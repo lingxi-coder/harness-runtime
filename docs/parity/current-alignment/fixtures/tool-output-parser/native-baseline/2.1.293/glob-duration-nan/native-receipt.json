@@ -1,0 +1,133 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "case": "duration-nan",
+  "runner_sha256": "e89b5cc70f1c7db79bc291dce4df65bbc8dec47097f26e72951d85e59d85ce5e",
+  "hook_sha256": "b8f3c3a7bef99934342dd62deefd5e7943995a84f3f62700bc1af70c6f39a5d4",
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default,Glob",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f01",
+    "Find the file matching *.fixture and report its path."
+  ],
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "tools_setting": "default,Glob",
+  "run_name": "glob-duration-nan",
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 43842,
+      "request_sha256": "86d787a6c021ff02aa63d4669a9db85024ea0929ea5355ac54c677a5e2ef4e27",
+      "raw_request": "request-01.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 44540,
+      "request_sha256": "a1d12ce05d75caefc009b60020b6e6503068f23f4c80fa6074a9744c700d5432",
+      "raw_request": "request-02.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    }
+  ],
+  "stub_responses": [
+    {
+      "path": "response-01.raw.sse",
+      "bytes": 872,
+      "sha256": "c00ea5503b99ce33ffe9f6361de101464db1a7998d41b227c50c2f2bef2bcae1"
+    },
+    {
+      "path": "response-02.raw.sse",
+      "bytes": 796,
+      "sha256": "3018f80436c2641d80b4794aaf0b178f7cd4b9abc7d6adb3e25637d2a4097e5d"
+    }
+  ],
+  "tool_catalog_raw": {
+    "path": "tool-catalog.raw.json",
+    "bytes": 983,
+    "sha256": "5d7dcbce7d830bc7d62de5f728e39b6ec51413528b7f0851bd211f224418a383"
+  },
+  "tool_use_result_session_rows": {
+    "path": "tool-use-result-session-rows.raw.jsonl",
+    "rows": 1,
+    "sha256": "1344699725bca39aabac5314f8e20714e08d8d3c9b70c1518dc5e4dbed6d7862"
+  },
+  "hook_marker_stdout_or_stderr": [],
+  "hook_marker_debug_log": [
+    "2026-10-08T13:42:11.005Z [DEBUG] [native-builtin-glob-output-probe] console.log: NATIVE_GLOB_TOOL_CALL_HOOK={\"tool\":\"Glob\",\"tool_use_id\":\"toolu_native_glob_output_probe_293\",\"nativeResult\":{\"ref\":1,\"result\":{\"filenames\":[\"probe.fixture\"],\"durationMs\":6,\"numFiles\":1,\"truncated\":false,\"totalMatches\":1,\"countIsComplete\":true},\"text\":\"probe.fixture\",\"isReadOnly\":true},\"result\":{\"durationMs\":null,\"numFiles\":1,\"filenames\":[\"hook-return.fixture\"],\"truncated\":false,\"totalMatches\":1,\"countIsComplete\":true},\"durationMsIsFinite\":false,\"durationMsString\":\"NaN\"}"
+  ],
+  "model_tool_result_content": "<tool_use_error>tool.call step resolved Glob with a result that does not match its output shape: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"NaN\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received NaN\"\n  }\n]</tool_use_error>\n\n<system-reminder>\n<total_tokens>14999994 tokens left</total_tokens>\n</system-reminder>",
+  "parsed_tool_use_results": [
+    "Error: tool.call step resolved Glob with a result that does not match its output shape: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"NaN\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received NaN\"\n  }\n]"
+  ],
+  "checks": {
+    "catalog_glob_availability_matches_cli_profile": true,
+    "hook_marker_matches_tool_availability": true,
+    "two_loopback_requests": true,
+    "native_rejects_non_finite_number": true
+  },
+  "expected_return_object": {
+    "durationMs": {
+      "js_expression": "NaN",
+      "runtime_string": "NaN"
+    },
+    "numFiles": 1,
+    "filenames": [
+      "hook-return.fixture"
+    ],
+    "truncated": false,
+    "totalMatches": 1,
+    "countIsComplete": true
+  },
+  "model_tool_result_content_utf8": {
+    "path": "model-tool-result-content.raw.txt",
+    "bytes": 392,
+    "sha256": "3a0b30a0edbca7ab7c07384a7381f9493494d5b70f9a244bd40523a52c173924"
+  },
+  "hook_marker_raw": {
+    "path": "hook-marker.raw.txt",
+    "bytes": 556,
+    "sha256": "6394eb8e93f0a6242d3e438ec682b92ee33d9b0d0c5a558519e8a0f85032576b"
+  },
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 14,
+    "sha256": "78fe71bbc60474c0bbb454a1a2f6e3e7a14a096d3513ada72f6d5475f4e61382"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "run_output_dir": "run-output/glob-duration-nan",
+  "scope": "Native 2.1.293 public CLI tool.call continuation-wrapper output parser probe for built-in Glob; all model and file inputs are local and fixed"
+}

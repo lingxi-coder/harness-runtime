@@ -36,8 +36,7 @@ pub fn parse_skill_markdown(
             .ok_or_else(|| SkillLoadError::Parse("unterminated".into()))?;
         let yaml = &rest[..end];
         let body = &rest[end + 5..];
-        let fm: SkillFrontmatter =
-            serde_yaml::from_str(yaml).map_err(|e| SkillLoadError::Parse(e.to_string()))?;
+        let fm = parse_frontmatter_yaml(yaml).map_err(|e| SkillLoadError::Parse(e.to_string()))?;
         (fm, body.trim_start().to_string())
     } else {
         (SkillFrontmatter::default(), raw.to_string())
@@ -47,12 +46,32 @@ pub fn parse_skill_markdown(
         name: fm.name.clone(),
         description: fm.description.clone(),
         frontmatter: fm,
-        content: body,
+        content: body.into(),
         source,
         loaded_from,
         plugin_id: None,
         file_path,
     })
+}
+
+fn parse_frontmatter_yaml(yaml: &str) -> Result<SkillFrontmatter, serde_yaml::Error> {
+    // The reusable SkillFrontmatter DTO uses raw JSON serde for its source
+    // description. YAML skill files are UTF-8 text, so extract that one scalar
+    // at the file boundary, deserialize the remaining YAML fields normally,
+    // and install the scalar directly into the source carrier.
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(yaml)?;
+    let description = match &mut value {
+        serde_yaml::Value::Mapping(mapping) => mapping
+            .remove(serde_yaml::Value::String("description".to_owned()))
+            .map(serde_yaml::from_value::<String>)
+            .transpose()?,
+        _ => None,
+    };
+    let mut frontmatter: SkillFrontmatter = serde_yaml::from_value(value)?;
+    if let Some(description) = description {
+        frontmatter.description = description.into();
+    }
+    Ok(frontmatter)
 }
 
 #[cfg(test)]
@@ -289,7 +308,7 @@ mod tests {
     #[test]
     fn body_trim_start() {
         let s = parse("name: x", "\n\nhello world");
-        assert_eq!(s.content, "hello world");
+        assert_eq!(s.content.string_at(""), Some("hello world"));
     }
 
     #[test]
@@ -303,8 +322,8 @@ mod tests {
         )
         .expect("ok");
         assert_eq!(s.frontmatter.name, "x");
-        assert_eq!(s.frontmatter.description, "demo");
-        assert_eq!(s.content, "body");
+        assert_eq!(s.frontmatter.description.string_at(""), Some("demo"));
+        assert_eq!(s.content.string_at(""), Some("body"));
     }
 
     // ---- no frontmatter fallback ---------------------------------------------

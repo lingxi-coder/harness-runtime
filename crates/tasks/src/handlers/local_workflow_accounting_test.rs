@@ -9,7 +9,7 @@ struct BatchProbe {
     session: lingxi_core::types::SessionId,
     generation: lingxi_core::types::MessageId,
     listings: AtomicU64,
-    spawned: std::sync::Mutex<Vec<String>>,
+    spawned: std::sync::Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     b_listing_entered: Semaphore,
     release_b: Semaphore,
     accounting_failed: Semaphore,
@@ -36,12 +36,13 @@ impl SubagentSpawner for BatchProbe {
         _: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawned.lock().unwrap().push(request.prompt.clone());
-        if request.prompt == "A" {
+        if request.prompt.string_at("") == Some("A") {
             // A may complete only after B passed the entry latch and reached
             // an awaited catalog lookup. This isolates the FINAL dispatch check.
             self.b_listing_entered.acquire().await.unwrap().forget();
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String("answer".into()),
             usage: lingxi_core::host::SubagentUsage {
@@ -82,10 +83,10 @@ impl ToolInvoker for BatchProbe {
     async fn invoke(
         &self,
         _: &str,
-        _: Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        Ok(Value::Null)
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap())
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -133,5 +134,10 @@ async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
     .await
     .expect("both batch members must reach the deterministic barriers");
     assert_eq!(probe.listings.load(Ordering::SeqCst), 2);
-    assert_eq!(*probe.spawned.lock().unwrap(), vec!["A".to_string()]);
+    assert_eq!(
+        *probe.spawned.lock().unwrap(),
+        vec![lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "A"
+        )]
+    );
 }

@@ -288,6 +288,7 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
     registry.connections.write().await.insert(
         "srv".into(),
         mcp::connection::McpConnectionState::Cached {
+            server_info: None,
             config: http_cfg("srv"),
             connection_id: McpConnectionId::new(),
             capabilities: ServerCapabilitiesDto {

@@ -51,13 +51,13 @@ pub fn is_outside_reads_blocked(reason: &PermissionDecisionReason) -> bool {
 fn outside_reads_ask(tool_name: &str, text: String) -> PermissionResult {
     PermissionResult::Ask {
         reason: PermissionDecisionReason::SafetyCheck {
-            reason: text.clone(),
+            reason: text.clone().into(),
             classifier_approvable: false,
             circuit_breaker: Some(SafetyCircuitBreaker::OutsideReadsBlocked),
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
-            message: text,
+            message: text.into(),
             options: Vec::new(),
         },
         pending_classifier_check: None,
@@ -184,7 +184,9 @@ pub fn deny_rule_message(command: &str, resolved_path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn message_of(result: &PermissionResult) -> (String, bool) {
+    fn message_of(
+        result: &PermissionResult,
+    ) -> (lingxi_core::types::utf16_json::Utf16JsonProjection, bool) {
         match result {
             PermissionResult::Ask { reason, prompt, .. } => {
                 let PermissionDecisionReason::SafetyCheck {
@@ -211,16 +213,19 @@ mod tests {
     fn builders_are_byte_locked() {
         let (msg, approvable) = message_of(&ask_runtime_computed_path("Bash", "cat"));
         assert!(!approvable);
-        assert_eq!(msg.as_str(), "cat names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)");
+        assert_eq!(msg.string_at(""), Some("cat names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"));
 
         let (msg, _) = message_of(&ask_unanalyzable("Bash", "Parse error"));
-        assert_eq!(msg.as_str(), "Parse error; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person");
+        assert_eq!(msg.string_at(""), Some("Parse error; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person"));
 
         let (msg, _) = message_of(&ask_uncheckable_named_path("Bash", "grep", "/x/*"));
-        assert_eq!(msg.as_str(), "grep names '/x/*', which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)");
+        assert_eq!(msg.string_at(""), Some("grep names '/x/*', which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"));
 
         let (msg, _) = message_of(&ask_sed_off_allowlist("Bash"));
-        assert!(msg.starts_with("This sed script is not on the allowlist"));
+        assert!(msg
+            .string_at("")
+            .unwrap()
+            .starts_with("This sed script is not on the allowlist"));
     }
 
     #[test]
@@ -231,7 +236,7 @@ mod tests {
             "/etc",
             OutsidePathShape::MovesLaterReads,
         ));
-        assert_eq!(msg.as_str(), "cd moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.");
+        assert_eq!(msg.string_at(""), Some("cd moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting."));
 
         let (msg, _) = message_of(&ask_outside_path(
             "Bash",
@@ -239,7 +244,7 @@ mod tests {
             "/etc/x",
             OutsidePathShape::NamesAPath,
         ));
-        assert_eq!(msg.as_str(), "ln names a path outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.");
+        assert_eq!(msg.string_at(""), Some("ln names a path outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting."));
 
         let (msg, _) = message_of(&ask_outside_path(
             "Bash",
@@ -247,23 +252,23 @@ mod tests {
             "/etc/x",
             OutsidePathShape::NamesResolved,
         ));
-        assert_eq!(msg.as_str(), "grep names '/etc/x', outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.");
+        assert_eq!(msg.string_at(""), Some("grep names '/etc/x', outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting."));
     }
 
     #[test]
     fn ul_predicate_matches_only_the_read_block() {
         let blocked = PermissionDecisionReason::SafetyCheck {
-            reason: String::new(),
+            reason: "".into(),
             classifier_approvable: false,
             circuit_breaker: Some(SafetyCircuitBreaker::OutsideReadsBlocked),
         };
         let other = PermissionDecisionReason::SafetyCheck {
-            reason: String::new(),
+            reason: "".into(),
             classifier_approvable: false,
             circuit_breaker: Some(SafetyCircuitBreaker::DangerousRemoval),
         };
         let bare = PermissionDecisionReason::SafetyCheck {
-            reason: String::new(),
+            reason: "".into(),
             classifier_approvable: false,
             circuit_breaker: None,
         };

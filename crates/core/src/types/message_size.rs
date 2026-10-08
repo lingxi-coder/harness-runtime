@@ -3,6 +3,7 @@
 //! field of `CompactionSummary` (UX estimate only — the exact cost
 //! accounting lives in `lingxi-cost`).
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::{ContentBlock, ConversationMessage, MediaAnalysis};
 
 /// Returns the sum, in bytes, of every text payload carried by `msg`.
@@ -17,24 +18,20 @@ pub fn text_byte_size(msg: &ConversationMessage) -> u64 {
         | ConversationMessage::Assistant { content, .. } => {
             content.iter().map(content_block_size).sum()
         }
-        ConversationMessage::System { content, .. } => content.len() as u64,
+        ConversationMessage::System { content, .. } => {
+            content.string_at("").unwrap_or_default().len() as u64
+        }
     }
 }
 
 fn content_block_size(b: &ContentBlock) -> u64 {
     match b {
-        ContentBlock::ProviderContent { value, .. } => serde_json::to_vec(value)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0),
+        ContentBlock::ProviderContent { value, .. } => projection_json_size(value),
         ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             text.len() as u64
         }
-        ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
-            .map(|s| s.len() as u64)
-            .unwrap_or(0),
-        ContentBlock::ToolResult { content, .. } => serde_json::to_string(content)
-            .map(|s| s.len() as u64)
-            .unwrap_or(0),
+        ContentBlock::ToolUse { input, .. } => projection_json_size(input),
+        ContentBlock::ToolResult { content, .. } => projection_json_size(content),
         ContentBlock::Thinking { .. } => 0,
         ContentBlock::Image { source } => match source {
             crate::types::ImageSource::Base64 { data, .. } => data.len() as u64,
@@ -45,15 +42,18 @@ fn content_block_size(b: &ContentBlock) -> u64 {
         },
         // Low-frequency server-side blocks: opaque payloads sized best-effort.
         ContentBlock::RedactedThinking { data } => data.len() as u64,
-        ContentBlock::ServerToolUse { input, .. } => serde_json::to_string(input)
-            .map(|s| s.len() as u64)
-            .unwrap_or(0),
+        ContentBlock::ServerToolUse { input, .. } => projection_json_size(input),
         ContentBlock::ConnectorText { connector_text, .. } => connector_text.len() as u64,
-        ContentBlock::AdvisorToolResult { content, .. } => serde_json::to_string(content)
-            .map(|s| s.len() as u64)
-            .unwrap_or(0),
+        ContentBlock::AdvisorToolResult { content, .. } => projection_json_size(content),
         ContentBlock::MediaAnalysis { analysis } => media_analysis_size(analysis),
     }
+}
+
+fn projection_json_size(projection: &Utf16JsonProjection) -> u64 {
+    projection
+        .to_json_string()
+        .map(|source| source.len() as u64)
+        .unwrap_or(0)
 }
 
 fn media_analysis_size(analysis: &MediaAnalysis) -> u64 {
@@ -74,15 +74,29 @@ mod tests {
     }
 
     #[test]
-    fn system_message_returns_content_length() {
+    fn system_message_returns_display_content_length() {
         let m = ConversationMessage::System {
             id: MessageId::new(),
             content: "abc".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert_eq!(text_byte_size(&m), 3);
+    }
+
+    #[test]
+    fn system_message_size_uses_display_bytes_for_unpaired_utf16() {
+        let m = ConversationMessage::System {
+            id: MessageId::new(),
+            content: Utf16JsonProjection::parse(r#""a\ud800b""#).unwrap(),
+            subtype: None,
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        assert_eq!(text_byte_size(&m), "a�b".len() as u64);
     }
 
     #[test]
@@ -98,6 +112,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }
@@ -109,10 +127,12 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: "Read".into(),
-                input: serde_json::json!({"path": "/a"}),
+                input: crate::types::utf16_json::Utf16JsonProjection::parse(r#"{"path":"/a"}"#)
+                    .unwrap(),
                 provider_id: None,
             }],
             stop_reason: Some("tool_use".into()),
+            resumable: None,
         };
         // {"path":"/a"} → 13 bytes
         assert_eq!(text_byte_size(&m), 13);
@@ -145,6 +165,10 @@ mod tests {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         assert_eq!(text_byte_size(&message), expected);
     }

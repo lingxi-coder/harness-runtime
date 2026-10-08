@@ -28,7 +28,7 @@ async fn ping_between_deltas_does_not_disturb_output() {
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn]));
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
@@ -38,7 +38,7 @@ async fn ping_between_deltas_does_not_disturb_output() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
     orch.run_turn_streaming("hi").await.expect("ok");
 
     let events = output.snapshot().await;

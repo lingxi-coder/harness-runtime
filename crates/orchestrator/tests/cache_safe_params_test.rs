@@ -28,7 +28,7 @@ fn make_orch(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));

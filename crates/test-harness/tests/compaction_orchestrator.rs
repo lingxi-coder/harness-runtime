@@ -13,7 +13,7 @@ async fn over_threshold_triggers_autocompact() {
             content: vec![ContentBlock::Text {
                 text: format!(
                     "turn-{i} a very long padding string to inflate tokens beyond the threshold"
-                ),
+                ), citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,

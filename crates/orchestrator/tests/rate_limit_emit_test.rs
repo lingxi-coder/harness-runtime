@@ -25,6 +25,7 @@ fn end_turn_response(text: &str) -> llm_runtime::HistoryResponse {
         vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )
@@ -206,7 +207,7 @@ async fn streaming_turn_emits_rate_limit() {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     batched.set_rate_limit_full(Some(sample_info()));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         streaming,
@@ -216,7 +217,7 @@ async fn streaming_turn_emits_rate_limit() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     orch.run_turn_streaming("hello").await.expect("turn 1");
 
@@ -469,7 +470,7 @@ async fn streaming_turn_emits_raw_utilization() {
         "0.42",
     ))));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         streaming,
@@ -479,7 +480,7 @@ async fn streaming_turn_emits_raw_utilization() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     orch.run_turn_streaming("hello").await.expect("turn 1");
 

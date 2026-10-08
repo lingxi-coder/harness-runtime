@@ -215,7 +215,9 @@ fn parse_record(line: &str) -> Option<Value> {
     if line.is_empty() {
         return None;
     }
-    serde_json::from_str::<Value>(strip_leading_nuls(line)).ok()
+    crate::jsonl::exact_json::parse_exact_json(strip_leading_nuls(line))
+        .ok()
+        .map(|exact| exact.value)
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -907,6 +909,20 @@ fn open_tmp(tmp: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_preserved_segment_recognizes_native_exact_peer_rows_and_copies_bytes() {
+        let fixture = include_str!("../../tests/fixtures/handback_exact_utf16_2_1_286.jsonl");
+        let mut lines: Vec<_> = fixture.lines().map(str::to_string).collect();
+        lines.push(r#"{"type":"system","subtype":"compact_boundary","uuid":"boundary","parentUuid":null,"compactMetadata":{"preservedSegment":{"headUuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1","anchorUuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1","tailUuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4"}}}"#.to_string());
+        let plan = plan_of(&lines);
+        let copied: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .flat_map(|(index, line)| plan.apply(index, line))
+            .collect();
+        assert_eq!(copied, lines.iter().map(String::as_str).collect::<Vec<_>>());
+    }
 
     /// One transcript message line.
     fn msg(uuid: &str, parent: Option<&str>) -> String {

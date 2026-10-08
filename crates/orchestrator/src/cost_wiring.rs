@@ -6,9 +6,9 @@
 //!
 //! Used by M6-06 to feed `HistoryResponse.usage` into `CostTracker`.
 
+use cost::ModelRef;
 use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
-use cost::ModelRef;
 use llm_runtime::ExecutionUsage as LlmUsage;
 
 /// Adapt canonical SDK counters to the host cost ledger's disjoint buckets.
@@ -197,6 +197,46 @@ pub(crate) fn frozen_cost_quote(estimate: &llm_runtime::CostEstimate) -> Option<
     ))
 }
 
+/// A native multi-model quote already contains its hosted-tool component.
+/// If that branch has no complete quote, retain usage as unpriced instead of
+/// applying the ordinary aggregate request-model tariff.
+pub(crate) fn response_pricing(
+    estimate: Option<&llm_runtime::CostEstimate>,
+    native_fallback_quote: bool,
+) -> (Option<ModelRef>, cost::CostResponsePricing) {
+    use cost::CostResponsePricing;
+    match estimate.and_then(frozen_cost_quote) {
+        Some((model, amount)) => (
+            Some(model),
+            if native_fallback_quote {
+                CostResponsePricing::CompleteQuote(amount)
+            } else {
+                CostResponsePricing::TokenQuote(amount)
+            },
+        ),
+        None => (
+            None,
+            if native_fallback_quote {
+                CostResponsePricing::Unpriced
+            } else {
+                CostResponsePricing::Catalog
+            },
+        ),
+    }
+}
+
+pub(crate) fn has_native_fallback_quote(
+    metadata: &llm_runtime::services::sdk::protocol::JsonPayload,
+) -> bool {
+    llm_runtime::history::server_fallback_cost_quote(metadata).is_some()
+}
+
+pub(crate) fn native_fallback_cost_model(
+    metadata: &llm_runtime::services::sdk::protocol::JsonPayload,
+) -> Option<String> {
+    llm_runtime::history::server_fallback_cost_quote(metadata)?.string_at("/summaryModel")
+}
+
 /// Build an `llm_runtime::PricingCatalog` populated from a `cost::PricingCatalog`.
 ///
 /// Conversion: for each [`cost::ModelPricing`] entry, the `billing_model` is the
@@ -250,6 +290,10 @@ pub fn llm_catalog_from_cost(
                 .token_rates
                 .get(&TokenClass::ReasoningOutput)
                 .map(|_| nano_to_usd(TokenClass::ReasoningOutput)),
+            web_search_per_request: entry
+                .non_token_rates_nano_usd
+                .get(&cost::NonTokenBillableUnit::WebSearchRequest)
+                .map(|nano| *nano as f64 / 1_000_000_000.0),
             ..Default::default()
         };
         out = out.with_price(provider, billing_model, pricing);
@@ -396,7 +440,10 @@ mod tests {
             usage.counts_mut().output_tokens = 100;
             usage.counts_mut().cache_write_1h_tokens = 18;
             usage.provider_metadata =
-                serde_json::json!({"cache_creation_input_tokens":30,"cache_creation":split});
+                llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &serde_json::json!({"cache_creation_input_tokens":30,"cache_creation":split}),
+                )
+                .unwrap();
             let before = usage.clone();
             let result = llm_usage_to_cost_usage_checked(&usage).unwrap();
             assert_eq!(
@@ -435,7 +482,9 @@ mod tests {
             serde_json::json!({"server_tool_use":{"web_search_requests":"1"}}),
         ] {
             let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
-            usage.provider_metadata = metadata;
+            usage.provider_metadata =
+                llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&metadata)
+                    .unwrap();
             assert!(
                 llm_usage_to_cost_usage_checked(&usage).is_ok(),
                 "{:?}",
@@ -484,7 +533,10 @@ mod tests {
         );
         let mut inconsistent = make_llm_usage(0, 0, 0, 0, None, None);
         inconsistent.provider_metadata =
-            serde_json::json!({"server_tool_use":{"web_search_requests":1}});
+            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &serde_json::json!({"server_tool_use":{"web_search_requests":1}}),
+            )
+            .unwrap();
         assert!(llm_usage_to_cost_usage_checked(&inconsistent).is_ok());
     }
 
@@ -506,13 +558,17 @@ mod tests {
     fn splits_anthropic_cache_creation_by_ttl() {
         let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
         usage.counts_mut().cache_write_1h_tokens = 18;
-        usage.provider_metadata = serde_json::json!({
-            "cache_creation_input_tokens": 30,
-            "cache_creation": {
-                "ephemeral_5m_input_tokens": 12,
-                "ephemeral_1h_input_tokens": 18
-            }
-        });
+        usage.provider_metadata =
+            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &serde_json::json!({
+                    "cache_creation_input_tokens": 30,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 12,
+                        "ephemeral_1h_input_tokens": 18
+                    }
+                }),
+            )
+            .unwrap();
 
         let translated = llm_usage_to_cost_usage(&usage);
         assert_eq!(translated.tokens.cache_write, 12);
@@ -523,10 +579,14 @@ mod tests {
     fn subtracts_one_hour_bucket_when_five_minute_breakdown_is_absent() {
         let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
         usage.counts_mut().cache_write_1h_tokens = 18;
-        usage.provider_metadata = serde_json::json!({
-            "cache_creation_input_tokens": 30,
-            "cache_creation": { "ephemeral_1h_input_tokens": 18 }
-        });
+        usage.provider_metadata =
+            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &serde_json::json!({
+                    "cache_creation_input_tokens": 30,
+                    "cache_creation": { "ephemeral_1h_input_tokens": 18 }
+                }),
+            )
+            .unwrap();
 
         let translated = llm_usage_to_cost_usage(&usage);
         assert_eq!(translated.tokens.cache_write, 12);

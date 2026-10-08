@@ -5,6 +5,7 @@ use super::*;
 use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use lingxi_core::host::{BudgetError, SubagentUsage};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
@@ -54,6 +55,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         None,
         None,
         &Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: json!("answer"),
             usage: SubagentUsage::default(),
@@ -152,9 +154,20 @@ fn a_same_named_custom_workflow_gets_no_workspace_lease() {
 
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
 
+fn echo_prompt(prompt: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = "echo:".encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        prompt
+            .string_units("")
+            .expect("workflow prompt is a root-string projection"),
+    );
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("echo fixture is a valid UTF-16 string")
+}
+
 #[derive(Default)]
 struct EchoSpawner {
-    seen: StdMutex<Vec<String>>,
+    seen: StdMutex<Vec<Utf16JsonProjection>>,
     seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
     inherited_budget_totals: Option<Arc<StdMutex<Vec<u64>>>>,
     fail: bool,
@@ -172,14 +185,14 @@ struct WorkflowForwardingProbeSpawner {
 
 struct BlockingWorkflowObserverSpawner {
     started: std::sync::atomic::AtomicUsize,
-    started_prompts: StdMutex<Vec<String>>,
+    started_prompts: StdMutex<Vec<Utf16JsonProjection>>,
     released: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
-    started_tx: StdMutex<Option<mpsc::UnboundedSender<String>>>,
+    started_tx: StdMutex<Option<mpsc::UnboundedSender<Utf16JsonProjection>>>,
 }
 
 impl BlockingWorkflowObserverSpawner {
-    fn new(started_tx: mpsc::UnboundedSender<String>) -> Self {
+    fn new(started_tx: mpsc::UnboundedSender<Utf16JsonProjection>) -> Self {
         Self {
             started: std::sync::atomic::AtomicUsize::new(0),
             started_prompts: StdMutex::new(Vec::new()),
@@ -206,8 +219,24 @@ impl BlockingWorkflowObserverSpawner {
     }
 }
 
+fn seen_prompt_displays(spawner: &EchoSpawner) -> Vec<String> {
+    spawner
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|prompt| {
+            prompt
+                .string_at("")
+                .expect("fixture prompts are valid display strings")
+                .to_owned()
+        })
+        .collect()
+}
+
 fn completed_probe_result(agent_id: lingxi_core::types::AgentId) -> SubagentResult {
     SubagentResult::Completed {
+        handback: None,
         agent_id,
         content: Value::String("done".to_string()),
         usage: SubagentUsage::default(),
@@ -376,8 +405,9 @@ impl SubagentSpawner for EchoSpawner {
             });
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: Value::String(format!("echo:{}", request.prompt)),
+            content: echo_prompt(&request.prompt),
             usage: SubagentUsage {
                 output_tokens: 100,
                 ..Default::default()
@@ -467,10 +497,10 @@ impl ToolInvoker for MockInvoker {
     async fn invoke(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
-        Ok(json!(null))
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap())
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -821,7 +851,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                         "message": lingxi_core::types::ConversationMessage::Assistant {
                             id: lingxi_core::types::MessageId::new(),
                             content: vec![lingxi_core::types::ContentBlock::Text {
-                                text: "hello from child".to_string(),
+                                text: "hello from child".to_string(), citations: None,
                             }],
                             stop_reason: None,
                         }
@@ -831,6 +861,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
             .expect("write transcript line");
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id,
             content: Value::String("ok".to_string()),
             usage: SubagentUsage::default(),
@@ -954,8 +985,9 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: Value::String(format!("echo:{}", request.prompt)),
+                content: echo_prompt(&request.prompt),
                 usage: SubagentUsage {
                     output_tokens: 1,
                     ..Default::default()
@@ -1205,8 +1237,9 @@ impl SubagentSpawner for NamespacedListingSpawner {
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.seen_reqs.lock().unwrap().push(request.clone());
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: Value::String(format!("echo:{}", request.prompt)),
+            content: echo_prompt(&request.prompt),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
@@ -1700,7 +1733,7 @@ async fn parallel_agents_round_trip_through_spawner_in_order() {
     "#;
     let outcome = run_bridge(script, spawner.clone()).await;
     assert_eq!(logs(&outcome), vec!["R:echo:a,echo:b,echo:c".to_string()]);
-    let mut seen = spawner.seen.lock().unwrap().clone();
+    let mut seen = seen_prompt_displays(&spawner);
     seen.sort();
     assert_eq!(
         seen,
@@ -2032,10 +2065,7 @@ async fn sequential_awaits_preserve_order() {
     "#;
     let outcome = run_bridge(script, spawner.clone()).await;
     assert_eq!(logs(&outcome), vec!["echo:1|echo:2".to_string()]);
-    assert_eq!(
-        *spawner.seen.lock().unwrap(),
-        vec!["1".to_string(), "2".to_string()]
-    );
+    assert_eq!(seen_prompt_displays(&spawner), vec!["1", "2"]);
 }
 
 #[tokio::test]
@@ -2169,10 +2199,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
     .await
     .unwrap();
     // The nested workflow's agent() went through the PARENT's spawner.
-    assert_eq!(
-        *spawner.seen.lock().unwrap(),
-        vec!["child-task".to_string()]
-    );
+    assert_eq!(seen_prompt_displays(&spawner), vec!["child-task"]);
     // Its return value (incl. its own args) flowed back to the parent.
     assert_eq!(logs(&outcome), vec!["got=echo:child-task n=9".to_string()]);
     assert_eq!(
@@ -2595,7 +2622,7 @@ async fn handler_runs_workflow_and_spools_the_return_value() {
     assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
 
     // Both agents ran.
-    let mut seen = spawner.seen.lock().unwrap().clone();
+    let mut seen = seen_prompt_displays(&spawner);
     seen.sort();
     assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
 
@@ -3469,7 +3496,8 @@ fn bare_schema_agent_uses_xbp() {
     // Override must be the xBp string (WORKFLOW_SUBAGENT_SCHEMA_PROMPT).
     let override_prompt = req
         .system_prompt_override
-        .as_deref()
+        .as_ref()
+        .and_then(|source| source.string_at(""))
         .expect("override must be set for schema agent()");
     assert_eq!(
         override_prompt,
@@ -3501,7 +3529,8 @@ fn user_agenttype_gets_hbp_addendum_and_disallow_union() {
     );
     let addendum = req
         .system_prompt_addendum
-        .as_deref()
+        .as_ref()
+        .and_then(|source| source.string_at(""))
         .expect("HBp addendum must be set");
     assert_eq!(
         addendum,
@@ -3539,7 +3568,8 @@ fn user_agenttype_with_schema_gets_ibp_and_disallow_union() {
     );
     let addendum = req
         .system_prompt_addendum
-        .as_deref()
+        .as_ref()
+        .and_then(|source| source.string_at(""))
         .expect("IBp addendum must be set");
     assert_eq!(addendum, agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM);
     // Must request union with {SendUserMessage, Agent, Workflow}.
@@ -4934,6 +4964,119 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treating_tombstones_as_idle(
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let observer = WorkflowAgentLiveObserver::new_with_metrics(
+        None,
+        Some(tx),
+        workflow_progress_update(&workflow::Progress::Agent {
+            index: 2,
+            label: "Review".into(),
+            phase_index: None,
+            phase_title: None,
+            agent_id: None,
+            model: Some("test-model".into()),
+            state: workflow::AgentState::Start,
+            error: None,
+            tool_use_id: "workflow_agent_2_queued".into(),
+        }),
+        None,
+        None,
+        0,
+    );
+    let agent_id = lingxi_core::types::AgentId::new();
+    let message_id = lingxi_core::types::MessageId::new();
+    let tool_use_id = lingxi_core::types::ToolUseId::new();
+    let assistant = lingxi_core::types::ConversationMessage::Assistant {
+        id: message_id,
+        content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            id: tool_use_id,
+            name: "Read".into(),
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"file_path":"review.md"}),
+            )
+            .expect("test tool input is valid JSON"),
+            provider_id: Some("provider-read".into()),
+        }],
+        stop_reason: Some("tool_use".into()),
+    };
+
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::MessageRow {
+            agent_id,
+            message: assistant,
+            message_index: 41,
+        },
+    )
+    .await;
+    let message_update = rx.recv().await.expect("row updates workflow progress");
+    assert_eq!(message_update.last_tool_name.as_deref(), Some("Read"));
+    assert_eq!(message_update.last_tool_summary.as_deref(), Some("Read"));
+
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackTombstone {
+            agent_id,
+            message: lingxi_core::host::ServerFallbackTombstoneMessage {
+                uuid: message_id,
+                message_type: "assistant".into(),
+                timestamp: "created".into(),
+                request_id: None,
+                request_ref: None,
+                provider_message_id: None,
+                model: Some("test-model".into()),
+                stop_reason: Some("tool_use".into()),
+                stop_details: None,
+                usage: None,
+                content: vec![],
+                is_api_error_message: None,
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        },
+    )
+    .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "progress has no row ledger to retract"
+    );
+    assert_eq!(observer.snapshot().await.state.as_deref(), Some("start"));
+
+    let refusal_text =
+        Utf16JsonProjection::from("refusal body remains a visible assistant message");
+    let mut refusal =
+        lingxi_core::host::ServerFallbackApiErrorRow::new(&refusal_text, "created".into());
+    refusal.set_refusal(
+        Some("request-refusal".into()),
+        Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"type":"refusal","category":"cyber"}),
+        )
+        .unwrap(),
+    );
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackApiErrorRow {
+            agent_id,
+            row: refusal,
+            message_index: 42,
+        },
+    )
+    .await;
+    let refusal_update = rx
+        .recv()
+        .await
+        .expect("refusal row updates workflow progress");
+    assert_eq!(refusal_update.state.as_deref(), Some("start"));
+    assert!(refusal_update
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("refusal body remains a visible assistant message")));
+    assert_eq!(refusal_update.last_tool_name.as_deref(), Some("Read"));
 }
 
 /// r2-tests-honesty-005: nothing ties the `agentType: '<x>'` literals in the

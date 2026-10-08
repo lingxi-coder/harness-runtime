@@ -84,8 +84,11 @@ impl Tool for AlwaysOkTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "AlwaysOk".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -140,7 +143,7 @@ async fn tool_use_dispatched_before_message_stop() {
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -150,7 +153,7 @@ async fn tool_use_dispatched_before_message_stop() {
         output.clone(),
         memory,
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let _outcome = orch.run_turn_streaming("call a tool").await.expect("ok");
 

@@ -34,18 +34,17 @@ impl BuiltinCommandHandler for PermissionsHandler {
             Ok(o) => {
                 telemetry::emit_command_completed(cmd_evt::PERMISSIONS_COMPLETED, "");
                 CommandResult::Done {
-                    display: Some(format!(
-                        "Edited {} (exit {}).",
-                        o.edited_path.display(),
-                        o.exit_code
-                    )),
+                    display: Some(
+                        (format!("Edited {} (exit {}).", o.edited_path.display(), o.exit_code))
+                            .into(),
+                    ),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::PERMISSIONS_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not edit permissions: {msg}")),
+                    display: Some((format!("Could not edit permissions: {msg}")).into()),
                 }
             }
         }
@@ -66,7 +65,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "permissions".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

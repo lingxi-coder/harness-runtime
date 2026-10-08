@@ -1,6 +1,14 @@
 //! Tests for `skill.rs`, extracted from inline `#[cfg(test)]` blocks. Included via `#[path] mod skill_test;`.
 
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::json;
+
+macro_rules! source_json {
+    ($($tokens:tt)*) => {
+        Utf16JsonProjection::from_serde_value(&json!($($tokens)*)).expect("source test JSON")
+    };
+}
 
 #[cfg(test)]
 mod tests {
@@ -22,20 +30,26 @@ mod tests {
     struct FixedLoader(Option<SkillDescriptor>);
     #[async_trait]
     impl SkillLoader for FixedLoader {
-        async fn load(&self, _name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+        async fn load(
+            &self,
+            _name: &Utf16JsonProjection,
+        ) -> Result<Option<SkillDescriptor>, ToolError> {
             Ok(self.0.clone())
         }
     }
 
     /// A loader that captures the (normalized) name it was asked to load.
     struct CapturingLoader {
-        seen: std::sync::Mutex<Option<String>>,
+        seen: std::sync::Mutex<Option<Vec<u16>>>,
         desc: Option<SkillDescriptor>,
     }
     #[async_trait]
     impl SkillLoader for CapturingLoader {
-        async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
-            *self.seen.lock().unwrap() = Some(name.to_string());
+        async fn load(
+            &self,
+            name: &Utf16JsonProjection,
+        ) -> Result<Option<SkillDescriptor>, ToolError> {
+            *self.seen.lock().unwrap() = Some(name.string_units("").expect("source name"));
             Ok(self.desc.clone())
         }
     }
@@ -49,6 +63,10 @@ mod tests {
         }
     }
 
+    fn source_text(value: &Utf16JsonProjection, pointer: &str) -> Option<&str> {
+        value.string_at(pointer)
+    }
+
     #[test]
     fn constants_locked() {
         assert_eq!(SKILL_TOOL_NAME, "Skill");
@@ -57,14 +75,35 @@ mod tests {
 
     #[test]
     fn normalize_strips_one_invocation_prefix_and_trims() {
-        assert_eq!(normalize_skill_name("/commit"), "commit");
-        assert_eq!(normalize_skill_name("  /commit  "), "commit");
-        assert_eq!(normalize_skill_name("$commit"), "commit");
-        assert_eq!(normalize_skill_name("  $commit  "), "commit");
-        assert_eq!(normalize_skill_name("commit"), "commit");
+        assert_eq!(
+            normalize_skill_name(&"/commit".into()).string_at(""),
+            Some("commit")
+        );
+        assert_eq!(
+            normalize_skill_name(&"  /commit  ".into()).string_at(""),
+            Some("commit")
+        );
+        assert_eq!(
+            normalize_skill_name(&"$commit".into()).string_at(""),
+            Some("commit")
+        );
+        assert_eq!(
+            normalize_skill_name(&"  $commit  ".into()).string_at(""),
+            Some("commit")
+        );
+        assert_eq!(
+            normalize_skill_name(&"commit".into()).string_at(""),
+            Some("commit")
+        );
         // Only a single invocation prefix is stripped.
-        assert_eq!(normalize_skill_name("//commit"), "/commit");
-        assert_eq!(normalize_skill_name("$$commit"), "$commit");
+        assert_eq!(
+            normalize_skill_name(&"//commit".into()).string_at(""),
+            Some("/commit")
+        );
+        assert_eq!(
+            normalize_skill_name(&"$$commit".into()).string_at(""),
+            Some("$commit")
+        );
     }
 
     #[test]
@@ -106,15 +145,21 @@ mod tests {
         });
         let tool = SkillTool::with_loader(shell_test_ctx(dummy_out()), loader.clone());
         let out = tool
-            .call(json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         // Loader saw the slash-stripped name.
-        assert_eq!(loader.seen.lock().unwrap().as_deref(), Some("commit"));
+        assert_eq!(
+            loader.seen.lock().unwrap().as_ref().unwrap(),
+            &"commit".encode_utf16().collect::<Vec<_>>()
+        );
         // commandName is the normalized name + inline status.
-        assert_eq!(out.data["commandName"], json!("commit"));
-        assert_eq!(out.data["status"], json!("inline"));
-        assert_eq!(out.data["success"], json!(true));
+        assert_eq!(source_text(&out.data, "/commandName"), Some("commit"));
+        assert_eq!(source_text(&out.data, "/status"), Some("inline"));
+        assert_eq!(
+            out.data.at_pointer("/success").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -126,26 +171,57 @@ mod tests {
         let tool = SkillTool::with_loader(shell_test_ctx(dummy_out()), loader.clone());
         let out = tool
             .call(
-                json!({"skill": "$frontend-design"}),
+                source_json!({"skill": "$frontend-design"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("the coordinator shorthand resolves");
         assert_eq!(
-            loader.seen.lock().unwrap().as_deref(),
+            loader.seen.lock().unwrap().as_ref().unwrap(),
+            &"frontend-design".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            source_text(&out.data, "/commandName"),
             Some("frontend-design")
         );
-        assert_eq!(out.data["commandName"], json!("frontend-design"));
-        assert_eq!(out.data["status"], json!("inline"));
-        assert_eq!(out.data["success"], json!(true));
+        assert_eq!(source_text(&out.data, "/status"), Some("inline"));
+        assert_eq!(
+            out.data.at_pointer("/success").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_skill_name_units_reach_the_result_without_utf8_lowering() {
+        let name =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xd800]), vec![0xd800])
+                .expect("exact skill name fixture");
+        let input = Utf16JsonProjection::object(vec![("skill".to_owned(), name.clone())])
+            .expect("skill input fixture");
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(prompt_desc("source-name")))),
+        );
+        let result = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("call");
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/commandName")
+                .and_then(|value| value.code_units())
+                .map(|units| units.to_vec()),
+            name.string_units("")
+        );
     }
 
     #[tokio::test]
     async fn unknown_skill_locked_error() {
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(json!({"skill": "absent"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "absent"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("unknown");
         assert!(format!("{err}").contains("Unknown skill: absent"));
@@ -162,7 +238,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let err = tool
-            .call(json!({"skill": "locked"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "locked"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("disabled");
         assert!(format!("{err}").contains(
@@ -181,7 +257,11 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let err = tool
-            .call(json!({"skill": "local-cmd"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({"skill": "local-cmd"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("non-prompt");
         assert!(format!("{err}").contains(
@@ -201,13 +281,19 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "rich"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "rich"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["status"], json!("inline"));
-        assert_eq!(out.data["model"], json!("opus"));
-        assert_eq!(out.data["allowedTools"], json!(["Bash", "Read"]));
-        assert_eq!(out.data["commandName"], json!("rich"));
+        assert_eq!(source_text(&out.data, "/status"), Some("inline"));
+        assert_eq!(source_text(&out.data, "/model"), Some("opus"));
+        let allowed = out
+            .data
+            .at_pointer("/allowedTools")
+            .expect("allowed tools array");
+        assert_eq!(allowed.array_len(), Some(2));
+        assert_eq!(allowed.get_index(0).and_then(|v| v.as_str()), Some("Bash"));
+        assert_eq!(allowed.get_index(1).and_then(|v| v.as_str()), Some("Read"));
+        assert_eq!(source_text(&out.data, "/commandName"), Some("rich"));
     }
 
     #[tokio::test]
@@ -217,13 +303,13 @@ mod tests {
             Arc::new(FixedLoader(Some(prompt_desc("plain")))),
         );
         let out = tool
-            .call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         // Optional fields are omitted (matches TS `.optional()` surfacing).
-        assert!(out.data.get("model").is_none());
-        assert!(out.data.get("allowedTools").is_none());
-        assert_eq!(out.data["body"], json!("body here"));
+        assert!(out.data.at_pointer("/model").is_none());
+        assert!(out.data.at_pointer("/allowedTools").is_none());
+        assert_eq!(source_text(&out.data, "/body"), Some("body here"));
     }
 
     #[tokio::test]
@@ -241,7 +327,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         let modifier = out
@@ -264,7 +350,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         let modifier = out.context_modifier.expect("context_modifier present");
@@ -284,7 +370,7 @@ mod tests {
             Arc::new(FixedLoader(Some(prompt_desc("plain")))),
         );
         let out = tool
-            .call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert!(
@@ -308,19 +394,17 @@ mod tests {
         );
         // Slash-prefixed input: model_content uses the normalized name.
         let out = tool
-            .call(json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let mc = out.data["model_content"]
-            .as_str()
-            .expect("model_content is a string");
+        let mc = source_text(&out.data, "/model_content").expect("model_content is a string");
         assert_eq!(mc, "Launching skill: commit");
         // The body still rides along for non-model consumers, but is NOT in the
         // model-facing string.
         assert!(!mc.contains("SECRET FULL SKILL BODY"));
         assert_eq!(
-            out.data["body"],
-            json!("SECRET FULL SKILL BODY that must not reach the model")
+            source_text(&out.data, "/body"),
+            Some("SECRET FULL SKILL BODY that must not reach the model")
         );
     }
 
@@ -333,19 +417,19 @@ mod tests {
         // With args.
         let out = tool
             .call(
-                json!({"skill": "commit", "args": "--amend"}),
+                source_json!({"skill": "commit", "args": "--amend"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["args"], json!("--amend"));
+        assert_eq!(source_text(&out.data, "/args"), Some("--amend"));
         // Without args — no `args` key.
         let out2 = tool
-            .call(json!({"skill": "commit"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "commit"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert!(out2.data.get("args").is_none());
+        assert!(out2.data.at_pointer("/args").is_none());
     }
 
     /// SKILLEXEC.3: a model-invocable Prompt skill expands its body's
@@ -363,7 +447,7 @@ mod tests {
         );
         let out = tool
             .call(
-                json!({"skill": "review-pr", "args": "123"}),
+                source_json!({"skill": "review-pr", "args": "123"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -373,7 +457,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, "Review PR 123 now");
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -384,9 +468,112 @@ mod tests {
         // The inline model-facing string is still the launch line — the body is
         // NOT leaked into the tool_result content (SKILLEXEC.1 invariant holds).
         assert_eq!(
-            out.data["model_content"],
-            json!("Launching skill: review-pr")
+            source_text(&out.data, "/model_content"),
+            Some("Launching skill: review-pr")
         );
+    }
+
+    #[tokio::test]
+    async fn raw_utf16_arguments_survive_prompt_expansion_and_result_projection() {
+        let mut argument_units = "run ".encode_utf16().collect::<Vec<_>>();
+        argument_units.push(0xd800);
+        argument_units.extend(" exactly".encode_utf16());
+        let raw_args = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&argument_units),
+            argument_units.clone(),
+        )
+        .expect("raw argument fixture");
+        let input = Utf16JsonProjection::object(vec![
+            ("skill".to_owned(), "raw-args".into()),
+            ("args".to_owned(), raw_args),
+        ])
+        .expect("skill input fixture");
+        let desc = SkillDescriptor {
+            body: "$ARGUMENTS".into(),
+            ..prompt_desc("raw-args")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("skill call");
+        assert_eq!(
+            out.data
+                .at_pointer("/args")
+                .and_then(|value| value.code_units())
+                .map(|units| units.to_vec()),
+            Some(argument_units.clone())
+        );
+        let lingxi_core::types::ConversationMessage::User { content, .. } = &out.new_messages[0]
+        else {
+            panic!("skill prompt is a user message")
+        };
+        let Some(lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        }) = content.first()
+        else {
+            panic!("skill prompt is an exact UTF-16 text block")
+        };
+        assert_eq!(utf16_code_units, &argument_units);
+    }
+
+    #[tokio::test]
+    async fn raw_utf16_skill_body_survives_substitution_and_result_projection() {
+        let mut body_units = "prompt ".encode_utf16().collect::<Vec<_>>();
+        body_units.push(0xd800);
+        body_units.extend(" $ARGUMENTS".encode_utf16());
+        let body = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&body_units),
+            body_units.clone(),
+        )
+        .expect("source skill body");
+        let expected_prompt = [
+            "prompt ".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " run".encode_utf16().collect(),
+        ]
+        .concat();
+        let input = Utf16JsonProjection::object(vec![
+            ("skill".to_owned(), "raw-body".into()),
+            ("args".to_owned(), "run".into()),
+        ])
+        .expect("skill input fixture");
+        let descriptor = SkillDescriptor {
+            body: body.clone(),
+            ..prompt_desc("raw-body")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(descriptor))),
+        );
+
+        let result = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("skill invocation");
+
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/body")
+                .and_then(|value| value.code_units())
+                .map(|units| units.to_vec()),
+            Some(body_units)
+        );
+        let lingxi_core::types::ConversationMessage::User { content, .. } = &result.new_messages[0]
+        else {
+            panic!("skill prompt is a user message")
+        };
+        let Some(lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        }) = content.first()
+        else {
+            panic!("skill prompt is an exact UTF-16 text block")
+        };
+        assert_eq!(utf16_code_units, &expected_prompt);
     }
 
     /// Named frontmatter arguments (`$name`) resolve via the descriptor's
@@ -405,7 +592,7 @@ mod tests {
         );
         let out = tool
             .call(
-                json!({"skill": "greet", "args": "world"}),
+                source_json!({"skill": "greet", "args": "world"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -414,7 +601,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, "Hello world")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -434,10 +621,12 @@ mod tests {
             fn try_build_at(
                 &self,
                 _: &str,
-                root: &std::path::Path,
-                cwd: &std::path::Path,
-                preload: bool,
+                context: command_api::BundledPromptContext<'_>,
             ) -> std::io::Result<String> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(context.main_loop_model, Some("claude-fable-5"));
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));
                 assert!(!preload);
@@ -456,8 +645,9 @@ mod tests {
         let tool = SkillTool::with_loader(builtin, Arc::new(FixedLoader(Some(desc))));
         let mut call = fresh_ctx();
         call.cwd = Some("/project/subdir".into());
+        call.options.main_loop_model = "claude-fable-5".into();
         let error = tool
-            .call(json!({"skill":"loop"}), call, fresh_tx())
+            .call(source_json!({"skill":"loop"}), call, fresh_tx())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("loop.md denied"));
@@ -495,13 +685,13 @@ mod tests {
 
         // Empty args → usage branch.
         let out = tool
-            .call(json!({"skill": "loop"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "loop"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, "USAGE")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -517,7 +707,7 @@ mod tests {
         );
         let out = tool
             .call(
-                json!({"skill": "loop", "args": "  check the deploy  "}),
+                source_json!({"skill": "loop", "args": "  check the deploy  "}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -526,7 +716,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, "BUILT[check the deploy]");
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -545,13 +735,13 @@ mod tests {
             Arc::new(FixedLoader(Some(prompt_desc("plain")))),
         );
         let out = tool
-            .call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, "body here")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -589,13 +779,13 @@ mod tests {
         ]));
         let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
         let out = tool
-            .call(json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         // format_bash_output trims the stdout -> "hi".
                         assert_eq!(text, "before hi after");
                     }
@@ -605,7 +795,10 @@ mod tests {
             other => panic!("expected injected User message, got {other:?}"),
         }
         // The model-facing line is still the launch string (body not leaked).
-        assert_eq!(out.data["model_content"], json!("Launching skill: sh"));
+        assert_eq!(
+            source_text(&out.data, "/model_content"),
+            Some("Launching skill: sh")
+        );
     }
 
     /// SKILLEXEC #26: the shell snapshot is SESSION-scoped — its creation shell
@@ -631,13 +824,13 @@ mod tests {
 
         for _ in 0..2 {
             let out = tool
-                .call(json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
+                .call(source_json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
                 .await
                 .expect("ok");
             match &out.new_messages[0] {
                 lingxi_core::types::ConversationMessage::User { content, .. } => {
                     match content.first() {
-                        Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                             assert_eq!(text, "before hi after");
                         }
                         other => panic!("expected leading Text block, got {other:?}"),
@@ -668,8 +861,16 @@ mod tests {
             ..prompt_desc("nb")
         };
         // Independently compute the pure arg-substitution result.
-        let expected =
-            command_api::substitute_arguments_faithful(body, Some("123"), true, &[]).unwrap();
+        let expected = command_api::substitute_arguments_source(
+            &Utf16JsonProjection::from(body),
+            &Utf16JsonProjection::from("123"),
+            true,
+            &[],
+        )
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .to_owned();
         // dummy_out() has empty stdout; if the runner were ever called and then
         // called AGAIN, the stub would error — proving the no-op path.
         let tool = SkillTool::with_loader(
@@ -678,7 +879,7 @@ mod tests {
         );
         let out = tool
             .call(
-                json!({"skill": "nb", "args": "123"}),
+                source_json!({"skill": "nb", "args": "123"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -687,7 +888,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         assert_eq!(text, &expected);
                         assert_eq!(text, "Review PR 123 now (no shell here)");
                     }
@@ -716,13 +917,13 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "mcpish"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "mcpish"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
                         // Body is verbatim — the `!`echo hi`` block is NOT expanded.
                         assert_eq!(text, "before !`echo hi` after");
                     }
@@ -736,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn descriptor_truncated_at_1024() {
         let desc = SkillDescriptor {
-            description: "x".repeat(MAX_SKILL_DESCRIPTOR_LEN + 100),
+            description: "x".repeat(MAX_SKILL_DESCRIPTOR_LEN + 100).into(),
             ..prompt_desc("huge")
         };
         let tool = SkillTool::with_loader(
@@ -744,18 +945,23 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "huge"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "huge"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert!(out.data["body"].as_str().is_some(), "body present");
-        assert_eq!(out.data["descriptor_truncated"], json!(true));
+        assert!(source_text(&out.data, "/body").is_some(), "body present");
+        assert_eq!(
+            out.data
+                .at_pointer("/descriptor_truncated")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
     async fn blank_skill_rejected() {
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(json!({"skill": "   "}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "   "}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("blank");
         assert!(format!("{err}").contains("Invalid skill format"));
@@ -765,7 +971,7 @@ mod tests {
     async fn rejects_missing_skill() {
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(source_json!({}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing");
         assert!(format!("{err}").contains("missing or non-string skill"));
@@ -776,7 +982,7 @@ mod tests {
         // Unknown via empty loader.
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .validate_input(&json!({"skill": "/absent"}), &fresh_ctx())
+            .validate_input(&source_json!({"skill": "/absent"}), &fresh_ctx())
             .await
             .expect_err("unknown");
         assert!(err.0.contains("Unknown skill: absent"));
@@ -791,11 +997,13 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let err = tool
-            .validate_input(&json!({"skill": "x"}), &fresh_ctx())
+            .validate_input(&source_json!({"skill": "x"}), &fresh_ctx())
             .await
             .expect_err("disabled");
         assert!(err
             .0
+            .string_at("")
+            .expect("validation error is a string")
             .contains("cannot be used with Skill tool due to disable-model-invocation"));
     }
 
@@ -810,7 +1018,9 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => text.clone(),
+                    Some(lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. }) => {
+                        text.clone()
+                    }
                     other => panic!("expected leading Text block, got {other:?}"),
                 }
             }
@@ -831,7 +1041,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(
@@ -852,7 +1062,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(
@@ -875,7 +1085,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(
@@ -898,7 +1108,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(
@@ -921,7 +1131,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(injected_text(&out), "session sess:abc-123 = sess:abc-123");
@@ -941,7 +1151,7 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(injected_text(&out), "session ${LINGXI_SESSION_ID}");
@@ -1007,7 +1217,7 @@ mod tests {
         };
         let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
         let out = tool
-            .call(json!({"skill": "ord"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "ord"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         // The expanded prompt splices the (trimmed) stdout.
@@ -1091,7 +1301,7 @@ mod tests {
             ..prompt_desc("wrap")
         };
         let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
-        tool.call(json!({"skill": "wrap"}), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({"skill": "wrap"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
 
@@ -1136,15 +1346,23 @@ mod tests {
             session_id: Some("sess:abc".into()),
             ..prompt_desc("plain")
         };
-        let expected =
-            command_api::substitute_arguments_faithful(body, Some("X"), true, &[]).unwrap();
+        let expected = command_api::substitute_arguments_source(
+            &Utf16JsonProjection::from(body),
+            &Utf16JsonProjection::from("X"),
+            true,
+            &[],
+        )
+        .unwrap()
+        .string_at("")
+        .unwrap()
+        .to_owned();
         let tool = SkillTool::with_loader(
             shell_test_ctx(dummy_out()),
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
             .call(
-                json!({"skill": "plain", "args": "X"}),
+                source_json!({"skill": "plain", "args": "X"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1195,7 +1413,7 @@ mod tests {
         };
         let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
         let out = tool
-            .call(json!({"skill": "sbx"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "sbx"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         // The splice still works (the stub stdout is "OUT").
@@ -1238,7 +1456,7 @@ mod tests {
         };
         let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
         let out = tool
-            .call(json!({"skill": "nosbx"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "nosbx"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(injected_text(&out), "pre OUT post");
@@ -1290,7 +1508,8 @@ the listing (or that the user typed explicitly) are valid. Built-in CLI commands
 (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already present \
 this turn, the skill is loaded — follow it directly rather than calling again.\n";
         assert_eq!(
-            p, expected,
+            p.string_at(""),
+            Some(expected),
             "Skill tool prompt must be byte-exact vs 2.1.220"
         );
     }
@@ -1313,20 +1532,88 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             shell_test_ctx(dummy_out()),
             Arc::new(FixedLoader(Some(desc))),
         );
-        tool.call(json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
 
         // The registry now carries the main-thread row keyed `":regtest"` with
         // the expanded skill content the model received (`body here`).
-        let content = compaction::invoked_skills::content_for_test(":regtest")
+        let skill_name = Utf16JsonProjection::from("regtest");
+        let main_thread_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
+            &skill_name,
+        );
+        let content = compaction::invoked_skills::content_for_test(&main_thread_key)
             .expect("skill registered under main-thread key");
         assert!(
-            content.contains("body here"),
-            "registered content must carry the expanded skill body; got: {content}"
+            content
+                .string_at("")
+                .is_some_and(|text| text.contains("body here")),
+            "registered content must carry the expanded skill body; got: {content:?}"
         );
         // A skill NOT invoked leaves no row.
-        assert!(compaction::invoked_skills::content_for_test(":other").is_none());
+        let other_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
+            &Utf16JsonProjection::from("other"),
+        );
+        assert!(compaction::invoked_skills::content_for_test(&other_key).is_none());
+
+        compaction::invoked_skills::reset_for_test();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invocation_registry_preserves_raw_skill_name_and_expanded_prompt_units() {
+        let _g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+
+        let name_units = vec![0xd800];
+        let skill_name = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&name_units),
+            name_units.clone(),
+        )
+        .expect("raw UTF-16 skill name");
+        let prompt_units = vec![u16::from(b'R'), 0xdfff, u16::from(b'!')];
+        let args = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&prompt_units),
+            prompt_units.clone(),
+        )
+        .expect("raw UTF-16 skill argument");
+        let input = Utf16JsonProjection::object(vec![
+            ("skill".to_owned(), skill_name.clone()),
+            ("args".to_owned(), args),
+        ])
+        .expect("raw skill input");
+        let descriptor = SkillDescriptor {
+            body: "$ARGUMENTS".into(),
+            ..prompt_desc("raw-name")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(descriptor))),
+        );
+        let result = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("raw skill invocation");
+
+        let key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
+            &skill_name,
+        );
+        let registered = compaction::invoked_skills::content_for_test(&key)
+            .expect("raw skill invocation is registered");
+        assert_eq!(registered.string_units(""), Some(prompt_units));
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/commandName")
+                .and_then(|value| value.code_units())
+                .map(|units| units.to_vec()),
+            Some(name_units)
+        );
 
         compaction::invoked_skills::reset_for_test();
     }
@@ -1351,7 +1638,7 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         let mut call_ctx = fresh_ctx();
         call_ctx.agent_id = Some(agent_id);
 
-        tool.call(json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1360,16 +1647,22 @@ this turn, the skill is loaded — follow it directly rather than calling again.
                 Some(&session_id.to_string()),
                 Some(&agent_id.to_string()),
             ),
-            "regtest",
+            &Utf16JsonProjection::from("regtest"),
         );
         let content = compaction::invoked_skills::content_for_test(&scoped_key)
             .expect("skill registered under scoped key");
         assert!(
-            content.contains("body here"),
-            "registered content must carry the expanded skill body; got: {content}"
+            content
+                .string_at("")
+                .is_some_and(|text| text.contains("body here")),
+            "registered content must carry the expanded skill body; got: {content:?}"
+        );
+        let main_thread_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
+            &Utf16JsonProjection::from("regtest"),
         );
         assert!(
-            compaction::invoked_skills::content_for_test(":regtest").is_none(),
+            compaction::invoked_skills::content_for_test(&main_thread_key).is_none(),
             "scoped registration must not leak into the legacy main-thread key"
         );
 
@@ -1398,7 +1691,7 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             lingxi_core::SessionState::empty(live_session_id, "model".into()),
         )));
 
-        tool.call(json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1407,14 +1700,14 @@ this turn, the skill is loaded — follow it directly rather than calling again.
                 Some(&live_session_id.to_string()),
                 None,
             ),
-            "regtest",
+            &Utf16JsonProjection::from("regtest"),
         );
         let stale_key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(
                 Some(&stale_session_id.to_string()),
                 None,
             ),
-            "regtest",
+            &Utf16JsonProjection::from("regtest"),
         );
         assert!(compaction::invoked_skills::content_for_test(&live_key).is_some());
         assert!(compaction::invoked_skills::content_for_test(&stale_key).is_none());
@@ -1452,7 +1745,10 @@ mod fork_dispatch_tests {
     struct Loader(Option<SkillDescriptor>);
     #[async_trait]
     impl SkillLoader for Loader {
-        async fn load(&self, _name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+        async fn load(
+            &self,
+            _name: &Utf16JsonProjection,
+        ) -> Result<Option<SkillDescriptor>, ToolError> {
             Ok(self.0.clone())
         }
     }
@@ -1463,7 +1759,7 @@ mod fork_dispatch_tests {
     struct RecordingSpawner {
         seen: std::sync::Mutex<Option<SubagentSpawnRequest>>,
         /// Canned final content for the SYNCHRONOUS fork path.
-        sync_content: Option<serde_json::Value>,
+        sync_content: Option<Utf16JsonProjection>,
     }
     #[async_trait]
     impl SubagentSpawner for RecordingSpawner {
@@ -1473,9 +1769,14 @@ mod fork_dispatch_tests {
             _i: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             *self.seen.lock().unwrap() = Some(request);
+            let content = self
+                .sync_content
+                .clone()
+                .unwrap_or_else(|| source_json!([]));
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::nil(),
-                content: self.sync_content.clone().unwrap_or(json!([])),
+                content,
                 usage: Default::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
@@ -1618,19 +1919,28 @@ mod fork_dispatch_tests {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![]);
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "review"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .expect("fork dispatch succeeds");
 
-        assert_eq!(res.data["status"], json!("forked"));
-        assert_eq!(res.data["background"], json!(true));
-        assert_eq!(res.data["commandName"], json!("review"));
+        assert_eq!(source_text(&res.data, "/status"), Some("forked"));
         assert_eq!(
-            res.data["result"],
-            json!("Running in the background as @review")
+            res.data.at_pointer("/background").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(source_text(&res.data, "/commandName"), Some("review"));
+        assert_eq!(
+            source_text(&res.data, "/result"),
+            Some("Running in the background as @review")
         );
         assert_eq!(
-            res.model_content.as_deref(),
+            res.model_content
+                .as_ref()
+                .and_then(|value| value.string_at("")),
             Some(
                 "Skill \"review\" launched (forked execution, running in the background).\n\n\
                  Running in the background as @review"
@@ -1643,12 +1953,66 @@ mod fork_dispatch_tests {
         );
 
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
-        assert_eq!(req.forked_skill_name.as_deref(), Some("review"));
-        assert_eq!(req.forked_skill_attribution.as_deref(), Some("review"));
+        assert_eq!(
+            req.forked_skill_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("review")
+        );
+        assert_eq!(
+            req.forked_skill_attribution
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("review")
+        );
         assert_eq!(req.subagent_type, "code-reviewer");
         assert!(req.run_in_background);
         // The `SendMessage` handle is the skill name, so `@review` resolves.
         assert_eq!(req.name.as_deref(), Some("review"));
+    }
+
+    #[tokio::test]
+    async fn a_forked_skill_keeps_unpaired_utf16_name_as_its_identity() {
+        let mut units = "skill-".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend("-probe".encode_utf16());
+        let exact_name = Utf16JsonProjection::root_string("skill-�-probe", units.clone())
+            .expect("exact UTF-16 skill name");
+        let desc = SkillDescriptor {
+            name: exact_name.clone(),
+            description: "a forking skill".into(),
+            body: "do the work".into(),
+            context: Some("fork".into()),
+            ..SkillDescriptor::default()
+        };
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let tool = tool_with(spawner.clone(), desc, vec![]);
+        let input = Utf16JsonProjection::object(vec![("skill".into(), exact_name.clone())])
+            .expect("source-preserving skill input");
+        let result = tool
+            .call(input, ctx_with_registry(), fresh_tx())
+            .await
+            .expect("surrogate-containing name still launches as a fork");
+
+        assert_eq!(source_text(&result.data, "/status"), Some("forked"));
+        let request = spawner.seen.lock().unwrap().clone().expect("spawned");
+        assert_eq!(
+            request
+                .forked_skill_name
+                .as_ref()
+                .and_then(|name| name.string_units("")),
+            Some(units.clone())
+        );
+        assert_eq!(
+            request
+                .forked_skill_attribution
+                .as_ref()
+                .and_then(|name| name.string_units("")),
+            Some(units)
+        );
+        // The string-only task handle is for display/routing. Fork identity
+        // remains the exact source projection above.
+        assert_eq!(request.name.as_deref(), Some("skill-�-probe"));
     }
 
     /// One live fork per skill: a second invocation while the first is still
@@ -1661,15 +2025,20 @@ mod fork_dispatch_tests {
             task_type: "local_agent".into(),
             status: "running".into(),
             forked_skill_name: Some("review".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![live]);
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "review"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .expect("inline");
-        assert_eq!(res.data["status"], json!("inline"));
+        assert_eq!(source_text(&res.data, "/status"), Some("inline"));
         assert!(spawner.seen.lock().unwrap().is_none(), "no second spawn");
     }
 
@@ -1679,10 +2048,14 @@ mod fork_dispatch_tests {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let tool = tool_with(spawner.clone(), inline_desc("commit"), vec![]);
         let res = tool
-            .call(json!({"skill": "commit"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "commit"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .expect("inline");
-        assert_eq!(res.data["status"], json!("inline"));
+        assert_eq!(source_text(&res.data, "/status"), Some("inline"));
         assert!(spawner.seen.lock().unwrap().is_none());
     }
 
@@ -1695,27 +2068,36 @@ mod fork_dispatch_tests {
             Arc::new(Loader(Some(fork_desc("review", None)))),
         );
         let res = tool
-            .call(json!({"skill": "review"}), fresh_ctx(), fresh_tx())
+            .call(source_json!({"skill": "review"}), fresh_ctx(), fresh_tx())
             .await
             .expect("inline");
-        assert_eq!(res.data["status"], json!("inline"));
+        assert_eq!(source_text(&res.data, "/status"), Some("inline"));
     }
 
     /// Records every `set_command_input_denies` the Skill tool makes.
     #[derive(Default)]
     struct RecordingDenyGate {
-        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
+        calls: std::sync::Mutex<
+            Vec<(
+                Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+                bool,
+            )>,
+        >,
     }
     #[async_trait::async_trait]
     impl lingxi_core::host::permission_gate::PermissionGate for RecordingDenyGate {
         async fn check(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
-        fn set_command_input_denies(&self, specs: &[String], union: bool) {
+        fn set_command_input_denies(
+            &self,
+            specs: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+            union: bool,
+        ) {
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1735,12 +2117,12 @@ mod fork_dispatch_tests {
         let mut ctx = shell_test_ctx(out());
         ctx.permission_gate = Some(gate.clone());
         let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(desc))));
-        tool.call(json!({"skill": "tighten"}), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({"skill": "tighten"}), fresh_ctx(), fresh_tx())
             .await
             .expect("inline skill runs");
         assert_eq!(
             gate.calls.lock().unwrap().clone(),
-            vec![(vec!["Bash".to_string(), "Write".to_string()], true)],
+            vec![(vec!["Bash".into(), "Write".into()], true)],
             "an inline skill must UNION its denies onto the current input's"
         );
     }
@@ -1754,7 +2136,7 @@ mod fork_dispatch_tests {
         let mut ctx = shell_test_ctx(out());
         ctx.permission_gate = Some(gate.clone());
         let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(inline_desc("plain")))));
-        tool.call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
             .await
             .expect("inline skill runs");
         assert!(gate.calls.lock().unwrap().is_empty());
@@ -1770,9 +2152,13 @@ mod fork_dispatch_tests {
         let mut desc = fork_desc("review", None);
         desc.disallowed_tools = vec!["Write".into(), "Bash".into()];
         let tool = tool_with(spawner.clone(), desc, vec![]);
-        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
-            .await
-            .expect("fork dispatch succeeds");
+        tool.call(
+            source_json!({"skill": "review"}),
+            ctx_with_registry(),
+            fresh_tx(),
+        )
+        .await
+        .expect("fork dispatch succeeds");
 
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
         assert_eq!(
@@ -1833,9 +2219,13 @@ mod fork_dispatch_tests {
         ctx.budget_enforcer = Some(Arc::new(NoBudget));
         let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
-        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
-            .await
-            .expect("fork dispatch succeeds");
+        tool.call(
+            source_json!({"skill": "review"}),
+            ctx_with_registry(),
+            fresh_tx(),
+        )
+        .await
+        .expect("fork dispatch succeeds");
 
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
         assert_eq!(
@@ -1853,7 +2243,7 @@ mod fork_dispatch_tests {
     async fn a_non_background_fork_runs_the_subagent_synchronously() {
         let spawner = Arc::new(RecordingSpawner {
             seen: std::sync::Mutex::new(None),
-            sync_content: Some(json!([
+            sync_content: Some(source_json!([
                 { "type": "text", "text": "first" },
                 { "type": "tool_use", "name": "Bash", "input": {} },
                 { "type": "text", "text": "second" }
@@ -1863,18 +2253,24 @@ mod fork_dispatch_tests {
         desc.disallowed_tools = vec!["Write".into()];
         let tool = tool_with(spawner.clone(), desc, vec![]);
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "review"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .expect("sync fork succeeds");
 
-        assert_eq!(res.data["status"], json!("forked"));
+        assert_eq!(source_text(&res.data, "/status"), Some("forked"));
         assert!(
-            res.data.get("background").is_none(),
+            res.data.at_pointer("/background").is_none(),
             "the synchronous fork omits the background key"
         );
-        assert_eq!(res.data["result"], json!("first\nsecond"));
+        assert_eq!(source_text(&res.data, "/result"), Some("first\nsecond"));
         assert_eq!(
-            res.model_content.as_deref(),
+            res.model_content
+                .as_ref()
+                .and_then(|value| value.string_at("")),
             Some("Skill \"review\" completed (forked execution).\n\nResult:\nfirst\nsecond")
         );
         assert!(
@@ -1897,14 +2293,21 @@ mod fork_dispatch_tests {
     async fn a_sync_fork_with_no_text_reports_the_default_result() {
         let spawner = Arc::new(RecordingSpawner {
             seen: std::sync::Mutex::new(None),
-            sync_content: Some(json!([])),
+            sync_content: Some(source_json!([])),
         });
         let tool = tool_with(spawner, fork_desc("review", Some(false)), vec![]);
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "review"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        assert_eq!(res.data["result"], json!("Skill execution completed"));
+        assert_eq!(
+            source_text(&res.data, "/result"),
+            Some("Skill execution completed")
+        );
     }
 
     /// A fork that declines to launch must RELEASE its spawn reservation —
@@ -1917,6 +2320,7 @@ mod fork_dispatch_tests {
             task_type: "local_agent".into(),
             status: "running".into(),
             forked_skill_name: Some("review".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let registry = Arc::new(StubRegistry::new(vec![live]));
@@ -1928,10 +2332,14 @@ mod fork_dispatch_tests {
         let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(
+                source_json!({"skill": "review"}),
+                ctx_with_registry(),
+                fresh_tx(),
+            )
             .await
             .expect("inline");
-        assert_eq!(res.data["status"], json!("inline"));
+        assert_eq!(source_text(&res.data, "/status"), Some("inline"));
         assert_eq!(
             registry.get_total_agent_spawns(),
             0,
@@ -1950,9 +2358,13 @@ mod fork_dispatch_tests {
         ctx.budget_enforcer = Some(Arc::new(NoBudget));
         let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
-        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
-            .await
-            .expect("fork");
+        tool.call(
+            source_json!({"skill": "review"}),
+            ctx_with_registry(),
+            fresh_tx(),
+        )
+        .await
+        .expect("fork");
         assert_eq!(registry.get_total_agent_spawns(), 1);
     }
 }
@@ -2001,12 +2413,10 @@ fn declared_effort_matches_the_oracle_union() {
 /// and the miss should say so.
 #[test]
 fn a_single_suffix_match_is_named() {
-    let names = vec![
-        "some-plugin:deploy".to_string(),
-        "other:unrelated".to_string(),
-    ];
+    let names = vec!["some-plugin:deploy".into(), "other:unrelated".into()];
     assert_eq!(
-        super::unknown_skill_suffix_hint("deploy", &names).as_deref(),
+        super::unknown_skill_suffix_hint(&"deploy".into(), &names)
+            .and_then(|hint| hint.string_at("")),
         Some(" Did you mean some-plugin:deploy? Invoke it by that full name.")
     );
 }
@@ -2014,9 +2424,10 @@ fn a_single_suffix_match_is_named() {
 /// Several matches are listed instead, with the oracle's em-dash.
 #[test]
 fn several_suffix_matches_are_listed() {
-    let names = vec!["b-plugin:deploy".to_string(), "a-plugin:deploy".to_string()];
+    let names = vec!["b-plugin:deploy".into(), "a-plugin:deploy".into()];
     assert_eq!(
-        super::unknown_skill_suffix_hint("deploy", &names).as_deref(),
+        super::unknown_skill_suffix_hint(&"deploy".into(), &names)
+            .and_then(|hint| hint.string_at("")),
         Some(" Several skills match that name: a-plugin:deploy, b-plugin:deploy \u{2014} invoke one by its full name.")
     );
 }
@@ -2026,12 +2437,18 @@ fn several_suffix_matches_are_listed() {
 #[test]
 fn only_a_colon_qualified_suffix_counts() {
     let names = vec![
-        "redeploy".to_string(),
-        "plugin:redeploy".to_string(),
-        "deployment".to_string(),
+        "redeploy".into(),
+        "plugin:redeploy".into(),
+        "deployment".into(),
     ];
-    assert_eq!(super::unknown_skill_suffix_hint("deploy", &names), None);
-    assert_eq!(super::unknown_skill_suffix_hint("deploy", &[]), None);
+    assert_eq!(
+        super::unknown_skill_suffix_hint(&"deploy".into(), &names),
+        None
+    );
+    assert_eq!(
+        super::unknown_skill_suffix_hint(&"deploy".into(), &[]),
+        None
+    );
 }
 
 /// Oracle `Fee`. Skill names come from plugins and marketplaces, so they are
@@ -2051,20 +2468,40 @@ fn an_undisplayable_name_is_never_quoted_back() {
         "a\u{0}b:deploy",
     ] {
         assert_eq!(
-            super::unknown_skill_suffix_hint("deploy", &[bad.to_string()]),
+            super::unknown_skill_suffix_hint(&"deploy".into(), &[bad.to_string().into()]),
             None,
             "{bad:?} must not be echoed into a user-facing message"
         );
     }
-    let mixed = vec!["good:deploy".to_string(), "<x>:deploy".to_string()];
-    assert_eq!(super::unknown_skill_suffix_hint("deploy", &mixed), None);
+    let mixed = vec!["good:deploy".into(), "<x>:deploy".into()];
+    assert_eq!(
+        super::unknown_skill_suffix_hint(&"deploy".into(), &mixed),
+        None
+    );
 }
 
 /// The failed request itself is not a suggestion.
 #[test]
 fn the_requested_name_is_not_offered_back() {
     assert_eq!(
-        super::unknown_skill_suffix_hint("deploy", &["deploy".to_string()]),
+        super::unknown_skill_suffix_hint(&"deploy".into(), &["deploy".into()]),
         None
     );
+}
+
+#[test]
+fn an_unpaired_surrogate_name_is_preserved_in_a_suggestion() {
+    let name_units = [0xd800, u16::from(b':')]
+        .into_iter()
+        .chain("deploy".encode_utf16())
+        .collect::<Vec<_>>();
+    let source_name =
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&name_units), name_units.clone())
+            .expect("raw root string fixture");
+    let suggestion = super::unknown_skill_suffix_hint(&"deploy".into(), &[source_name])
+        .expect("the exact source name remains a valid suggestion");
+    let mut expected_units = " Did you mean ".encode_utf16().collect::<Vec<_>>();
+    expected_units.extend(name_units);
+    expected_units.extend("? Invoke it by that full name.".encode_utf16());
+    assert_eq!(suggestion.string_units(""), Some(expected_units));
 }

@@ -389,12 +389,15 @@ async fn drain_framed_output<SO, SE>(
     mut output: BackgroundOutput,
     health: Option<(&lingxi_core::host::BackgroundTaskBinding, u32)>,
     child: &mut tokio::process::Child,
-) -> std::io::Result<()>
+    deadline: Option<tokio::time::Instant>,
+) -> (std::io::Result<()>, bool)
 where
     SO: AsyncRead + Unpin,
     SE: AsyncRead + Unpin,
 {
     let binding = health.map(|(binding, _)| binding);
+    let mut deadline_expired = false;
+    let mut deadline_handled = false;
     let managed = binding
         .and_then(|bound| bound.on_exit.as_ref())
         .is_some_and(|sink| sink.manages_output());
@@ -419,16 +422,31 @@ where
     let mut stdout_chunk = vec![0u8; 8192];
     let mut stderr_chunk = vec![0u8; 8192];
     loop {
-        if stdout_done && stderr_done && (health.is_none() || !matches!(child.try_wait(), Ok(None)))
-        {
+        if stdout_done && stderr_done && !matches!(child.try_wait(), Ok(None)) {
             break;
         }
         let framed = tokio::select! {
+            _ = async {
+                if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
+                else { std::future::pending::<()>().await; }
+            }, if !deadline_handled => {
+                deadline_handled = true;
+                // Do not reap the leader here: it may have exited while a
+                // descendant still owns a pipe. The held, unreaped leader
+                // reserves this process-group identity until the final wait.
+                if let Some(pid) = child.id() {
+                    deadline_expired = true;
+                    let _ = kill_tree_force(pid);
+                }
+                continue;
+            }
             _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } }, if !stop_handled => {
                 stop_handled = true;
-                // The same task owns wait/reap and signaling. No await between
-                // checking this live Child handle and signaling its group.
-                if matches!(child.try_wait(), Ok(None)) { if let Some(pid) = child.id() { let _ = kill_tree_force(pid); } }
+                // Keep an exited leader unreaped while its descendants hold
+                // pipes, just as the deadline path does. A user stop owns the
+                // outcome even if output draining crosses the later deadline.
+                deadline_handled = true;
+                if let Some(pid) = child.id() { let _ = kill_tree_force(pid); }
                 continue;
             }
             _ = child.wait(), if stdout_done && stderr_done => break,
@@ -486,7 +504,7 @@ where
     if let Err(error) = flushed {
         first_write_error.get_or_insert(error);
     }
-    first_write_error.map_or(Ok(()), Err)
+    (first_write_error.map_or(Ok(()), Err), deadline_expired)
 }
 
 /// Production [`ProcessRunner`] using `tokio::process`.
@@ -1043,9 +1061,11 @@ impl ProcessRunner for PosixProcess {
             .kill_on_drop(true);
 
         let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
-        if print_mode_cleanup || cmd.process_owner().is_some() {
-            attach_setsid(&mut tcmd);
-        }
+        // This path can hand its child to the background reaper or terminate
+        // it at a foreground deadline. Both operations signal its owned group,
+        // so the group must exist before the first fork even in an interactive
+        // main-agent call with no print-mode cleanup or subagent owner.
+        attach_setsid(&mut tcmd);
 
         let mut child =
             super::spawn_unsafe::spawn_with_capability(tcmd, cmd.background_task()).await?;
@@ -1274,6 +1294,9 @@ impl ProcessRunner for PosixProcess {
             .into_background();
         let pid = spawned_pid;
         let exit_task_id = task_id.clone();
+        let background_deadline = cmd
+            .background_timeout()
+            .map(|timeout| tokio::time::Instant::now() + timeout);
 
         tokio::spawn(async move {
             // Hold the print-mode registration for the child's remaining life so
@@ -1282,13 +1305,14 @@ impl ProcessRunner for PosixProcess {
             let _agent_registration = agent_registration;
             let mut child = child;
             let mut file = std_file.map(tokio::fs::File::from_std);
-            let _ = drain_framed_output(
+            let (_, deadline_expired) = drain_framed_output(
                 &mut sout,
                 &mut serr,
                 &mut file,
                 initial_output,
                 binding.as_ref().map(|binding| (binding, pid)),
                 &mut child,
+                background_deadline,
             )
             .await;
             let status = child.wait().await;
@@ -1296,7 +1320,11 @@ impl ProcessRunner for PosixProcess {
             // auto-backgrounded (timed-out) command settles its task record.
             if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
                 let code = status.ok().and_then(|status| status.code());
-                sink.on_exit(&exit_task_id, code).await;
+                if deadline_expired {
+                    sink.on_background_deadline_exit(&exit_task_id, code).await;
+                } else {
+                    sink.on_exit(&exit_task_id, code).await;
+                }
             }
         });
 
@@ -1559,16 +1587,20 @@ impl ProcessRunner for PosixProcess {
         // The task also reaps the child to avoid zombies.
         let agent_registration = super::agent_processes::register(cmd.process_owner(), Some(pid));
         let exit_task_id = task_id.clone();
+        let background_deadline = cmd
+            .background_timeout()
+            .map(|timeout| tokio::time::Instant::now() + timeout);
         tokio::spawn(async move {
             let _agent_registration = agent_registration;
             let mut file = file.map(tokio::fs::File::from_std);
-            let _ = drain_framed_output(
+            let (_, deadline_expired) = drain_framed_output(
                 &mut stdout,
                 &mut stderr,
                 &mut file,
                 BackgroundOutput::default(),
                 binding.as_ref().map(|binding| (binding, pid)),
                 &mut child,
+                background_deadline,
             )
             .await;
             let status = child.wait().await;
@@ -1577,7 +1609,11 @@ impl ProcessRunner for PosixProcess {
             // the completion notification).
             if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
                 let code = status.ok().and_then(|status| status.code());
-                sink.on_exit(&exit_task_id, code).await;
+                if deadline_expired {
+                    sink.on_background_deadline_exit(&exit_task_id, code).await;
+                } else {
+                    sink.on_exit(&exit_task_id, code).await;
+                }
             }
         });
 
@@ -1780,13 +1816,164 @@ mod async_hook_tests {
         );
     }
 
+    #[tokio::test]
+    async fn background_deadline_kills_explicit_and_handed_off_children_and_flushes_output() {
+        #[derive(Default)]
+        struct Sink {
+            output: std::sync::Mutex<String>,
+            expired: std::sync::atomic::AtomicBool,
+            done: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                self.output.lock().unwrap().push_str(text);
+                Ok(())
+            }
+            async fn on_background_deadline_exit(&self, _: &str, _: Option<i32>) {
+                self.expired.store(true, Ordering::SeqCst);
+                self.done.notify_one();
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                self.done.notify_one();
+            }
+        }
+        for (explicit, parent_exits) in [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = Arc::new(Sink::default());
+            let script = if parent_exits {
+                "printf before; sleep 0.15; sleep 60 & printf after"
+            } else {
+                "printf before; sleep 0.15; printf after; exec sleep 60"
+            };
+            let command = sh_with_timeout(script, Duration::from_millis(100))
+                .with_background_timeout(Some(Duration::from_millis(250)))
+                .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                    task_id: "bdeadline".into(),
+                    output_path: dir.path().join("output"),
+                    on_exit: Some(sink.clone()),
+                    on_demand: None,
+                });
+            let process = PosixProcess::new();
+            let handle = if explicit {
+                process.spawn_background(&command).await.unwrap()
+            } else {
+                match process.run_foreground(&command).await.unwrap() {
+                    lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => handle,
+                    other => panic!("must hand off: {other:?}"),
+                }
+            };
+            let settled = tokio::time::timeout(Duration::from_secs(5), sink.done.notified()).await;
+            if settled.is_err() {
+                let _ = process.kill(&handle).await;
+            }
+            settled.unwrap_or_else(|error| panic!(
+                "background deadline settles without a foreground waiter: explicit={explicit}, parent_exits={parent_exits}, pid={}, output={:?}: {error}",
+                handle.pid, *sink.output.lock().unwrap()
+            ));
+            assert!(
+                sink.expired.load(Ordering::SeqCst),
+                "explicit={explicit}, parent_exits={parent_exits}"
+            );
+            assert_eq!(
+                *sink.output.lock().unwrap(),
+                "beforeafter",
+                "explicit={explicit}, parent_exits={parent_exits}"
+            );
+            assert!(
+                lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_none(),
+                "held child is reaped before settlement: explicit={explicit}, parent_exits={parent_exits}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_after_background_leader_exit_kills_descendants_without_deadline_cause() {
+        #[derive(Default)]
+        struct Sink {
+            stop: Arc<tokio::sync::Notify>,
+            output: std::sync::Mutex<String>,
+            expired: std::sync::atomic::AtomicBool,
+            done: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+                Some(self.stop.clone())
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                self.output.lock().unwrap().push_str(text);
+                Ok(())
+            }
+            async fn on_background_deadline_exit(&self, _: &str, _: Option<i32>) {
+                self.expired.store(true, Ordering::SeqCst);
+                self.done.notify_one();
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                self.done.notify_one();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let command = sh("sleep 60 & printf before-stop")
+            .with_background_timeout(Some(Duration::from_secs(5)))
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                task_id: "bstop-exited-leader".into(),
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            });
+        let process = PosixProcess::new();
+        let handle = process.spawn_background(&command).await.unwrap();
+        // Observe the zombie without wait/try_wait: the runner must retain its
+        // process-group identity until its pipe-holding descendant is stopped.
+        let exited = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = tokio::process::Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &handle.pid.to_string()])
+                    .output()
+                    .await
+                    .unwrap();
+                if String::from_utf8_lossy(&status.stdout).contains('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        sink.stop.notify_one();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), sink.done.notified()).await;
+        if stopped.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        exited.expect("leader exits before stop without being reaped");
+        stopped.expect("stop settles before the five-second background deadline");
+        assert_eq!(*sink.output.lock().unwrap(), "before-stop");
+        assert!(!sink.expired.load(Ordering::SeqCst));
+        assert!(
+            lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_none(),
+            "stop joins the held leader before settlement"
+        );
+    }
+
     fn sh(script: &str) -> SandboxedCommand {
+        sh_with_timeout(script, Duration::from_secs(5))
+    }
+
+    fn sh_with_timeout(script: &str, timeout: Duration) -> SandboxedCommand {
         let pcmd = ProcessCommand {
             command: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), script.to_string()],
             cwd: None,
             env: HashMap::new(),
-            timeout: Some(Duration::from_secs(5)),
+            timeout: Some(timeout),
             stdin: None,
         };
         SandboxedCommand::__new_sandboxed(

@@ -79,15 +79,19 @@ details, code examples, and documentation excerpts as needed.";
 #[must_use]
 pub fn make_secondary_model_prompt(
     markdown_content: &str,
-    prompt: &str,
+    prompt: &crate::source::Source,
     is_preapproved_domain: bool,
-) -> String {
+) -> crate::source::Source {
     let guidelines = if is_preapproved_domain {
         GUIDELINES_PREAPPROVED
     } else {
         GUIDELINES_STRICT
     };
-    format!("\nWeb page content:\n---\n{markdown_content}\n---\n\n{prompt}\n\n{guidelines}\n")
+    crate::source::affix(
+        &format!("\nWeb page content:\n---\n{markdown_content}\n---\n\n"),
+        prompt,
+        &format!("\n\n{guidelines}\n"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +274,11 @@ pub fn is_preapproved_domain(host: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn display_text(source: &crate::source::Source) -> String {
+        String::from_utf16(&source.string_units("").expect("root string"))
+            .expect("fixture contains only Unicode scalar values")
+    }
+
     #[test]
     fn detects_html_content_type() {
         assert!(is_html_content_type("text/html; charset=utf-8"));
@@ -321,7 +330,8 @@ mod tests {
 
     #[test]
     fn secondary_prompt_matches_template_strict() {
-        let got = make_secondary_model_prompt("MD-HERE", "what is X?", false);
+        let prompt: crate::source::Source = "what is X?".into();
+        let got = make_secondary_model_prompt("MD-HERE", &prompt, false);
         let expected = "\nWeb page content:\n---\nMD-HERE\n---\n\nwhat is X?\n\n\
 Provide a concise response based only on the content above. In your response:\n \
 - Enforce a strict 125-character maximum for quotes from any source document. \
@@ -330,17 +340,36 @@ Open Source Software is ok as long as we respect the license.\n \
 the quotation should never be word-for-word the same.\n \
 - You are not a lawyer and never comment on the legality of your own prompts and \
 responses.\n - Never produce or reproduce exact song lyrics.\n";
-        assert_eq!(got, expected);
+        assert_eq!(
+            got.string_units(""),
+            Some(expected.encode_utf16().collect())
+        );
     }
 
     #[test]
     fn secondary_prompt_preapproved_uses_short_guidelines() {
-        let got = make_secondary_model_prompt("MD", "q", true);
-        assert!(got.contains(
+        let prompt: crate::source::Source = "q".into();
+        let got = make_secondary_model_prompt("MD", &prompt, true);
+        let text = display_text(&got);
+        assert!(text.contains(
             "Provide a concise response based on the content above. Include relevant \
 details, code examples, and documentation excerpts as needed."
         ));
-        assert!(got.starts_with("\nWeb page content:\n---\nMD\n---\n\nq\n\n"));
+        assert!(text.starts_with("\nWeb page content:\n---\nMD\n---\n\nq\n\n"));
+    }
+
+    #[test]
+    fn secondary_prompt_keeps_unpaired_prompt_units() {
+        let prompt_units = vec![b'q' as u16, 0xd800, b'x' as u16];
+        let prompt = crate::source::text(prompt_units.clone());
+        let got = make_secondary_model_prompt("MD", &prompt, false);
+        let suffix = format!("\n\n{GUIDELINES_STRICT}\n");
+        let expected = "\nWeb page content:\n---\nMD\n---\n\n"
+            .encode_utf16()
+            .chain(prompt_units)
+            .chain(suffix.encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(got.string_units(""), Some(expected));
     }
 
     // ---- preapproved hosts (preapproved.ts) --------------------------------

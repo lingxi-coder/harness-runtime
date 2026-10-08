@@ -1,9 +1,9 @@
 use super::*;
+use crate::OrchestratorConfig;
 use crate::prompt::todo_reminder::{TaskReminderItem, TodoReminderTaskProvider};
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
-use crate::OrchestratorConfig;
 use lingxi_core::{TodoItem, TodoState};
 use std::sync::Arc;
 use tool_api::context::ToolUseContext;
@@ -65,8 +65,11 @@ impl Tool for NamedTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,

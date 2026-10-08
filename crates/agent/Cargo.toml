@@ -10,6 +10,7 @@ core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 tool-api = { path = "../tool-api" }
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 mcp = { path = "../mcp" }
 memory = { path = "../memory" }
 hooks = { path = "../hooks" }
@@ -24,6 +25,7 @@ telemetry = { path = "../telemetry" }
 branding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid = { version = "1.10", features = ["v4"] }
 serde_yaml = "0.9"
 # cc 2.1.218 agent-name validation: `name.normalize("NFKC").includes(":")` —
 # NFKC catches colon look-alikes (U+FF1A/U+FE55) before the plugin-namespace

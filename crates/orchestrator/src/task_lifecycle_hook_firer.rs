@@ -52,6 +52,7 @@ use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
 use hooks::HookExecutorImpl;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::TaskLifecycleHookFirer;
 
 /// Adapts the engine's hook executor to the V2 `Task*` tool's BLOCKING
@@ -104,13 +105,16 @@ impl OrchestratorTaskLifecycleHookFirer {
     /// Faithful to claude-code's blocking gate: `executeTask{Created,Completed}Hooks`
     /// collect `blockingError`s, and the tool acts only when at least one is
     /// present — exactly the `Some(Block)` arm here.
-    async fn run(&self, event: HookEvent) -> Result<(), String> {
+    async fn run(&self, event: HookEvent) -> Result<(), Utf16JsonProjection> {
         let agg = self.hooks.execute(event, self.ctx()).await;
         if agg.decision == Some(HookDecision::Block) {
             // claude-code's block case sets `blockingError = reason || "Blocked
             // by hook"` (capital B) uniformly across hook events; the task tool
             // then wraps it as "Task{Created,Completed} hook feedback:\n<reason>".
-            Err(agg.reason.unwrap_or_else(|| "Blocked by hook".to_string()))
+            Err(agg.reason.map_or_else(
+                || source_string("Blocked by hook"),
+                |reason| reason.json_projection(),
+            ))
         } else {
             Ok(())
         }
@@ -122,19 +126,21 @@ impl TaskLifecycleHookFirer for OrchestratorTaskLifecycleHookFirer {
     async fn fire_task_created(
         &self,
         task_id: &str,
-        subject: &str,
-        description: Option<&str>,
+        subject: &Utf16JsonProjection,
+        description: Option<&Utf16JsonProjection>,
         teammate_name: Option<&str>,
         team_name: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Utf16JsonProjection> {
         // The `HookEvent::TaskCreated` variant names its subject field
         // `task_type` (wire `task_subject`) and its detail field `description`
         // (wire `task_description`); `teammate_name` / `team_name` ride from the
         // creating teammate's identity (TS `getAgentName()` / `getTeamName()`).
         let event = HookEvent::TaskCreated {
             task_id: task_id.to_string(),
-            task_type: subject.to_string(),
-            description: description.unwrap_or_default().to_string(),
+            task_type: subject.clone(),
+            description: description
+                .cloned()
+                .unwrap_or_else(|| empty_source_string()),
             teammate_name: teammate_name.map(str::to_string),
             team_name: team_name.map(str::to_string),
         };
@@ -145,21 +151,30 @@ impl TaskLifecycleHookFirer for OrchestratorTaskLifecycleHookFirer {
         &self,
         task_id: &str,
         status: &str,
-        subject: &str,
-        description: Option<&str>,
+        subject: &Utf16JsonProjection,
+        description: Option<&Utf16JsonProjection>,
         teammate_name: Option<&str>,
         team_name: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Utf16JsonProjection> {
         let event = HookEvent::TaskCompleted {
             task_id: task_id.to_string(),
             status: status.to_string(),
-            task_subject: subject.to_string(),
-            task_description: description.map(str::to_string),
+            task_subject: subject.clone(),
+            task_description: description.cloned(),
             teammate_name: teammate_name.map(str::to_string),
             team_name: team_name.map(str::to_string),
         };
         self.run(event).await
     }
+}
+
+fn source_string(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+        .expect("Rust strings are valid UTF-16 projections")
+}
+
+fn empty_source_string() -> Utf16JsonProjection {
+    source_string("")
 }
 
 #[cfg(test)]
@@ -174,6 +189,11 @@ mod tests {
     use lingxi_core::types::HookId;
     use tokio::sync::RwLock;
 
+    fn source_string(value: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+            .expect("Rust strings are valid UTF-16 projections")
+    }
+
     // ── empty-registry (no hook) → allow ────────────────────────────────────
 
     #[tokio::test]
@@ -185,7 +205,13 @@ mod tests {
         );
         assert_eq!(
             firer
-                .fire_task_created("t1", "ship it", Some("do the work"), None, None)
+                .fire_task_created(
+                    "t1",
+                    &source_string("ship it"),
+                    Some(&source_string("do the work")),
+                    None,
+                    None
+                )
                 .await,
             Ok(()),
             "no TaskCreated hook → allow"
@@ -195,8 +221,8 @@ mod tests {
                 .fire_task_completed(
                     "t1",
                     "completed",
-                    "ship it",
-                    Some("do the work"),
+                    &source_string("ship it"),
+                    Some(&source_string("do the work")),
                     None,
                     None,
                 )
@@ -258,8 +284,11 @@ mod tests {
     struct BlockingRunner(String);
     #[async_trait]
     impl HookPromptRunner for BlockingRunner {
-        async fn run(&self, _req: PromptHookRequest) -> Result<String, PromptHookError> {
-            Ok(format!(r#"{{"ok": false, "reason": "{}"}}"#, self.0))
+        async fn run(
+            &self,
+            _req: PromptHookRequest,
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, PromptHookError> {
+            Ok(format!(r#"{{"ok": false, "reason": "{}"}}"#, self.0).into())
         }
     }
 
@@ -302,12 +331,18 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
         );
         let res = firer
-            .fire_task_created("t1", "ship it", Some("desc"), None, None)
+            .fire_task_created(
+                "t1",
+                &source_string("ship it"),
+                Some(&source_string("desc")),
+                None,
+                None,
+            )
             .await;
         // The Prompt arm surfaces the block as `[<hook prompt>]: <reason>`.
         assert_eq!(
             res,
-            Err("[block? $ARGUMENTS]: creation denied".to_string()),
+            Err(source_string("[block? $ARGUMENTS]: creation denied")),
             "a blocking TaskCreated hook must surface as Err(reason)"
         );
     }
@@ -320,11 +355,18 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
         );
         let res = firer
-            .fire_task_completed("t1", "completed", "ship it", Some("desc"), None, None)
+            .fire_task_completed(
+                "t1",
+                "completed",
+                &source_string("ship it"),
+                Some(&source_string("desc")),
+                None,
+                None,
+            )
             .await;
         assert_eq!(
             res,
-            Err("[block? $ARGUMENTS]: not done yet".to_string()),
+            Err(source_string("[block? $ARGUMENTS]: not done yet")),
             "a blocking TaskCompleted hook must surface as Err(reason)"
         );
     }

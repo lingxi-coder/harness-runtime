@@ -30,11 +30,14 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{COMPLETED, FAILED, STARTED};
 use telemetry::AnalyticsBus;
 
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    CoercedInput, DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult,
-    ToolError, ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, CoercedInput,
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError,
 };
 
 use crate::autonomous_loop::{self as al, DynamicLoopRecord};
@@ -64,7 +67,7 @@ pub use crate::autonomous_loop::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL;
 pub trait WakeupScheduler: Send + Sync {
     /// Schedule a one-shot self-wakeup. `delay` is already clamped to
     /// `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` and minute-aligned by the tool.
-    async fn schedule(&self, delay: Duration, prompt: String, reason: String);
+    async fn schedule(&self, delay: Duration, prompt: Utf16JsonProjection, reason: String);
 
     /// Cancel every wakeup still pending (the binary's `HL(loopCronIds)`),
     /// returning the PROMPT of each wakeup that was cancelled.
@@ -72,7 +75,7 @@ pub trait WakeupScheduler: Send + Sync {
     /// The prompts — not just the count — are what `ZXn` / `t3t` feed to
     /// `Ort(prompt)` to forget those loops' chain-start records. Hosts that
     /// cannot cancel return an empty vec.
-    async fn cancel_pending(&self) -> Vec<String> {
+    async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
         Vec::new()
     }
 
@@ -218,13 +221,13 @@ pub struct ScheduledWakeup {
 struct LoopState(Option<Arc<al::LoopRuntime>>);
 
 impl LoopState {
-    fn record(&self, prompt: &str) -> Option<DynamicLoopRecord> {
+    fn record(&self, prompt: &Utf16JsonProjection) -> Option<DynamicLoopRecord> {
         match &self.0 {
             Some(rt) => rt.dynamic_loop_record(prompt),
             None => al::dynamic_loop_record(prompt),
         }
     }
-    fn set_record(&self, prompt: &str, record: DynamicLoopRecord) {
+    fn set_record(&self, prompt: &Utf16JsonProjection, record: DynamicLoopRecord) {
         match &self.0 {
             Some(rt) => rt.set_dynamic_loop_record(prompt, record),
             None => al::set_dynamic_loop_record(prompt, record),
@@ -248,14 +251,14 @@ impl LoopState {
             None => al::mark_loop_rescheduled(),
         }
     }
-    fn take_in_flight(&self) -> Option<String> {
+    fn take_in_flight(&self) -> Option<Utf16JsonProjection> {
         match &self.0 {
             Some(rt) => rt.take_in_flight_prompt(),
             None => al::take_loop_tick_in_flight_prompt(),
         }
     }
     /// `Ort(prompt)` — drop the per-prompt dynamic-loop record.
-    fn forget(&self, prompt: &str) {
+    fn forget(&self, prompt: &Utf16JsonProjection) {
         match &self.0 {
             Some(rt) => rt.forget_dynamic_loop(prompt),
             None => al::forget_dynamic_loop(prompt),
@@ -389,7 +392,7 @@ fn now_epoch_ms() -> i64 {
 pub async fn schedule_dynamic_wakeup(
     scheduler: &Arc<dyn WakeupScheduler>,
     raw_delay_seconds: f64,
-    prompt: &str,
+    prompt: &Utf16JsonProjection,
     reason: Option<&str>,
     via_keepalive: bool,
 ) -> Option<ScheduledWakeup> {
@@ -430,7 +433,7 @@ pub async fn schedule_dynamic_wakeup(
     scheduler
         .schedule(
             delay,
-            prompt.to_string(),
+            prompt.clone(),
             reason.map_or_else(|| "loop keepalive fallback".to_string(), str::to_string),
         )
         .await;
@@ -488,7 +491,10 @@ pub async fn schedule_dynamic_wakeup(
 /// Binary `QXn(prompt)` — arm the keepalive fallback when a dynamic /loop tick
 /// completes without the model rescheduling: budget check, then the shared
 /// scheduling path with `viaKeepalive: true`.
-pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -> KeepaliveOutcome {
+pub async fn arm_keepalive(
+    scheduler: &Arc<dyn WakeupScheduler>,
+    prompt: &Utf16JsonProjection,
+) -> KeepaliveOutcome {
     let state = LoopState(scheduler.loop_runtime());
     if state.keepalives() >= KEEPALIVE_BUDGET {
         tracing::info!(
@@ -514,7 +520,7 @@ pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -
 /// Session-scoped variant of [`arm_keepalive`] (the runtime is the scheduler's).
 pub async fn arm_keepalive_with_runtime(
     scheduler: &Arc<dyn WakeupScheduler>,
-    prompt: &str,
+    prompt: &Utf16JsonProjection,
     _runtime: &al::LoopRuntime,
 ) -> KeepaliveOutcome {
     arm_keepalive(scheduler, prompt).await
@@ -647,20 +653,23 @@ fn local_hhmmss(epoch_ms: i64) -> String {
 /// first delivery, short reminder afterward); any other prompt passes through
 /// verbatim (binary `resolveLoopDefaultFire`).
 #[must_use]
-pub fn resolve_wakeup_prompt(prompt: &str) -> String {
+pub fn resolve_wakeup_prompt(prompt: &Utf16JsonProjection) -> Utf16JsonProjection {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     resolve_wakeup_prompt_at(prompt, &cwd)
 }
 
 /// Resolve a wakeup against its owning session's working directory.
 #[must_use]
-pub fn resolve_wakeup_prompt_at(prompt: &str, cwd: &std::path::Path) -> String {
+pub fn resolve_wakeup_prompt_at(
+    prompt: &Utf16JsonProjection,
+    cwd: &std::path::Path,
+) -> Utf16JsonProjection {
     // Upstream sentinel predicates compare exact strings; padded sentinel-like
     // prompts are ordinary user text and must not activate the autonomous loop.
     if al::is_loop_default_sentinel(prompt) {
         return al::resolve_loop_default_fire(prompt, cwd);
     }
-    prompt.to_string()
+    prompt.clone()
 }
 
 /// Model-facing SHORT description (binary `aZn`).
@@ -782,6 +791,8 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
+
 /// Tool RESULT schema (binary `Hqo`).
 static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
@@ -811,6 +822,9 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         }
     })
 });
+
+static SOURCE_OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&OUTPUT_SCHEMA));
 
 /// `ScheduleWakeup` — `/loop` dynamic-mode one-shot self-wakeup.
 pub struct ScheduleWakeupTool {
@@ -902,14 +916,15 @@ async fn emit_completed(bus: &Arc<AnalyticsBus>, duration_ms: u64, scheduled: bo
     bus.log_event(COMPLETED, md).await;
 }
 
-fn result(data: Value) -> ToolCallResult {
+fn result(data: Utf16JsonProjection, model_content: Option<Utf16JsonProjection>) -> ToolCallResult {
     ToolCallResult {
         data,
-        model_content: None,
+        model_content,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -918,14 +933,20 @@ const NOT_SCHEDULED_TEXT: &str = "Wakeup not scheduled. The loop reached its max
 
 /// PARITY: `{scheduledFor:0, clampedDelaySeconds:0, wasClamped:false}` with the
 /// `e===0` model text — the aged-out / no-scheduler branches.
-fn zero_triple_result(reason: &str) -> ToolCallResult {
-    result(json!({
-        "scheduledFor": 0,
-        "clampedDelaySeconds": 0,
-        "wasClamped": false,
-        "model_content": NOT_SCHEDULED_TEXT,
-        "reason": reason,
-    }))
+fn zero_triple_result(reason: &Utf16JsonProjection) -> ToolCallResult {
+    result(
+        Utf16JsonProjection::object(vec![
+            ("scheduledFor".into(), generated_builtin_result(&json!(0))),
+            (
+                "clampedDelaySeconds".into(),
+                generated_builtin_result(&json!(0)),
+            ),
+            ("wasClamped".into(), generated_builtin_result(&json!(false))),
+            ("reason".into(), reason.clone()),
+        ])
+        .expect("ScheduleWakeup zero result is valid JSON"),
+        Some(source_text_projection(NOT_SCHEDULED_TEXT)),
+    )
 }
 
 /// Binary `mapToolResultToToolResultBlockParam` for `stopped === true`.
@@ -936,14 +957,23 @@ fn stopped_result(cancelled: usize) -> ToolCallResult {
     } else {
         format!("Loop stopped — cancelled {cancelled} pending wakeup(s); no further dynamic-loop wakeups scheduled. {tail}")
     };
-    result(json!({
-        "scheduledFor": 0,
-        "clampedDelaySeconds": 0,
-        "wasClamped": false,
-        "stopped": true,
-        "cancelledWakeups": cancelled,
-        "model_content": content,
-    }))
+    result(
+        Utf16JsonProjection::object(vec![
+            ("scheduledFor".into(), generated_builtin_result(&json!(0))),
+            (
+                "clampedDelaySeconds".into(),
+                generated_builtin_result(&json!(0)),
+            ),
+            ("wasClamped".into(), generated_builtin_result(&json!(false))),
+            ("stopped".into(), generated_builtin_result(&json!(true))),
+            (
+                "cancelledWakeups".into(),
+                generated_builtin_result(&json!(cancelled)),
+            ),
+        ])
+        .expect("ScheduleWakeup stopped result is valid JSON"),
+        Some(source_text_projection(&content)),
+    )
 }
 
 /// Render with an explicit clock so the full model-visible result is byte-tested.
@@ -966,11 +996,13 @@ fn scheduled_wakeup_text(scheduled: ScheduledWakeup, now_ms: i64) -> String {
 }
 
 /// Binary `DM(number)` — accept a JSON number or a numeric string.
-fn coerce_delay(value: Option<&Value>) -> Result<Option<f64>, ValidationError> {
+fn coerce_delay(value: Option<JsonValueView<'_>>) -> Result<Option<f64>, ValidationError> {
     match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => Ok(n.as_f64()),
-        Some(Value::String(s)) => {
+        None => Ok(None),
+        Some(value) if value.is_null() => Ok(None),
+        Some(value) if value.as_number().is_some() => Ok(value.as_number()),
+        Some(value) if value.as_str().is_some() => {
+            let s = value.as_str().expect("string view was checked");
             // Upstream TH only coerces signed decimal strings and finite values.
             // Rust's float parser also accepts exponents, infinities and `.5`.
             let trimmed = s.trim_matches(|c: char| {
@@ -992,48 +1024,56 @@ fn coerce_delay(value: Option<&Value>) -> Result<Option<f64>, ValidationError> {
                     }
                 }
             }
-            Err(ValidationError(
-                "ScheduleWakeup: `delaySeconds` must be a number".into(),
-            ))
+            Err(ValidationError(source_text_projection(
+                "ScheduleWakeup: `delaySeconds` must be a number",
+            )))
         }
-        Some(_) => Err(ValidationError(
-            "ScheduleWakeup: `delaySeconds` must be a number".into(),
-        )),
+        Some(_) => Err(ValidationError(source_text_projection(
+            "ScheduleWakeup: `delaySeconds` must be a number",
+        ))),
     }
 }
 
 /// The binary's `ScheduleWakeupInputError` checks (run in `call` there; here in
 /// `validate_input`, before the turn loop records a tool failure).
-fn validate_wakeup_input(input: &Value) -> Result<(), ValidationError> {
-    if input.get("stop").and_then(Value::as_bool) == Some(true) {
+fn validate_wakeup_input(input: &Utf16JsonProjection) -> Result<(), ValidationError> {
+    if input.get_property("stop").and_then(JsonValueView::as_bool) == Some(true) {
         return Ok(());
     }
     for (key, ty) in [("stop", "boolean"), ("noop", "boolean")] {
         if input
-            .get(key)
-            .is_some_and(|v| !v.is_null() && !v.is_boolean())
+            .get_property(key)
+            .is_some_and(|v| !v.is_null() && v.as_bool().is_none())
         {
-            return Err(ValidationError(format!(
+            return Err(ValidationError(source_text_projection(&format!(
                 "ScheduleWakeup: `{key}` must be a {ty}"
-            )));
+            ))));
         }
     }
-    let delay = coerce_delay(input.get("delaySeconds"))?;
-    let reason = input.get("reason").and_then(Value::as_str);
+    let delay = coerce_delay(input.get_property("delaySeconds"))?;
+    let reason = input.get_property("reason").and_then(JsonValueView::as_str);
     if delay.is_none() || reason.is_none() {
-        return Err(ValidationError(
-            "`delaySeconds` and `reason` are required when `stop` is not true.".into(),
-        ));
+        return Err(ValidationError(source_text_projection(
+            "`delaySeconds` and `reason` are required when `stop` is not true.",
+        )));
     }
-    if input.get("prompt").and_then(Value::as_str).is_none() {
-        return Err(ValidationError(
-            "`prompt` is required when `stop` is not true.".into(),
-        ));
+    if input
+        .get_property("prompt")
+        .and_then(JsonValueView::as_str)
+        .is_none()
+    {
+        return Err(ValidationError(source_text_projection(
+            "`prompt` is required when `stop` is not true.",
+        )));
     }
-    if input.get("noop").and_then(Value::as_bool).is_none() {
-        return Err(ValidationError(
-            "`noop` is required when `stop` is not true.".into(),
-        ));
+    if input
+        .get_property("noop")
+        .and_then(JsonValueView::as_bool)
+        .is_none()
+    {
+        return Err(ValidationError(source_text_projection(
+            "`noop` is required when `stop` is not true.",
+        )));
     }
     Ok(())
 }
@@ -1046,28 +1086,74 @@ impl Tool for ScheduleWakeupTool {
     fn native_input_validation(&self) -> bool {
         true
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_SCHEMA
     }
-    fn output_schema(&self) -> Option<&Value> {
-        Some(&OUTPUT_SCHEMA)
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
-    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&SOURCE_OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        tool_api::native_output::parse_object(
+            output,
+            SCHEDULE_WAKEUP_TOOL_NAME,
+            &[
+                tool_api::native_output::OutputField {
+                    name: "scheduledFor",
+                    kind: tool_api::native_output::OutputFieldType::Number,
+                    required: true,
+                },
+                tool_api::native_output::OutputField {
+                    name: "clampedDelaySeconds",
+                    kind: tool_api::native_output::OutputFieldType::Number,
+                    required: true,
+                },
+                tool_api::native_output::OutputField {
+                    name: "wasClamped",
+                    kind: tool_api::native_output::OutputFieldType::Boolean,
+                    required: true,
+                },
+                tool_api::native_output::OutputField {
+                    name: "stopped",
+                    kind: tool_api::native_output::OutputFieldType::Boolean,
+                    required: false,
+                },
+                tool_api::native_output::OutputField {
+                    name: "cancelledWakeups",
+                    kind: tool_api::native_output::OutputFieldType::Number,
+                    required: false,
+                },
+            ],
+            tool_api::native_output::UnknownOutputKeys::Strip,
+        )
+    }
+    fn coerce_input(&self, input: &Utf16JsonProjection) -> Option<CoercedInput> {
         // Zod's TH preprocessing runs before type validation upstream. Move the
         // same accepted string rewrite ahead of our exported JSON-schema gate.
-        if !input.get("delaySeconds")?.is_string() {
+        if input.get_property("delaySeconds")?.as_str().is_none() {
             return None;
         }
-        let delay = coerce_delay(input.get("delaySeconds")).ok()??;
+        let delay = coerce_delay(input.get_property("delaySeconds")).ok()??;
         let mut normalized = input.clone();
-        normalized["delaySeconds"] = json!(delay);
+        normalized
+            .set_field("delaySeconds", generated_builtin_result(&json!(delay)))
+            .ok()?;
         Some(CoercedInput {
             input: normalized,
             shape_class: "delaySeconds".into(),
         })
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some(SEARCH_HINT)
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some((SEARCH_HINT).into())
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Binary: no `isEnabled` — always available where registered (main
@@ -1080,19 +1166,19 @@ impl Tool for ScheduleWakeupTool {
     fn max_result_size_chars(&self) -> usize {
         1000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
@@ -1106,7 +1192,11 @@ impl Tool for ScheduleWakeupTool {
     /// classifier, which returns Pass and falls back to the prompt transport.
     /// Matching Anthropic's LLM classification requires that shared classifier,
     /// not a tool-local bypass or fabricated deterministic approval.
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ScheduleWakeup schedules a one-shot self-wakeup for /loop dynamic mode"
@@ -1118,20 +1208,20 @@ impl Tool for ScheduleWakeupTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // LingXi is multi-provider and has no uniform Anthropic prompt-cache TTL
         // signal, so it emits the variant the binary uses when its two TTL
         // signals disagree.
-        build_prompt(PromptCacheTtl::Unknown)
+        build_prompt(PromptCacheTtl::Unknown).into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // Required-unless-stop checks are thrown from call upstream, producing
@@ -1142,7 +1232,7 @@ impl Tool for ScheduleWakeupTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1154,10 +1244,10 @@ impl Tool for ScheduleWakeupTool {
         // for EVERY call — including a `stop: true` one, which carries no
         // `noop` and therefore vetoes, exactly as `p !== true` does there.
         LoopState(self.wakeup.get().and_then(|w| w.loop_runtime()))
-            .mark_noop(input.get("noop").and_then(Value::as_bool) == Some(true));
+            .mark_noop(input.get_property("noop").and_then(JsonValueView::as_bool) == Some(true));
 
         // PARITY: `if(p===!0) return {…stopped:!0, cancelledWakeups: ZXn()}`.
-        if input.get("stop").and_then(Value::as_bool) == Some(true) {
+        if input.get_property("stop").and_then(JsonValueView::as_bool) == Some(true) {
             let cancelled = stop_dynamic_loop(self.wakeup.get()).await;
             emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
             return Ok(stopped_result(cancelled));
@@ -1167,20 +1257,18 @@ impl Tool for ScheduleWakeupTool {
             emit_failed(&bus, "invalid_input", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::InvalidInput(message));
         }
-        let raw_delay = coerce_delay(input.get("delaySeconds"))
+        let raw_delay = coerce_delay(input.get_property("delaySeconds"))
             .ok()
             .flatten()
             .unwrap_or(f64::NAN);
         let reason = input
-            .get("reason")
-            .and_then(Value::as_str)
+            .get_property("reason")
+            .and_then(JsonValueView::as_str)
             .unwrap_or_default()
             .to_string();
         let prompt = input
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .subprojection("/prompt")
+            .expect("validated prompt exists");
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("tool_name".into(), verified_str(SCHEDULE_WAKEUP_TOOL_NAME));
@@ -1195,14 +1283,22 @@ impl Tool for ScheduleWakeupTool {
         // binary's `aKi(...) === null` stand-in — zero triple, no loop telemetry.
         let Some(wakeup) = self.wakeup.get() else {
             emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
-            return Ok(zero_triple_result(&reason));
+            return Ok(zero_triple_result(
+                &input
+                    .subprojection("/reason")
+                    .expect("validated reason exists"),
+            ));
         };
 
         let Some(scheduled) =
             schedule_dynamic_wakeup(wakeup, raw_delay, &prompt, Some(&reason), false).await
         else {
             emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
-            return Ok(zero_triple_result(&reason));
+            return Ok(zero_triple_result(
+                &input
+                    .subprojection("/reason")
+                    .expect("validated reason exists"),
+            ));
         };
         emit_completed(&bus, started.elapsed().as_millis() as u64, true).await;
         // A wakeup is now armed: the turn loop may end the turn if this was the
@@ -1214,14 +1310,49 @@ impl Tool for ScheduleWakeupTool {
         let now_ms = now_epoch_ms();
         let model_content = scheduled_wakeup_text(scheduled, now_ms);
 
-        Ok(result(json!({
-            "scheduledFor": scheduled.scheduled_for_ms,
-            "clampedDelaySeconds": scheduled.clamped_delay_seconds,
-            "wasClamped": scheduled.was_clamped,
-            "model_content": model_content,
-            "reason": reason,
-        })))
+        Ok(result(
+            Utf16JsonProjection::object(vec![
+                (
+                    "scheduledFor".into(),
+                    generated_builtin_result(&json!(scheduled.scheduled_for_ms)),
+                ),
+                (
+                    "clampedDelaySeconds".into(),
+                    generated_builtin_result(&json!(scheduled.clamped_delay_seconds)),
+                ),
+                (
+                    "wasClamped".into(),
+                    generated_builtin_result(&json!(scheduled.was_clamped)),
+                ),
+                (
+                    "reason".into(),
+                    input
+                        .subprojection("/reason")
+                        .expect("validated reason exists"),
+                ),
+            ])
+            .expect("ScheduleWakeup result is valid JSON"),
+            Some(source_text_projection(&model_content)),
+        ))
     }
+}
+
+#[cfg(test)]
+impl ScheduleWakeupTool {
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Tool::call(self, generated_builtin_result(&input), ctx, progress).await
+    }
+}
+
+#[cfg(test)]
+fn test_projection_value(value: &Utf16JsonProjection) -> Value {
+    serde_json::from_str(&value.to_json_string().expect("projection serializes"))
+        .expect("projection JSON parses")
 }
 
 #[cfg(test)]
@@ -1281,6 +1412,11 @@ mod fold_line_tests {
     }
 }
 
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,9 +1446,9 @@ mod tests {
 
     /// A scheduler that records calls and can cancel what it armed.
     struct Rec {
-        calls: Mutex<Vec<(Duration, String, String)>>,
+        calls: Mutex<Vec<(Duration, Utf16JsonProjection, String)>>,
         /// Prompts of the wakeups still pending (what `cancel_pending` returns).
-        pending: Mutex<Vec<String>>,
+        pending: Mutex<Vec<Utf16JsonProjection>>,
     }
     impl Rec {
         fn new() -> Arc<Self> {
@@ -1324,14 +1460,14 @@ mod tests {
     }
     #[async_trait]
     impl WakeupScheduler for Rec {
-        async fn schedule(&self, delay: Duration, prompt: String, reason: String) {
+        async fn schedule(&self, delay: Duration, prompt: Utf16JsonProjection, reason: String) {
             self.calls
                 .lock()
                 .unwrap()
                 .push((delay, prompt.clone(), reason));
             self.pending.lock().unwrap().push(prompt);
         }
-        async fn cancel_pending(&self) -> Vec<String> {
+        async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
             std::mem::take(&mut *self.pending.lock().unwrap())
         }
     }
@@ -1462,9 +1598,12 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,
                 parent_agent_id: None,
                 origin_session_id: None,
+                instruction_context: None,
+                fork_context: None,
                 tool_execution_policy: ToolExecutionPolicy::Ordinary,
                 agent_name: None,
                 team_name: None,
@@ -1478,6 +1617,11 @@ mod tests {
                 observer: None,
                 parent_model: None,
                 parent_model_profile: None,
+                agent_spawn_provenance: Default::default(),
+                tool_context_state: None,
+                assistant_message: None,
+                same_turn_tool_uses: Vec::new(),
+                current_history: Vec::new(),
                 mode_override: None,
                 request_source: None,
                 frozen_command_denies: Vec::new(),
@@ -1515,7 +1659,7 @@ mod tests {
         for tool in &tools {
             assert!(tool.native_input_validation());
             assert_eq!(
-                schema_shape(tool.input_schema().clone()),
+                schema_shape(test_projection_value(tool.input_schema())),
                 schema_shape(oracle["schemas"][tool.name()].clone()),
                 "schema {}",
                 tool.name()
@@ -1524,34 +1668,26 @@ mod tests {
         for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
             let name = case["tool"].as_str().unwrap();
             let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+            let source_input = generated_builtin_result(&case["input"]);
             let actual = tool
-                .coerce_input(&case["input"])
-                .map_or_else(|| case["input"].clone(), |c| c.input);
+                .coerce_input(&source_input)
+                .map_or_else(|| source_input.clone(), |c| c.input);
             assert_eq!(
-                tool_api::native_schema::js_json(&actual, false),
-                tool_api::native_schema::js_json(&case["coerced"], false),
+                actual.semantically_eq(&generated_builtin_result(&case["coerced"])),
+                true,
                 "coercion {index}"
             );
             if case["success"] == true {
                 let normalized = tool_api::native_schema::normalize_flat_input(&actual)
                     .unwrap_or_else(|| actual.clone());
-                let expected = case["normalized"].as_object().unwrap();
-                assert_eq!(
-                    normalized.as_object().unwrap().len(),
-                    expected.len(),
-                    "parsed keys {index}"
+                assert!(
+                    normalized.semantically_eq(&generated_builtin_result(&case["normalized"])),
+                    "parsed {index}"
                 );
-                for (key, value) in expected {
-                    assert_eq!(
-                        tool_api::native_schema::js_json(&normalized[key], false),
-                        tool_api::native_schema::js_json(value, false),
-                        "parsed {index} {key}"
-                    );
-                }
             }
             if case["success"] == false {
                 let error = invoker
-                    .invoke(name, case["input"].clone(), invocation_context())
+                    .invoke(name, source_input.clone(), invocation_context())
                     .await
                     .unwrap_err();
                 assert_eq!(
@@ -1568,7 +1704,7 @@ mod tests {
                     "native missing-field checks run in call"
                 );
                 let error = invoker
-                    .invoke(name, case["input"].clone(), invocation_context())
+                    .invoke(name, source_input, invocation_context())
                     .await
                     .unwrap_err();
                 assert_eq!(
@@ -1579,7 +1715,11 @@ mod tests {
             }
         }
         let error = invoker
-            .invoke("CronDelete", json!({"id":"missing"}), invocation_context())
+            .invoke(
+                "CronDelete",
+                generated_builtin_result(&json!({"id":"missing"})),
+                invocation_context(),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1589,7 +1729,7 @@ mod tests {
         let error = invoker
             .invoke(
                 "CronCreate",
-                json!({"cron":"invalid","prompt":"p"}),
+                generated_builtin_result(&json!({"cron":"invalid","prompt":"p"})),
                 invocation_context(),
             )
             .await
@@ -1635,7 +1775,8 @@ mod tests {
             );
         }
         for case in oracle["coercion"].as_array().unwrap() {
-            let actual = coerce_delay(Some(&case["input"]));
+            let input = generated_builtin_result(&case["input"]);
+            let actual = coerce_delay(input.at_pointer(""));
             assert_eq!(
                 actual.is_ok(),
                 case["accepted"].as_bool().unwrap(),
@@ -1647,17 +1788,26 @@ mod tests {
         }
         for case in oracle["errors"].as_array().unwrap() {
             assert_eq!(
-                validate_wakeup_input(&case["input"]).unwrap_err().0,
-                case["message"].as_str().unwrap()
+                validate_wakeup_input(&generated_builtin_result(&case["input"]))
+                    .unwrap_err()
+                    .0
+                    .string_at(""),
+                case["message"].as_str()
             );
         }
         for case in oracle["results"].as_array().unwrap().iter().take(3) {
             let result = if case["input"]["stopped"] == true {
                 stopped_result(case["input"]["cancelledWakeups"].as_u64().unwrap() as usize)
             } else {
-                zero_triple_result("")
+                zero_triple_result(&source_text_projection(""))
             };
-            assert_eq!(result.data["model_content"], case["content"]);
+            assert_eq!(
+                result
+                    .model_content
+                    .as_ref()
+                    .and_then(|projection| projection.string_at("")),
+                case["content"].as_str()
+            );
         }
     }
 
@@ -1712,8 +1862,9 @@ mod tests {
         ))
         .unwrap();
         for case in oracle["coercion"].as_array().unwrap() {
-            let original =
-                json!({"delaySeconds": case["input"], "reason":"r", "prompt":"p", "noop":false});
+            let original = generated_builtin_result(
+                &json!({"delaySeconds": case["input"], "reason":"r", "prompt":"p", "noop":false}),
+            );
             let normalized = tool.coerce_input(&original);
             assert_eq!(
                 normalized.is_some(),
@@ -1722,29 +1873,47 @@ mod tests {
             );
             if let Some(normalized) = normalized {
                 assert_eq!(
-                    normalized.input["delaySeconds"].as_f64(),
+                    normalized
+                        .input
+                        .get_property("delaySeconds")
+                        .and_then(JsonValueView::as_number),
                     case["value"].as_f64()
                 );
-                assert_eq!(normalized.input["reason"], original["reason"]);
-                assert_eq!(normalized.input["prompt"], original["prompt"]);
-                assert_eq!(normalized.input["noop"], original["noop"]);
+                for key in ["reason", "prompt", "noop"] {
+                    assert!(normalized
+                        .input
+                        .subprojection(&format!("/{key}"))
+                        .unwrap()
+                        .semantically_eq(&original.subprojection(&format!("/{key}")).unwrap()));
+                }
                 assert_eq!(normalized.shape_class, "delaySeconds");
-                assert!(normalized.input["delaySeconds"].is_number());
+                assert!(normalized
+                    .input
+                    .get_property("delaySeconds")
+                    .and_then(JsonValueView::as_number)
+                    .is_some());
             }
             assert!(
-                original["delaySeconds"].is_string(),
+                original
+                    .get_property("delaySeconds")
+                    .and_then(JsonValueView::as_str)
+                    .is_some(),
                 "input remains unchanged"
             );
         }
-        assert!(tool.coerce_input(&json!({"delaySeconds":120})).is_none());
-        assert!(tool.coerce_input(&json!({"stop":true})).is_none());
+        assert!(tool
+            .coerce_input(&generated_builtin_result(&json!({"delaySeconds":120})))
+            .is_none());
+        assert!(tool
+            .coerce_input(&generated_builtin_result(&json!({"stop":true})))
+            .is_none());
     }
 
     #[tokio::test]
     async fn description_search_hint_and_prompt_surface() {
         let tool = tool_with(Rec::new());
         assert_eq!(
-            tool.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await,
+            tool.description(&generated_builtin_result(&json!({})), &DescriptionOptions { is_non_interactive_session: false }).await,
             "Schedule when to resume work in /loop dynamic mode (always pass the `prompt` arg unless stopping). Call before ending the turn to keep the loop alive; call with `stop: true` to end the loop immediately."
         );
         assert_eq!(
@@ -1753,7 +1922,11 @@ mod tests {
         );
         assert_eq!(tool.max_result_size_chars(), 1000);
         assert!(tool.should_defer());
-        let prompt = tool.prompt(&PromptOptions::default()).await;
+        let prompt = tool
+            .prompt(&PromptOptions::default())
+            .await
+            .string_at("")
+            .expect("generated prompt is a root string");
         // Structure of `iZn`: intro, noop, delay guidance, reason — blank-line
         // separated, trailing newline. Lengths are the oracle-derived sizes of
         // the three variants (chars / bytes: 3148/3180, 3396/3433, 3197/3227).
@@ -1778,7 +1951,9 @@ mod tests {
         let tool = &tool;
         let err = |v: Value| async move {
             let _ = tool;
-            validate_wakeup_input(&v).err().map(|e| e.0)
+            validate_wakeup_input(&generated_builtin_result(&v))
+                .err()
+                .and_then(|e| e.0.string_at("").map(str::to_owned))
         };
         assert_eq!(
             err(json!({"reason": "r", "prompt": "p", "noop": true}))
@@ -1836,19 +2011,28 @@ mod tests {
             )
             .await
             .expect("ok");
-        let scheduled_for = out.data["scheduledFor"].as_i64().unwrap();
+        let scheduled_for = test_projection_value(&out.data)["scheduledFor"]
+            .as_i64()
+            .unwrap();
         assert_eq!(scheduled_for % 60_000, 0, "whole-minute target");
         assert!(scheduled_for >= before + 3600 * 1000);
-        assert_eq!(out.data["clampedDelaySeconds"], json!(3600));
-        assert_eq!(out.data["wasClamped"], json!(true));
-        let mc = out.data["model_content"].as_str().unwrap();
+        assert_eq!(
+            test_projection_value(&out.data)["clampedDelaySeconds"],
+            json!(3600)
+        );
+        assert_eq!(test_projection_value(&out.data)["wasClamped"], json!(true));
+        let mc = out
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .unwrap();
         assert!(mc.starts_with("Next wakeup scheduled for "));
         assert!(mc.contains("(clamped to 3600s from your requested value)"));
         assert!(mc.ends_with(". Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."));
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0 >= Duration::from_secs(3600) && calls[0].0 <= Duration::from_secs(3660));
-        assert_eq!(calls[0].1, "5m /x");
+        assert_eq!(calls[0].1.string_at(""), Some("5m /x"));
         assert_eq!(calls[0].2, "idle tick");
         drop(calls);
         assert_eq!(
@@ -1858,7 +2042,7 @@ mod tests {
         );
         assert!(al::take_loop_rescheduled());
         assert!(!al::loop_ended());
-        let record = al::dynamic_loop_record("5m /x").unwrap();
+        let record = al::dynamic_loop_record(&source_text_projection("5m /x")).unwrap();
         assert_eq!(record.last_scheduled_for_ms, scheduled_for);
         assert!(!record.aged_out);
     }
@@ -1895,18 +2079,21 @@ mod tests {
         )
         .await
         .expect("ok");
-        al::begin_loop_tick("p".into());
+        al::begin_loop_tick(source_text_projection("p"));
         al::set_loop_consecutive_keepalives(1);
         let out = tool
             .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["stopped"], json!(true));
-        assert_eq!(out.data["cancelledWakeups"], json!(1));
-        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert_eq!(test_projection_value(&out.data)["stopped"], json!(true));
         assert_eq!(
-            out.data["model_content"],
-            json!("Loop stopped — cancelled 1 pending wakeup(s); no further dynamic-loop wakeups scheduled. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
+            test_projection_value(&out.data)["cancelledWakeups"],
+            json!(1)
+        );
+        assert_eq!(test_projection_value(&out.data)["scheduledFor"], json!(0));
+        assert_eq!(
+            out.model_content.as_ref().and_then(|value| value.string_at("")),
+            Some("Loop stopped — cancelled 1 pending wakeup(s); no further dynamic-loop wakeups scheduled. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
         );
         assert!(al::loop_ended());
         assert_eq!(al::loop_consecutive_keepalives(), 0);
@@ -1923,10 +2110,13 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_eq!(again.data["cancelledWakeups"], json!(0));
         assert_eq!(
-            again.data["model_content"],
-            json!("Loop stopped — any dynamic loop in this session is ended; there was no pending wakeup to cancel. If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call — cancel it with CronDelete. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
+            test_projection_value(&again.data)["cancelledWakeups"],
+            json!(0)
+        );
+        assert_eq!(
+            again.model_content.as_ref().and_then(|value| value.string_at("")),
+            Some("Loop stopped — any dynamic loop in this session is ended; there was no pending wakeup to cancel. If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call — cancel it with CronDelete. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
         );
         // Stopping without a wired scheduler still succeeds.
         let tmp = tempfile::tempdir().unwrap();
@@ -1936,7 +2126,10 @@ mod tests {
             .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["cancelledWakeups"], json!(0));
+        assert_eq!(
+            test_projection_value(&out.data)["cancelledWakeups"],
+            json!(0)
+        );
     }
 
     /// PARITY `ZXn` → `Ort(prompt)` (`sessionCron.forgetChainStart`): stopping a
@@ -1959,7 +2152,7 @@ mod tests {
         // so the restart-gap escape hatch (`S`) does NOT apply.
         let now = now_epoch_ms();
         al::set_dynamic_loop_record(
-            "p",
+            &source_text_projection("p"),
             DynamicLoopRecord {
                 started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
                 last_scheduled_for_ms: now,
@@ -1971,9 +2164,12 @@ mod tests {
             .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["cancelledWakeups"], json!(1));
+        assert_eq!(
+            test_projection_value(&out.data)["cancelledWakeups"],
+            json!(1)
+        );
         assert!(
-            al::dynamic_loop_record("p").is_none(),
+            al::dynamic_loop_record(&source_text_projection("p")).is_none(),
             "stop:true must forget the cancelled wakeup's chain start"
         );
 
@@ -1989,7 +2185,7 @@ mod tests {
             .await
             .expect("ok");
         assert_ne!(
-            out.data["scheduledFor"],
+            test_projection_value(&out.data)["scheduledFor"],
             json!(0),
             "a restarted loop must not inherit the stopped loop's age"
         );
@@ -2009,12 +2205,15 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
-        assert_eq!(out.data["wasClamped"], json!(false));
+        assert_eq!(test_projection_value(&out.data)["scheduledFor"], json!(0));
         assert_eq!(
-            out.data["model_content"],
-            json!("Wakeup not scheduled. The loop reached its maximum duration — the loop has ended; do not re-issue.")
+            test_projection_value(&out.data)["clampedDelaySeconds"],
+            json!(0)
+        );
+        assert_eq!(test_projection_value(&out.data)["wasClamped"], json!(false));
+        assert_eq!(
+            out.model_content.as_ref().and_then(|value| value.string_at("")),
+            Some("Wakeup not scheduled. The loop reached its maximum duration — the loop has ended; do not re-issue.")
         );
     }
 
@@ -2028,7 +2227,7 @@ mod tests {
         let tool = tool_with(rec.clone());
         let now = now_epoch_ms();
         al::set_dynamic_loop_record(
-            "old",
+            &source_text_projection("old"),
             DynamicLoopRecord {
                 started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
                 last_scheduled_for_ms: now - 10 * 60 * 1000,
@@ -2043,9 +2242,13 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert_eq!(test_projection_value(&out.data)["scheduledFor"], json!(0));
         assert!(rec.calls.lock().unwrap().is_empty());
-        assert!(al::dynamic_loop_record("old").unwrap().aged_out);
+        assert!(
+            al::dynamic_loop_record(&source_text_projection("old"))
+                .unwrap()
+                .aged_out
+        );
         assert!(al::loop_ended());
         // A second call after aging out is silent (no double terminal event) and
         // still schedules nothing.
@@ -2057,11 +2260,11 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert_eq!(test_projection_value(&out.data)["scheduledFor"], json!(0));
         assert!(rec.calls.lock().unwrap().is_empty());
         // Stale by more than an hour → treated as a fresh loop → schedules.
         al::set_dynamic_loop_record(
-            "old",
+            &source_text_projection("old"),
             DynamicLoopRecord {
                 started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
                 last_scheduled_for_ms: now - 2 * 60 * 60 * 1000,
@@ -2076,9 +2279,9 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_ne!(out.data["scheduledFor"], json!(0));
+        assert_ne!(test_projection_value(&out.data)["scheduledFor"], json!(0));
         assert_eq!(rec.calls.lock().unwrap().len(), 1);
-        let record = al::dynamic_loop_record("old").unwrap();
+        let record = al::dynamic_loop_record(&source_text_projection("old")).unwrap();
         assert!(!record.aged_out);
         assert!(record.started_at_ms >= now);
     }
@@ -2089,7 +2292,11 @@ mod tests {
         let rec = Rec::new();
         let sched: Arc<dyn WakeupScheduler> = rec.clone();
         assert_eq!(
-            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            arm_keepalive(
+                &sched,
+                &source_text_projection("<<autonomous-loop-dynamic>>")
+            )
+            .await,
             KeepaliveOutcome::Armed
         );
         {
@@ -2099,13 +2306,18 @@ mod tests {
                 calls[0].0 >= Duration::from_secs(1200) && calls[0].0 <= Duration::from_secs(1260)
             );
             assert_eq!(
-                calls[0].1, "<<autonomous-loop-dynamic>>",
+                calls[0].1.string_at(""),
+                Some("<<autonomous-loop-dynamic>>"),
                 "the keepalive re-arms the ORIGINAL sentinel"
             );
         }
         assert_eq!(al::loop_consecutive_keepalives(), 1);
         assert_eq!(
-            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            arm_keepalive(
+                &sched,
+                &source_text_projection("<<autonomous-loop-dynamic>>")
+            )
+            .await,
             KeepaliveOutcome::BudgetExhausted
         );
         assert_eq!(rec.calls.lock().unwrap().len(), 1);
@@ -2120,17 +2332,17 @@ mod tests {
         // Not a loop tick → nothing.
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
         // Loop tick, model silent → keepalive armed (gate default TRUE in 2.1.263).
-        al::begin_loop_tick("5m /x".into());
+        al::begin_loop_tick(source_text_projection("5m /x"));
         assert_eq!(
             maybe_arm_keepalive(&sched).await,
             Some(KeepaliveOutcome::Armed)
         );
         // Loop tick, model rescheduled → no keepalive.
-        al::begin_loop_tick("5m /x".into());
+        al::begin_loop_tick(source_text_projection("5m /x"));
         al::mark_loop_rescheduled();
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
         // Gate off via the env var → no keepalive.
-        al::begin_loop_tick("5m /x".into());
+        al::begin_loop_tick(source_text_projection("5m /x"));
         std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "");
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
         std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
@@ -2145,9 +2357,13 @@ mod tests {
         assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 0);
         assert!(!al::loop_ended(), "nothing to cancel → no terminal event");
         sched
-            .schedule(Duration::from_secs(60), "p".into(), "r".into())
+            .schedule(
+                Duration::from_secs(60),
+                source_text_projection("p"),
+                "r".into(),
+            )
             .await;
-        al::begin_loop_tick("p".into());
+        al::begin_loop_tick(source_text_projection("p"));
         assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 1);
         assert!(al::loop_ended());
         assert!(al::loop_tick_in_flight_prompt().is_none());
@@ -2158,24 +2374,29 @@ mod tests {
     #[test]
     fn sentinel_resolution() {
         let _s = serial();
-        let resolved = resolve_wakeup_prompt("<<autonomous-loop-dynamic>>");
-        assert!(resolved.starts_with("# Autonomous loop check\n\n"));
-        assert!(resolved.contains("\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\n"));
-        assert_eq!(resolve_wakeup_prompt("5m /babysit-prs"), "5m /babysit-prs");
+        let resolved =
+            resolve_wakeup_prompt(&source_text_projection("<<autonomous-loop-dynamic>>"));
+        let display = resolved.string_at("").unwrap_or_default();
+        assert!(display.starts_with("# Autonomous loop check\n\n"));
+        assert!(display.contains("\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\n"));
+        assert_eq!(
+            resolve_wakeup_prompt(&source_text_projection("5m /babysit-prs")).string_at(""),
+            Some("5m /babysit-prs")
+        );
         for text in [
             " <<autonomous-loop-dynamic>> ",
             "\u{feff}<<loop.md-dynamic>>",
             "<<loop.md-dynamic>>\n",
         ] {
             assert_eq!(
-                resolve_wakeup_prompt(text),
-                text,
+                resolve_wakeup_prompt(&source_text_projection(text)).string_at(""),
+                Some(text),
                 "sentinel matching is exact, not trimmed"
             );
         }
         assert_eq!(
-            resolve_wakeup_prompt("  5m /x  "),
-            "  5m /x  ",
+            resolve_wakeup_prompt(&source_text_projection("  5m /x  ")).string_at(""),
+            Some("  5m /x  "),
             "real prompts are never trimmed"
         );
     }

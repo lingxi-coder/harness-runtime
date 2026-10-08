@@ -1,8 +1,8 @@
 //! Per-teammate plan review dispatch, independent of the leader's permission state.
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::AgentId;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -11,8 +11,13 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 pub struct PlanApprovalResponse {
     pub request_id: String,
     pub approved: bool,
-    #[serde(default)]
-    pub feedback: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub feedback: Option<Utf16JsonProjection>,
     #[serde(default)]
     pub permission_mode: Option<String>,
 }
@@ -24,7 +29,10 @@ pub trait TeammatePlanRequester: Send + Sync {
         None
     }
 
-    async fn submit(&self, input: Value) -> Result<Value, String>;
+    async fn submit(
+        &self,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, Utf16JsonProjection>;
 }
 
 type Requesters = HashMap<AgentId, Weak<dyn TeammatePlanRequester>>;
@@ -88,7 +96,10 @@ mod file_scope_tests {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
-        async fn submit(&self, _: Value) -> Result<Value, String> {
+        async fn submit(
+            &self,
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
             unreachable!()
         }
     }
@@ -115,5 +126,32 @@ mod file_scope_tests {
             assert!(own_plan_file_root(Some(&id), &path).is_none());
             assert_eq!(std::fs::read_to_string(outside).unwrap(), "protected");
         }
+    }
+
+    #[test]
+    fn plan_approval_feedback_preserves_utf16_and_null_presence() {
+        let source: PlanApprovalResponse =
+            serde_json::from_str(r#"{"requestId":"r1","approved":false,"feedback":"\ud800"}"#)
+                .unwrap();
+        assert_eq!(
+            source
+                .feedback
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0xd800])
+        );
+        let serialized = serde_json::to_string(&source).unwrap();
+        let round_trip: PlanApprovalResponse = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.feedback, source.feedback);
+
+        let explicit_null: PlanApprovalResponse =
+            serde_json::from_str(r#"{"requestId":"r2","approved":false,"feedback":null}"#).unwrap();
+        assert_eq!(
+            explicit_null.feedback,
+            Some(Utf16JsonProjection::parse("null").unwrap())
+        );
+        let absent: PlanApprovalResponse =
+            serde_json::from_str(r#"{"requestId":"r3","approved":false}"#).unwrap();
+        assert!(absent.feedback.is_none());
     }
 }

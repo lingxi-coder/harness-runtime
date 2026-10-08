@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::notification::{NotificationError, NotificationRequest};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -20,6 +21,8 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "notification";
@@ -38,8 +41,8 @@ impl NotificationTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object",
         "properties": {
             "action": { "type": "string", "enum": ["post"] },
@@ -48,7 +51,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "tag": { "type": "string", "description": "Optional channel/identifier tag for coalescing (optional)." }
         },
         "required": ["action", "title", "body"]
-    })
+    }))
 });
 
 fn map_notification_err(e: &NotificationError) -> ToolError {
@@ -65,23 +68,31 @@ impl Tool for NotificationTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.notifications.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "notification tool — native OS notification prompt gates posting".into(),
@@ -92,26 +103,32 @@ impl Tool for NotificationTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Posting a notification".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Post a local system notification (title + body) to the device.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("post") => {
                 let has_title = input
-                    .get("title")
-                    .and_then(Value::as_str)
+                    .get_property("title")
+                    .and_then(|value| value.as_str())
                     .is_some_and(|t| !t.trim().is_empty());
-                let has_body = input.get("body").and_then(Value::as_str).is_some();
+                let has_body = input
+                    .get_property("body")
+                    .and_then(|value| value.as_str())
+                    .is_some();
                 if has_title && has_body {
                     Ok(())
                 } else {
@@ -126,7 +143,7 @@ impl Tool for NotificationTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -135,16 +152,19 @@ impl Tool for NotificationTool {
         })?;
 
         let title = input
-            .get("title")
-            .and_then(Value::as_str)
+            .get_property("title")
+            .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
         let body = input
-            .get("body")
-            .and_then(Value::as_str)
+            .get_property("body")
+            .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
-        let tag = input.get("tag").and_then(Value::as_str).map(str::to_string);
+        let tag = input
+            .get_property("tag")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
 
         notifications
             .notify(NotificationRequest { title, body, tag })
@@ -152,12 +172,13 @@ impl Tool for NotificationTool {
             .map_err(|e| map_notification_err(&e))?;
 
         Ok(ToolCallResult {
-            data: json!({ "posted": true }),
+            data: generated_projection(&json!({ "posted": true })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -171,6 +192,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_support::test_json_view;
     use lingxi_core::host::notification::NotificationService;
     use std::sync::{Arc, Mutex};
 
@@ -212,14 +234,14 @@ mod tests {
         let static_ctx = ToolStaticContext::default();
         let tool = NotificationTool::new(ctx_with(None));
         assert!(!tool.is_enabled(&static_ctx));
-        assert!(!tool.is_read_only(&json!({ "action": "post" })));
+        assert!(!tool.is_read_only(&generated_projection(&json!({ "action": "post" }))));
 
         let tool = NotificationTool::new(ctx_with(Some(Arc::new(FakeNotifier {
             deny: true,
             ..Default::default()
         }))));
         assert!(tool.is_enabled(&static_ctx));
-        assert!(!tool.is_read_only(&json!({ "action": "post" })));
+        assert!(!tool.is_read_only(&generated_projection(&json!({ "action": "post" }))));
     }
 
     #[tokio::test]
@@ -228,13 +250,13 @@ mod tests {
         let tool = NotificationTool::new(ctx_with(Some(fake.clone())));
         let res = tool
             .call(
-                json!({ "action": "post", "title": "Build done", "body": "All green", "tag": "ci" }),
+                generated_projection(&json!({ "action": "post", "title": "Build done", "body": "All green", "tag": "ci" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["posted"], true);
+        assert_eq!(test_json_view(&res.data)["posted"], true);
         let last = fake.last.lock().unwrap().clone().expect("notify called");
         assert_eq!(last.title, "Build done");
         assert_eq!(last.body, "All green");
@@ -246,7 +268,7 @@ mod tests {
         let tool = NotificationTool::new(ctx_with(None));
         let err = tool
             .call(
-                json!({ "action": "post", "title": "t", "body": "b" }),
+                generated_projection(&json!({ "action": "post", "title": "t", "body": "b" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -264,7 +286,7 @@ mod tests {
         let tool = NotificationTool::new(ctx_with(Some(fake)));
         let err = tool
             .call(
-                json!({ "action": "post", "title": "t", "body": "b" }),
+                generated_projection(&json!({ "action": "post", "title": "t", "body": "b" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -279,11 +301,11 @@ mod tests {
         let tool = NotificationTool::new(ctx_with(Some(fake)));
         let err = tool
             .validate_input(
-                &json!({ "action": "post", "body": "b" }),
+                &generated_projection(&json!({ "action": "post", "body": "b" })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await
             .unwrap_err();
-        assert!(err.0.contains("title"));
+        assert!(err.0.string_at("").unwrap().contains("title"));
     }
 }

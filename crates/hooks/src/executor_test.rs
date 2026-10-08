@@ -2,6 +2,28 @@
 
 use super::*;
 
+fn hook_json(source: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
+        .expect("event fixture is valid JSON")
+}
+
+fn hook_json_string(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        text.to_owned(),
+        text.encode_utf16().collect(),
+    )
+    .expect("fixture string display matches its UTF-16 units")
+}
+
+fn hook_json_field<'a>(
+    value: &'a lingxi_core::types::utf16_json::Utf16JsonProjection,
+    key: &str,
+) -> lingxi_core::types::utf16_json::JsonValueView<'a> {
+    value
+        .get_property(key)
+        .unwrap_or_else(|| panic!("missing JSON member {key}"))
+}
+
 #[cfg(test)]
 mod constants_tests {
     use super::*;
@@ -206,8 +228,8 @@ mod session_end_batch_deadline_tests {
             self.ran.store(true, Ordering::SeqCst);
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: crate::response::ExactHookText::default(),
+                stderr: crate::response::ExactHookText::default(),
                 exit_code: Some(0),
                 response: None,
             }
@@ -316,7 +338,7 @@ mod session_end_batch_deadline_tests {
             matches!(slow_r.outcome, HookOutcome::Timeout),
             "cut-off hook records a Timeout outcome"
         );
-        assert!(slow_r.stderr.contains("batch deadline"));
+        assert!(slow_r.stderr.display.contains("batch deadline"));
 
         // Half 2 assertions: ran to completion.
         assert!(
@@ -347,7 +369,7 @@ mod session_end_batch_deadline_tests {
 mod command_arm_tests {
     use super::*;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
-    use crate::events::{HookEvent, HookEventType};
+    use crate::events::{HookEvent, HookEventType, PromptExpansionType};
     use crate::response::HookDecision;
     use lingxi_core::host::sandbox::{SandboxCapability, SandboxedTag};
     use lingxi_core::host::{ProcessHandle, RuntimeError, SandboxPolicy, SandboxedCommand};
@@ -355,7 +377,6 @@ mod command_arm_tests {
     use mobile_linux_api::ProcessOutput;
     use mobile_linux_api::SandboxBackend;
 
-    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -548,7 +569,7 @@ mod command_arm_tests {
     fn pre_event() -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_input: hook_json(r#"{"command":"ls"}"#),
             tool_use_id: ToolUseId::new(),
         }
     }
@@ -594,7 +615,7 @@ mod command_arm_tests {
         // Binary: `[${getHookDisplayText(hook)}]: ${stderr||"No stderr output"}`.
         // The test hook is `hook.sh --check` ⇒ display = command + args joined.
         assert_eq!(
-            agg.reason.as_deref(),
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[hook.sh --check]: policy violation")
         );
         let (_, r) = &agg.all_results[0];
@@ -612,7 +633,7 @@ mod command_arm_tests {
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(
-            agg.reason.as_deref(),
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[hook.sh --check]: No stderr output")
         );
     }
@@ -627,7 +648,10 @@ mod command_arm_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]:    "));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("[hook.sh --check]:    ")
+        );
     }
 
     #[tokio::test]
@@ -642,9 +666,32 @@ mod command_arm_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("json said no"));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("json said no")
+        );
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Success), "exit 0 + JSON");
+    }
+
+    #[tokio::test]
+    async fn json_hook_reason_keeps_source_units_through_aggregate_fold() {
+        let runner = MockRunner::ok(output(r#"{"decision":"block","reason":"\ud800"}"#, "", 0));
+        let exec = executor_with(runner);
+
+        let aggregate = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(aggregate.decision, Some(HookDecision::Block));
+        let aggregate_reason = aggregate.reason.expect("block reason is retained");
+        assert_eq!(aggregate_reason.utf16_code_units, [0xD800]);
+        assert_eq!(aggregate_reason.display, "\u{FFFD}");
+        let response_reason = aggregate.all_results[0]
+            .1
+            .response
+            .as_ref()
+            .and_then(|response| response.reason.as_ref())
+            .expect("per-hook reason is retained");
+        assert_eq!(response_reason.utf16_code_units, [0xD800]);
     }
 
     #[tokio::test]
@@ -772,16 +819,22 @@ mod command_arm_tests {
         let exec = executor_for(HookEventType::PermissionRequest, runner);
         let event = HookEvent::PermissionRequest {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "printf unsafe"}),
+            tool_input: hook_json(r#"{"command":"printf unsafe"}"#),
             reason: "needs approval".into(),
         };
 
         let agg = exec.execute(event, HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Allow));
-        assert_eq!(agg.modified_input, Some(json!({"command": "printf safe"})));
+        assert_eq!(
+            agg.modified_input,
+            Some(hook_json(r#"{"command":"printf safe"}"#))
+        );
         assert_eq!(agg.permission_updates.len(), 1);
-        assert_eq!(agg.permission_updates[0]["destination"], "session");
+        assert_eq!(
+            agg.permission_updates[0].string_at("/destination"),
+            Some("session")
+        );
         assert!(!agg.interrupt);
     }
 
@@ -795,7 +848,7 @@ mod command_arm_tests {
         let exec = executor_for(HookEventType::PermissionRequest, runner);
         let event = HookEvent::PermissionRequest {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "printf unsafe"}),
+            tool_input: hook_json(r#"{"command":"printf unsafe"}"#),
             reason: "needs approval".into(),
         };
 
@@ -804,11 +857,9 @@ mod command_arm_tests {
         assert_eq!(agg.decision, Some(HookDecision::Allow));
         assert_eq!(
             agg.permission_updates,
-            vec![json!({
-                "type": "setMode",
-                "mode": "auto",
-                "destination": "session"
-            })]
+            vec![hook_json(
+                r#"{"type":"setMode","mode":"auto","destination":"session"}"#
+            )]
         );
         assert!(matches!(
             agg.permission_request_result,
@@ -829,14 +880,17 @@ mod command_arm_tests {
         let exec = executor_for(HookEventType::PermissionRequest, runner);
         let event = HookEvent::PermissionRequest {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "rm -rf /"}),
+            tool_input: hook_json(r#"{"command":"rm -rf /"}"#),
             reason: "needs approval".into(),
         };
 
         let agg = exec.execute(event, HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("not safe"));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("not safe")
+        );
         assert!(agg.interrupt);
     }
 
@@ -846,7 +900,7 @@ mod command_arm_tests {
         let exec = executor_for(HookEventType::PermissionRequest, runner);
         let event = HookEvent::PermissionRequest {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "rm -rf /"}),
+            tool_input: hook_json(r#"{"command":"rm -rf /"}"#),
             reason: "needs approval".into(),
         };
 
@@ -855,7 +909,7 @@ mod command_arm_tests {
         assert_eq!(agg.decision, None);
         assert_eq!(agg.reason, None);
         let (_, result) = &agg.all_results[0];
-        assert_eq!(result.stderr, "ignored stderr");
+        assert_eq!(result.stderr.display, "ignored stderr");
         assert_eq!(result.exit_code, Some(2));
         assert!(result.response.is_none());
     }
@@ -875,10 +929,10 @@ mod command_arm_tests {
             let (_, r) = &agg.all_results[0];
             assert!(matches!(r.outcome, HookOutcome::Error));
             assert_eq!(r.exit_code, Some(exit_code));
-            assert_eq!(r.stdout, "{bad");
+            assert_eq!(r.stdout.display, "{bad");
             assert_eq!(
-                r.stderr,
-                "hook response is not valid JSON: key must be a string at line 1 column 2"
+                r.stderr.display,
+                "hook response is not valid JSON: invalid exact JSON at UTF-16 unit 1: expected JSON string"
             );
             assert!(r.response.is_none());
         }
@@ -897,11 +951,12 @@ mod command_arm_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert_eq!(r.exit_code, Some(2));
-        assert_eq!(r.stderr, "child diagnostic");
+        assert_eq!(r.stderr.display, "child diagnostic");
         assert_eq!(
-            r.response
+            r.response.as_ref().and_then(|response| response
+                .reason
                 .as_ref()
-                .and_then(|response| response.reason.as_deref()),
+                .map(|reason| reason.display.as_str())),
             Some("[hook.sh --check]: child diagnostic")
         );
     }
@@ -925,7 +980,7 @@ mod command_arm_tests {
             assert!(matches!(r.outcome, HookOutcome::Error));
             assert_eq!(r.exit_code, Some(exit_code));
             assert_eq!(
-                r.stderr,
+                r.stderr.display,
                 "Hook JSON output validation failed — continue: expected boolean, received string"
             );
             assert!(r.response.is_none());
@@ -944,9 +999,9 @@ mod command_arm_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert_eq!(r.exit_code, Some(2));
-        assert_eq!(r.stderr, "child diagnostic");
+        assert_eq!(r.stderr.display, "child diagnostic");
         assert_eq!(
-            agg.reason.as_deref(),
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[hook.sh --check]: child diagnostic")
         );
     }
@@ -966,8 +1021,11 @@ mod command_arm_tests {
         let (_, result) = &agg.all_results[0];
         assert!(matches!(result.outcome, HookOutcome::Error));
         assert!(result.response.is_none());
-        assert!(result.stderr.contains("Hook JSON output validation failed"));
-        assert!(result.stderr.contains("permissionDecision"));
+        assert!(result
+            .stderr
+            .display
+            .contains("Hook JSON output validation failed"));
+        assert!(result.stderr.display.contains("permissionDecision"));
     }
 
     #[tokio::test]
@@ -980,7 +1038,7 @@ mod command_arm_tests {
         let exec = executor_for(HookEventType::PermissionRequest, runner);
         let event = HookEvent::PermissionRequest {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "rm -rf /"}),
+            tool_input: hook_json(r#"{"command":"rm -rf /"}"#),
             reason: "destructive".into(),
         };
 
@@ -990,8 +1048,14 @@ mod command_arm_tests {
         let (_, result) = &agg.all_results[0];
         assert!(matches!(result.outcome, HookOutcome::Error));
         assert!(result.response.is_none());
-        assert!(result.stderr.contains("Hook JSON output validation failed"));
-        assert!(result.stderr.contains("hookSpecificOutput.decision"));
+        assert!(result
+            .stderr
+            .display
+            .contains("Hook JSON output validation failed"));
+        assert!(result
+            .stderr
+            .display
+            .contains("hookSpecificOutput.decision"));
     }
 
     #[tokio::test]
@@ -1010,7 +1074,7 @@ mod command_arm_tests {
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert_eq!(r.exit_code, Some(0));
         assert_eq!(
-            r.stderr,
+            r.stderr.display,
             "hook response hookEventName mismatch: expected 'PreToolUse', got 'PostToolUse'"
         );
         assert!(r.response.is_none());
@@ -1040,8 +1104,8 @@ mod command_arm_tests {
         assert_eq!(agg.decision, None);
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
-        assert!(r.stderr.contains("process error"));
-        assert!(r.stderr.contains("spawn failed"));
+        assert!(r.stderr.display.contains("process error"));
+        assert!(r.stderr.display.contains("spawn failed"));
     }
 
     #[tokio::test]
@@ -1074,7 +1138,7 @@ mod command_arm_tests {
         assert_eq!(agg.decision, None, "not-wired must not block");
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
-        assert!(r.stderr.contains("command executor not wired"));
+        assert!(r.stderr.display.contains("command executor not wired"));
     }
 
     // ---- B2: LINGXI_PROJECT_DIR injection into the Command child env -----
@@ -1649,14 +1713,39 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn task_hook_execution_serializes_exact_source_utf16_text() {
+        let subject = hook_json(r#""task \ud800 subject""#);
+        let description = hook_json(r#""summary \ud800 text""#);
+        let stdin = dispatch_and_capture(
+            HookEventType::TaskCreated,
+            HookEvent::TaskCreated {
+                task_id: "task-source".into(),
+                task_type: subject,
+                description,
+                teammate_name: None,
+                team_name: None,
+            },
+        )
+        .await;
+        assert!(
+            stdin.contains(r#""task_subject":"task \ud800 subject""#),
+            "{stdin}"
+        );
+        assert!(
+            stdin.contains(r#""task_description":"summary \ud800 text""#),
+            "{stdin}"
+        );
+    }
+
+    #[tokio::test]
     async fn task_completed_event_serializes_task_id() {
         let stdin = dispatch_and_capture(
             HookEventType::TaskCompleted,
             HookEvent::TaskCompleted {
                 task_id: "task-99".into(),
                 status: "completed".into(),
-                task_subject: "ship the thing".into(),
-                task_description: Some("do the work".into()),
+                task_subject: hook_json_string("ship the thing"),
+                task_description: Some(hook_json_string("do the work")),
                 teammate_name: Some("buddy".into()),
                 team_name: Some("alpha".into()),
             },
@@ -1687,6 +1776,55 @@ mod command_arm_tests {
         .await;
         assert!(stdin.contains(r#""hook_event_name":"UserPromptSubmit""#));
         assert!(stdin.contains(r#""prompt":"do the thing""#));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_and_expansion_preserve_lone_utf16_units() {
+        let prompt = hook_json(r#""\ud800""#);
+        let (_, submit_body) = build_envelope_body(
+            &HookEvent::UserPromptSubmit {
+                prompt: prompt.clone(),
+            },
+            &HookContext::default(),
+        )
+        .expect("prompt submit serializes");
+        assert_eq!(
+            hook_json(&submit_body).string_units("/prompt"),
+            Some(vec![0xd800])
+        );
+
+        let args = hook_json(r#""a\udfff""#);
+        let source = hook_json(r#""s\ud800""#);
+        let command_name = hook_json(r#""prompt\ud800""#);
+        let expansion = hook_json(r#""p\udfff""#);
+        let (_, expansion_body) = build_envelope_body(
+            &HookEvent::UserPromptExpansion {
+                expansion_type: PromptExpansionType::McpPrompt,
+                command_name,
+                command_args: args,
+                command_source: Some(source),
+                prompt: expansion,
+            },
+            &HookContext::default(),
+        )
+        .expect("prompt expansion serializes");
+        let expansion_body = hook_json(&expansion_body);
+        assert_eq!(
+            expansion_body.string_units("/command_name"),
+            Some("prompt".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            expansion_body.string_units("/command_args"),
+            Some(vec![b'a' as u16, 0xdfff])
+        );
+        assert_eq!(
+            expansion_body.string_units("/command_source"),
+            Some(vec![b's' as u16, 0xd800])
+        );
+        assert_eq!(
+            expansion_body.string_units("/prompt"),
+            Some(vec![b'p' as u16, 0xdfff])
+        );
     }
 
     #[tokio::test]
@@ -1724,7 +1862,7 @@ mod command_arm_tests {
             HookEventType::PostToolUseFailure,
             HookEvent::PostToolUseFailure {
                 tool_name: "Bash".into(),
-                tool_input: json!({"command": "ls"}),
+                tool_input: hook_json(r#"{"command":"ls"}"#),
                 error: "boom".into(),
                 tool_use_id: ToolUseId::new(),
                 duration_ms: None,
@@ -1736,6 +1874,22 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""error":"boom""#));
         // The dispatched `tool_input` is now carried verbatim, not `null`.
         assert!(stdin.contains(r#""tool_input":{"command":"ls"}"#));
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_failure_event_preserves_lone_surrogate_error_source() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PostToolUseFailure,
+            HookEvent::PostToolUseFailure {
+                tool_name: "Mcp".into(),
+                tool_input: hook_json("null"),
+                error: hook_json(r#""x\ud800y""#),
+                tool_use_id: ToolUseId::new(),
+                duration_ms: None,
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""error":"x\ud800y""#), "{stdin}");
     }
 
     #[tokio::test]
@@ -1872,7 +2026,8 @@ mod command_arm_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert!(agg
             .reason
-            .as_deref()
+            .as_ref()
+            .map(|reason| reason.display.as_str())
             .is_some_and(|reason| reason.contains("timed out")));
     }
 
@@ -1929,7 +2084,12 @@ mod command_arm_tests {
             )
             .await;
         assert_eq!(agg.decision, None, "post decisions never gate");
-        assert_eq!(agg.additional_contexts, vec!["warm the new model"]);
+        assert_eq!(
+            agg.additional_contexts,
+            vec![crate::response::ExactHookText::from_text(
+                "warm the new model"
+            )]
+        );
     }
 
     #[tokio::test]
@@ -1953,7 +2113,7 @@ mod command_arm_tests {
             HookEventType::PermissionRequest,
             HookEvent::PermissionRequest {
                 tool_name: "Bash".into(),
-                tool_input: json!({"command": "rm -rf /"}),
+                tool_input: hook_json(r#"{"command":"rm -rf /"}"#),
                 reason: "destructive".into(),
             },
         )
@@ -2156,7 +2316,7 @@ mod command_arm_tests {
                 mode: Some(crate::events::ElicitationMode::Form),
                 url: Some("https://example.test/auth".into()),
                 elicitation_id: Some("elic-42".into()),
-                requested_schema: Some(json!({"type": "object"})),
+                requested_schema: Some(hook_json(r#"{"type":"object"}"#)),
             },
         )
         .await;
@@ -2228,7 +2388,7 @@ mod command_arm_tests {
                 HookEvent::TaskCompleted {
                     task_id: "t".into(),
                     status: "completed".into(),
-                    task_subject: "s".into(),
+                    task_subject: hook_json_string("s"),
                     task_description: None,
                     teammate_name: None,
                     team_name: None,
@@ -2238,8 +2398,8 @@ mod command_arm_tests {
             (
                 HookEvent::TaskCreated {
                     task_id: "t".into(),
-                    task_type: "LocalBash".into(),
-                    description: "do the work".into(),
+                    task_type: hook_json_string("LocalBash"),
+                    description: hook_json_string("do the work"),
                     teammate_name: None,
                     team_name: None,
                 },
@@ -2273,7 +2433,7 @@ mod command_arm_tests {
             (
                 HookEvent::PostToolUseFailure {
                     tool_name: "Bash".into(),
-                    tool_input: json!({}),
+                    tool_input: hook_json("{}"),
                     error: "boom".into(),
                     tool_use_id: ToolUseId::new(),
                     duration_ms: None,
@@ -2312,7 +2472,7 @@ mod command_arm_tests {
             (
                 HookEvent::PermissionRequest {
                     tool_name: "Bash".into(),
-                    tool_input: json!({}),
+                    tool_input: hook_json("{}"),
                     reason: "r".into(),
                 },
                 "PermissionRequest",
@@ -2320,7 +2480,7 @@ mod command_arm_tests {
             (
                 HookEvent::PermissionDenied {
                     tool_name: "Bash".into(),
-                    tool_input: json!({ "command": "git push" }),
+                    tool_input: hook_json(r#"{"command":"git push"}"#),
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     reason: "denied".into(),
                 },
@@ -2405,7 +2565,7 @@ mod command_arm_tests {
                     server_name: "srv".into(),
                     elicitation_id: None,
                     mode: None,
-                    result: json!({"action": "accept", "content": {"token": "xyz"}}),
+                    result: hook_json(r#"{"action":"accept","content":{"token":"xyz"}}"#),
                 },
                 "ElicitationResult",
             ),
@@ -2530,7 +2690,7 @@ mod command_arm_tests {
             server_name: "my-server".into(),
             elicitation_id: Some("elicit-7".into()),
             mode: Some(crate::events::ElicitationMode::Form),
-            result: json!({"action": "decline", "content": {"reason": "no"}}),
+            result: hook_json(r#"{"action":"decline","content":{"reason":"no"}}"#),
         };
         let (marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
         assert_eq!(marker, "ElicitationResult");
@@ -2549,7 +2709,7 @@ mod command_arm_tests {
             server_name: "srv".into(),
             elicitation_id: None,
             mode: None,
-            result: json!({}),
+            result: hook_json("{}"),
         };
         let (_marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
         assert!(body.contains(r#""action":"cancel""#), "{body}");
@@ -2588,12 +2748,12 @@ mod async_path_tests {
 
     #[derive(Default)]
     struct AsyncRecordingSink {
-        seen: StdMutex<Vec<serde_json::Value>>,
+        seen: StdMutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     }
 
     #[async_trait]
     impl HookAttachmentSink for AsyncRecordingSink {
-        async fn record(&self, attachment: serde_json::Value) {
+        async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection) {
             self.seen.lock().unwrap().push(attachment);
         }
     }
@@ -2822,7 +2982,7 @@ mod async_path_tests {
     fn pre_event() -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({"command": "ls"}),
+            tool_input: hook_json(r#"{"command":"ls"}"#),
             tool_use_id: ToolUseId::new(),
         }
     }
@@ -2906,16 +3066,20 @@ mod async_path_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert!(agg.hook_attachments.is_empty());
 
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("completion must publish before timeout")
             .expect("completion channel stays open");
+        let got_id = envelope.hook_id;
+        let got = envelope.result;
+        let hook_event = envelope.hook_event;
         assert_eq!(got_id, hook_id);
-        assert_eq!(got.stdout, "async complete\n");
+        assert_eq!(hook_event.as_deref(), Some("PreToolUse"));
+        assert_eq!(got.stdout.display, "async complete");
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0]["type"], "hook_success");
-        assert_eq!(seen[0]["content"], "async complete");
+        assert_eq!(seen[0].string_at("/type"), Some("hook_success"));
+        assert_eq!(seen[0].string_at("/content"), Some("async complete"));
     }
 
     #[tokio::test]
@@ -2952,11 +3116,11 @@ mod async_path_tests {
             .await;
         assert!(agg.hook_attachments.is_empty());
 
-        let (got_id, _got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("completion must publish before timeout")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
         let envs = runner.recorded_env.lock().unwrap().clone();
         assert_eq!(envs.len(), 1);
         assert_eq!(
@@ -2995,17 +3159,21 @@ mod async_path_tests {
         assert!(agg.hook_attachments.is_empty());
         ran.notified().await;
 
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timeout result must publish")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Timeout));
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0]["type"], "hook_cancelled");
-        assert_eq!(seen[0]["timedOut"], true);
-        assert_eq!(seen[0]["timeoutMs"], 10);
+        assert_eq!(seen[0].string_at("/type"), Some("hook_cancelled"));
+        assert_eq!(hook_json_field(&seen[0], "timedOut").as_bool(), Some(true));
+        assert_eq!(
+            hook_json_field(&seen[0], "timeoutMs").as_number(),
+            Some(10.0)
+        );
     }
 
     /// (2) + (3) The registry records the in-flight handle and publishes the
@@ -3040,8 +3208,9 @@ mod async_path_tests {
 
         // Release the hook; its result must land on completion_tx keyed by id.
         gate.notify_one();
-        let (got_id, got) = rx.recv().await.expect("completion must publish");
-        assert_eq!(got_id, hook_id);
+        let envelope = rx.recv().await.expect("completion must publish");
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(got.exit_code, Some(0));
     }
@@ -3066,8 +3235,9 @@ mod async_path_tests {
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert!(agg.all_results.is_empty());
-        let (got_id, got) = rx.recv().await.expect("completion must publish");
-        assert_eq!(got_id, hook_id);
+        let envelope = rx.recv().await.expect("completion must publish");
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert!(
             registry.read().await.all_hooks().is_empty(),
@@ -3134,7 +3304,10 @@ mod async_path_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         // Synchronous: exit 2 ⇒ Block surfaces in the aggregate, result recorded.
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: policy violation"));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("[hook.sh]: policy violation")
+        );
         assert_eq!(
             agg.all_results.len(),
             1,
@@ -3188,7 +3361,7 @@ mod async_path_tests {
         // The aggregate Block comes ONLY from the blocking hook.
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(
-            agg.reason.as_deref(),
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[hook.sh]: blocking-reason"),
             "the Block reason must be the blocking hook's, not the backgrounded one's",
         );
@@ -3204,9 +3377,9 @@ mod async_path_tests {
 
         // The async hook still RAN (fire-and-forget) — its completion lands on
         // the channel keyed by its own id, and it was never in the aggregate.
-        let (got_id, _got) = rx.recv().await.expect("async hook completion publishes");
+        let envelope = rx.recv().await.expect("async hook completion publishes");
         assert_eq!(
-            got_id, async_id,
+            envelope.hook_id, async_id,
             "the backgrounded completion is the async hook's, separate from the aggregate",
         );
 
@@ -3339,13 +3512,13 @@ mod async_path_tests {
 
     #[async_trait]
     impl lingxi_core::host::OutputStream for AsyncProgressObserver {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
 
@@ -3353,8 +3526,8 @@ mod async_path_tests {
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _model_text: &str,
-            _result: &serde_json::Value,
+            _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
 
@@ -3432,25 +3605,30 @@ mod async_path_tests {
 
         // The eventual output folds back on completion_tx, keyed by hook id and
         // mapped through the command-hook contract.
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("fold-back must publish before the timeout")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(
             got.response
                 .as_ref()
-                .and_then(|r| r.additional_context.as_deref()),
+                .and_then(|r| r.additional_context.as_ref())
+                .map(|text| text.display.as_str()),
             Some("async done"),
             "the eventual additionalContext must survive the fold-back mapping"
         );
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "only the eventual completion is persisted");
-        assert_eq!(seen[0]["type"], "hook_success");
-        assert_eq!(seen[0]["content"], "");
-        assert_eq!(seen[0]["stdout"], got.stdout);
-        assert_eq!(seen[0]["exitCode"], 0);
+        assert_eq!(seen[0].string_at("/type"), Some("hook_success"));
+        assert_eq!(seen[0].string_at("/content"), Some(""));
+        assert_eq!(
+            seen[0].string_at("/stdout"),
+            Some(got.stdout.display.as_str())
+        );
+        assert_eq!(hook_json_field(&seen[0], "exitCode").as_number(), Some(0.0));
     }
 
     #[tokio::test]
@@ -3577,9 +3755,14 @@ mod async_path_tests {
         assert_eq!(runner.runs.load(Ordering::SeqCst), 2, "both hooks must run");
         assert_eq!(agg.all_results.len(), 2, "both results folded");
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: first blocker"));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("[hook.sh]: first blocker")
+        );
         assert!(
-            agg.system_messages.iter().any(|m| m == "second ran"),
+            agg.system_messages
+                .iter()
+                .any(|m| m.display == "second ran"),
             "the later hook's systemMessage must survive the earlier Block: {:?}",
             agg.system_messages,
         );
@@ -3692,13 +3875,13 @@ mod once_and_status_message_tests {
 
     #[async_trait]
     impl lingxi_core::host::OutputStream for ProgressObserver {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
 
@@ -3706,8 +3889,8 @@ mod once_and_status_message_tests {
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _model_text: &str,
-            _result: &serde_json::Value,
+            _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
 
@@ -3793,8 +3976,8 @@ mod once_and_status_message_tests {
             let exit_code = i32::from(!matches!(self.outcome, HookOutcome::Success));
             HookResult {
                 outcome: self.outcome,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: crate::response::ExactHookText::default(),
+                stderr: crate::response::ExactHookText::default(),
                 exit_code: Some(exit_code),
                 response: None,
             }
@@ -3807,7 +3990,7 @@ mod once_and_status_message_tests {
     fn pre_event() -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({"command": "ls"}),
+            tool_input: hook_json(r#"{"command":"ls"}"#),
             tool_use_id: ToolUseId::new(),
         }
     }
@@ -3983,13 +4166,11 @@ mod once_and_status_message_tests {
             async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::response::ExactHookText::default(),
+                    stderr: crate::response::ExactHookText::default(),
                     exit_code: None,
                     response: Some(HookResponse {
-                        updated_mcp_tool_output: Some(
-                            serde_json::json!({ "content": "rewritten" }),
-                        ),
+                        updated_mcp_tool_output: Some(hook_json(r#"{"content":"rewritten"}"#)),
                         ..Default::default()
                     }),
                 }
@@ -4016,15 +4197,15 @@ mod once_and_status_message_tests {
         let (exec, _reg) = executor_with(hook, Arc::new(RewriteBuiltin));
         let post = HookEvent::PostToolUse {
             tool_name: "mcp__srv__tool".into(),
-            tool_input: serde_json::json!({}),
-            tool_output: serde_json::json!({ "content": "original" }),
+            tool_input: hook_json("{}"),
+            tool_output: hook_json(r#"{"content":"original"}"#),
             tool_use_id: ToolUseId::new(),
             duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(
             agg.updated_mcp_tool_output,
-            Some(serde_json::json!({ "content": "rewritten" })),
+            Some(hook_json(r#"{"content":"rewritten"}"#)),
             "the hook's updatedMCPToolOutput must reach the aggregate",
         );
     }
@@ -4035,7 +4216,11 @@ mod once_and_status_message_tests {
     /// `additional_contexts` (model-facing) or `system_messages`.
     #[tokio::test]
     async fn post_hook_classifier_context_reaches_aggregate_capped() {
-        struct ContextBuiltin;
+        let mut context_units = vec![0xD800];
+        context_units.extend(std::iter::repeat(u16::from(b'x')).take(2_500));
+        struct ContextBuiltin {
+            classifier_context: crate::response::ExactHookText,
+        }
         #[async_trait]
         impl BuiltinHookHandler for ContextBuiltin {
             fn id(&self) -> &str {
@@ -4044,14 +4229,15 @@ mod once_and_status_message_tests {
             async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::response::ExactHookText::default(),
+                    stderr: crate::response::ExactHookText::default(),
                     exit_code: None,
                     response: Some(HookResponse {
-                        // 2500 units — 500 over the `Pfr` cap.
-                        classifier_context: Some("x".repeat(2500)),
+                        // More than Pfr; the isolated surrogate must survive
+                        // the cap and aggregation exactly.
+                        classifier_context: Some(self.classifier_context.clone()),
                         // Pairs with a direct output rewrite ⇒ `pairedRewrite:"direct"`.
-                        updated_tool_output: Some(Some(serde_json::json!({ "x": 1 }))),
+                        updated_tool_output: Some(hook_json(r#"{"x":1}"#)),
                         ..Default::default()
                     }),
                 }
@@ -4075,20 +4261,29 @@ mod once_and_status_message_tests {
             async_timeout: None,
             rewake_message: None,
         };
-        let (exec, _reg) = executor_with(hook, Arc::new(ContextBuiltin));
+        let (exec, _reg) = executor_with(
+            hook,
+            Arc::new(ContextBuiltin {
+                classifier_context: crate::response::ExactHookText::from_utf16(context_units),
+            }),
+        );
         let post = HookEvent::PostToolUse {
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({}),
-            tool_output: serde_json::json!({ "content": "original" }),
+            tool_input: hook_json("{}"),
+            tool_output: hook_json(r#"{"content":"original"}"#),
             tool_use_id: ToolUseId::new(),
             duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(agg.classifier_contexts.len(), 1);
         assert_eq!(
-            agg.classifier_contexts[0].value.chars().count(),
+            agg.classifier_contexts[0].value.len_utf16(),
             2000,
             "capped at Pfr = 2000 UTF-16 code units",
+        );
+        assert_eq!(
+            agg.classifier_contexts[0].value.utf16_code_units[0], 0xD800,
+            "the exact source units survive before the cap boundary",
         );
         assert!(
             !agg.classifier_contexts[0].host_principal,
@@ -4124,11 +4319,11 @@ mod once_and_status_message_tests {
             async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::response::ExactHookText::default(),
+                    stderr: crate::response::ExactHookText::default(),
                     exit_code: None,
                     response: Some(HookResponse {
-                        updated_tool_output: Some(Some(serde_json::json!({ "x": "all" }))),
+                        updated_tool_output: Some(hook_json(r#"{"x":"all"}"#)),
                         ..Default::default()
                     }),
                 }
@@ -4156,15 +4351,15 @@ mod once_and_status_message_tests {
         let post = HookEvent::PostToolUse {
             // a NON-mcp tool: updated_tool_output applies for all tools
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({}),
-            tool_output: serde_json::json!("original"),
+            tool_input: hook_json("{}"),
+            tool_output: hook_json(r#""original""#),
             tool_use_id: ToolUseId::new(),
             duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(
             agg.updated_tool_output,
-            Some(Some(serde_json::json!({ "x": "all" }))),
+            Some(hook_json(r#"{"x":"all"}"#)),
             "the hook's updatedToolOutput must reach the aggregate",
         );
     }
@@ -4182,8 +4377,8 @@ mod once_and_status_message_tests {
             async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::response::ExactHookText::default(),
+                    stderr: crate::response::ExactHookText::default(),
                     exit_code: None,
                     response: Some(HookResponse {
                         terminal_sequence: Some("\u{0007}".into()),
@@ -4213,11 +4408,16 @@ mod once_and_status_message_tests {
         let (exec, _reg) = executor_with(hook, Arc::new(TermHook));
         let pre = HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({}),
+            tool_input: hook_json("{}"),
             tool_use_id: ToolUseId::new(),
         };
         let agg = exec.execute(pre, HookContext::default()).await;
-        assert_eq!(agg.terminal_sequence.as_deref(), Some("\u{0007}"));
+        assert_eq!(
+            agg.terminal_sequence
+                .as_ref()
+                .map(|value| value.display.as_str()),
+            Some("\u{0007}")
+        );
     }
 
     /// A `PostToolUse` hook that does NOT set `updated_mcp_tool_output` leaves
@@ -4251,8 +4451,8 @@ mod once_and_status_message_tests {
         let (exec, _reg) = executor_with(hook, handler);
         let post = HookEvent::PostToolUse {
             tool_name: "mcp__srv__tool".into(),
-            tool_input: serde_json::json!({}),
-            tool_output: serde_json::json!({ "content": "original" }),
+            tool_input: hook_json("{}"),
+            tool_output: hook_json(r#"{"content":"original"}"#),
             tool_use_id: ToolUseId::new(),
             duration_ms: None,
         };
@@ -4361,7 +4561,6 @@ mod http_agent_dispatch_tests {
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
     use lingxi_core::types::{HookId, HttpResponse, ToolUseId};
-    use serde_json::json;
     use std::sync::Mutex;
 
     /// `RuntimeSpawner` stub — never exercised by these tests.
@@ -4419,7 +4618,7 @@ mod http_agent_dispatch_tests {
     fn pre_event() -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_input: hook_json(r#"{"command":"ls"}"#),
             tool_use_id: ToolUseId::new(),
         }
     }
@@ -4491,9 +4690,9 @@ mod http_agent_dispatch_tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
             Err(ToolInvokerError::Internal("inert".into()))
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -4591,8 +4790,9 @@ mod http_agent_dispatch_tests {
         let spawner = Arc::new(RecordingSpawner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: json!(r#"{"decision":"approve"}"#),
+                content: hook_json_string(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
@@ -4625,14 +4825,21 @@ mod http_agent_dispatch_tests {
         let recorded = spawner.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "the Agent arm must reach the spawner");
         assert_eq!(recorded[0].subagent_type, "general-purpose");
+        let prompt_units = recorded[0]
+            .prompt
+            .string_units("")
+            .expect("agent prompt is a JSON string");
+        let prompt_prefix = "vet this".encode_utf16().collect::<Vec<_>>();
         assert!(
-            recorded[0].prompt.starts_with("vet this"),
+            prompt_units.starts_with(&prompt_prefix),
             "prompt template is spliced ahead of the payload",
         );
+        let serialized_event =
+            r#""hook_event_name":"PreToolUse""#.encode_utf16().collect::<Vec<_>>();
         assert!(
-            recorded[0]
-                .prompt
-                .contains(r#""hook_event_name":"PreToolUse""#),
+            prompt_units
+                .windows(serialized_event.len())
+                .any(|window| window == serialized_event),
             "the serialized event payload is appended to the prompt",
         );
         drop(recorded);
@@ -4659,8 +4866,8 @@ mod prompt_dispatch_tests {
     use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
     use crate::prompt_executor::{HookPromptRunner, PromptHookError, PromptHookRequest};
     use crate::response::HookDecision;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{HookId, SessionId, ToolUseId};
-    use serde_json::json;
     use std::sync::Mutex;
 
     /// `RuntimeSpawner` stub — never exercised by these tests.
@@ -4711,11 +4918,42 @@ mod prompt_dispatch_tests {
     /// `$ARGUMENTS`-substituted prompt.
     struct RecordingRunner {
         recorded: Mutex<Vec<PromptHookRequest>>,
-        result: Mutex<Option<Result<String, PromptHookError>>>,
+        result: Mutex<Option<Result<Utf16JsonProjection, PromptHookError>>>,
+    }
+
+    struct ContextCaptureHandler {
+        id: String,
+        captured: Arc<Mutex<Option<(Option<crate::HookModelSelection>, Option<usize>)>>>,
+    }
+
+    #[async_trait]
+    impl BuiltinHookHandler for ContextCaptureHandler {
+        async fn handle(&self, _event: &HookEvent, ctx: &HookContext) -> HookResult {
+            *self.captured.lock().unwrap() = Some((
+                ctx.model_selection.clone(),
+                ctx.prompt_transcript
+                    .as_ref()
+                    .map(|transcript| transcript.last_usage_tokens),
+            ));
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: crate::response::ExactHookText::default(),
+                stderr: crate::response::ExactHookText::default(),
+                exit_code: Some(0),
+                response: None,
+            }
+        }
+
+        fn id(&self) -> &str {
+            &self.id
+        }
     }
     #[async_trait]
     impl HookPromptRunner for RecordingRunner {
-        async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+        async fn run(
+            &self,
+            req: PromptHookRequest,
+        ) -> Result<Utf16JsonProjection, PromptHookError> {
             self.recorded.lock().unwrap().push(req);
             self.result
                 .lock()
@@ -4740,7 +4978,7 @@ mod prompt_dispatch_tests {
     fn pre_event() -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "rm -rf /"}),
+            tool_input: hook_json(r#"{"command":"rm -rf /"}"#),
             tool_use_id: ToolUseId::new(),
         }
     }
@@ -4802,8 +5040,27 @@ mod prompt_dispatch_tests {
             ..Default::default()
         };
         let child_snapshot = snapshot("child-only unpersisted evidence");
-        exec.publish_agent_prompt_transcript(session, child, child_snapshot.clone());
-        exec.publish_agent_prompt_transcript(session, other, snapshot("other child"));
+        let child_selection = crate::HookModelSelection {
+            model: "claude-sonnet-4-5".into(),
+            model_profile: Some("child-provider".into()),
+        };
+        let other_selection = crate::HookModelSelection {
+            model: "claude-haiku-4-5".into(),
+            model_profile: Some("other-provider".into()),
+        };
+        let other_snapshot = snapshot("other child");
+        exec.publish_agent_prompt_transcript(
+            session,
+            child,
+            child_selection.clone(),
+            child_snapshot.clone(),
+        );
+        exec.publish_agent_prompt_transcript(
+            session,
+            other,
+            other_selection.clone(),
+            other_snapshot.clone(),
+        );
         exec.execute_excluding_agent(
             HookEvent::SubagentStop {
                 agent_id: child,
@@ -4829,8 +5086,74 @@ mod prompt_dispatch_tests {
         assert!(exec
             .take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
             .is_none());
+        let (selected_model, other_transcript) = exec
+            .take_agent_prompt_transcript(session, other)
+            .expect("other child's route and transcript remain independently stored");
+        assert_eq!(selected_model, other_selection);
+        assert_eq!(other_transcript.messages, other_snapshot.messages);
         exec.clear_session_hooks(session).await;
         assert!(exec.take_agent_prompt_transcript(session, other).is_none());
+    }
+
+    #[tokio::test]
+    async fn parent_subagent_stop_restores_the_child_route_with_its_transcript() {
+        let captured = Arc::new(Mutex::new(None));
+        let handler = Arc::new(ContextCaptureHandler {
+            id: "capture-route".into(),
+            captured: captured.clone(),
+        });
+        let mut hook = prompt_hook();
+        hook.events = vec![HookEventType::SubagentStop];
+        hook.executor = DefHookExecutor::Builtin {
+            handler_id: "capture-route".into(),
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let mut exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(handler);
+
+        let session = SessionId::new();
+        let child = lingxi_core::types::AgentId::new();
+        let child_selection = crate::HookModelSelection {
+            model: "claude-sonnet-4-5".into(),
+            model_profile: Some("child-provider".into()),
+        };
+        exec.publish_agent_prompt_transcript(
+            session,
+            child,
+            child_selection.clone(),
+            crate::PromptHookTranscript {
+                last_usage_tokens: 987,
+                ..Default::default()
+            },
+        );
+
+        exec.execute_excluding_agent(
+            HookEvent::SubagentStop {
+                agent_id: child,
+                status: "completed".into(),
+                agent_type: "worker".into(),
+            },
+            HookContext {
+                session_id: session,
+                model_selection: Some(crate::HookModelSelection {
+                    model: "parent-model".into(),
+                    model_profile: None,
+                }),
+                ..Default::default()
+            },
+            child,
+        )
+        .await;
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some((Some(child_selection), Some(987)))
+        );
     }
 
     #[tokio::test]
@@ -4855,14 +5178,18 @@ mod prompt_dispatch_tests {
         let recorded = runner.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "the Prompt arm must reach the runner");
         assert!(
-            recorded[0].prompt.starts_with("Is this safe? "),
+            recorded[0]
+                .prompt
+                .string_at("")
+                .is_some_and(|prompt| prompt.starts_with("Is this safe? ")),
             "prompt template precedes the payload: {:?}",
-            recorded[0].prompt,
+            recorded[0].prompt.string_at(""),
         );
         assert!(
             recorded[0]
                 .prompt
-                .contains(r#""hook_event_name":"PreToolUse""#),
+                .string_at("")
+                .is_some_and(|prompt| prompt.contains(r#""hook_event_name":"PreToolUse""#)),
             "the serialized event payload is spliced into $ARGUMENTS",
         );
         assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));
@@ -4870,7 +5197,7 @@ mod prompt_dispatch_tests {
         // The runner's `{ok:false}` verdict surfaces as a Block decision.
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(
-            agg.reason.as_deref(),
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[Is this safe? $ARGUMENTS]: destructive")
         );
         assert!(agg.prevent_continuation);
@@ -4951,7 +5278,10 @@ mod prompt_dispatch_tests {
         )
         .await;
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("saw Stop"));
+        assert_eq!(
+            agg.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("saw Stop")
+        );
     }
 
     /// 🚨 A hook that throws must produce NO decision. If a crash read as an
@@ -4971,7 +5301,11 @@ mod prompt_dispatch_tests {
             .first()
             .expect("the function hook must actually have been dispatched");
         assert_eq!(result.outcome, HookOutcome::Error, "a throw is an error");
-        assert!(result.stderr.contains("boom"), "{}", result.stderr);
+        assert!(
+            result.stderr.display.contains("boom"),
+            "{}",
+            result.stderr.display
+        );
     }
 
     /// Same for exhausting the budget: a hook cannot buy an outcome by hanging.
@@ -4986,9 +5320,9 @@ mod prompt_dispatch_tests {
             .expect("the function hook must actually have been dispatched");
         assert_eq!(result.outcome, HookOutcome::Error);
         assert!(
-            result.stderr.contains("time budget"),
+            result.stderr.display.contains("time budget"),
             "the failure must be the BUDGET, not some other error: {}",
-            result.stderr
+            result.stderr.display
         );
         // It must have actually waited — a hook that returned instantly would
         // satisfy every assertion above while proving the budget never ran.
@@ -5034,7 +5368,10 @@ mod prompt_dispatch_tests {
         let recorded = runner.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert!(
-            recorded[0].prompt.contains(r#""hook_event_name":"Stop""#),
+            recorded[0]
+                .prompt
+                .string_at("")
+                .is_some_and(|prompt| prompt.contains(r#""hook_event_name":"Stop""#)),
             "Stop payload must be serialized into the prompt"
         );
         drop(recorded);
@@ -5063,7 +5400,7 @@ mod prompt_dispatch_tests {
         assert!(!agg.prevent_continuation);
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
-        assert!(r.stderr.contains("prompt executor not wired"));
+        assert!(r.stderr.display.contains("prompt executor not wired"));
     }
 
     /// SH-04: an `mcp_tool` settings entry now LOADS (the loader used to drop it
@@ -5082,7 +5419,7 @@ mod prompt_dispatch_tests {
             executor: DefHookExecutor::McpTool {
                 server: "linter".into(),
                 tool: "format_file".into(),
-                input: std::collections::HashMap::new(),
+                input: hook_json("{}"),
             },
             source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
@@ -5109,7 +5446,7 @@ mod prompt_dispatch_tests {
         assert!(!agg.prevent_continuation);
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
-        assert!(r.stderr.contains("mcp_tool executor not wired"));
+        assert!(r.stderr.display.contains("mcp_tool executor not wired"));
     }
 
     #[tokio::test]
@@ -5117,7 +5454,9 @@ mod prompt_dispatch_tests {
         let invoker = Arc::new(RecordingMcpInvoker {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(vec![HookMcpInvocationResult::Success {
-                text_content: vec![r#"{"decision":"block","reason":"denied"}"#.into()],
+                text_content: vec![crate::response::ExactHookText::from_text(
+                    r#"{"decision":"block","reason":"denied"}"#,
+                )],
             }]),
         });
         let mut registry = HookRegistry::new();
@@ -5129,10 +5468,9 @@ mod prompt_dispatch_tests {
             executor: DefHookExecutor::McpTool {
                 server: "audit".into(),
                 tool: "lint".into(),
-                input: std::collections::HashMap::from([
-                    ("path".into(), json!("${tool_input.command}")),
-                    ("event".into(), json!("hook:${hook_event_name}")),
-                ]),
+                input: hook_json(
+                    r#"{"path":"${tool_input.command}","event":"hook:${hook_event_name}"}"#,
+                ),
             },
             source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
@@ -5159,10 +5497,10 @@ mod prompt_dispatch_tests {
         assert_eq!(recorded[0].server, "audit");
         assert_eq!(recorded[0].tool, "lint");
         assert_eq!(recorded[0].timeout, Duration::from_secs(12));
-        assert_eq!(recorded[0].input.get("path"), Some(&json!("rm -rf /")));
+        assert_eq!(recorded[0].input.string_at("/path"), Some("rm -rf /"));
         assert_eq!(
-            recorded[0].input.get("event"),
-            Some(&json!("hook:PreToolUse"))
+            recorded[0].input.string_at("/event"),
+            Some("hook:PreToolUse")
         );
     }
 
@@ -5175,7 +5513,9 @@ mod prompt_dispatch_tests {
                     message: "server audit is not connected".into(),
                 },
                 HookMcpInvocationResult::Error {
-                    text_content: vec![r#"{"decision":"block","reason":"ignored"}"#.into()],
+                    text_content: vec![crate::response::ExactHookText::from_text(
+                        r#"{"decision":"block","reason":"ignored"}"#,
+                    )],
                     message: "tool returned isError".into(),
                 },
             ]),
@@ -5189,7 +5529,7 @@ mod prompt_dispatch_tests {
             executor: DefHookExecutor::McpTool {
                 server: "audit".into(),
                 tool: "lint".into(),
-                input: std::collections::HashMap::new(),
+                input: hook_json("{}"),
             },
             source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
@@ -5213,7 +5553,11 @@ mod prompt_dispatch_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert_eq!(agg.decision, None);
         assert!(matches!(agg.all_results[0].1.outcome, HookOutcome::Error));
-        assert!(agg.all_results[0].1.stderr.contains("not connected"));
+        assert!(agg.all_results[0]
+            .1
+            .stderr
+            .display
+            .contains("not connected"));
 
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -5227,7 +5571,7 @@ mod prompt_dispatch_tests {
         assert_eq!(agg.decision, None);
         assert!(matches!(agg.all_results[0].1.outcome, HookOutcome::Error));
         assert_eq!(
-            agg.all_results[0].1.stdout,
+            agg.all_results[0].1.stdout.display,
             r#"{"decision":"block","reason":"ignored"}"#
         );
         assert!(agg.all_results[0].1.response.is_none());

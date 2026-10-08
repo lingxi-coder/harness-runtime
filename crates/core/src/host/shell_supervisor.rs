@@ -137,6 +137,8 @@ struct Start {
     tag: SandboxedTag,
     owner: Option<String>,
     auto_background: bool,
+    #[serde(default)]
+    background_timeout: Option<Duration>,
     explicit: bool,
     limit: Option<usize>,
     task_id: String,
@@ -161,6 +163,8 @@ enum Request {
 struct Receipt {
     handoff: ShellProcessHandoff,
     exit_code: Option<i32>,
+    #[serde(default)]
+    stop_cause: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "response")]
@@ -176,6 +180,8 @@ enum Response {
         handoff: ShellProcessHandoff,
         terminal: bool,
         exit_code: Option<i32>,
+        #[serde(default)]
+        stop_cause: Option<String>,
     },
     Ack,
     Error {
@@ -238,7 +244,9 @@ fn validate_paths(handoff: &ShellProcessHandoff) -> Result<(), ProcessError> {
     }
     Ok(())
 }
-async fn inspect(handoff: &ShellProcessHandoff) -> Result<Option<Option<i32>>, ProcessError> {
+async fn inspect(
+    handoff: &ShellProcessHandoff,
+) -> Result<Option<(Option<i32>, Option<String>)>, ProcessError> {
     validate_paths(handoff)?;
     match tokio::time::timeout(
         Duration::from_secs(3),
@@ -255,7 +263,8 @@ async fn inspect(handoff: &ShellProcessHandoff) -> Result<Option<Option<i32>>, P
             handoff: actual,
             terminal,
             exit_code,
-        })) if same_identity(handoff, &actual) => Ok(terminal.then_some(exit_code)),
+            stop_cause,
+        })) if same_identity(handoff, &actual) => Ok(terminal.then_some((exit_code, stop_cause))),
         _ => {
             // Exact receipt remains valid after its supervisor exits. Read by
             // pinned/no-follow APIs, never infer completion from PID disappearance.
@@ -272,7 +281,7 @@ async fn inspect(handoff: &ShellProcessHandoff) -> Result<Option<Option<i32>>, P
             if !same_identity(handoff, &receipt.handoff) {
                 return Err(error("shell receipt identity mismatch"));
             }
-            Ok(Some(receipt.exit_code))
+            Ok(Some((receipt.exit_code, receipt.stop_cause)))
         }
     }
 }
@@ -299,7 +308,7 @@ pub fn supervisor_liveness(handoff: &ShellProcessHandoff) -> SupervisorLiveness 
 const LOST_SUPERVISOR_FOOTER: &str = "[supervisor lost; task failed]";
 async fn recover_failed_output(
     handoff: &ShellProcessHandoff,
-) -> Result<(Option<i32>, bool), ProcessError> {
+) -> Result<(Option<i32>, bool, Option<String>), ProcessError> {
     let output = Path::new(&handoff.output_path);
     let _ = output.parent().ok_or(ProcessError::Unsupported)?;
     let handoff = handoff.clone();
@@ -334,7 +343,7 @@ async fn recover_failed_output(
                 if !same_identity(&receipt.handoff, &handoff) {
                     return Err(error("terminal receipt identity mismatch"));
                 }
-                return Ok((receipt.exit_code, false));
+                return Ok((receipt.exit_code, false, receipt.stop_cause));
             }
             Err(crate::host::FsError::NotFound(_)) => {}
             Err(cause) => return Err(error(cause)),
@@ -359,6 +368,7 @@ async fn recover_failed_output(
         let receipt = Receipt {
             handoff,
             exit_code: Some(-1),
+            stop_cause: None,
         };
         crate::host::rooted_fs::atomic_write_pinned(
             &receipt_root,
@@ -373,7 +383,7 @@ async fn recover_failed_output(
             &receipt_id,
         )
         .map_err(error)?;
-        Ok((Some(-1), true))
+        Ok((Some(-1), true, None))
     })
     .await
     .map_err(error)?
@@ -543,6 +553,19 @@ pub async fn adopt(
         pid: handoff.pid,
     })
 }
+async fn notify_supervised_exit(
+    sink: &dyn BackgroundExitSink,
+    task_id: &str,
+    code: Option<i32>,
+    stop_cause: Option<&str>,
+) {
+    if stop_cause == Some("deadline") {
+        sink.on_supervised_background_deadline_exit(task_id, code)
+            .await;
+    } else {
+        sink.on_supervised_exit(task_id, code).await;
+    }
+}
 fn observe(handoff: ShellProcessHandoff, sink: Arc<dyn BackgroundExitSink>, live: Option<LiveJob>) {
     let live = live.unwrap_or_else(|| track(handoff.clone(), true));
     let cancel = live.cancel.clone();
@@ -560,9 +583,15 @@ fn observe(handoff: ShellProcessHandoff, sink: Arc<dyn BackgroundExitSink>, live
                 ()=tokio::time::sleep(Duration::from_secs(1))=>{}
             }
             match inspect(&handoff).await {
-                Ok(Some(code)) => {
+                Ok(Some((code, stop_cause))) => {
                     if !cancel.is_cancelled() {
-                        sink.on_supervised_exit(&handoff.task_id, code).await;
+                        notify_supervised_exit(
+                            sink.as_ref(),
+                            &handoff.task_id,
+                            code,
+                            stop_cause.as_deref(),
+                        )
+                        .await;
                     }
                     break;
                 }
@@ -587,8 +616,14 @@ fn observe(handoff: ShellProcessHandoff, sink: Arc<dyn BackgroundExitSink>, live
                             Err(ProcessError::Unsupported)
                         };
                         match recovery {
-                            Ok((code, false)) => {
-                                sink.on_supervised_exit(&handoff.task_id, code).await
+                            Ok((code, false, stop_cause)) => {
+                                notify_supervised_exit(
+                                    sink.as_ref(),
+                                    &handoff.task_id,
+                                    code,
+                                    stop_cause.as_deref(),
+                                )
+                                .await
                             }
                             _ => sink.on_supervision_lost(&handoff.task_id).await,
                         }
@@ -761,6 +796,7 @@ pub async fn execute(
         tag: command.tag().clone(),
         owner: command.process_owner().map(str::to_string),
         auto_background: command.auto_background_on_timeout(),
+        background_timeout: command.background_timeout(),
         explicit,
         limit,
         task_id: binding.task_id.clone(),
@@ -873,6 +909,7 @@ struct ServerState {
     delivered: bool,
     receipt_persisted: bool,
     killed: bool,
+    stop_cause: Option<String>,
     backgrounded: bool,
     spawn_accepted: bool,
 }
@@ -923,6 +960,14 @@ impl BackgroundExitSink for ServerSink {
     async fn flush_output(&self, id: &str) -> Result<(), ProcessError> {
         self.inner.flush_output(id).await
     }
+    async fn on_background_deadline_exit(&self, id: &str, code: Option<i32>) {
+        {
+            let mut state = self.state.lock().await;
+            state.killed = true;
+            state.stop_cause = Some("deadline".into());
+        }
+        self.on_exit(id, code).await;
+    }
     async fn on_exit(&self, id: &str, code: Option<i32>) {
         let killed = self.state.lock().await.killed;
         self.inner.on_exit_with_status(id, code, killed).await;
@@ -934,6 +979,7 @@ impl BackgroundExitSink for ServerSink {
                 &Receipt {
                     handoff,
                     exit_code: code,
+                    stop_cause: state.stop_cause.clone(),
                 },
             )
             .is_ok();
@@ -1009,7 +1055,7 @@ pub async fn run_at(
     let bootstrap_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let mut stream = tokio::select! { accepted=listener.accept()=>accepted.map_err(error)?,
-        _=retry.tick()=>{let mut current=state.lock().await;if !current.receipt_persisted {if let (Some(handoff),Some(code))=(current.handoff.clone(),current.exit_code){current.receipt_persisted=write_receipt(&directory,&Receipt{handoff,exit_code:code}).is_ok();if current.receipt_persisted&&current.delivered{done.cancel();}}}continue;}, ()=tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none()=>{let _=std::fs::remove_file(&socket);return Ok(());}, ()=done.cancelled()=>{let _=std::fs::remove_file(&socket);return Ok(());} };
+        _=retry.tick()=>{let mut current=state.lock().await;if !current.receipt_persisted {if let (Some(handoff),Some(code))=(current.handoff.clone(),current.exit_code){current.receipt_persisted=write_receipt(&directory,&Receipt{handoff,exit_code:code,stop_cause:current.stop_cause.clone()}).is_ok();if current.receipt_persisted&&current.delivered{done.cancel();}}}continue;}, ()=tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none()=>{let _=std::fs::remove_file(&socket);return Ok(());}, ()=done.cancelled()=>{let _=std::fs::remove_file(&socket);return Ok(());} };
         let state = state.clone();
         let background = background.clone();
         let stop = stop.clone();
@@ -1114,6 +1160,7 @@ pub async fn run_at(
                     let command = SandboxedCommand::__new_sandboxed(start.command, start.tag)
                         .with_process_owner(start.owner)
                         .with_auto_background_on_timeout(start.auto_background)
+                        .with_background_timeout(start.background_timeout)
                         .with_background_task(BackgroundTaskBinding {
                             task_id: start.task_id.clone(),
                             output_path: start.output.clone(),
@@ -1178,6 +1225,7 @@ pub async fn run_at(
                                         &Receipt {
                                             handoff: handoff.clone(),
                                             exit_code: code,
+                                            stop_cause: state.stop_cause.clone(),
                                         },
                                     )
                                     .is_ok();
@@ -1218,6 +1266,7 @@ pub async fn run_at(
                                     handoff,
                                     terminal: state.exit_code.is_some(),
                                     exit_code: state.exit_code.flatten(),
+                                    stop_cause: state.stop_cause.clone(),
                                 },
                             ),
                             Request::SpawnAccepted { .. } => {
@@ -1374,6 +1423,38 @@ mod recovery_tests {
         }
     }
     #[tokio::test]
+    async fn background_deadline_survives_receipt_recovery_and_supervised_delivery() {
+        struct Sink(std::sync::atomic::AtomicBool);
+        #[async_trait::async_trait]
+        impl BackgroundExitSink for Sink {
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                panic!("deadline must retain its cause");
+            }
+            async fn on_background_deadline_exit(&self, _: &str, code: Option<i32>) {
+                assert_eq!(code, None);
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let h = fixture(dir.path(), "before\n[killed]\n");
+        write_receipt(
+            Path::new(&h.receipt_path).parent().unwrap(),
+            &Receipt {
+                handoff: h.clone(),
+                exit_code: None,
+                stop_cause: Some("deadline".into()),
+            },
+        )
+        .unwrap();
+        let (code, lost, cause) = recover_failed_output(&h).await.unwrap();
+        assert!(!lost);
+        assert_eq!(cause.as_deref(), Some("deadline"));
+        let sink = Sink(std::sync::atomic::AtomicBool::new(false));
+        notify_supervised_exit(&sink, &h.task_id, code, cause.as_deref()).await;
+        assert!(sink.0.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn recovery_preserves_late_receipt_and_deduplicates_terminal_output() {
         let dir = tempfile::tempdir().unwrap();
         let h = fixture(dir.path(), "body\n[exited with code 7]\n");
@@ -1383,13 +1464,23 @@ mod recovery_tests {
             &Receipt {
                 handoff: h.clone(),
                 exit_code: Some(7),
+                stop_cause: None,
             },
         )
         .unwrap();
-        assert_eq!(recover_failed_output(&h).await.unwrap(), (Some(7), false));
+        assert_eq!(
+            recover_failed_output(&h).await.unwrap(),
+            (Some(7), false, None)
+        );
         std::fs::remove_file(&h.receipt_path).unwrap();
-        assert_eq!(recover_failed_output(&h).await.unwrap(), (Some(-1), true));
-        assert_eq!(recover_failed_output(&h).await.unwrap(), (Some(-1), false));
+        assert_eq!(
+            recover_failed_output(&h).await.unwrap(),
+            (Some(-1), true, None)
+        );
+        assert_eq!(
+            recover_failed_output(&h).await.unwrap(),
+            (Some(-1), false, None)
+        );
         assert_eq!(
             std::fs::read_to_string(&h.output_path).unwrap(),
             "body\n[exited with code 7]\n"
@@ -1431,6 +1522,7 @@ mod recovery_tests {
                         &Receipt {
                             handoff: conflict,
                             exit_code: Some(0),
+                            stop_cause: None,
                         },
                     )
                     .unwrap();

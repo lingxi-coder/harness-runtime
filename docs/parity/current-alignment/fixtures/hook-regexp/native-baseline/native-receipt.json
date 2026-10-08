@@ -1,0 +1,112 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "argv": [
+    "/private/tmp/mods-current-native-293-reference-v1614/claude",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--plugin-dir",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hook-regexp/run-output/native-plugin",
+    "--print",
+    "--no-session-persistence",
+    "--tools",
+    "",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002936",
+    "--debug",
+    "hooks",
+    "Run the Hook matcher fixture."
+  ],
+  "working_directory": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hook-regexp/run-output/run/cwd",
+  "network_boundary": {
+    "base_url": "http://127.0.0.1:54867",
+    "dummy_api_key_only": true,
+    "proxy_variables_passed": false,
+    "telemetry_disabled_by_fixture_environment": true,
+    "upstream_relay": false,
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/v1/messages?beta=true",
+        "accepted": true,
+        "dummy_key_matched": true,
+        "request_bytes": 41742,
+        "request_sha256": "910a37418eea6f3c9e6ab747403dfa09db148f22ddf0d5145cbb667a71ba58db",
+        "stream": true
+      }
+    ]
+  },
+  "native_exit_code": 0,
+  "timed_out": false,
+  "stdout_bytes": 17,
+  "stdout_sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637",
+  "stderr_bytes": 0,
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "expected_matches": [
+    "lookbehind",
+    "lookahead",
+    "backreference",
+    "cross-ascii-to-pua-range",
+    "unpaired-pattern-unit-alternative",
+    "feff-in-pattern",
+    "nel-in-pattern"
+  ],
+  "actual_matches": [
+    "lookahead",
+    "nel-in-pattern",
+    "cross-ascii-to-pua-range",
+    "feff-in-pattern",
+    "lookbehind",
+    "unpaired-pattern-unit-alternative",
+    "backreference"
+  ],
+  "native_event_inputs": {
+    "lookbehind": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "lookahead": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "backreference": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "cross-ascii-to-pua-range": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "unpaired-pattern-unit-alternative": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "feff-in-pattern": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    },
+    "nel-in-pattern": {
+      "bytes": 645,
+      "sha256": "0c40e27b5e536328e0eb80d620c5215428b5fc29bb2f9f7d5d3d9df80fe2e443",
+      "source": "startup"
+    }
+  },
+  "all_expected_event_sources_are_startup": true,
+  "expected_nonmatches_absent": true,
+  "all_expected_matches_observed": true,
+  "debug_mentions_session_start": false,
+  "debug_mentions_startup_query": false,
+  "native_match_result": "passed",
+  "scope": "Native public CLI SessionStart command-hook matcher fixture only; not a Harness byte-parity claim"
+}

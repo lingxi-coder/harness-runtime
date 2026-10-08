@@ -65,6 +65,7 @@
 //! is NO `<system-reminder>` wrapper (unlike the skill-/task-notification
 //! reminders). The exact texts are locked in [`V1_BASE`] / [`V2_BASE`] below.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::TodoState;
 
 /// `rqt.TURNS_SINCE_WRITE` — assistant turns since the last TodoWrite/Task call
@@ -117,6 +118,30 @@ fn status_wire(s: TodoState) -> &'static str {
         TodoState::Pending => "pending",
         TodoState::InProgress => "in_progress",
         TodoState::Completed => "completed",
+    }
+}
+
+#[derive(Default)]
+struct ReminderTextBuilder {
+    units: Vec<u16>,
+}
+
+impl ReminderTextBuilder {
+    fn push_text(&mut self, text: &str) {
+        self.units.extend(text.encode_utf16());
+    }
+
+    fn push_source(&mut self, source: &Utf16JsonProjection) {
+        self.units.extend(
+            source
+                .string_units("")
+                .expect("todo reminder content is a root source string"),
+        );
+    }
+
+    fn finish(self) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&self.units), self.units)
+            .expect("reminder text is a root source string")
     }
 }
 
@@ -183,18 +208,21 @@ pub fn select_mode(main_loop_model: Option<&str>) -> Option<ReminderMode> {
 /// is appended; each item is `"${idx}. [${status}] ${content}"` (1-based idx),
 /// joined by `\n`, wrapped in `[...]`.
 #[must_use]
-pub fn render_v1(items: &[(TodoState, String)]) -> String {
-    let mut r = String::from(V1_BASE);
+pub fn render_v1(items: &[(TodoState, Utf16JsonProjection)]) -> Utf16JsonProjection {
+    let mut rendered = ReminderTextBuilder::default();
+    rendered.push_text(V1_BASE);
     if !items.is_empty() {
-        let body = items
-            .iter()
-            .enumerate()
-            .map(|(i, (st, content))| format!("{}. [{}] {}", i + 1, status_wire(*st), content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        r.push_str(&format!("\n\n{V1_ITEMS_HEADER}\n\n[{body}]"));
+        rendered.push_text(&format!("\n\n{V1_ITEMS_HEADER}\n\n["));
+        for (index, (status, content)) in items.iter().enumerate() {
+            if index > 0 {
+                rendered.push_text("\n");
+            }
+            rendered.push_text(&format!("{}. [{}] ", index + 1, status_wire(*status)));
+            rendered.push_source(content);
+        }
+        rendered.push_text("]");
     }
-    r
+    rendered.finish()
 }
 
 /// Render the V2 (`task_reminder`) body. `items` = `(id, status, subject)`
@@ -202,17 +230,20 @@ pub fn render_v1(items: &[(TodoState, String)]) -> String {
 /// (NO `[...]` wrapping, unlike V1) is appended; each item is
 /// `"#${id}. [${status}] ${subject}"`, joined by `\n`.
 #[must_use]
-pub fn render_v2(items: &[(String, TodoState, String)]) -> String {
-    let mut r = v2_base();
+pub fn render_v2(items: &[(String, TodoState, Utf16JsonProjection)]) -> Utf16JsonProjection {
+    let mut rendered = ReminderTextBuilder::default();
+    rendered.push_text(&v2_base());
     if !items.is_empty() {
-        let body = items
-            .iter()
-            .map(|(id, st, subject)| format!("#{id}. [{}] {subject}", status_wire(*st)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        r.push_str(&format!("\n\n{V2_ITEMS_HEADER}\n\n{body}"));
+        rendered.push_text(&format!("\n\n{V2_ITEMS_HEADER}\n\n"));
+        for (index, (id, status, subject)) in items.iter().enumerate() {
+            if index > 0 {
+                rendered.push_text("\n");
+            }
+            rendered.push_text(&format!("#{id}. [{}] ", status_wire(*status)));
+            rendered.push_source(subject);
+        }
     }
-    r
+    rendered.finish()
 }
 
 #[cfg(test)]
@@ -240,18 +271,22 @@ mod tests {
     fn v1_base_is_byte_exact_with_no_items() {
         let out = render_v1(&[]);
         assert_eq!(
-            out,
-            "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            out.string_at(""),
+            Some("The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n")
         );
     }
 
     #[test]
     fn v1_with_items_appends_bracketed_block() {
         let items = vec![
-            (TodoState::Pending, "first thing".to_string()),
-            (TodoState::InProgress, "second thing".to_string()),
+            (TodoState::Pending, Utf16JsonProjection::from("first thing")),
+            (
+                TodoState::InProgress,
+                Utf16JsonProjection::from("second thing"),
+            ),
         ];
         let out = render_v1(&items);
+        let out = out.string_at("").expect("reminder is a source string");
         assert!(out.ends_with(
             "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first thing\n2. [in_progress] second thing]"
         ), "got: {out:?}");
@@ -263,18 +298,27 @@ mod tests {
     fn v2_base_is_byte_exact_with_no_items() {
         let out = render_v2(&[]);
         assert_eq!(
-            out,
-            "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            out.string_at(""),
+            Some("The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n")
         );
     }
 
     #[test]
     fn v2_with_items_appends_unbracketed_block() {
         let items = vec![
-            ("1".to_string(), TodoState::Completed, "alpha".to_string()),
-            ("2".to_string(), TodoState::Pending, "beta".to_string()),
+            (
+                "1".to_string(),
+                TodoState::Completed,
+                Utf16JsonProjection::from("alpha"),
+            ),
+            (
+                "2".to_string(),
+                TodoState::Pending,
+                Utf16JsonProjection::from("beta"),
+            ),
         ];
         let out = render_v2(&items);
+        let out = out.string_at("").expect("reminder is a source string");
         assert!(
             out.ends_with(
                 "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"
@@ -282,6 +326,19 @@ mod tests {
             "got: {out:?}"
         );
         assert!(out.starts_with("The task tools haven't been used recently."));
+    }
+
+    #[test]
+    fn v1_and_v2_reminders_keep_lone_utf16_units_in_task_text() {
+        let subject = Utf16JsonProjection::parse(r#""left\ud800right""#)
+            .expect("lone UTF-16 surrogate is valid JSON source");
+        let v1 = render_v1(&[(TodoState::Pending, subject.clone())]);
+        let v2 = render_v2(&[("task-1".into(), TodoState::Pending, subject)]);
+        for rendered in [v1, v2] {
+            let units = rendered.string_units("").expect("root reminder text");
+            assert!(units.contains(&0xd800));
+            assert!(String::from_utf16_lossy(&units).contains("left�right"));
+        }
     }
 
     #[test]

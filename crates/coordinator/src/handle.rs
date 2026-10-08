@@ -86,7 +86,7 @@ impl MailboxRouterHandle for MailboxRouter {
             from,
             from_name: from_agent.to_string(),
             content: message.content,
-            summary: None,
+            summary: message.summary,
             message_id: message.message_id,
             timestamp: message.timestamp,
             request_id: None,
@@ -130,7 +130,7 @@ impl MailboxRouterHandle for MailboxRouter {
                 from: sender_id.map_or(MessageSender::Coordinator, MessageSender::Teammate),
                 from_name: from_agent.to_string(),
                 content: message.content.clone(),
-                summary: None,
+                summary: message.summary.clone(),
                 message_id: message.message_id.clone(),
                 timestamp: message.timestamp,
                 request_id: None,
@@ -221,6 +221,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "m1".into(),
                     content: "hi".into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -250,6 +251,7 @@ mod tests {
             MailboxMessage {
                 message_id: "m1".into(),
                 content: "carry on".into(),
+                summary: None,
                 timestamp: SystemTime::now(),
                 color: None,
             },
@@ -265,6 +267,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "m2".into(),
                     content: "x".into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -287,6 +290,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "m1".into(),
                     content: "hi".into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -318,6 +322,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "m1".into(),
                     content: r#"{"type":"task_assignment"}"#.into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -335,7 +340,10 @@ mod tests {
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1, "exactly one message delivered");
         assert!(matches!(drained[0].from, MessageSender::Coordinator));
-        assert_eq!(drained[0].content, r#"{"type":"task_assignment"}"#);
+        assert_eq!(
+            drained[0].content.string_units(""),
+            Some(r#"{"type":"task_assignment"}"#.encode_utf16().collect())
+        );
     }
 
     /// A teammate-name SENDER resolves to `Teammate(id)`, and an unknown
@@ -359,6 +367,7 @@ mod tests {
             MailboxMessage {
                 message_id: "m2".into(),
                 content: "hi".into(),
+                summary: None,
                 timestamp: SystemTime::now(),
                 color: None,
             },
@@ -381,6 +390,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "m3".into(),
                     content: "x".into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -413,6 +423,7 @@ mod tests {
                 MailboxMessage {
                     message_id: "broadcast-1".into(),
                     content: "status update".into(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -430,7 +441,10 @@ mod tests {
         for recipient in [beta, gamma] {
             let messages = reg.mailbox_router.get(&recipient).await.unwrap().drain();
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].content, "status update");
+            assert_eq!(
+                messages[0].content.string_units(""),
+                Some("status update".encode_utf16().collect())
+            );
             assert!(matches!(messages[0].from, MessageSender::Teammate(id) if id == alpha));
         }
     }

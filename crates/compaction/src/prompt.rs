@@ -28,6 +28,8 @@
 //!   `o` parameter — a REPL-subsystem addendum) remains an intentional
 //!   deferral; the REPL VM-state reset is a separate finding.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 /// Aggressive no-tools preamble — prompt.ts:19-26.
 ///
 /// Byte-faithful (trailing blank line included, matching the template
@@ -456,6 +458,239 @@ pub fn get_compact_user_summary_message_with(
     }
 
     base_summary
+}
+
+pub fn format_compact_summary_source(summary: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut source = summary
+        .string_units("")
+        .expect("compaction summary source is a root string");
+    if let Some((start, end)) = source_span(&source, "<analysis>", "</analysis>") {
+        source.drain(start..end);
+    }
+    let formatted = if let Some((start, end)) = source_span(&source, "<summary>", "</summary>") {
+        let inner_start = start + "<summary>".encode_utf16().count();
+        let inner_end = end - "</summary>".encode_utf16().count();
+        let content = trim_js_source_units(&source[inner_start..inner_end]);
+        let mut output = source[..start].to_vec();
+        output.extend("Summary:\n".encode_utf16());
+        append_replacement_template(&mut output, &content, &source, start, end);
+        output.extend_from_slice(&source[end..]);
+        output
+    } else {
+        source
+    };
+    source_projection(trim_js_source_units(&collapse_source_blank_lines(
+        &formatted,
+    )))
+}
+
+pub fn get_compact_user_summary_message_with_source(
+    summary: &Utf16JsonProjection,
+    suppress_follow_up_questions: bool,
+    transcript_path: Option<&str>,
+    recent_messages_preserved: bool,
+    head_truncated: bool,
+) -> Utf16JsonProjection {
+    let formatted_summary = format_compact_summary_source(summary)
+        .string_units("")
+        .expect("formatted summary is a root string");
+    let mut units = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(formatted_summary);
+    if let Some(path) = transcript_path.filter(|path| !path.is_empty()) {
+        units.extend("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: ".encode_utf16());
+        units.extend(path.encode_utf16());
+    }
+    if recent_messages_preserved {
+        units.extend("\n\nRecent messages are preserved verbatim.".encode_utf16());
+    }
+    if head_truncated {
+        units.extend("\n\nNote: the earliest part of the conversation was too large to include and is NOT covered by this summary".encode_utf16());
+        if transcript_path.is_some_and(|path| !path.is_empty()) {
+            units.extend(" (the full transcript mentioned above still has it)".encode_utf16());
+        }
+        units.extend(". If the task turns out to depend on something from that part, say so plainly rather than guessing at it.".encode_utf16());
+    }
+    if suppress_follow_up_questions {
+        units.extend("\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.".encode_utf16());
+    }
+    source_projection(units)
+}
+
+pub fn trim_compact_source_text(source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = source
+        .string_units("")
+        .expect("compaction text source is a root string");
+    source_projection(trim_js_source_units(&units))
+}
+
+pub fn get_compact_prompt_source(
+    custom_instructions: Option<&Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    let mut units = NO_TOOLS_PREAMBLE.encode_utf16().collect::<Vec<_>>();
+    units.extend(BASE_COMPACT_PROMPT.encode_utf16());
+    if let Some(custom) = custom_instructions {
+        let custom_units = custom
+            .string_units("")
+            .expect("compact instructions are a string");
+        if !trim_js_source_units(&custom_units).is_empty() {
+            units.extend("\n\nAdditional Instructions:\n".encode_utf16());
+            units.extend(custom_units);
+        }
+    }
+    units.extend(NO_TOOLS_TRAILER.encode_utf16());
+    source_projection(units)
+}
+
+pub fn get_summarize_prompt_source(
+    custom_instructions: Option<&Utf16JsonProjection>,
+    direction: SummarizeDirection,
+) -> Utf16JsonProjection {
+    let body = match direction {
+        SummarizeDirection::UpTo => SUMMARIZE_UP_TO_PROMPT,
+        SummarizeDirection::From => SUMMARIZE_FROM_PROMPT,
+    };
+    let mut units = NO_TOOLS_PREAMBLE.encode_utf16().collect::<Vec<_>>();
+    units.extend(body.encode_utf16());
+    if let Some(custom) = custom_instructions {
+        let custom_units = custom
+            .string_units("")
+            .expect("summarize instructions are a string");
+        if !trim_js_source_units(&custom_units).is_empty() {
+            units.extend("\n\nAdditional Instructions:\n".encode_utf16());
+            units.extend(custom_units);
+        }
+    }
+    units.extend(NO_TOOLS_TRAILER.encode_utf16());
+    source_projection(units)
+}
+
+fn source_projection(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text is derived from the source UTF-16 units")
+}
+
+fn source_span(haystack: &[u16], open: &str, close: &str) -> Option<(usize, usize)> {
+    let open = open.encode_utf16().collect::<Vec<_>>();
+    let close = close.encode_utf16().collect::<Vec<_>>();
+    let start = find_source_units(haystack, &open, 0)?;
+    let close_at = find_source_units(haystack, &close, start + open.len())?;
+    Some((start, close_at + close.len()))
+}
+
+fn find_source_units(haystack: &[u16], needle: &[u16], from: usize) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset)
+}
+
+fn append_replacement_template(
+    output: &mut Vec<u16>,
+    replacement: &[u16],
+    original: &[u16],
+    match_start: usize,
+    match_end: usize,
+) {
+    let mut index = 0;
+    while index < replacement.len() {
+        if replacement[index] != u16::from(b'$') || index + 1 == replacement.len() {
+            output.push(replacement[index]);
+            index += 1;
+            continue;
+        }
+        match replacement[index + 1] {
+            unit if unit == u16::from(b'$') => {
+                output.push(u16::from(b'$'));
+                index += 2;
+            }
+            unit if unit == u16::from(b'&') => {
+                output.extend_from_slice(&original[match_start..match_end]);
+                index += 2;
+            }
+            unit if unit == 96 => {
+                output.extend_from_slice(&original[..match_start]);
+                index += 2;
+            }
+            unit if unit == u16::from(b'\'') => {
+                output.extend_from_slice(&original[match_end..]);
+                index += 2;
+            }
+            _ => {
+                output.push(u16::from(b'$'));
+                index += 1;
+            }
+        }
+    }
+}
+
+fn trim_js_source_units(units: &[u16]) -> Vec<u16> {
+    let mut index = 0;
+    let mut last_non_whitespace = 0;
+    while index < units.len() {
+        let (width, is_whitespace) = match char::decode_utf16(units[index..].iter().copied()).next()
+        {
+            Some(Ok(ch)) => (
+                ch.len_utf16(),
+                (ch.is_whitespace() && ch != '\u{0085}') || ch == '\u{feff}',
+            ),
+            Some(Err(_)) => (1, false),
+            None => break,
+        };
+        index += width;
+        if !is_whitespace {
+            last_non_whitespace = index;
+        }
+    }
+    units[..last_non_whitespace].to_vec()
+}
+
+fn collapse_source_blank_lines(units: &[u16]) -> Vec<u16> {
+    let mut output = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        if units[index] != u16::from(b'\n') {
+            output.push(units[index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < units.len() && units[index] == u16::from(b'\n') {
+            index += 1;
+        }
+        output.extend(std::iter::repeat_n(
+            u16::from(b'\n'),
+            if index - start >= 2 { 2 } else { 1 },
+        ));
+    }
+    output
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn summary_formatting_keeps_unpaired_units() {
+        let units = "<analysis>scratch</analysis><summary>kept "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("\n\ntext</summary>".encode_utf16())
+            .collect::<Vec<_>>();
+        let source = source_projection(units);
+        let formatted = format_compact_summary_source(&source);
+        let formatted_units = formatted.string_units("").unwrap();
+        assert!(formatted_units.contains(&0xd800));
+        assert_eq!(
+            String::from_utf16_lossy(&formatted_units),
+            "Summary:\nkept �\n\ntext"
+        );
+        let message =
+            get_compact_user_summary_message_with_source(&source, true, None, false, false);
+        assert!(message.string_units("").unwrap().contains(&0xd800));
+    }
 }
 
 #[cfg(test)]

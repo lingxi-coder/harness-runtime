@@ -78,7 +78,9 @@ impl BuiltinCommandHandler for VersionHandler {
             self.build_info.version, self.build_info.git_sha_short
         );
         telemetry::emit_command_completed(cmd_evt::VERSION_COMPLETED, "");
-        CommandResult::Done { display: Some(s) }
+        CommandResult::Done {
+            display: Some((s).into()),
+        }
     }
     fn name(&self) -> &str {
         "version"
@@ -94,8 +96,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "version".to_string(),
-            raw_args: String::new(),
+            name: "version".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -123,7 +125,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(display, "lingxi-cli unknown (unknown)");
+        assert_eq!(display.string_at(""), Some("lingxi-cli unknown (unknown)"));
     }
 
     #[tokio::test]

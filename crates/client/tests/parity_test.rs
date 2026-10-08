@@ -189,6 +189,7 @@ fn task_record_parity() {
         status: "running".to_string(),
         description: "cargo build".to_string(),
         command: None,
+        agent_facts: None,
         ..Default::default()
     };
     let completed = TaskRecord {
@@ -197,6 +198,7 @@ fn task_record_parity() {
         status: "completed".to_string(),
         description: "explore".to_string(),
         command: None,
+        agent_facts: None,
         ..Default::default()
     };
 
@@ -227,6 +229,7 @@ fn task_agent_identity_is_the_runner_and_never_a_shell_creator() {
         let record = TaskRecord {
             task_type: task_type.into(),
             owner_agent_id: Some("agent:runner-or-creator".into()),
+            agent_facts: None,
             ..Default::default()
         };
         assert_eq!(
@@ -238,6 +241,7 @@ fn task_agent_identity_is_the_runner_and_never_a_shell_creator() {
     assert_eq!(
         lower_task_record(&TaskRecord {
             task_type: "local_agent".into(),
+            agent_facts: None,
             ..Default::default()
         })
         .agent_id,

@@ -9,7 +9,9 @@
 
 use command_api::model::BuiltinCommandHandler;
 use command_api::{CommandResult, ParsedSlashCommand};
-use serde_json::{json, Value};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use tool_api::{BuiltinToolContext, Tool, ToolCallResult, ToolUseContext};
 
 const USAGE: &str = "Usage: /cron <schedule or action>\n\
@@ -24,10 +26,10 @@ Examples:\n\
 enum ParsedCronCommand {
     Usage,
     List,
-    Delete(Option<String>),
+    Delete(Option<Utf16JsonProjection>),
     Create {
         cron: String,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         recurring: bool,
         durable: bool,
     },
@@ -161,7 +163,7 @@ fn parse_raw_cron(args: &str) -> Option<Result<ParsedCronCommand, String>> {
         && !prompt.contains("仅本次会话");
     Some(Ok(ParsedCronCommand::Create {
         cron: expression,
-        prompt,
+        prompt: prompt.into(),
         recurring,
         durable,
     }))
@@ -188,7 +190,7 @@ fn parse_natural_schedule(args: &str) -> Option<Result<ParsedCronCommand, String
         }
         return Some(Ok(ParsedCronCommand::Create {
             cron: format!("{minute} {hour} * * {day_of_week}"),
-            prompt: prompt.to_string(),
+            prompt: prompt.to_string().into(),
             recurring: true,
             durable: true,
         }));
@@ -216,7 +218,7 @@ fn parse_natural_schedule(args: &str) -> Option<Result<ParsedCronCommand, String
         }
         return Some(Ok(ParsedCronCommand::Create {
             cron: format!("{minute} {hour} * * {day_of_week}"),
-            prompt: prompt.to_string(),
+            prompt: prompt.to_string().into(),
             recurring: true,
             durable: true,
         }));
@@ -224,7 +226,7 @@ fn parse_natural_schedule(args: &str) -> Option<Result<ParsedCronCommand, String
     None
 }
 
-fn parse_cron_command(args: &str) -> Result<ParsedCronCommand, String> {
+fn parse_cron_command_text(args: &str) -> Result<ParsedCronCommand, String> {
     let args = args.trim();
     if args.is_empty() {
         return Ok(ParsedCronCommand::Usage);
@@ -250,7 +252,7 @@ fn parse_cron_command(args: &str) -> Result<ParsedCronCommand, String> {
         {
             let id = args[prefix.len()..].trim();
             return Ok(ParsedCronCommand::Delete(
-                (!id.is_empty()).then(|| id.to_string()),
+                (!id.is_empty()).then(|| id.to_string().into()),
             ));
         }
     }
@@ -265,24 +267,133 @@ fn parse_cron_command(args: &str) -> Result<ParsedCronCommand, String> {
     Err("Could not understand the schedule. Use a form such as 'every day at 9am ...', '每天早上...', or begin with a five-field cron expression.".into())
 }
 
-fn tool_result_text(result: ToolCallResult) -> String {
-    result
-        .model_content
-        .or_else(|| {
-            result
+fn parser_text(source: &Utf16JsonProjection) -> (String, HashMap<char, u16>) {
+    let units = source
+        .string_units("")
+        .expect("cron command arguments are a root string");
+    let mut unavailable = HashSet::new();
+    let mut index = 0;
+    while index < units.len() {
+        if (0xd800..=0xdbff).contains(&units[index])
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000
+                + (((u32::from(units[index]) - 0xd800) << 10)
+                    | (u32::from(units[index + 1]) - 0xdc00));
+            unavailable.insert(scalar);
+            index += 2;
+        } else if (0xd800..=0xdfff).contains(&units[index]) {
+            index += 1;
+        } else {
+            unavailable.insert(u32::from(units[index]));
+            index += 1;
+        }
+    }
+
+    let mut markers = HashMap::new();
+    let mut by_unit = HashMap::<u16, char>::new();
+    let mut text = String::new();
+    let mut next_marker = 0xf0000_u32;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000
+                + (((u32::from(unit) - 0xd800) << 10) | (u32::from(units[index + 1]) - 0xdc00));
+            text.push(char::from_u32(scalar).expect("valid surrogate pair"));
+            index += 2;
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            let marker = *by_unit.entry(unit).or_insert_with(|| {
+                while unavailable.contains(&next_marker) || char::from_u32(next_marker).is_none() {
+                    next_marker += 1;
+                    assert!(next_marker < 0x10fffe, "no cron source marker is available");
+                }
+                let marker = char::from_u32(next_marker).expect("available marker scalar");
+                unavailable.insert(next_marker);
+                next_marker += 1;
+                markers.insert(marker, unit);
+                marker
+            });
+            text.push(marker);
+            index += 1;
+        } else {
+            text.push(char::from_u32(u32::from(unit)).expect("non-surrogate BMP unit"));
+            index += 1;
+        }
+    }
+    (text, markers)
+}
+
+fn restore_source_text(text: &str, markers: &HashMap<char, u16>) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for scalar in text.chars() {
+        if let Some(unit) = markers.get(&scalar) {
+            units.push(*unit);
+        } else {
+            units.extend(scalar.encode_utf16(&mut [0; 2]).iter().copied());
+        }
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("restored cron text is a root string")
+}
+
+fn parse_cron_command(args: &Utf16JsonProjection) -> Result<ParsedCronCommand, String> {
+    let (text, markers) = parser_text(args);
+    let command = parse_cron_command_text(&text)?;
+    Ok(match command {
+        ParsedCronCommand::Delete(Some(id)) => ParsedCronCommand::Delete(Some(
+            restore_source_text(id.string_at("").unwrap_or_default(), &markers),
+        )),
+        ParsedCronCommand::Create {
+            cron,
+            prompt,
+            recurring,
+            durable,
+        } => ParsedCronCommand::Create {
+            cron,
+            prompt: restore_source_text(prompt.string_at("").unwrap_or_default(), &markers),
+            recurring,
+            durable,
+        },
+        other => other,
+    })
+}
+
+fn tool_result_text(result: ToolCallResult) -> Utf16JsonProjection {
+    if let Some(content) = result.model_content {
+        return content;
+    }
+    for pointer in ["/content", "/message"] {
+        if result.data.string_units(pointer).is_some() {
+            return result
                 .data
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            result
-                .data
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| result.data.to_string())
+                .subprojection(pointer)
+                .expect("a string field can be re-rooted as a projection");
+        }
+    }
+    result.data.to_json_string().unwrap_or_default().into()
+}
+
+fn append_generated_text(source: &Utf16JsonProjection, suffix: &str) -> Utf16JsonProjection {
+    let mut units = source.string_units("").unwrap_or_default();
+    units.extend(suffix.encode_utf16());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("appended cron command display is a root string")
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("generated cron tool input is valid JSON")
+}
+
+fn source_bool(value: bool) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&Value::Bool(value))
+        .expect("generated boolean is valid JSON")
 }
 
 pub(crate) struct DesktopCronCommandHandler {
@@ -294,7 +405,11 @@ impl DesktopCronCommandHandler {
         Self { ctx }
     }
 
-    async fn call_tool<T: Tool + Sync>(&self, tool: &T, input: Value) -> Result<String, String> {
+    async fn call_tool<T: Tool + Sync>(
+        &self,
+        tool: &T,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, String> {
         let call_ctx = ToolUseContext::model_seed(self.ctx.default_model.clone());
         tool.validate_input(&input, &call_ctx)
             .await
@@ -306,9 +421,12 @@ impl DesktopCronCommandHandler {
             .map_err(|error| error.to_string())
     }
 
-    async fn list(&self) -> Result<String, String> {
-        self.call_tool(&tool_cron::CronListTool::new(self.ctx.clone()), json!({}))
-            .await
+    async fn list(&self) -> Result<Utf16JsonProjection, String> {
+        self.call_tool(
+            &tool_cron::CronListTool::new(self.ctx.clone()),
+            source_object(Vec::new()),
+        )
+        .await
     }
 }
 
@@ -316,19 +434,22 @@ impl DesktopCronCommandHandler {
 impl BuiltinCommandHandler for DesktopCronCommandHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         let display = match parse_cron_command(&args.raw_args) {
-            Ok(ParsedCronCommand::Usage) => USAGE.to_string(),
-            Ok(ParsedCronCommand::List) => self.list().await.unwrap_or_else(|error| error),
+            Ok(ParsedCronCommand::Usage) => USAGE.into(),
+            Ok(ParsedCronCommand::List) => self.list().await.unwrap_or_else(|error| error.into()),
             Ok(ParsedCronCommand::Delete(None)) => match self.list().await {
-                Ok(jobs) => format!("{jobs}\n\nChoose a job ID and run `/cron cancel <job-id>`."),
-                Err(error) => error,
+                Ok(jobs) => append_generated_text(
+                    &jobs,
+                    "\n\nChoose a job ID and run `/cron cancel <job-id>`.",
+                ),
+                Err(error) => error.into(),
             },
             Ok(ParsedCronCommand::Delete(Some(id))) => self
                 .call_tool(
                     &tool_cron::CronDeleteTool::new(self.ctx.clone()),
-                    json!({ "id": id }),
+                    source_object(vec![("id".to_owned(), id)]),
                 )
                 .await
-                .unwrap_or_else(|error| error),
+                .unwrap_or_else(|error| error.into()),
             Ok(ParsedCronCommand::Create {
                 cron,
                 prompt,
@@ -337,16 +458,16 @@ impl BuiltinCommandHandler for DesktopCronCommandHandler {
             }) => self
                 .call_tool(
                     &tool_cron::CronCreateTool::new(self.ctx.clone()),
-                    json!({
-                        "cron": cron,
-                        "prompt": prompt,
-                        "recurring": recurring,
-                        "durable": durable,
-                    }),
+                    source_object(vec![
+                        ("cron".to_owned(), cron.into()),
+                        ("prompt".to_owned(), prompt),
+                        ("recurring".to_owned(), source_bool(recurring)),
+                        ("durable".to_owned(), source_bool(durable)),
+                    ]),
                 )
                 .await
-                .unwrap_or_else(|error| error),
-            Err(error) => error,
+                .unwrap_or_else(|error| error.into()),
+            Err(error) => error.into(),
         };
         CommandResult::Done {
             display: Some(display),
@@ -373,7 +494,7 @@ mod tests {
     #[test]
     fn parses_chinese_daily_morning_request() {
         assert_eq!(
-            parse_cron_command("每天早上汇报武汉天气"),
+            parse_cron_command(&"每天早上汇报武汉天气".into()),
             Ok(ParsedCronCommand::Create {
                 cron: "0 9 * * *".into(),
                 prompt: "汇报武汉天气".into(),
@@ -386,7 +507,7 @@ mod tests {
     #[test]
     fn parses_raw_cron_and_management_actions() {
         assert_eq!(
-            parse_cron_command("30 14 * * 1-5 summarize pull requests"),
+            parse_cron_command(&"30 14 * * 1-5 summarize pull requests".into()),
             Ok(ParsedCronCommand::Create {
                 cron: "30 14 * * 1-5".into(),
                 prompt: "summarize pull requests".into(),
@@ -394,9 +515,12 @@ mod tests {
                 durable: true,
             })
         );
-        assert_eq!(parse_cron_command("list"), Ok(ParsedCronCommand::List));
         assert_eq!(
-            parse_cron_command("cancel job-123"),
+            parse_cron_command(&"list".into()),
+            Ok(ParsedCronCommand::List)
+        );
+        assert_eq!(
+            parse_cron_command(&"cancel job-123".into()),
             Ok(ParsedCronCommand::Delete(Some("job-123".into())))
         );
     }
@@ -404,7 +528,7 @@ mod tests {
     #[test]
     fn parses_english_weekday_schedule() {
         assert_eq!(
-            parse_cron_command("every weekday at 9:30am summarize my open pull requests"),
+            parse_cron_command(&"every weekday at 9:30am summarize my open pull requests".into()),
             Ok(ParsedCronCommand::Create {
                 cron: "30 9 * * 1-5".into(),
                 prompt: "summarize my open pull requests".into(),
@@ -416,9 +540,31 @@ mod tests {
 
     #[test]
     fn rejects_missing_prompt() {
-        assert!(parse_cron_command("0 9 * * *")
+        assert!(parse_cron_command(&"0 9 * * *".into())
             .expect_err("missing prompt must fail")
             .contains("prompt"));
+    }
+
+    #[test]
+    fn prompt_remainder_retains_unpaired_utf16_units() {
+        let mut units = "0 9 * * * do ".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend(" the work".encode_utf16());
+        let raw = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("raw cron command fixture");
+        let ParsedCronCommand::Create { prompt, .. } = parse_cron_command(&raw).unwrap() else {
+            panic!("expected a scheduled prompt");
+        };
+        assert_eq!(
+            prompt.string_units(""),
+            Some(
+                "do "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" the work".encode_utf16())
+                    .collect()
+            )
+        );
     }
 
     #[test]
@@ -462,7 +608,9 @@ mod tests {
         else {
             panic!("cron must complete as a local command");
         };
-        assert!(display.contains("Scheduled recurring job"));
+        assert!(display
+            .string_at("")
+            .is_some_and(|text| text.contains("Scheduled recurring job")));
 
         let path = cron::tasks_file::session_scheduled_tasks_path(workspace.path());
         let body = std::fs::read_to_string(path).expect("durable session cron file");

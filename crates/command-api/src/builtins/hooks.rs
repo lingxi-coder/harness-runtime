@@ -36,7 +36,9 @@ impl BuiltinCommandHandler for HooksHandler {
         let rows: Vec<String> = hooks.iter().map(format_row).collect();
         let s = render_list("Hooks", rows, "No hooks configured");
         telemetry::emit_command_completed(cmd_evt::HOOKS_COMPLETED, "");
-        CommandResult::Done { display: Some(s) }
+        CommandResult::Done {
+            display: Some((s).into()),
+        }
     }
     fn name(&self) -> &str {
         "hooks"
@@ -58,7 +60,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "hooks".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

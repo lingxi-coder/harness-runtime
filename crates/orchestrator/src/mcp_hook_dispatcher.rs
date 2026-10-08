@@ -37,8 +37,8 @@ use hooks::events::{ElicitationMode, HookEvent};
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
 use hooks::HookExecutorImpl;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mcp::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
-use serde_json::json;
 
 /// Adapts the engine's hook executor to the MCP inbound dispatch seam.
 pub struct OrchestratorHookDispatcher {
@@ -86,13 +86,24 @@ impl HookDispatcher for OrchestratorHookDispatcher {
         &self,
         request: ElicitationHookRequest,
     ) -> ElicitationHookOutcome {
+        let source_field = |pointer: &str| {
+            request
+                .params
+                .at_pointer(pointer)
+                .and_then(|_| request.params.subprojection(pointer).ok())
+        };
+        let message = source_field("/message").unwrap_or_else(|| Utf16JsonProjection::from(""));
+        let mode = Self::map_mode(request.params.string_at("/mode"));
+        let url = source_field("/url");
+        let elicitation_id = source_field("/elicitationId");
+        let requested_schema = source_field("/requestedSchema");
         let event = HookEvent::Elicitation {
             server_name: request.server_name,
-            message: request.message,
-            mode: Self::map_mode(request.mode.as_deref()),
-            url: request.url,
-            elicitation_id: request.elicitation_id,
-            requested_schema: request.requested_schema,
+            message,
+            mode,
+            url,
+            elicitation_id,
+            requested_schema,
         };
         // Minimal context: the inbound elicitation path has no live per-turn
         // session, so we thread the engine cwd (also used as the LINGXI_PROJECT_DIR
@@ -116,10 +127,16 @@ impl HookDispatcher for OrchestratorHookDispatcher {
             // Build the answer object the handler returns verbatim: always an
             // `action`, plus `content` only when present (skip-if-none keeps the
             // wire bytes minimal, matching the optional `content` field).
-            let answer = match er.content {
-                Some(content) => json!({ "action": er.action, "content": content }),
-                None => json!({ "action": er.action }),
-            };
+            let action = Utf16JsonProjection::parse(
+                &serde_json::to_string(&er.action).expect("hook action serializes as JSON"),
+            )
+            .expect("serialized hook action is valid JSON");
+            let mut fields = vec![("action".to_string(), action)];
+            if let Some(content) = er.content {
+                fields.push(("content".to_string(), content));
+            }
+            let answer = Utf16JsonProjection::object(fields)
+                .expect("hook response fields form a valid JSON object");
             return ElicitationHookOutcome::Respond(answer);
         }
         ElicitationHookOutcome::Pass
@@ -143,7 +160,7 @@ mod tests {
         let outcome = dispatcher
             .dispatch_elicitation(ElicitationHookRequest {
                 server_name: "github".into(),
-                message: "Authorize?".into(),
+                params: Utf16JsonProjection::parse(r#"{"message":"Authorize?"}"#).unwrap(),
                 ..Default::default()
             })
             .await;

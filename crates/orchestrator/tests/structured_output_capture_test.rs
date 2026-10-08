@@ -69,8 +69,11 @@ impl Tool for InspectTool {
         "Inspect before returning the final result".into()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
 
     async fn call(

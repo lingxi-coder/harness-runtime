@@ -4,18 +4,33 @@
 //! etc. — is noted in a comment rather than reproduced structurally, since
 //! `tool_api::ToolError` has no separate code channel to carry it in).
 
-use serde_json::Value;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use tool_api::tool_trait::ToolError;
+
+fn as_unsigned_integer(value: JsonValueView<'_>) -> Option<u64> {
+    let number = value.as_number()?;
+    (number.is_finite() && number >= 0.0 && number.fract() == 0.0 && number < u64::MAX as f64)
+        .then_some(number as u64)
+}
+
+fn as_signed_integer(value: JsonValueView<'_>) -> Option<i64> {
+    let number = value.as_number()?;
+    (number.is_finite()
+        && number.fract() == 0.0
+        && number >= i64::MIN as f64
+        && number < i64::MAX as f64)
+        .then_some(number as i64)
+}
 
 /// `coordinate is required` / `coordinate must be an array of length 2` /
 /// `coordinate must be a tuple of non-negative numbers` (`bad_args`).
-pub fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> {
-    let Some(v) = input.get(key) else {
+pub fn require_coord(input: &Utf16JsonProjection, key: &str) -> Result<(u32, u32), ToolError> {
+    let Some(v) = input.get_property(key) else {
         // `coordinate` has a legacy flat x/y fallback the binary doesn't —
         // check that before erroring "required".
         if key == "coordinate" {
-            let x = input.get("x").and_then(Value::as_u64);
-            let y = input.get("y").and_then(Value::as_u64);
+            let x = input.get_property("x").and_then(as_unsigned_integer);
+            let y = input.get_property("y").and_then(as_unsigned_integer);
             if let (Some(x), Some(y)) = (x, y) {
                 #[allow(clippy::cast_possible_truncation)]
                 return Ok((
@@ -26,22 +41,29 @@ pub fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> 
                 ));
             }
         }
-        return Err(ToolError::InvalidInput(format!("{key} is required")));
+        return Err(ToolError::InvalidInput(format!("{key} is required").into()));
     };
-    let Some(arr) = v.as_array() else {
-        return Err(ToolError::InvalidInput(format!(
-            "{key} must be an array of length 2"
-        )));
+    require_coord_view(v, key)
+}
+
+pub(crate) fn require_coord_view(v: JsonValueView<'_>, key: &str) -> Result<(u32, u32), ToolError> {
+    let Some(len) = v.array_len() else {
+        return Err(ToolError::InvalidInput(
+            format!("{key} must be an array of length 2").into(),
+        ));
     };
-    if arr.len() != 2 {
-        return Err(ToolError::InvalidInput(format!(
-            "{key} must be an array of length 2"
-        )));
+    if len != 2 {
+        return Err(ToolError::InvalidInput(
+            format!("{key} must be an array of length 2").into(),
+        ));
     }
-    let (Some(x), Some(y)) = (arr[0].as_u64(), arr[1].as_u64()) else {
-        return Err(ToolError::InvalidInput(format!(
-            "{key} must be a tuple of non-negative numbers"
-        )));
+    let (Some(x), Some(y)) = (
+        v.get_index(0).and_then(as_unsigned_integer),
+        v.get_index(1).and_then(as_unsigned_integer),
+    ) else {
+        return Err(ToolError::InvalidInput(
+            format!("{key} must be a tuple of non-negative numbers").into(),
+        ));
     };
     Ok((
         u32::try_from(x).map_err(|_| ToolError::InvalidInput("coordinate exceeds u32".into()))?,
@@ -50,21 +72,24 @@ pub fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> 
 }
 
 /// `text is required` (`bad_args`) / `text must be a string` (`bad_args`).
-pub fn require_text(input: &Value) -> Result<String, ToolError> {
-    match input.get("text") {
+pub fn require_text(input: &Utf16JsonProjection) -> Result<String, ToolError> {
+    match input.get_property("text") {
         None => Err(ToolError::InvalidInput("text is required".into())),
-        Some(Value::String(s)) => Ok(s.clone()),
+        Some(value) if value.as_str().is_some() => value
+            .code_units()
+            .and_then(|units| String::from_utf16(units).ok())
+            .ok_or_else(|| ToolError::InvalidInput("text must be valid Unicode text".into())),
         Some(_) => Err(ToolError::InvalidInput("text must be a string".into())),
     }
 }
 
 /// `repeat must be a positive integer` / `repeat exceeds maximum of 100`
 /// (`bad_args`). Default `1` when omitted.
-pub fn key_repeat(input: &Value) -> Result<u32, ToolError> {
-    let Some(v) = input.get("repeat") else {
+pub fn key_repeat(input: &Utf16JsonProjection) -> Result<u32, ToolError> {
+    let Some(v) = input.get_property("repeat") else {
         return Ok(1);
     };
-    let Some(n) = v.as_i64() else {
+    let Some(n) = as_signed_integer(v) else {
         return Err(ToolError::InvalidInput(
             "repeat must be a positive integer".into(),
         ));
@@ -87,18 +112,23 @@ pub fn key_repeat(input: &Value) -> Result<u32, ToolError> {
 /// must be non-negative numbers` / `region x1 must be greater than x0` /
 /// `region y1 must be greater than y0` (all `bad_args`). Returns
 /// `(x0, y0, x1, y1)`.
-pub fn require_region(input: &Value) -> Result<(u32, u32, u32, u32), ToolError> {
-    let Some(arr) = input.get("region").and_then(Value::as_array) else {
+pub fn require_region(input: &Utf16JsonProjection) -> Result<(u32, u32, u32, u32), ToolError> {
+    let Some(arr) = input
+        .get_property("region")
+        .filter(|value| value.array_len().is_some())
+    else {
         return Err(ToolError::InvalidInput(
             "region must be an array of length 4: [x0, y0, x1, y1]".into(),
         ));
     };
-    if arr.len() != 4 {
+    if arr.array_len() != Some(4) {
         return Err(ToolError::InvalidInput(
             "region must be an array of length 4: [x0, y0, x1, y1]".into(),
         ));
     }
-    let vals: Option<Vec<u64>> = arr.iter().map(Value::as_u64).collect();
+    let vals: Option<Vec<u64>> = (0..4)
+        .map(|index| arr.get_index(index).and_then(as_unsigned_integer))
+        .collect();
     let Some(vals) = vals else {
         return Err(ToolError::InvalidInput(
             "region values must be non-negative numbers".into(),
@@ -136,11 +166,11 @@ pub fn require_region(input: &Value) -> Result<(u32, u32, u32, u32), ToolError> 
 /// ceiling — the binary's own cutoff wasn't recoverable byte-for-byte from
 /// strings alone, so 60s (matching the prior `LingXi` clamp) is kept as a
 /// documented, reasonable bound rather than a verified one.
-fn duration_secs(input: &Value, max_secs: f64) -> Result<f64, ToolError> {
-    let Some(v) = input.get("duration") else {
+fn duration_secs(input: &Utf16JsonProjection, max_secs: f64) -> Result<f64, ToolError> {
+    let Some(v) = input.get_property("duration") else {
         return Err(ToolError::InvalidInput("duration must be a number".into()));
     };
-    let Some(n) = v.as_f64() else {
+    let Some(n) = v.as_number() else {
         return Err(ToolError::InvalidInput("duration must be a number".into()));
     };
     if n < 0.0 {
@@ -157,13 +187,13 @@ fn duration_secs(input: &Value, max_secs: f64) -> Result<f64, ToolError> {
 }
 
 /// `wait`'s duration validation.
-pub fn wait_duration(input: &Value) -> Result<f64, ToolError> {
+pub fn wait_duration(input: &Utf16JsonProjection) -> Result<f64, ToolError> {
     duration_secs(input, 300.0)
 }
 
 /// `hold_key`'s duration validation (same rules, kept as a distinct entry
 /// point in case the two ceilings ever diverge).
-pub fn hold_duration(input: &Value) -> Result<f64, ToolError> {
+pub fn hold_duration(input: &Utf16JsonProjection) -> Result<f64, ToolError> {
     duration_secs(input, 300.0)
 }
 
@@ -171,10 +201,10 @@ pub fn hold_duration(input: &Value) -> Result<f64, ToolError> {
 /// Reads `scroll_direction` first, falling back to the legacy `direction`
 /// key. Returns `None` when neither is present (caller falls back to flat
 /// `dx`/`dy`), `Err` when one IS present but isn't one of the four values.
-pub fn scroll_direction(input: &Value) -> Result<Option<&str>, ToolError> {
+pub fn scroll_direction(input: &Utf16JsonProjection) -> Result<Option<&str>, ToolError> {
     let Some(dir) = input
-        .get("scroll_direction")
-        .or_else(|| input.get("direction"))
+        .get_property("scroll_direction")
+        .or_else(|| input.get_property("direction"))
     else {
         return Ok(None);
     };
@@ -190,11 +220,14 @@ pub fn scroll_direction(input: &Value) -> Result<Option<&str>, ToolError> {
 /// maximum of 100` (`bad_args`). Reads `scroll_amount` first, falling back to
 /// the legacy `amount` key. Defaults to `3` (one tick) when neither is
 /// present.
-pub fn scroll_amount(input: &Value) -> Result<i32, ToolError> {
-    let Some(v) = input.get("scroll_amount").or_else(|| input.get("amount")) else {
+pub fn scroll_amount(input: &Utf16JsonProjection) -> Result<i32, ToolError> {
+    let Some(v) = input
+        .get_property("scroll_amount")
+        .or_else(|| input.get_property("amount"))
+    else {
         return Ok(3);
     };
-    let Some(n) = v.as_i64() else {
+    let Some(n) = as_signed_integer(v) else {
         return Err(ToolError::InvalidInput(
             "scroll_amount must be a non-negative int".into(),
         ));
@@ -284,15 +317,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    macro_rules! input {
+        ($($value:tt)*) => {{
+            let value = json!($($value)*);
+            Utf16JsonProjection::from_serde_value(&value).unwrap()
+        }};
+    }
+
     #[test]
     fn coord_missing_is_required() {
-        let e = require_coord(&json!({}), "coordinate").unwrap_err();
+        let e = require_coord(&input!({}), "coordinate").unwrap_err();
         assert_eq!(e.to_string(), "invalid input: coordinate is required");
     }
 
     #[test]
     fn coord_wrong_length() {
-        let e = require_coord(&json!({ "coordinate": [1] }), "coordinate").unwrap_err();
+        let e = require_coord(&input!({ "coordinate": [1] }), "coordinate").unwrap_err();
         assert_eq!(
             e.to_string(),
             "invalid input: coordinate must be an array of length 2"
@@ -301,7 +341,7 @@ mod tests {
 
     #[test]
     fn coord_non_numeric() {
-        let e = require_coord(&json!({ "coordinate": ["a", "b"] }), "coordinate").unwrap_err();
+        let e = require_coord(&input!({ "coordinate": ["a", "b"] }), "coordinate").unwrap_err();
         assert_eq!(
             e.to_string(),
             "invalid input: coordinate must be a tuple of non-negative numbers"
@@ -311,26 +351,30 @@ mod tests {
     #[test]
     fn text_required_and_type_checked() {
         assert_eq!(
-            require_text(&json!({})).unwrap_err().to_string(),
+            require_text(&input!({})).unwrap_err().to_string(),
             "invalid input: text is required"
         );
         assert_eq!(
-            require_text(&json!({ "text": 5 })).unwrap_err().to_string(),
+            require_text(&input!({ "text": 5 }))
+                .unwrap_err()
+                .to_string(),
             "invalid input: text must be a string"
         );
-        assert_eq!(require_text(&json!({ "text": "hi" })).unwrap(), "hi");
+        assert_eq!(require_text(&input!({ "text": "hi" })).unwrap(), "hi");
     }
 
     #[test]
     fn repeat_defaults_and_validates() {
-        assert_eq!(key_repeat(&json!({})).unwrap(), 1);
-        assert_eq!(key_repeat(&json!({ "repeat": 5 })).unwrap(), 5);
+        assert_eq!(key_repeat(&input!({})).unwrap(), 1);
+        assert_eq!(key_repeat(&input!({ "repeat": 5 })).unwrap(), 5);
         assert_eq!(
-            key_repeat(&json!({ "repeat": 0 })).unwrap_err().to_string(),
+            key_repeat(&input!({ "repeat": 0 }))
+                .unwrap_err()
+                .to_string(),
             "invalid input: repeat must be a positive integer"
         );
         assert_eq!(
-            key_repeat(&json!({ "repeat": 101 }))
+            key_repeat(&input!({ "repeat": 101 }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: repeat exceeds maximum of 100"
@@ -340,29 +384,29 @@ mod tests {
     #[test]
     fn region_full_validation_chain() {
         assert_eq!(
-            require_region(&json!({})).unwrap_err().to_string(),
+            require_region(&input!({})).unwrap_err().to_string(),
             "invalid input: region must be an array of length 4: [x0, y0, x1, y1]"
         );
         assert_eq!(
-            require_region(&json!({ "region": [1, 2, 3] }))
+            require_region(&input!({ "region": [1, 2, 3] }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: region must be an array of length 4: [x0, y0, x1, y1]"
         );
         assert_eq!(
-            require_region(&json!({ "region": [0, 0, 0, 10] }))
+            require_region(&input!({ "region": [0, 0, 0, 10] }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: region x1 must be greater than x0"
         );
         assert_eq!(
-            require_region(&json!({ "region": [0, 0, 10, 0] }))
+            require_region(&input!({ "region": [0, 0, 10, 0] }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: region y1 must be greater than y0"
         );
         assert_eq!(
-            require_region(&json!({ "region": [1, 2, 11, 22] })).unwrap(),
+            require_region(&input!({ "region": [1, 2, 11, 22] })).unwrap(),
             (1, 2, 11, 22)
         );
     }
@@ -373,7 +417,7 @@ mod tests {
         // than x0=2. Comparing in u64 space (as the function does) must catch
         // this as out-of-range BEFORE truncating, not let it slip through as
         // a "valid" (x0=2, x1=1) pair that then underflows at the call site.
-        let e = require_region(&json!({ "region": [2, 0, 4_294_967_297u64, 10] })).unwrap_err();
+        let e = require_region(&input!({ "region": [2, 0, 4_294_967_297u64, 10] })).unwrap_err();
         assert_eq!(
             e.to_string(),
             "invalid input: region values must be non-negative numbers"
@@ -383,37 +427,37 @@ mod tests {
     #[test]
     fn duration_full_validation_chain() {
         assert_eq!(
-            wait_duration(&json!({})).unwrap_err().to_string(),
+            wait_duration(&input!({})).unwrap_err().to_string(),
             "invalid input: duration must be a number"
         );
         assert_eq!(
-            wait_duration(&json!({ "duration": -1 }))
+            wait_duration(&input!({ "duration": -1 }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: duration must be non-negative"
         );
         assert_eq!(
-            wait_duration(&json!({ "duration": 9999 }))
+            wait_duration(&input!({ "duration": 9999 }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: duration is too long. Duration is in seconds."
         );
-        assert!((wait_duration(&json!({ "duration": 2.5 })).unwrap() - 2.5).abs() < f64::EPSILON);
+        assert!((wait_duration(&input!({ "duration": 2.5 })).unwrap() - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn scroll_direction_validates_and_falls_back() {
-        assert_eq!(scroll_direction(&json!({})).unwrap(), None);
+        assert_eq!(scroll_direction(&input!({})).unwrap(), None);
         assert_eq!(
-            scroll_direction(&json!({ "scroll_direction": "up" })).unwrap(),
+            scroll_direction(&input!({ "scroll_direction": "up" })).unwrap(),
             Some("up")
         );
         assert_eq!(
-            scroll_direction(&json!({ "direction": "left" })).unwrap(),
+            scroll_direction(&input!({ "direction": "left" })).unwrap(),
             Some("left")
         );
         assert_eq!(
-            scroll_direction(&json!({ "scroll_direction": "sideways" }))
+            scroll_direction(&input!({ "scroll_direction": "sideways" }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: scroll_direction must be 'up', 'down', 'left', or 'right'"
@@ -422,17 +466,17 @@ mod tests {
 
     #[test]
     fn scroll_amount_defaults_and_bounds() {
-        assert_eq!(scroll_amount(&json!({})).unwrap(), 3);
-        assert_eq!(scroll_amount(&json!({ "scroll_amount": 50 })).unwrap(), 50);
-        assert_eq!(scroll_amount(&json!({ "amount": 10 })).unwrap(), 10);
+        assert_eq!(scroll_amount(&input!({})).unwrap(), 3);
+        assert_eq!(scroll_amount(&input!({ "scroll_amount": 50 })).unwrap(), 50);
+        assert_eq!(scroll_amount(&input!({ "amount": 10 })).unwrap(), 10);
         assert_eq!(
-            scroll_amount(&json!({ "scroll_amount": -1 }))
+            scroll_amount(&input!({ "scroll_amount": -1 }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: scroll_amount must be a non-negative int"
         );
         assert_eq!(
-            scroll_amount(&json!({ "scroll_amount": 101 }))
+            scroll_amount(&input!({ "scroll_amount": 101 }))
                 .unwrap_err()
                 .to_string(),
             "invalid input: scroll_amount exceeds maximum of 100"

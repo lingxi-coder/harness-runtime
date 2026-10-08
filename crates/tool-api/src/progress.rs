@@ -1,5 +1,6 @@
 //! Tool progress channel — mpsc channel for streaming progress updates.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::ToolUseId;
 use tokio::sync::mpsc;
 
@@ -8,8 +9,8 @@ use tokio::sync::mpsc;
 pub struct ToolProgress {
     /// Originating tool use ID.
     pub tool_use_id: ToolUseId,
-    /// Arbitrary JSON payload (tool-defined).
-    pub data: serde_json::Value,
+    /// Arbitrary JSON payload (tool-defined), retained as a Source projection.
+    pub data: Utf16JsonProjection,
 }
 
 /// Sender end of the progress channel.

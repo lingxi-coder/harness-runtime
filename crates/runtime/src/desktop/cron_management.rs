@@ -3,7 +3,12 @@ use client::protocol::{commands::CronRequestDto, events::CronJobDto};
 use cron::tasks_file::{CronTask, ScheduledTasks};
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::{FileSystem, FsError};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::{path::Path, sync::Arc};
+
+fn source_display(prompt: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&prompt.string_units("").unwrap_or_default())
+}
 
 /// Upgrade old durable tasks once before a scheduler loads them. The write is
 /// atomic and takes the scheduler's locks; repeated boots retain fixed settings.
@@ -253,7 +258,7 @@ pub fn task_dto(task: CronTask) -> CronJobDto {
             .and_then(|value| serde_json::from_value(value).ok()),
         id: task.id,
         cron: task.cron,
-        prompt: task.prompt,
+        prompt: source_display(&task.prompt),
         recurring: task.recurring.unwrap_or(false),
         durable: true,
         permanent: task.permanent.unwrap_or(false),
@@ -388,7 +393,7 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
             automation,
             id: tool_cron::schedule_cron::generate_cron_task_id(),
             cron: request.cron.unwrap(),
-            prompt: request.prompt.unwrap(),
+            prompt: request.prompt.unwrap().into(),
             created_at,
             last_fired_at: None,
             // PARITY `nCe`: the `recurring` key is written only when true.
@@ -507,7 +512,7 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
                 task.automation = Some(automation);
             }
             task.cron = request.cron.unwrap();
-            task.prompt = request.prompt.unwrap();
+            task.prompt = request.prompt.unwrap().into();
             if request.no_expiry == Some(true) {
                 task.expires_at = None;
             } else if request.expires_at.is_some() {
@@ -829,7 +834,7 @@ mod tests {
         assert_eq!(doc.tasks[0].id, before.id);
         assert_eq!(doc.tasks[0].created_at, before.created_at);
         assert_eq!(doc.tasks[0].last_fired_at, Some(123));
-        assert_eq!(doc.tasks[0].prompt, "Updated instructions");
+        assert_eq!(source_display(&doc.tasks[0].prompt), "Updated instructions");
         let mut delete = request("delete");
         delete.id = Some(before.id);
         apply(&mut doc, delete).unwrap();
@@ -916,7 +921,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(jobs[0].id, id);
-        assert_eq!(jobs[0].prompt, "Changed");
+        assert_eq!(source_display(&jobs[0].prompt), "Changed");
         let mut delete = request("delete");
         delete.id = Some(id);
         assert!(manage(&fs, temp.path(), delete, &registry, "session-test")

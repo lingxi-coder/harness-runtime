@@ -5,6 +5,7 @@ use crate::{
     StaticCredentialProvider,
 };
 use lingxi_core::host::{NativeReceiptStage, ToolExecutionJournal};
+use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use serde_json::json;
 
@@ -18,11 +19,27 @@ fn user(text: &str) -> ConversationMessage {
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     }
 }
 
-fn computer_tool() -> serde_json::Value {
-    json!({"name":"computer","description":"Manage desktop","input_schema":{"type":"object"}})
+fn computer_tool() -> crate::ToolDeclaration {
+    crate::convert::to_tool_declarations(vec![lingxi_core::host::SourceToolWireDefinition {
+        name: "computer".into(),
+        description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Manage desktop"),
+        input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"type":"object"}"#,
+        )
+        .unwrap(),
+        strict: false,
+        defer_loading: false,
+    }])
+    .unwrap()
+    .pop()
+    .unwrap()
 }
 
 fn service(protocol: wire::ProtocolFamily) -> ApiService {
@@ -69,12 +86,13 @@ fn service_with_transport(
 fn auxiliary(
     service: &ApiService,
     messages: Vec<ConversationMessage>,
-    tools: Vec<serde_json::Value>,
+    tools: Vec<crate::ToolDeclaration>,
 ) -> LlmRequest {
     service
         .build_side_query_request_with_thinking(
             "model",
             Some("test"),
+            None,
             None,
             false,
             messages,
@@ -139,6 +157,7 @@ async fn auxiliary_builders_and_dispatch_never_submit_parent_receipts() {
             .build_json_schema_request_with_thinking(
                 "model",
                 Some("test"),
+                None,
                 None,
                 vec![user("classify")],
                 json!({"type":"object"}),
@@ -270,6 +289,7 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
                         "model",
                         Some("test"),
                         None,
+                        None,
                         messages,
                         json!({"type":"object"}),
                         Some(512),
@@ -297,12 +317,16 @@ fn history_user(content: Vec<ContentBlock>) -> ConversationMessage {
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     }
 }
 
 fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) {
     let reference:wire::ContinuationRef=serde_json::from_value(json!({"protocol":"gemini_interactions","response_id":"parent-interaction","provider_id":"gemini","profile_name":"test","endpoint_fingerprint":"endpoint","account_scope":"account","request_model":"model"})).unwrap();
-    let original=wire::ContentBlock::Native{value:wire::NativeExtension::new(lingxi_llm_client::providers::google::computer::CALL_FORMAT,json!({"type":"function_call","id":"native-call","name":"take_screenshot","arguments":{}})).unwrap()};
+    let original=wire::ContentBlock::Native{value:wire::NativeExtension::new(lingxi_llm_client::providers::google::computer::CALL_FORMAT,wire::JsonPayload::from_generated_value(&json!({"type":"function_call","id":"native-call","name":"take_screenshot","arguments":{}})).unwrap()).unwrap()};
     let call = wire::decode_computer_calls(
         wire::NativeComputerProvider::Gemini,
         std::slice::from_ref(&original),
@@ -315,7 +339,26 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
     )
     .unwrap()
     .remove(0);
-    let receipt=wire::encode_computer_receipt(&call,&wire::ComputerReceiptInput{results:vec![wire::NativeComputerResult{operation_index:0,status:wire::NativeExecutionStatus::Succeeded,content:"Observed desktop".into(),blocks:Some(vec![json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}})])}],acknowledged_safety_checks:vec![]}).unwrap();
+    let receipt = wire::encode_computer_receipt(
+        &call,
+        &wire::ComputerReceiptInput {
+            results: vec![wire::NativeComputerResult {
+                operation_index: 0,
+                status: wire::NativeExecutionStatus::Succeeded,
+                content: "Observed desktop".into(),
+                blocks: Some(lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!([{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                    }
+                }])).unwrap()),
+            }],
+            acknowledged_safety_checks: vec![],
+        },
+    ).unwrap();
+
     let source = "gemini_interactions";
     (
         vec![
@@ -326,20 +369,21 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 stop_reason: Some("tool_use".into()),
+                resumable: None,
                 content: vec![
                     ContentBlock::ToolUse {
                         id: "synthetic".into(),
                         name: "computer".into(),
-                        input: json!({"action":"screenshot"}),
+                        input: Source::from_serde_value(&json!({"action":"screenshot"})).unwrap(),
                         provider_id: None,
                     },
                     ContentBlock::ProviderContent {
                         protocol: source.into(),
-                        value: json!({"type":"lingxi_computer_binding","provider_response_id":"parent-interaction","call":call,"tool_use_ids":["synthetic"],"original_blocks":[original]}),
+                        value: Source::from_serde_value(&json!({"type":"lingxi_computer_binding","provider_response_id":"parent-interaction","call":call,"tool_use_ids":["synthetic"],"original_blocks":[original]})).unwrap(),
                     },
                     ContentBlock::ProviderContent {
                         protocol: source.into(),
-                        value: json!({"type":"lingxi_computer_continuation","continuation":reference}),
+                        value: Source::from_serde_value(&json!({"type":"lingxi_computer_continuation","continuation":reference})).unwrap(),
                     },
                 ],
             },
@@ -348,15 +392,15 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
                     tool_use_id: "synthetic".into(),
                     content: "Observed desktop".into(),
                     is_error: Some(false),
-                    content_blocks: Some(vec![
-                        json!({"type":"text","text":"Observed desktop"}),
-                        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}}),
-                    ]),
+                    content_blocks: Some(Source::from_serde_value(&json!([
+                        {"type":"text","text":"Observed desktop"},
+                        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}},
+                    ])).unwrap()),
                     provider_tool_use_id: None,
                 },
                 ContentBlock::ProviderContent {
                     protocol: source.into(),
-                    value: json!({"type":"lingxi_computer_receipt","provider_response_id":"parent-interaction","call_id":"native-call","block":receipt}),
+                    value: Source::from_serde_value(&json!({"type":"lingxi_computer_receipt","provider_response_id":"parent-interaction","call_id":"native-call","block":receipt})).unwrap(),
                 },
             ]),
             history_user(vec![ContentBlock::Text {
@@ -408,7 +452,7 @@ async fn auxiliary_dispatch_projects_actual_native_history_as_ordinary_tools() {
             let plain = auxiliary(&service, messages.clone(), vec![]);
             assert_independent(&plain);
             let strict = service.build_json_schema_request_with_thinking(
-                "model", Some("test"), None, messages,
+                "model", Some("test"), None, None, messages,
                 json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
                 Some(512), None, None, None, Some("compaction"),
             ).unwrap();

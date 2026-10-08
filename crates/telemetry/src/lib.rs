@@ -306,14 +306,29 @@ pub fn emit_agent_hooks_origin_untrusted(
     );
 }
 
-/// Emit `tengu_repair_double_escaped_unicode` (cc 2.1.218 `jYd`) — a tool_use
-/// input had literal `\uXXXX` text repaired into real characters, and/or was
-/// left verbatim because it looked like a Windows path.
-pub fn emit_repair_double_escaped_unicode(repaired_strings: u32, windows_path_skips: u32) {
+/// Emit the current Unicode-repair counters. `proto_keys` is present only
+/// when at least one `__proto__` object member was removed.
+pub fn emit_repair_double_escaped_unicode(
+    repaired_strings: u32,
+    windows_path_skips: u32,
+    control_escape_skips: u32,
+    proto_keys: u32,
+) {
+    if proto_keys > 0 {
+        tracing::info!(
+            event = crate::tengu::tool::REPAIR_DOUBLE_ESCAPED_UNICODE,
+            repaired_strings,
+            windows_path_skips,
+            control_escape_skips,
+            proto_keys,
+        );
+        return;
+    }
     tracing::info!(
         event = crate::tengu::tool::REPAIR_DOUBLE_ESCAPED_UNICODE,
         repaired_strings = repaired_strings,
         windows_path_skips = windows_path_skips,
+        control_escape_skips = control_escape_skips,
     );
 }
 

@@ -8,6 +8,7 @@ use crate::command_path_containment::check_command_path_containment;
 use crate::filesystem::{file_tool_kind, input_path_for_tool, FileToolKind, FsRoots};
 use crate::path_constraints::check_path_constraints;
 use crate::shell_command::{command_from_input, is_shell_tool};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,7 +125,7 @@ impl WorkspacePermissionLeaseRegistry {
     // for a future caller to accidentally authorize against another active
     // app's lease.
     #[cfg(test)]
-    fn allows(&self, tool_name: &str, input: &serde_json::Value, roots: &FsRoots) -> bool {
+    fn allows(&self, tool_name: &str, input: &Utf16JsonProjection, roots: &FsRoots) -> bool {
         let active = self
             .active
             .read()
@@ -139,7 +140,7 @@ impl WorkspacePermissionLeaseRegistry {
         &self,
         token: Option<u64>,
         tool_name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         roots: &FsRoots,
     ) -> bool {
         let Some(token) = token else { return false };
@@ -157,7 +158,7 @@ impl WorkspacePermissionLeaseRegistry {
     fn denies_host_owned(
         &self,
         tool_name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         roots: &FsRoots,
     ) -> bool {
         let active = self
@@ -174,7 +175,7 @@ impl WorkspacePermissionLeaseRegistry {
         &self,
         token: Option<u64>,
         tool_name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         roots: &FsRoots,
     ) -> bool {
         let Some(token) = token else { return false };
@@ -192,7 +193,7 @@ impl WorkspacePermissionLeaseRegistry {
     /// non-inspection shell commands would become writable after a build.
     pub fn denies_host_owned_for_workspace(
         tool_name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         roots: &FsRoots,
     ) -> bool {
         let root = &roots.cwd;
@@ -205,7 +206,7 @@ impl WorkspacePermissionLeaseRegistry {
     /// target remains inside the workspace.
     pub fn escapes_local_app_workspace(
         tool_name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         roots: &FsRoots,
     ) -> bool {
         if !is_local_app_workspace_root(&roots.cwd) {
@@ -265,7 +266,7 @@ impl Drop for WorkspacePermissionLease {
 fn allows_for_lease(
     info: &WorkspaceLeaseInfo,
     tool_name: &str,
-    input: &serde_json::Value,
+    input: &Utf16JsonProjection,
     roots: &FsRoots,
 ) -> bool {
     // A local-app workspace has the stable on-disk shape
@@ -291,7 +292,7 @@ fn allows_for_lease(
                 | "LocalAppQueryData"
         );
         return allowed
-            && input.get("app_id").and_then(serde_json::Value::as_str)
+            && crate::source_input::exact_string_field(input, "app_id")
                 == Some(info.app_id.as_str());
     }
 
@@ -336,7 +337,7 @@ fn allows_for_lease(
 fn host_owned_for_lease(
     info: &WorkspaceLeaseInfo,
     tool_name: &str,
-    input: &serde_json::Value,
+    input: &Utf16JsonProjection,
     roots: &FsRoots,
 ) -> bool {
     if !workspace_root_matches_app_id(&info.root, &info.app_id) {
@@ -348,7 +349,7 @@ fn host_owned_for_lease(
 fn host_owned_for_root(
     root: &Path,
     tool_name: &str,
-    input: &serde_json::Value,
+    input: &Utf16JsonProjection,
     roots: &FsRoots,
 ) -> bool {
     let lease_roots = FsRoots {
@@ -753,6 +754,12 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    macro_rules! source_json {
+        ($($tokens:tt)+) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+        };
+    }
+
     fn roots(root: &Path) -> FsRoots {
         FsRoots {
             cwd: root.to_path_buf(),
@@ -771,21 +778,21 @@ mod tests {
         let fs = roots(&root);
         assert!(registry.allows(
             "Write",
-            &serde_json::json!({"file_path":"src/App.jsx"}),
+            &source_json!({"file_path":"src/App.jsx"}),
             &fs
         ));
-        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"../secret"}), &fs));
+        assert!(!registry.allows("Write", &source_json!({"file_path":"../secret"}), &fs));
         assert!(!registry.allows(
             "Write",
-            &serde_json::json!({"file_path":".lingxi/source-policy.json"}),
+            &source_json!({"file_path":".lingxi/source-policy.json"}),
             &fs
         ));
         assert!(!registry.allows(
             "Write",
-            &serde_json::json!({"file_path":"lib/lingxi-bridge.js"}),
+            &source_json!({"file_path":"lib/lingxi-bridge.js"}),
             &fs
         ));
-        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"LINGXI.md"}), &fs));
+        assert!(!registry.allows("Write", &source_json!({"file_path":"LINGXI.md"}), &fs));
         for path in [
             ".",
             "lib",
@@ -798,13 +805,13 @@ mod tests {
             "node_modules/vite/bin/vite.js",
         ] {
             assert!(
-                !registry.allows("Write", &serde_json::json!({"file_path": path}), &fs),
+                !registry.allows("Write", &source_json!({"file_path": path}), &fs),
                 "host-managed build infrastructure must not be writable: {path}"
             );
         }
         assert!(registry.allows(
             "Write",
-            &serde_json::json!({"file_path":"app/main.jsx"}),
+            &source_json!({"file_path":"app/main.jsx"}),
             &fs
         ));
     }
@@ -818,7 +825,7 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app", root.clone());
         let fs = roots(&root);
-        let settings = serde_json::json!({"file_path":".lingxi/settings.local.json"});
+        let settings = source_json!({"file_path":".lingxi/settings.local.json"});
 
         assert!(registry.allows("Read", &settings, &fs));
         assert!(!registry.allows("Write", &settings, &fs));
@@ -826,28 +833,28 @@ mod tests {
         assert!(!registry.denies_host_owned("Read", &settings, &fs));
         assert!(registry.denies_host_owned(
             "Bash",
-            &serde_json::json!({"command":"echo x > .lingxi/settings.local.json"}),
+            &source_json!({"command":"echo x > .lingxi/settings.local.json"}),
             &fs
         ));
         assert!(registry.denies_host_owned(
             "Bash",
-            &serde_json::json!({"command":"rm -rf .lingxi"}),
+            &source_json!({"command":"rm -rf .lingxi"}),
             &fs
         ));
         for command in ["rm -rf .", "rm -rf lib", "mv lib lib.bak", "rm -rf *"] {
             assert!(
-                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                registry.denies_host_owned("Bash", &source_json!({"command": command}), &fs),
                 "destructive parent or glob must not bypass host ownership: {command}"
             );
         }
         assert!(registry.denies_host_owned(
             "Bash",
-            &serde_json::json!({"command":"printf x > package.json"}),
+            &source_json!({"command":"printf x > package.json"}),
             &fs
         ));
         for command in ["rm -rf app/old.jsx", "mkdir components"] {
             assert!(
-                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                registry.denies_host_owned("Bash", &source_json!({"command": command}), &fs),
                 "shell mutation must use structured file tools: {command}"
             );
         }
@@ -863,7 +870,7 @@ mod tests {
             "find . -files0-from list",
         ] {
             assert!(
-                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                registry.denies_host_owned("Bash", &source_json!({"command": command}), &fs),
                 "shell expansion must not bypass the structured mutation boundary: {command}"
             );
         }
@@ -882,7 +889,7 @@ mod tests {
         assert!(registry.active().is_empty());
         assert!(!registry.allows(
             "Write",
-            &serde_json::json!({"file_path":"src/App.jsx"}),
+            &source_json!({"file_path":"src/App.jsx"}),
             &fs
         ));
     }
@@ -897,33 +904,33 @@ mod tests {
         let fs = roots(&root);
         assert!(!registry.allows(
             "Bash",
-            &serde_json::json!({"command":"echo ok > out.txt"}),
+            &source_json!({"command":"echo ok > out.txt"}),
             &fs
         ));
         assert!(registry.allows(
             "Bash",
-            &serde_json::json!({"command":"cat src/App.jsx"}),
+            &source_json!({"command":"cat src/App.jsx"}),
             &fs
         ));
-        assert!(!registry.allows("Bash", &serde_json::json!({"command":"npm install"}), &fs));
+        assert!(!registry.allows("Bash", &source_json!({"command":"npm install"}), &fs));
         assert!(!registry.allows(
             "Bash",
-            &serde_json::json!({"command":"curl https://example.com"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"node -e 'process.exit(0)'"}),
+            &source_json!({"command":"curl https://example.com"}),
             &fs
         ));
         assert!(!registry.allows(
             "Bash",
-            &serde_json::json!({"command":"echo $(curl https://example.com)"}),
+            &source_json!({"command":"node -e 'process.exit(0)'"}),
             &fs
         ));
         assert!(!registry.allows(
             "Bash",
-            &serde_json::json!({"command":"echo `curl https://example.com`"}),
+            &source_json!({"command":"echo $(curl https://example.com)"}),
+            &fs
+        ));
+        assert!(!registry.allows(
+            "Bash",
+            &source_json!({"command":"echo `curl https://example.com`"}),
             &fs
         ));
         for command in [
@@ -932,7 +939,7 @@ mod tests {
             "find . -files0-from list",
         ] {
             assert!(
-                !registry.allows("Bash", &serde_json::json!({"command": command}), &fs),
+                !registry.allows("Bash", &source_json!({"command": command}), &fs),
                 "side-effecting or path-indirect find must not be lease-authorized: {command}"
             );
         }
@@ -950,13 +957,13 @@ mod tests {
         assert!(registry.allows_for_token(
             Some(lease.token()),
             "Write",
-            &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
+            &source_json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
             &fs
         ));
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "Bash",
-            &serde_json::json!({
+            &source_json!({
                 "command":"echo ok > /workspace/local-app-app-a/src/out.txt"
             }),
             &fs
@@ -964,7 +971,7 @@ mod tests {
         assert!(registry.allows_for_token(
             Some(lease.token()),
             "Bash",
-            &serde_json::json!({
+            &source_json!({
                 "command":"cat /workspace/local-app-app-a/src/out.txt"
             }),
             &fs
@@ -972,7 +979,7 @@ mod tests {
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "Write",
-            &serde_json::json!({"file_path":"/workspace/local-app-app-b/src/App.jsx"}),
+            &source_json!({"file_path":"/workspace/local-app-app-b/src/App.jsx"}),
             &fs
         ));
     }
@@ -1000,7 +1007,7 @@ mod tests {
             registry.denies_host_owned_for_token(
                 Some(lease.token()),
                 "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/package.json"}),
                 &fs
             ),
             "a leased workflow must not rewrite host-owned package.json"
@@ -1009,7 +1016,7 @@ mod tests {
             registry.denies_host_owned_for_token(
                 Some(lease.token()),
                 "Edit",
-                &serde_json::json!({
+                &source_json!({
                     "file_path":"/workspace/local-app-app-a/.lingxi-build-state/dependency-update-recovery.json"
                 }),
                 &fs
@@ -1022,7 +1029,7 @@ mod tests {
             !registry.denies_host_owned_for_token(
                 Some(lease.token()),
                 "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
                 &fs
             ),
             "generated source is not host-owned"
@@ -1038,7 +1045,7 @@ mod tests {
             !registry.denies_host_owned_for_token(
                 None,
                 "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/package.json"}),
                 &fs
             ),
             "a dropped token silently disables the host-owned deny"
@@ -1055,21 +1062,21 @@ mod tests {
         assert!(
             !WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
                 "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
+                &source_json!({"command":"cat src/App.jsx"}),
                 &fs
             )
         );
         assert!(
             WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
                 "Bash",
-                &serde_json::json!({"command":"cat /etc/passwd"}),
+                &source_json!({"command":"cat /etc/passwd"}),
                 &fs
             )
         );
         assert!(
             WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
                 "Bash",
-                &serde_json::json!({"command":"cd /tmp && cat src/App.jsx"}),
+                &source_json!({"command":"cd /tmp && cat src/App.jsx"}),
                 &fs
             )
         );
@@ -1083,13 +1090,13 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app-a", root.clone());
         let fs = roots(&root);
-        assert!(registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
+        assert!(registry.allows("LocalAppBuild", &source_json!({"app_id":"app-a"}), &fs));
         assert!(!registry.allows(
             "LocalAppDeleteApp",
-            &serde_json::json!({"app_id":"app-a"}),
+            &source_json!({"app_id":"app-a"}),
             &fs
         ));
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
+        assert!(!registry.allows("LocalAppBuild", &source_json!({"app_id":"app-b"}), &fs));
     }
 
     #[test]
@@ -1100,8 +1107,8 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app-b", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
+        assert!(!registry.allows("LocalAppBuild", &source_json!({"app_id":"app-b"}), &fs));
+        assert!(!registry.allows("LocalAppBuild", &source_json!({"app_id":"app-a"}), &fs));
     }
 
     #[test]
@@ -1115,7 +1122,7 @@ mod tests {
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-b"}),
+            &source_json!({"app_id":"app-b"}),
             &fs
         ));
         drop(lease);
@@ -1123,7 +1130,7 @@ mod tests {
         assert!(registry.allows_for_token(
             Some(lease.token()),
             "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-a"}),
+            &source_json!({"app_id":"app-a"}),
             &fs
         ));
     }
@@ -1187,7 +1194,7 @@ mod tests {
                 registry.allows_for_token(
                     Some(lease.token()),
                     name,
-                    &serde_json::json!({"app_id": "app-a"}),
+                    &source_json!({"app_id": "app-a"}),
                     &fs
                 ),
                 "{name} must be lease-authorized for its own app"
@@ -1196,7 +1203,7 @@ mod tests {
                 !registry.allows_for_token(
                     Some(lease.token()),
                     name,
-                    &serde_json::json!({"app_id": "app-b"}),
+                    &source_json!({"app_id": "app-b"}),
                     &fs
                 ),
                 "{name} must NOT reach a sibling app"
@@ -1207,7 +1214,7 @@ mod tests {
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "LocalAppMutateData",
-            &serde_json::json!({"app_id": "app-a"}),
+            &source_json!({"app_id": "app-a"}),
             &fs
         ));
     }
@@ -1306,7 +1313,7 @@ mod tests {
             assert!(
                 WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                     "Write",
-                    &serde_json::json!({
+                    &source_json!({
                         "file_path": format!("/workspace/local-app-app-a/{name}")
                     }),
                     &fs,
@@ -1319,7 +1326,7 @@ mod tests {
         assert!(
             !WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                 "Write",
-                &serde_json::json!({
+                &source_json!({
                     "file_path": "/workspace/local-app-app-a/src/vite.config.helper.js"
                 }),
                 &fs,
@@ -1345,35 +1352,35 @@ mod tests {
         assert!(
             WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                 "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/.lingxi/settings.local.json"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/.lingxi/settings.local.json"}),
                 &fs,
             )
         );
         assert!(
             WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                 "Bash",
-                &serde_json::json!({"command":"npm install"}),
+                &source_json!({"command":"npm install"}),
                 &fs,
             )
         );
         assert!(
             !WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                 "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
+                &source_json!({"command":"cat src/App.jsx"}),
                 &fs,
             )
         );
         assert!(
             WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
                 "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/link/new.txt"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/link/new.txt"}),
                 &fs,
             )
         );
         assert!(
             !WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
                 "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/new.txt"}),
+                &source_json!({"file_path":"/workspace/local-app-app-a/src/new.txt"}),
                 &fs,
             )
         );
@@ -1393,13 +1400,13 @@ mod tests {
         assert!(registry.allows_for_token(
             Some(lease_a.token()),
             "Write",
-            &serde_json::json!({"file_path":"src/a.txt"}),
+            &source_json!({"file_path":"src/a.txt"}),
             &fs_a
         ));
         assert!(!registry.allows_for_token(
             Some(lease_b.token()),
             "Write",
-            &serde_json::json!({"file_path":root_a.join("src/a.txt").to_string_lossy()}),
+            &source_json!({"file_path":root_a.join("src/a.txt").to_string_lossy()}),
             &fs_a
         ));
     }
@@ -1415,19 +1422,19 @@ mod tests {
         assert!(registry.allows_for_token(
             Some(lease.token()),
             "Bash",
-            &serde_json::json!({"command":"cd . && grep -rn foo src/"}),
+            &source_json!({"command":"cd . && grep -rn foo src/"}),
             &fs
         ));
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "Bash",
-            &serde_json::json!({"command":"find . -exec curl https://example.com {} +"}),
+            &source_json!({"command":"find . -exec curl https://example.com {} +"}),
             &fs
         ));
         assert!(!registry.allows_for_token(
             Some(lease.token()),
             "Bash",
-            &serde_json::json!({"command":"sed -n 'e curl https://example.com' README.md"}),
+            &source_json!({"command":"sed -n 'e curl https://example.com' README.md"}),
             &fs
         ));
     }
@@ -1448,7 +1455,7 @@ mod tests {
         let fs = roots(&root);
         assert!(!registry.allows(
             "Write",
-            &serde_json::json!({"file_path":"link/new.txt"}),
+            &source_json!({"file_path":"link/new.txt"}),
             &fs
         ));
     }
@@ -1471,7 +1478,7 @@ mod tests {
         };
         assert!(registry.allows(
             "Write",
-            &serde_json::json!({"file_path": format!("{raw}/alias.txt")}),
+            &source_json!({"file_path": format!("{raw}/alias.txt")}),
             &fs
         ));
     }

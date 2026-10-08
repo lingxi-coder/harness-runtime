@@ -1598,13 +1598,13 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     let mut grown = skill_api::SkillRegistry::new();
     grown.register(skill_api::Skill {
         name: new_skill_name.to_string(),
-        description: "planted for scanner_needle_comes_from_discovery test".to_string(),
+        description: "planted for scanner_needle_comes_from_discovery test".into(),
         frontmatter: skill_api::SkillFrontmatter {
             name: new_skill_name.to_string(),
-            description: "planted".to_string(),
+            description: "planted".into(),
             ..Default::default()
         },
-        content: String::new(),
+        content: String::new().into(),
         source: skill_api::SkillSource::Bundled,
         loaded_from: skill_api::LoadedFrom::Bundled,
         plugin_id: None,

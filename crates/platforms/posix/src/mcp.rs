@@ -13,23 +13,32 @@
 //! without going through the trait surface.
 
 use async_trait::async_trait;
-use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
+use jsonrpc::{
+    Connection, ConnectionError, InboundHandler, JsonPayload, Request, Response, RouterError,
+};
+use lingxi_core::host::mcp_result::{
+    connection_error_diagnostic, decode_modern_result, drive_modern_request,
+    result_error_diagnostic, DecodedMcpResult, JsonrpcMcpResultIo, McpInputRequiredOptions,
+    McpResultError,
+};
 use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+    McpServerMetadataDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+    McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use platform_common::mcp_remote::{
-    capabilities_from_wire, initialize_params_for_version, modern_meta, modern_probe_params,
-    modern_request_requires_meta, validate_modern_envelope, MCP_PROTOCOL_VERSION,
-    MODERN_PROTOCOL_VERSION,
+    initialize_params_for_version, modern_meta, modern_probe_error, modern_probe_params,
+    modern_request_requires_meta, parse_legacy_initialize, parse_modern_discovery, ModernDiscovery,
+    ModernProbeErrorAction, MCP_PROTOCOL_VERSION,
 };
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -41,6 +50,7 @@ use tokio::sync::Mutex as AsyncMutex;
 /// `"Anthropic's agentic coding tool"`). The canonical
 /// `mcp::identity::ClientInfo` model does not (yet) carry a `description`
 /// field, so the literal lives here at the posix wire boundary.
+#[cfg(test)]
 const CLIENT_DESCRIPTION: &str = "An agentic coding tool";
 const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
 
@@ -50,21 +60,74 @@ const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
 /// without a live connection. Mirrors claude-code's SDK `Client` construction
 /// (`services/mcp/client.ts:985-1002`):
 ///
-/// * `capabilities` advertises the `roots` and `elicitation` markers as bare
-///   empty objects `{}` (NOT `null`, NOT `{form:{},url:{}}` — the Java MCP SDK
-///   rejects unknown elicitation props). The posix `McpClient` already
-///   registers `roots/list` + `elicitation/create` handlers, so advertising
-///   these lets spec-compliant servers issue those requests.
+/// * `capabilities` advertises roots and the current form/URL elicitation
+///   modes. The connection's explicit initialize capability choice is passed
+///   separately during the combined handshake.
 /// * `clientInfo` carries claude-code's identity literals — reused from the
 ///   canonical `mcp::identity` constants (`name`, `title`, `websiteUrl`) plus
 ///   the `description` literal — while `version` stays this build's own
 ///   product version (we do NOT impersonate claude-code's release number).
-fn initialize_params() -> Value {
-    initialize_params_for_version(MCP_PROTOCOL_VERSION)
+#[cfg(test)]
+fn initialize_params() -> Utf16JsonProjection {
+    initialize_params_for_version(
+        MCP_PROTOCOL_VERSION,
+        lingxi_core::host::McpElicitationMode::FormAndUrl,
+    )
 }
 
 fn modern_request_requires_result_type(method: &str) -> bool {
     modern_request_requires_meta(method)
+}
+
+fn source_string(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+        .expect("Rust strings are valid UTF-16")
+}
+
+fn empty_source_string() -> Utf16JsonProjection {
+    source_string("")
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("generated object fields are unique")
+}
+
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty JSON object is valid")
+}
+
+fn null_source_value() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null JSON value is valid")
+}
+
+fn source_payload(value: &Utf16JsonProjection) -> Result<JsonPayload, McpError> {
+    let json = value
+        .to_json_string()
+        .map_err(|error| McpError::Internal(error.to_string().into()))?;
+    JsonPayload::parse(json).map_err(|error| McpError::Internal(error.to_string().into()))
+}
+
+fn source_from_payload(value: JsonPayload) -> Result<Utf16JsonProjection, McpError> {
+    Utf16JsonProjection::parse(value.as_json())
+        .map_err(|error| McpError::Internal(error.to_string().into()))
+}
+
+fn source_from_payload_ref(value: &JsonPayload) -> Option<Utf16JsonProjection> {
+    Utf16JsonProjection::parse(value.as_json()).ok()
+}
+
+fn decode_source<T: serde::de::DeserializeOwned>(
+    value: &Utf16JsonProjection,
+) -> Result<T, McpError> {
+    let json = value
+        .to_json_string()
+        .map_err(|error| McpError::Internal(error.to_string().into()))?;
+    serde_json::from_str(&json).map_err(|error| McpError::Internal(error.to_string().into()))
+}
+
+#[cfg(test)]
+fn source_from_test_json(value: &serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(&value.to_string()).expect("test fixture is valid JSON")
 }
 
 /// Per-connection state held by `PosixMcpTransport`.
@@ -102,6 +165,8 @@ pub(crate) enum PosixMcpConnection {
         /// force-terminate a non-cooperative server. `Mutex<Option<…>>`
         /// because the oneshot sender is consumed on the first send.
         reaper_kill: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        /// Completion acknowledgement used before replacing a probe sibling.
+        reaper_done: tokio::sync::watch::Receiver<bool>,
     },
 }
 
@@ -116,6 +181,9 @@ pub(crate) enum PosixMcpConnection {
 pub struct PosixMcpTransport {
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
     negotiated: Arc<Mutex<HashMap<McpConnectionId, McpNegotiatedProtocol>>>,
+    metadata: Arc<Mutex<HashMap<McpConnectionId, McpServerMetadataDto>>>,
+    elicitation:
+        Arc<Mutex<HashMap<McpConnectionId, lingxi_core::host::McpElicitationCapabilities>>>,
     /// Shared HTTP/SSE implementation. POSIX only owns process/reaper state;
     /// remote JSON-RPC and protocol negotiation live in platform-common.
     remote: Arc<RemoteMcpTransport>,
@@ -129,6 +197,9 @@ struct ConnectionCleanupGuard {
     id: McpConnectionId,
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
     negotiated: Arc<Mutex<HashMap<McpConnectionId, McpNegotiatedProtocol>>>,
+    metadata: Arc<Mutex<HashMap<McpConnectionId, McpServerMetadataDto>>>,
+    elicitation:
+        Arc<Mutex<HashMap<McpConnectionId, lingxi_core::host::McpElicitationCapabilities>>>,
     connection: Arc<Connection>,
     reaper_kill: Option<Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
     armed: bool,
@@ -159,6 +230,12 @@ impl Drop for ConnectionCleanupGuard {
         if let Ok(mut guard) = self.negotiated.lock() {
             guard.remove(&self.id);
         }
+        if let Ok(mut guard) = self.metadata.lock() {
+            guard.remove(&self.id);
+        }
+        if let Ok(mut guard) = self.elicitation.lock() {
+            guard.remove(&self.id);
+        }
     }
 }
 
@@ -178,6 +255,32 @@ impl PosixMcpTransport {
         }
     }
 
+    fn elicitation_for(
+        &self,
+        id: McpConnectionId,
+    ) -> Result<lingxi_core::host::McpElicitationCapabilities, McpError> {
+        self.elicitation
+            .lock()
+            .map_err(|_| McpError::Internal("MCP capability map poisoned".into()))?
+            .get(&id)
+            .copied()
+            .ok_or_else(|| {
+                McpError::Internal(format!("missing MCP capability authority for {id}").into())
+            })
+    }
+
+    fn set_elicitation(
+        &self,
+        id: McpConnectionId,
+        capabilities: lingxi_core::host::McpElicitationCapabilities,
+    ) -> Result<(), McpError> {
+        self.elicitation
+            .lock()
+            .map_err(|_| McpError::Internal("MCP capability map poisoned".into()))?
+            .insert(id, capabilities);
+        Ok(())
+    }
+
     fn negotiated_for(&self, id: McpConnectionId) -> Option<McpNegotiatedProtocol> {
         self.negotiated.lock().ok()?.get(&id).cloned()
     }
@@ -186,16 +289,30 @@ impl PosixMcpTransport {
         self.remote.connection_for(id).is_some()
     }
 
-    fn decorate_params(&self, id: McpConnectionId, method: &str, params: Value) -> Value {
+    fn decorate_params(
+        &self,
+        id: McpConnectionId,
+        method: &str,
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpError> {
         let Some(protocol) = self.negotiated_for(id) else {
-            return params;
+            return Ok(params);
         };
         if protocol.era == McpProtocolEra::Modern && modern_request_requires_meta(method) {
-            let mut object = params.as_object().cloned().unwrap_or_default();
-            object.insert("_meta".into(), modern_meta(&protocol.version));
-            Value::Object(object)
-        } else {
+            let mut params = if params.object_entries().is_some() {
+                params
+            } else {
+                empty_source_object()
+            };
             params
+                .set_field(
+                    "_meta",
+                    modern_meta(&protocol.version, self.elicitation_for(id)?.modern),
+                )
+                .map_err(|error| McpError::Internal(error.to_string().into()))?;
+            Ok(params)
+        } else {
+            Ok(params)
         }
     }
 
@@ -203,26 +320,37 @@ impl PosixMcpTransport {
         &self,
         conn: &McpRawConnection,
         method: &str,
-        params: Value,
-    ) -> Result<Value, McpError> {
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpError> {
         let connection = self.connection_for_result(conn.connection_id)?;
-        let mut result = connection
-            .call(
+        let params = self.decorate_params(conn.connection_id, method, params)?;
+        if self.negotiated_for(conn.connection_id).is_some_and(|p| {
+            p.era == McpProtocolEra::Modern && modern_request_requires_result_type(method)
+        }) {
+            drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection,
+                    client_capabilities: modern_meta(
+                        platform_common::mcp_remote::MODERN_PROTOCOL_VERSION,
+                        self.elicitation_for(conn.connection_id)?.modern,
+                    )
+                    .subprojection("/io.modelcontextprotocol~1clientCapabilities")
+                    .expect("generated client capabilities exist"),
+                },
                 method,
-                self.decorate_params(conn.connection_id, method, params),
+                params,
+                McpInputRequiredOptions::default(),
             )
             .await
-            .map_err(|e| map_call_err(&e))?;
-        if self
-            .negotiated_for(conn.connection_id)
-            .is_some_and(|protocol| {
-                protocol.era == McpProtocolEra::Modern
-                    && modern_request_requires_result_type(method)
-            })
-        {
-            validate_modern_envelope(&mut result)?;
+            .map_err(map_result_err)
+        } else {
+            let params = source_payload(&params)?;
+            let result: JsonPayload = connection
+                .call(method, params)
+                .await
+                .map_err(|error| map_call_err(&error))?;
+            source_from_payload(result)
         }
-        Ok(result)
     }
 
     /// Clone the JSON-RPC [`Connection`] for `id` out of the map, dropping the
@@ -247,7 +375,7 @@ impl PosixMcpTransport {
             None => self
                 .remote
                 .connection_for(id)
-                .ok_or_else(|| McpError::Connection(format!("no such connection: {id}"))),
+                .ok_or_else(|| McpError::Connection(format!("no such connection: {id}").into())),
         }
     }
 
@@ -263,13 +391,19 @@ impl PosixMcpTransport {
                     reaper_kill,
                     ..
                 }) => (Arc::clone(connection), Some(Arc::clone(reaper_kill))),
-                None => return Err(McpError::Connection(format!("no such connection: {id}"))),
+                None => {
+                    return Err(McpError::Connection(
+                        format!("no such connection: {id}").into(),
+                    ))
+                }
             }
         };
         Ok(ConnectionCleanupGuard {
             id,
             connections: Arc::clone(&self.connections),
             negotiated: Arc::clone(&self.negotiated),
+            metadata: Arc::clone(&self.metadata),
+            elicitation: Arc::clone(&self.elicitation),
             connection,
             reaper_kill,
             armed: true,
@@ -303,119 +437,67 @@ impl PosixMcpTransport {
         conn: &McpRawConnection,
         version: &str,
         deadline: tokio::time::Instant,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<jsonrpc::ResponseError>)> {
         let Some(remaining) = Self::remaining(deadline) else {
-            return Err(McpError::Connection(
-                "MCP connection deadline exceeded".into(),
+            return Err((
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
             ));
         };
-        match tokio::time::timeout(
+        tokio::time::timeout(
             remaining,
-            self.initialize_with_version(conn, version, remaining),
+            self.initialize_with_version_detailed(conn, version, remaining),
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(McpError::Connection(
-                "MCP connection deadline exceeded".into(),
-            )),
-        }
+        .map_err(|_| {
+            (
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
+            )
+        })?
     }
 
     async fn probe_modern(
         &self,
         conn: &McpRawConnection,
         deadline: tokio::time::Instant,
-        closed_is_compatibility: bool,
-    ) -> Result<Option<String>, McpError> {
+        probe_timeout: Duration,
+    ) -> Result<(Option<ModernDiscovery>, bool), McpError> {
         let rpc = self.connection_for_result(conn.connection_id)?;
-        let mut probe = modern_probe_params();
         let mut corrective_retry = false;
         loop {
             let Some(timeout) = Self::remaining(deadline) else {
-                return Err(McpError::Connection(
-                    "MCP connection deadline exceeded".into(),
-                ));
+                return Ok((None, true));
             };
-            let result = rpc
-                .call_with_timeout_probe::<Value, Value>("server/discover", probe.clone(), timeout)
-                .await;
-            match result {
+            let timeout = timeout.min(probe_timeout);
+            let params = source_payload(&modern_probe_params(
+                self.elicitation_for(conn.connection_id)?.modern,
+            ))?;
+            match rpc
+                .call_with_timeout_probe_ignoring_unknown_ids::<_, JsonPayload>(
+                    "server/discover",
+                    params,
+                    timeout,
+                )
+                .await
+            {
                 Ok(reply) => {
-                    return Ok(reply
-                        .get("protocolVersion")
-                        .and_then(Value::as_str)
-                        .filter(|version| *version == MODERN_PROTOCOL_VERSION)
-                        .map(str::to_string));
+                    return Ok((parse_modern_discovery(source_from_payload(reply)?), false));
                 }
                 Err(ConnectionError::Router(RouterError::Remote(error))) => {
-                    if matches!(http_status(&error.data), Some(401 | 403)) {
-                        return Err(handshake_error(&ConnectionError::Router(
-                            RouterError::Remote(error),
-                        )));
+                    match modern_probe_error(&error, corrective_retry)? {
+                        ModernProbeErrorAction::Legacy => return Ok((None, false)),
+                        ModernProbeErrorAction::Retry => corrective_retry = true,
                     }
-                    if error.code == -32022 {
-                        if corrective_retry {
-                            return Ok(None);
-                        }
-                        corrective_retry = true;
-                        let supported = error
-                            .data
-                            .as_ref()
-                            .and_then(|data| data.get("supported"))
-                            .and_then(Value::as_array)
-                            .and_then(|items| {
-                                items.iter().find_map(|value| {
-                                    value
-                                        .as_str()
-                                        .filter(|version| *version == MODERN_PROTOCOL_VERSION)
-                                })
-                            });
-                        if let Some(version) = supported {
-                            probe["_meta"]["io.modelcontextprotocol/protocolVersion"] =
-                                Value::String(version.to_string());
-                            probe["protocolVersion"] = Value::String(version.to_string());
-                            continue;
-                        }
-                        return Ok(None);
-                    }
-                    if is_modern_compatibility_error(error.code) {
-                        return Ok(None);
-                    }
-                    return Err(McpError::Internal(format!(
-                        "MCP modern discovery failed: code={}, message={}",
-                        error.code, error.message
-                    )));
                 }
-                Err(ConnectionError::Router(RouterError::Deserialize(_))) => {
-                    // A syntactically valid JSON-RPC result with the wrong
-                    // shape is compatibility evidence, not a transport fault.
-                    return Ok(None);
+                Err(ConnectionError::Router(
+                    RouterError::Deserialize(_) | RouterError::WrongResponseId { .. },
+                )) => return Ok((None, false)),
+                Err(ConnectionError::Router(RouterError::WriterClosed)) if rpc.is_closed() => {
+                    return Ok((None, false))
                 }
-                Err(ConnectionError::Router(RouterError::WrongResponseId { .. })) => {
-                    return Ok(None);
-                }
-                Err(ConnectionError::Router(RouterError::WriterClosed))
-                    if closed_is_compatibility && rpc.is_closed() =>
-                {
-                    return Ok(None);
-                }
-                Err(ConnectionError::Router(RouterError::Timeout(_)))
-                    if closed_is_compatibility =>
-                {
-                    // A stdio peer that emits a response with the wrong id
-                    // leaves the router waiting until the probe budget. It is
-                    // indistinguishable from an old server that ignores the
-                    // probe, and both are compatibility fallback cases. A
-                    // remote timeout remains fatal below.
-                    return Ok(None);
-                }
-                Err(error) => {
-                    // Network and timeout errors are intentionally not
-                    // compatibility fallbacks: an unreachable server must be
-                    // reported instead of being redialed as legacy.
-                    return Err(map_call_err(&error));
-                }
+                Err(ConnectionError::Router(RouterError::Timeout(_))) => return Ok((None, true)),
+                Err(error) => return Err(map_call_err(&error)),
             }
         }
     }
@@ -426,29 +508,69 @@ impl PosixMcpTransport {
         version: &str,
         timeout: Duration,
     ) -> Result<ServerCapabilitiesDto, McpError> {
-        let connection = self.connection_for_result(conn.connection_id)?;
-        let result: Value = connection
-            .call_with_timeout(
-                "initialize",
-                self.decorate_params(
-                    conn.connection_id,
-                    "initialize",
-                    initialize_params_for_version(version),
-                ),
-                timeout,
-            )
+        self.initialize_with_version_detailed(conn, version, timeout)
             .await
-            .map_err(|e| handshake_error(&e))?;
-        let caps = result
-            .get("capabilities")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                McpError::Handshake("initialize result missing `capabilities` object".into())
+            .map_err(|(error, _)| error)
+    }
+
+    async fn initialize_with_version_detailed(
+        &self,
+        conn: &McpRawConnection,
+        version: &str,
+        timeout: Duration,
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<jsonrpc::ResponseError>)> {
+        let connection = self
+            .connection_for_result(conn.connection_id)
+            .map_err(|error| (error, None))?;
+        let params = self
+            .decorate_params(
+                conn.connection_id,
+                "initialize",
+                initialize_params_for_version(
+                    version,
+                    self.elicitation_for(conn.connection_id)
+                        .map_err(|error| (error, None))?
+                        .legacy,
+                ),
+            )
+            .map_err(|error| (error, None))?;
+        let params = source_payload(&params).map_err(|error| (error, None))?;
+        let result: JsonPayload = connection
+            .call_with_timeout("initialize", params, timeout)
+            .await
+            .map_err(|error| {
+                let remote = match &error {
+                    ConnectionError::Router(RouterError::Remote(remote)) => Some(remote.clone()),
+                    _ => None,
+                };
+                (handshake_error(&error), remote)
             })?;
-        let dto = capabilities_from_wire(caps, result.get("capabilities"));
+        let result = source_from_payload(result).map_err(|error| (error, None))?;
+        let (dto, selected_version, metadata) =
+            parse_legacy_initialize(result).map_err(|error| (error, None))?;
+        if let Ok(mut map) = self.negotiated.lock() {
+            map.insert(
+                conn.connection_id,
+                McpNegotiatedProtocol {
+                    era: McpProtocolEra::Legacy,
+                    version: selected_version,
+                },
+            );
+        }
+        if let Ok(mut map) = self.metadata.lock() {
+            map.insert(conn.connection_id, metadata);
+        }
         connection
-            .notify("notifications/initialized", json!({}))
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
+            .notify(
+                "notifications/initialized",
+                source_payload(&empty_source_object()).map_err(|error| (error, None))?,
+            )
+            .map_err(|error| {
+                (
+                    McpError::Handshake(connection_error_diagnostic(&error)),
+                    None,
+                )
+            })?;
         Ok(dto)
     }
 }
@@ -481,18 +603,39 @@ struct ToolsListResult {
 #[derive(Deserialize)]
 struct RawTool {
     name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(rename = "inputSchema", default)]
-    input_schema: Value,
-    #[serde(rename = "outputSchema", default)]
-    output_schema: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    description: Option<Utf16JsonProjection>,
+    #[serde(
+        rename = "inputSchema",
+        default = "empty_source_object",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    input_schema: Utf16JsonProjection,
+    #[serde(
+        rename = "outputSchema",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    output_schema: Option<Utf16JsonProjection>,
     #[serde(default)]
     annotations: Option<lingxi_core::host::McpToolAnnotationsDto>,
     #[serde(default)]
     icons: Vec<lingxi_core::host::McpIconDto>,
-    #[serde(default, rename = "_meta")]
-    meta: Option<Value>,
+    #[serde(
+        default,
+        rename = "_meta",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
 }
 
 impl RawTool {
@@ -500,28 +643,27 @@ impl RawTool {
     /// token; `McpRegistry::connect` rewrites both once it knows the registry
     /// key.
     fn into_dto(self) -> McpToolDto {
-        let search_hint = self
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("anthropic/searchHint"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let search_hint = self.meta.as_ref().and_then(|meta| {
+            let value = meta.get_property("anthropic/searchHint")?;
+            value.as_str()?;
+            meta.subprojection("/anthropic~1searchHint").ok()
+        });
         let always_load = self
             .meta
             .as_ref()
-            .and_then(|meta| meta.get("anthropic/alwaysLoad"))
-            .and_then(Value::as_bool);
+            .and_then(|meta| meta.get_property("anthropic/alwaysLoad"))
+            .and_then(|value| value.as_bool());
         let requires_user_interaction = self
             .meta
             .as_ref()
-            .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
-            .and_then(Value::as_bool)
+            .and_then(|meta| meta.get_property("anthropic/requiresUserInteraction"))
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
         McpToolDto {
             full_name: format!("mcp____{}", self.name),
             server_name: String::new(),
             tool_name: self.name,
-            description: self.description,
+            description: self.description.unwrap_or_else(|| source_string("")),
             input_schema: self.input_schema,
             output_schema: self.output_schema,
             annotations: self.annotations,
@@ -536,17 +678,32 @@ impl RawTool {
 
 #[derive(Deserialize)]
 struct ToolCallResult {
-    #[serde(default)]
-    content: Value,
+    #[serde(
+        default = "null_source_value",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    content: Utf16JsonProjection,
     #[serde(rename = "isError", default)]
     is_error: bool,
     // Optional, arbitrary-JSON MCP `CallToolResult` members. Parsed as opaque
     // values and forwarded verbatim onto the DTO (no transformation), matching
     // claude-code's `result._meta` / `result.structuredContent` passthrough.
-    #[serde(rename = "_meta", default)]
-    meta: Option<Value>,
-    #[serde(rename = "structuredContent", default)]
-    structured_content: Option<Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    structured_content: Option<Utf16JsonProjection>,
 }
 
 #[derive(Deserialize)]
@@ -557,15 +714,29 @@ struct ResourcesListResult {
 
 #[derive(Deserialize)]
 struct RawResource {
-    uri: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    uri: Utf16JsonProjection,
+    #[serde(
+        default = "empty_source_string",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    name: Utf16JsonProjection,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    description: Option<Utf16JsonProjection>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
 }
 
 /// Wire response for `resources/templates/list` (§26a). Oracle
@@ -580,17 +751,39 @@ struct ResourceTemplatesListResult {
 
 #[derive(Deserialize)]
 struct RawResourceTemplate {
-    #[serde(rename = "uriTemplate")]
-    uri_template: String,
-    #[serde(default)]
-    name: String,
-    description: Option<String>,
+    #[serde(
+        rename = "uriTemplate",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    uri_template: Utf16JsonProjection,
+    #[serde(
+        default = "empty_source_string",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    name: Utf16JsonProjection,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    description: Option<Utf16JsonProjection>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
-    #[serde(default)]
-    annotations: Option<Value>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    annotations: Option<Utf16JsonProjection>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
 }
 
 #[derive(Deserialize)]
@@ -601,13 +794,27 @@ struct ResourceReadResult {
 
 #[derive(Deserialize)]
 struct RawResourceContent {
-    uri: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    uri: Option<Utf16JsonProjection>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
-    text: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    text: Option<Utf16JsonProjection>,
     blob: Option<String>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
 }
 
 #[derive(Deserialize)]
@@ -618,16 +825,26 @@ struct PromptsListResult {
 
 #[derive(Deserialize)]
 struct RawPrompt {
-    name: String,
-    description: Option<String>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    name: Utf16JsonProjection,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    description: Option<Utf16JsonProjection>,
     #[serde(default)]
     arguments: Vec<RawPromptArgument>,
 }
 
 #[derive(Deserialize)]
 struct RawPromptArgument {
-    name: String,
-    description: Option<String>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    name: Utf16JsonProjection,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    description: Option<Utf16JsonProjection>,
     #[serde(default)]
     required: bool,
 }
@@ -635,19 +852,16 @@ struct RawPromptArgument {
 /// Map a [`ConnectionError`] from an outbound call into the generic
 /// [`McpError::Internal`] surface (used by every method except the ones with
 /// a more specific mapping, e.g. `call_tool`'s timeout / not-found paths).
+fn map_result_err(error: McpResultError) -> McpError {
+    match error {
+        McpResultError::Connection(error) => map_call_err(&error),
+        McpResultError::Sdk(error) => McpError::Result(error),
+        error @ McpResultError::Local(_) => McpError::Internal(result_error_diagnostic(&error)),
+    }
+}
+
 fn map_call_err(e: &ConnectionError) -> McpError {
-    McpError::Internal(e.to_string())
-}
-
-fn http_status(data: &Option<Value>) -> Option<u16> {
-    data.as_ref()
-        .and_then(|data| data.get("httpStatus"))
-        .and_then(Value::as_u64)
-        .and_then(|status| u16::try_from(status).ok())
-}
-
-fn is_modern_compatibility_error(code: i32) -> bool {
-    matches!(code, jsonrpc::METHOD_NOT_FOUND | -32001 | -32020 | -32021)
+    McpError::Internal(connection_error_diagnostic(e))
 }
 
 /// Recover structured HTTP status / `WWW-Authenticate` metadata from a failed
@@ -669,25 +883,27 @@ fn is_modern_compatibility_error(code: i32) -> bool {
 /// back to the prior `Handshake(e.to_string())` behavior unchanged.
 fn handshake_error(e: &ConnectionError) -> McpError {
     if let ConnectionError::Router(RouterError::Remote(re)) = e {
-        if let Some(status) = re
-            .data
+        let data = re.data.as_ref().and_then(source_from_payload_ref);
+        if let Some(status) = data
             .as_ref()
-            .and_then(|data| data.get("httpStatus"))
-            .and_then(Value::as_u64)
+            .and_then(|data| data.number_at("/httpStatus"))
+            .filter(|status| {
+                status.is_finite()
+                    && status.fract() == 0.0
+                    && *status >= 0.0
+                    && *status <= u16::MAX as f64
+            })
         {
-            let www_authenticate = re
-                .data
+            let www_authenticate = data
                 .as_ref()
-                .and_then(|data| data.get("wwwAuthenticate"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
+                .and_then(|data| data.string_at("/wwwAuthenticate").map(str::to_owned));
             return McpError::HttpResponse {
                 status: status as u16,
                 www_authenticate,
             };
         }
     }
-    McpError::Handshake(e.to_string())
+    McpError::Handshake(connection_error_diagnostic(e))
 }
 
 /// True when `e` is a remote JSON-RPC error carrying the
@@ -732,7 +948,7 @@ impl McpTransport for PosixMcpTransport {
                 };
                 let handles = spawn_stdio_with_handles(cfg)
                     .await
-                    .map_err(|e| McpError::Connection(e.to_string()))?;
+                    .map_err(|e| McpError::Connection(e.to_string().into()))?;
                 let connection = Arc::new(handles.connection);
                 // A spec-compliant server may send us inbound `ping` requests
                 // for keepalive (the SDK does this). With no handler the
@@ -748,6 +964,7 @@ impl McpTransport for PosixMcpTransport {
                         connection,
                         stderr: handles.stderr,
                         reaper_kill: Arc::new(Mutex::new(Some(handles.reaper_kill))),
+                        reaper_done: handles.reaper_done,
                     },
                 );
             }
@@ -762,14 +979,32 @@ impl McpTransport for PosixMcpTransport {
             }
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
         }
+        if let Err(error) = self.set_elicitation(
+            id,
+            lingxi_core::host::McpElicitationCapabilities::for_transport(spec.transport_kind()),
+        ) {
+            self.disconnect_sync(id);
+            return Err(error);
+        }
         Ok(McpRawConnection { connection_id: id })
     }
 
     async fn connect_and_initialize(
         &self,
         spec: &McpTransportSpec,
-        options: McpConnectOptions,
+        mut options: McpConnectOptions,
     ) -> Result<McpConnectResult, McpError> {
+        if options.expected_era.is_none() {
+            match mcp::protocol_negotiation::resolve_for_spec(spec, options.deadline_ms) {
+                mcp::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
+                    options.expected_era = Some(McpProtocolEra::Modern);
+                    options.probe_timeout_ms = Some(probe_timeout_ms);
+                }
+                mcp::protocol_negotiation::NegotiationMode::Legacy => {
+                    options.expected_era = Some(McpProtocolEra::Legacy)
+                }
+            }
+        }
         if matches!(
             spec,
             McpTransportSpec::Sse { .. }
@@ -791,155 +1026,167 @@ impl McpTransport for PosixMcpTransport {
                     mcp::protocol_negotiation::NegotiationMode::Legacy => McpProtocolEra::Legacy,
                 },
             );
-        let mut negotiated = McpNegotiatedProtocol {
-            era: McpProtocolEra::Legacy,
-            version: MCP_PROTOCOL_VERSION.to_string(),
-        };
-
+        let mut discovery = None;
+        let mut probe_timed_out = false;
         if requested == McpProtocolEra::Modern {
-            // Probe a disposable sibling. The probe must never become the
-            // live session: stdio servers may bind per-process state and
-            // remote servers may issue a session id on the first request.
+            // Only stdio probes on a disposable sibling; HTTP is handled by
+            // platform-common and retains its original connection.
             let probe_connection = self.connect_before(spec, deadline).await?;
-            let probe_guard = match self.cleanup_guard(probe_connection.connection_id) {
-                Ok(guard) => guard,
-                Err(error) => {
-                    self.disconnect_sync(probe_connection.connection_id);
-                    return Err(error);
-                }
-            };
-            let default_probe_cap = if matches!(spec, McpTransportSpec::Stdio { .. }) {
-                3_000
-            } else {
-                5_000
-            };
-            let probe_cap = Duration::from_millis(
-                options
-                    .probe_timeout_ms
-                    .unwrap_or(default_probe_cap)
-                    .min(default_probe_cap),
-            );
-            let probe_deadline = std::cmp::min(
-                deadline,
-                tokio::time::Instant::now()
-                    .checked_add(probe_cap)
-                    .ok_or_else(|| {
-                        McpError::Connection("MCP connection deadline overflow".into())
-                    })?,
-            );
+            let probe_guard = self.cleanup_guard(probe_connection.connection_id)?;
+            self.set_elicitation(probe_connection.connection_id, options.elicitation)?;
+            let probe_cap =
+                Duration::from_millis(options.probe_timeout_ms.unwrap_or(3_000).min(3_000));
+            (discovery, probe_timed_out) = self
+                .probe_modern(&probe_connection, deadline, probe_cap)
+                .await?;
+            let reaped = self.connections.lock().ok().and_then(|connections| {
+                connections
+                    .get(&probe_connection.connection_id)
+                    .map(|PosixMcpConnection::Stdio { reaper_done, .. }| reaper_done.clone())
+            });
+            drop(probe_guard);
+            if let Some(mut reaped) = reaped {
+                // The disposable sibling must exit before a live child can
+                // claim the same server resources (ports, files or locks).
+                tokio::time::timeout_at(deadline, reaped.wait_for(|done| *done))
+                    .await
+                    .map_err(|_| {
+                        McpError::Connection("MCP probe cleanup deadline exceeded".into())
+                    })?
+                    .map_err(|_| {
+                        McpError::Connection("MCP probe reaper closed before cleanup".into())
+                    })?;
+            }
+        }
+        let connection = self.connect_before(spec, deadline).await?;
+        let live_guard = self.cleanup_guard(connection.connection_id)?;
+        self.set_elicitation(connection.connection_id, options.elicitation)?;
+        if discovery.is_none() {
             match self
-                .probe_modern(
-                    &probe_connection,
-                    probe_deadline,
-                    matches!(spec, McpTransportSpec::Stdio { .. }),
-                )
+                .initialize_before(&connection, MCP_PROTOCOL_VERSION, deadline)
                 .await
             {
-                Ok(Some(version)) => {
-                    negotiated = McpNegotiatedProtocol {
-                        era: McpProtocolEra::Modern,
-                        version,
+                Ok(capabilities) => {
+                    let negotiated = self
+                        .negotiated_for(connection.connection_id)
+                        .ok_or_else(|| McpError::Handshake("missing negotiated protocol".into()))?;
+                    live_guard.disarm();
+                    return Ok(McpConnectResult {
+                        connection,
+                        capabilities,
+                        negotiated,
+                    });
+                }
+                Err((error, remote)) if probe_timed_out => {
+                    if let Some(remote) = remote.filter(|error| error.code == -32022) {
+                        let supported = remote
+                            .data
+                            .as_ref()
+                            .and_then(source_from_payload_ref)
+                            .and_then(|data| data.subprojection("/supported").ok())
+                            .and_then(|versions| {
+                                let length = versions.array_len("")?;
+                                if length == 0 {
+                                    return None;
+                                }
+                                (0..length)
+                                    .map(|index| {
+                                        versions.string_at(&format!("/{index}")).map(str::to_owned)
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            });
+                        if supported.is_some_and(|versions| {
+                            !versions.iter().any(|version| {
+                                version == platform_common::mcp_remote::MODERN_PROTOCOL_VERSION
+                            })
+                        }) {
+                            return Err(error);
+                        }
+                    }
+                    // An old server can ignore discovery, while a modern peer
+                    // can reject initialize after a slow probe. The upstream
+                    // client tries discovery once on the live process then.
+                    let recovery_deadline = std::cmp::min(
+                        deadline,
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(
+                                options.probe_timeout_ms.unwrap_or(3_000).min(3_000),
+                            ),
+                    );
+                    let rpc = self.connection_for_result(connection.connection_id)?;
+                    let timeout = Self::remaining(recovery_deadline).unwrap_or_default();
+                    // This is a connected discover, not another raw probe: one
+                    // request, a complete-result envelope, no corrective retry.
+                    let params = source_payload(&modern_probe_params(options.elicitation.modern))?;
+                    discovery = match rpc
+                        .call_with_timeout::<_, JsonPayload>("server/discover", params, timeout)
+                        .await
+                    {
+                        Ok(reply) => match source_from_payload(reply).and_then(|reply| {
+                            decode_modern_result("server/discover", reply)
+                                .map_err(|error| McpError::Internal(error.to_string().into()))
+                        }) {
+                            Ok(DecodedMcpResult::Complete(reply)) => parse_modern_discovery(reply),
+                            _ => None,
+                        },
+                        _ => None,
                     };
+                    if discovery.is_none() {
+                        return Err(error);
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    drop(probe_guard);
-                    return Err(error);
-                }
+                Err((error, _)) => return Err(error),
             }
-            drop(probe_guard);
         }
-
-        // A fallback (or a successful probe) always redials the live session
-        // with the selected revision; no probe child/socket survives.
-        let connection = self.connect_before(spec, deadline).await?;
-        let live_guard = match self.cleanup_guard(connection.connection_id) {
-            Ok(guard) => guard,
-            Err(error) => {
-                self.disconnect_sync(connection.connection_id);
-                return Err(error);
-            }
+        let discovery = discovery.expect("modern discovery was checked");
+        let negotiated = McpNegotiatedProtocol {
+            era: McpProtocolEra::Modern,
+            version: discovery.version,
         };
-        if let Ok(mut guard) = self.negotiated.lock() {
-            guard.insert(connection.connection_id, negotiated.clone());
+        if let Ok(mut map) = self.negotiated.lock() {
+            map.insert(connection.connection_id, negotiated.clone());
         }
-        let capabilities = match self
-            .initialize_before(&connection, &negotiated.version, deadline)
-            .await
-        {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                drop(live_guard);
-                return Err(error);
-            }
-        };
+        if let Ok(mut map) = self.metadata.lock() {
+            map.insert(connection.connection_id, discovery.metadata);
+        }
         live_guard.disarm();
         Ok(McpConnectResult {
             connection,
-            capabilities,
+            capabilities: discovery.capabilities,
             negotiated,
         })
+    }
+
+    fn server_metadata(&self, id: McpConnectionId) -> Option<McpServerMetadataDto> {
+        if self.is_remote_connection(id) {
+            return self.remote.server_metadata(id);
+        }
+        self.metadata.lock().ok()?.get(&id).cloned()
     }
 
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.initialize(conn).await;
         }
-        let connection = self.connection_for_result(conn.connection_id)?;
-
-        // Send the MCP `initialize` request. The advertised capabilities and
-        // `clientInfo` identity match claude-code 1:1 (see `initialize_params`).
-        let version = self
-            .negotiated_for(conn.connection_id)
-            .map(|protocol| protocol.version)
-            .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_string());
-        let result: Value = connection
-            .call(
-                "initialize",
-                self.decorate_params(
-                    conn.connection_id,
-                    "initialize",
-                    initialize_params_for_version(&version),
-                ),
-            )
+        if let Some(discovery) = self
+            .server_metadata(conn.connection_id)
+            .and_then(|metadata| metadata.discovery)
+            .and_then(parse_modern_discovery)
+        {
+            return Ok(discovery.capabilities);
+        }
+        self.initialize_with_version(conn, MCP_PROTOCOL_VERSION, Duration::from_secs(60))
             .await
-            // A failed initialize is a handshake failure — UNLESS the
-            // Streamable HTTP writer task (`mcp_http.rs::http_error_message`)
-            // turned a non-2xx POST response into a synthetic JSON-RPC error
-            // carrying `data: {httpStatus, wwwAuthenticate}`; surface that
-            // structurally as `McpError::HttpResponse` (see `handshake_error`)
-            // so 401/403 classification never has to substring-match a
-            // stringified error. SSE's connect() arm already returns this
-            // structurally via `SseConnectError::HttpResponse` for the
-            // pre-flight GET; this closes the matching gap for `Http`.
-            .map_err(|e| handshake_error(&e))?;
-        // The server's declared capabilities live under `result.capabilities`
-        // as a presence map (e.g. `{ "tools": {} }`). Map by presence.
-        let caps = result
-            .get("capabilities")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                McpError::Handshake("initialize result missing `capabilities` object".into())
-            })?;
-
-        let dto = capabilities_from_wire(caps, result.get("capabilities"));
-
-        // Per the MCP spec, the client sends `notifications/initialized` once
-        // the handshake result is in hand (fire-and-forget, synchronous).
-        connection
-            .notify("notifications/initialized", json!({}))
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
-
-        Ok(dto)
     }
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.list_tools(conn).await;
         }
-        let raw = self.call_rpc(conn, "tools/list", json!({})).await?;
-        let parsed: ToolsListResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let raw = self
+            .call_rpc(conn, "tools/list", empty_source_object())
+            .await?;
+        let parsed: ToolsListResult = decode_source(&raw)?;
 
         // The trait's `connect`/`list_tools` carry no logical server name —
         // only an `McpConnectionId`. We leave `server_name` empty (and the
@@ -955,9 +1202,10 @@ impl McpTransport for PosixMcpTransport {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.list_resources(conn).await;
         }
-        let raw = self.call_rpc(conn, "resources/list", json!({})).await?;
-        let parsed: ResourcesListResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let raw = self
+            .call_rpc(conn, "resources/list", empty_source_object())
+            .await?;
+        let parsed: ResourcesListResult = decode_source(&raw)?;
         Ok(parsed
             .resources
             .into_iter()
@@ -979,10 +1227,9 @@ impl McpTransport for PosixMcpTransport {
             return self.remote.list_resource_templates(conn).await;
         }
         let raw = self
-            .call_rpc(conn, "resources/templates/list", json!({}))
+            .call_rpc(conn, "resources/templates/list", empty_source_object())
             .await?;
-        let parsed: ResourceTemplatesListResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let parsed: ResourceTemplatesListResult = decode_source(&raw)?;
         Ok(parsed
             .resource_templates
             .into_iter()
@@ -1001,9 +1248,10 @@ impl McpTransport for PosixMcpTransport {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.list_prompts(conn).await;
         }
-        let raw = self.call_rpc(conn, "prompts/list", json!({})).await?;
-        let parsed: PromptsListResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let raw = self
+            .call_rpc(conn, "prompts/list", empty_source_object())
+            .await?;
+        let parsed: PromptsListResult = decode_source(&raw)?;
         Ok(parsed
             .prompts
             .into_iter()
@@ -1027,7 +1275,7 @@ impl McpTransport for PosixMcpTransport {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.call_tool(conn, tool, input).await;
@@ -1037,44 +1285,67 @@ impl McpTransport for PosixMcpTransport {
         // (the `MCP_TOOL_TIMEOUT` env var, else the ~27.8h default). Previously a
         // hardcoded 60s, which spuriously timed out legitimately long MCP tools.
         let timeout = mcp::client::mcp_tool_timeout();
-        let raw: Value = connection
-            .call_with_timeout(
+        let params = self.decorate_params(
+            conn.connection_id,
+            "tools/call",
+            source_object(vec![
+                ("name".into(), source_string(tool)),
+                ("arguments".into(), input),
+            ]),
+        )?;
+        let raw = if self
+            .negotiated_for(conn.connection_id)
+            .is_some_and(|p| p.era == McpProtocolEra::Modern)
+        {
+            drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection,
+                    client_capabilities: modern_meta(
+                        platform_common::mcp_remote::MODERN_PROTOCOL_VERSION,
+                        self.elicitation_for(conn.connection_id)?.modern,
+                    )
+                    .subprojection("/io.modelcontextprotocol~1clientCapabilities")
+                    .expect("generated client capabilities exist"),
+                },
                 "tools/call",
-                self.decorate_params(
-                    conn.connection_id,
-                    "tools/call",
-                    json!({ "name": tool, "arguments": input }),
-                ),
-                timeout,
+                params,
+                McpInputRequiredOptions {
+                    per_request_timeout: timeout,
+                    max_total_timeout: Some(timeout),
+                    ..Default::default()
+                },
             )
             .await
-            .map_err(|e| match &e {
-                // Honor the per-call budget with the load-bearing Display
-                // string. `tool` is the unprefixed name; no logical server
-                // name is available at this layer, so it is left empty. `secs`
-                // reports the actual resolved budget (ceil to ≥1, as the
-                // McpClient path does).
-                ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
-                    server: String::new(),
-                    tool: tool.to_string(),
-                    secs: timeout.as_secs().max(1),
-                },
-                // The server reports an unknown tool via -32601.
-                _ if is_method_not_found(&e) => McpError::ToolNotFound(tool.to_string()),
-                _ => map_call_err(&e),
-            })?;
-        let mut raw = raw;
-        if self
-            .negotiated_for(conn.connection_id)
-            .is_some_and(|protocol| {
-                protocol.era == McpProtocolEra::Modern
-                    && modern_request_requires_result_type("tools/call")
-            })
-        {
-            validate_modern_envelope(&mut raw)?;
-        }
-        let parsed: ToolCallResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+            .map_err(|error| match error {
+                McpResultError::Sdk(error) if error.code == "REQUEST_TIMEOUT" => {
+                    McpError::Timeout {
+                        server: String::new(),
+                        tool: tool.to_owned(),
+                        secs: timeout.as_secs().max(1),
+                    }
+                }
+                McpResultError::Connection(error) if is_method_not_found(&error) => {
+                    McpError::ToolNotFound(tool.to_owned())
+                }
+                error => map_result_err(error),
+            })?
+        } else {
+            let params = source_payload(&params)?;
+            let result: JsonPayload = connection
+                .call_with_timeout("tools/call", params, timeout)
+                .await
+                .map_err(|error| match &error {
+                    ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
+                        server: String::new(),
+                        tool: tool.to_owned(),
+                        secs: timeout.as_secs().max(1),
+                    },
+                    _ if is_method_not_found(&error) => McpError::ToolNotFound(tool.to_owned()),
+                    _ => map_call_err(&error),
+                })?;
+            source_from_payload(result)?
+        };
+        let parsed: ToolCallResult = decode_source(&raw)?;
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
@@ -1086,16 +1357,19 @@ impl McpTransport for PosixMcpTransport {
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.read_resource(conn, uri).await;
         }
         let raw = self
-            .call_rpc(conn, "resources/read", json!({ "uri": uri }))
+            .call_rpc(
+                conn,
+                "resources/read",
+                source_object(vec![("uri".into(), uri.clone())]),
+            )
             .await?;
-        let parsed: ResourceReadResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let parsed: ResourceReadResult = decode_source(&raw)?;
         // Take the first contents block. `McpResourceContentDto.content` is a
         // single `String` whose documented contract is "text-encoded; binaries
         // are base64": map a UTF-8 `text` block through verbatim, and for a
@@ -1108,9 +1382,12 @@ impl McpTransport for PosixMcpTransport {
             .into_iter()
             .next()
             .ok_or_else(|| McpError::Internal("resources/read returned no contents".into()))?;
-        let content = first.text.or(first.blob).unwrap_or_default();
+        let content = first
+            .text
+            .or_else(|| first.blob.map(Into::into))
+            .unwrap_or_else(empty_source_string);
         Ok(McpResourceContentDto {
-            uri: first.uri.unwrap_or_else(|| uri.to_string()),
+            uri: first.uri.unwrap_or_else(|| uri.clone()),
             content,
             mime_type: first.mime_type,
             meta: first.meta,
@@ -1120,17 +1397,20 @@ impl McpTransport for PosixMcpTransport {
     async fn read_resource_rich(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
         output_dir: &std::path::Path,
     ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.read_resource_rich(conn, uri, output_dir).await;
         }
         let raw = self
-            .call_rpc(conn, "resources/read", json!({ "uri": uri }))
+            .call_rpc(
+                conn,
+                "resources/read",
+                source_object(vec![("uri".into(), uri.clone())]),
+            )
             .await?;
-        let parsed: ResourceReadResult =
-            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        let parsed: ResourceReadResult = decode_source(&raw)?;
         // Map EVERY content block (not just the first) into the rich shape:
         // text → text, base64 blob → decode + persist under `output_dir`. The
         // logical server name is not tracked at this transport layer (the map is
@@ -1141,7 +1421,7 @@ impl McpTransport for PosixMcpTransport {
             .contents
             .into_iter()
             .map(|c| mcp::RawResourceContentRich {
-                uri: c.uri.unwrap_or_else(|| uri.to_string()),
+                uri: c.uri.unwrap_or_else(|| uri.clone()),
                 mime_type: c.mime_type,
                 meta: c.meta,
                 text: c.text,
@@ -1166,7 +1446,7 @@ impl McpTransport for PosixMcpTransport {
         let conn = McpRawConnection {
             connection_id: conn_id,
         };
-        let _: Value = self.call_rpc(&conn, "ping", json!({})).await?;
+        let _: Utf16JsonProjection = self.call_rpc(&conn, "ping", empty_source_object()).await?;
         Ok(())
     }
 
@@ -1190,7 +1470,14 @@ impl McpTransport for PosixMcpTransport {
                         return Some((
                             McpNotificationDto {
                                 method: n.method,
-                                params: n.params.unwrap_or(Value::Null),
+                                params: n
+                                    .params
+                                    .as_ref()
+                                    .and_then(source_from_payload_ref)
+                                    .unwrap_or_else(|| {
+                                        Utf16JsonProjection::parse("null")
+                                            .expect("null JSON is valid")
+                                    }),
                             },
                             rx,
                         ));
@@ -1224,6 +1511,12 @@ impl McpTransport for PosixMcpTransport {
             return;
         }
         if let Ok(mut guard) = self.negotiated.lock() {
+            guard.remove(&conn_id);
+        }
+        if let Ok(mut guard) = self.metadata.lock() {
+            guard.remove(&conn_id);
+        }
+        if let Ok(mut guard) = self.elicitation.lock() {
             guard.remove(&conn_id);
         }
         let entry = self
@@ -1346,6 +1639,8 @@ pub struct StdioHandles {
     /// ignores stdin-EOF: the reaper owns the `Child`, so `kill_on_drop(true)`
     /// alone never fires until full runtime shutdown.
     pub reaper_kill: tokio::sync::oneshot::Sender<()>,
+    /// Becomes true after the reaper has observed and reaped the child exit.
+    pub reaper_done: tokio::sync::watch::Receiver<bool>,
 }
 
 // Re-export the shared WebSocket connector so callers can use a single path
@@ -1427,6 +1722,7 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
     // reaper call `child.start_kill()` and await exit — this force-kills a
     // server that would otherwise ignore stdin-EOF and run forever.
     let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let (reaper_done_tx, reaper_done) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         tokio::select! {
             wait = child.wait() => match wait {
@@ -1458,12 +1754,14 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
                 },
             }
         }
+        let _ = reaper_done_tx.send(true);
     });
 
     Ok(StdioHandles {
         connection,
         stderr: stderr_ring,
         reaper_kill: kill_tx,
+        reaper_done,
     })
 }
 
@@ -1481,60 +1779,65 @@ mod initialize_params_tests {
     //! MCP `initialize` request payload parity with claude-code
     //! `services/mcp/client.ts:985-1002`.
     use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde_json::json;
     // Imported here, not at file scope: the lib target has no other user, so a
     // file-level `use` reads as an unused import and gets deleted — which then
     // breaks these tests, since they reached it through `super::`.
     use platform_common::mcp_remote::directory_read_capability;
 
+    fn source(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(&value.to_string()).expect("fixture is valid JSON")
+    }
+
     #[test]
-    fn capabilities_advertise_bare_empty_roots_and_elicitation() {
+    fn capabilities_advertise_roots_and_current_elicitation_modes() {
         let params = initialize_params();
-        let caps = &params["capabilities"];
-        assert!(caps.is_object(), "capabilities must be a JSON object");
-        let caps_obj = caps.as_object().unwrap();
+        let caps = params.subprojection("/capabilities").unwrap();
+        let caps_obj = caps.object_entries().expect("capabilities object");
         // EXACTLY the two markers claude-code advertises — nothing else.
         assert_eq!(
             caps_obj.len(),
             2,
             "capabilities must have exactly 2 keys (roots, elicitation), got {:?}",
-            caps_obj.keys().collect::<Vec<_>>(),
+            caps_obj
+                .iter()
+                .map(|entry| entry.display_key)
+                .collect::<Vec<_>>(),
         );
-        // Each marker is the LITERAL empty object `{}` — not null, not missing,
-        // not `{form:{},url:{}}` (the Java MCP SDK rejects unknown props).
-        assert!(caps["roots"].is_object(), "roots must be an object");
+        let roots = caps.subprojection("/roots").unwrap();
+        assert_eq!(roots.to_json_string().unwrap(), r#"{"listChanged":true}"#);
+        let elicitation = caps.subprojection("/elicitation").unwrap();
         assert_eq!(
-            caps["roots"].as_object().unwrap().len(),
-            0,
-            "roots must be EMPTY"
-        );
-        assert!(
-            caps["elicitation"].is_object(),
-            "elicitation must be an object"
-        );
-        assert_eq!(
-            caps["elicitation"].as_object().unwrap().len(),
-            0,
-            "elicitation must be EMPTY",
+            elicitation.to_json_string().unwrap(),
+            r#"{"form":{},"url":{}}"#,
+            "current default includes both form and URL elicitation",
         );
     }
 
     #[test]
     fn client_info_carries_claude_code_identity_literals() {
         let params = initialize_params();
-        let info = &params["clientInfo"];
-        assert_eq!(info["name"], "lingxi");
-        assert_eq!(info["title"], "LingXi");
-        assert_eq!(info["description"], "An agentic coding tool");
-        assert_eq!(info["websiteUrl"], "https://claude.com/claude-code");
+        let info = params.subprojection("/clientInfo").unwrap();
+        assert_eq!(info.string_at("/name"), Some("lingxi"));
+        assert_eq!(info.string_at("/title"), Some("LingXi"));
+        assert_eq!(
+            info.string_at("/description"),
+            Some("An agentic coding tool")
+        );
+        assert_eq!(
+            info.string_at("/websiteUrl"),
+            Some("https://claude.com/claude-code")
+        );
         // The literals are sourced from the canonical `mcp::identity` constants
         // (so a rename there propagates here) — cross-check the reused values.
-        assert_eq!(info["name"], mcp::CLIENT_NAME);
-        assert_eq!(info["title"], mcp::CLIENT_TITLE);
-        assert_eq!(info["websiteUrl"], mcp::MCP_WEBSITE_URL);
-        assert_eq!(info["description"], CLIENT_DESCRIPTION);
+        assert_eq!(info.string_at("/name"), Some(mcp::CLIENT_NAME));
+        assert_eq!(info.string_at("/title"), Some(mcp::CLIENT_TITLE));
+        assert_eq!(info.string_at("/websiteUrl"), Some(mcp::MCP_WEBSITE_URL));
+        assert_eq!(info.string_at("/description"), Some(CLIENT_DESCRIPTION));
         // `version` stays THIS build's product version — never faked to look
         // like claude-code's release — and must look semver-like.
-        let version = info["version"].as_str().expect("version present");
+        let version = info.string_at("/version").expect("version present");
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
         assert!(
             version.split('.').count() >= 3,
@@ -1544,9 +1847,11 @@ mod initialize_params_tests {
 
     #[test]
     fn wire_bytes_are_camelcase_and_carry_literal_markers() {
-        let bytes = serde_json::to_vec(&initialize_params()).expect("serialize");
-        let s = std::str::from_utf8(&bytes).expect("utf8");
-        assert_eq!(initialize_params()["protocolVersion"], MCP_PROTOCOL_VERSION);
+        let s = initialize_params().to_json_string().expect("serialize");
+        assert_eq!(
+            initialize_params().string_at("/protocolVersion"),
+            Some(MCP_PROTOCOL_VERSION)
+        );
         assert!(
             s.contains(r#""name":"lingxi""#),
             "wire bytes must carry literal lingxi name, got: {s}",
@@ -1566,28 +1871,31 @@ mod initialize_params_tests {
     #[test]
     fn directory_read_capability_decodes_none_absent_false_and_true() {
         assert!(!directory_read_capability(None));
-        assert!(!directory_read_capability(Some(&serde_json::json!({}))));
-        assert!(!directory_read_capability(Some(&serde_json::json!({
+        let empty = source(&serde_json::json!({}));
+        let false_cap = source(&serde_json::json!({
             "extensions": {
                 "io.modelcontextprotocol/skills": {
                     "directoryRead": false
                 }
             }
-        }))));
-        assert!(directory_read_capability(Some(&serde_json::json!({
+        }));
+        let true_cap = source(&serde_json::json!({
             "extensions": {
                 "io.modelcontextprotocol/skills": {
                     "directoryRead": true
                 }
             }
-        }))));
+        }));
+        assert!(!directory_read_capability(Some(&empty)));
+        assert!(!directory_read_capability(Some(&false_cap)));
+        assert!(directory_read_capability(Some(&true_cap)));
     }
 }
 
 #[cfg(test)]
 mod error_mapping_tests {
     use super::{handshake_error, is_method_not_found, map_call_err};
-    use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
+    use jsonrpc::{ConnectionError, JsonPayload, JsonRpcError, RouterError};
     use lingxi_core::host::McpError;
     use serde_json::json;
     use std::time::Duration;
@@ -1627,7 +1935,10 @@ mod error_mapping_tests {
     fn map_call_err_is_internal() {
         let e = ConnectionError::Router(RouterError::WriterClosed);
         match map_call_err(&e) {
-            McpError::Internal(s) => assert_eq!(s, e.to_string()),
+            McpError::Internal(s) => {
+                let expected = e.to_string();
+                assert_eq!(s.string_at(""), Some(expected.as_str()));
+            }
             other => panic!("expected McpError::Internal, got {other:?}"),
         }
     }
@@ -1646,11 +1957,11 @@ mod error_mapping_tests {
             message: "MCP_HTTP_STATUS=403;WWW_AUTHENTICATE=Bearer error=\"insufficient_scope\", \
                       scope=\"mcp:elevated\", resource_metadata=\"https://mock/.well-known/x\""
                 .into(),
-            data: Some(json!({
+            data: Some(JsonPayload::from_serializable(&json!({
                 "httpStatus": 403,
                 "wwwAuthenticate": "Bearer error=\"insufficient_scope\", scope=\"mcp:elevated\", \
                                      resource_metadata=\"https://mock/.well-known/x\""
-            })),
+            })).unwrap()),
         }));
         match handshake_error(&e) {
             McpError::HttpResponse {
@@ -1674,7 +1985,12 @@ mod error_mapping_tests {
         let e = ConnectionError::Router(RouterError::Remote(JsonRpcError {
             code: -32001,
             message: "MCP_HTTP_STATUS=401;WWW_AUTHENTICATE=".into(),
-            data: Some(json!({ "httpStatus": 401, "wwwAuthenticate": null })),
+            data: Some(
+                JsonPayload::from_serializable(
+                    &json!({ "httpStatus": 401, "wwwAuthenticate": null }),
+                )
+                .unwrap(),
+            ),
         }));
         assert!(matches!(
             handshake_error(&e),
@@ -1696,13 +2012,19 @@ mod error_mapping_tests {
             data: None,
         }));
         match handshake_error(&remote) {
-            McpError::Handshake(s) => assert_eq!(s, remote.to_string()),
+            McpError::Handshake(s) => {
+                let expected = remote.to_string();
+                assert_eq!(s.string_at(""), Some(expected.as_str()));
+            }
             other => panic!("expected McpError::Handshake, got {other:?}"),
         }
 
         let writer_closed = ConnectionError::Router(RouterError::WriterClosed);
         match handshake_error(&writer_closed) {
-            McpError::Handshake(s) => assert_eq!(s, writer_closed.to_string()),
+            McpError::Handshake(s) => {
+                let expected = writer_closed.to_string();
+                assert_eq!(s.string_at(""), Some(expected.as_str()));
+            }
             other => panic!("expected McpError::Handshake, got {other:?}"),
         }
     }
@@ -1726,7 +2048,7 @@ mod error_mapping_tests {
 
 #[cfg(test)]
 mod tool_meta_tests {
-    use super::{RawResourceTemplate, RawTool, ToolsListResult};
+    use super::{source_from_test_json, RawResourceTemplate, RawTool, ToolsListResult};
 
     /// §27b — the `_meta.anthropic/requiresUserInteraction` bit must survive
     /// THIS transport, because `McpRegistry::connect` fills
@@ -1764,7 +2086,8 @@ mod tool_meta_tests {
                 }
             ]
         });
-        let parsed: ToolsListResult = serde_json::from_value(raw).expect("decode");
+        let raw_json = raw.to_string();
+        let parsed: ToolsListResult = serde_json::from_str(&raw_json).expect("decode");
         let dtos: Vec<_> = parsed.tools.into_iter().map(RawTool::into_dto).collect();
         assert_eq!(dtos.len(), 2);
         assert_eq!(dtos[0].tool_name, "plain");
@@ -1773,24 +2096,32 @@ mod tool_meta_tests {
             "a tool with no _meta must default to false"
         );
         assert_eq!(dtos[1].tool_name, "interactive");
-        assert_eq!(dtos[1].search_hint.as_deref(), Some("interactive consent"));
+        assert_eq!(
+            dtos[1]
+                .search_hint
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("interactive consent")
+        );
         assert_eq!(dtos[1].always_load, Some(true));
         assert!(
             dtos[1].requires_user_interaction,
             "_meta.anthropic/requiresUserInteraction must reach the DTO the registry stores"
         );
-        assert_eq!(
-            dtos[1].output_schema,
-            Some(serde_json::json!({
+        assert!(dtos[1]
+            .output_schema
+            .as_ref()
+            .unwrap()
+            .semantically_eq(&source_from_test_json(&serde_json::json!({
                 "type": "object",
                 "properties": { "ok": { "type": "boolean" } }
-            }))
-        );
+            }))));
         assert_eq!(
             dtos[1]
                 .annotations
                 .as_ref()
-                .and_then(|a| a.title.as_deref()),
+                .and_then(|a| a.title.as_ref())
+                .and_then(|title| title.string_at("")),
             Some("Interactive")
         );
         assert_eq!(dtos[1].icons.len(), 1);
@@ -1798,38 +2129,47 @@ mod tool_meta_tests {
             dtos[1]
                 .annotations
                 .as_ref()
-                .and_then(|annotations| annotations.extra.get("vendor/riskTier")),
-            Some(&serde_json::json!("reviewed"))
+                .and_then(|annotations| annotations.extra.string_at("/vendor~1riskTier")),
+            Some("reviewed")
         );
         assert_eq!(
-            dtos[1].icons[0].extra.get("vendor/accent"),
-            Some(&serde_json::json!("blue"))
+            dtos[1].icons[0].extra.string_at("/vendor~1accent"),
+            Some("blue")
         );
-        assert_eq!(
-            dtos[1].meta,
-            Some(serde_json::json!({
+        assert!(dtos[1]
+            .meta
+            .as_ref()
+            .unwrap()
+            .semantically_eq(&source_from_test_json(&serde_json::json!({
                 "anthropic/searchHint": "interactive consent",
                 "anthropic/alwaysLoad": true,
                 "anthropic/requiresUserInteraction": true,
                 "openai/outputTemplate": "ui://example/widget.html"
-            }))
-        );
+            }))));
     }
 
     #[test]
     fn resource_template_metadata_survives_the_posix_transport_decode() {
-        let raw: RawResourceTemplate = serde_json::from_value(serde_json::json!({
+        let raw_json = serde_json::json!({
             "uriTemplate": "file:///{path}",
             "name": "file",
             "description": "Workspace file",
             "mimeType": "text/plain",
             "annotations": { "audience": ["assistant"], "vendor/rank": 7 },
             "_meta": { "vendor/template": "opaque" }
-        }))
-        .expect("decode resource template");
+        })
+        .to_string();
+        let raw: RawResourceTemplate =
+            serde_json::from_str(&raw_json).expect("decode resource template");
 
-        assert_eq!(raw.annotations.as_ref().unwrap()["vendor/rank"], 7);
-        assert_eq!(raw.meta.as_ref().unwrap()["vendor/template"], "opaque");
+        assert_eq!(
+            raw.annotations.as_ref().unwrap().number_at("/vendor~1rank"),
+            Some(7.0)
+        );
+        assert_eq!(
+            raw.meta.as_ref().unwrap().string_at("/vendor~1template"),
+            Some("opaque")
+        );
     }
 }
 
@@ -1839,32 +2179,48 @@ mod protocol_era_tests {
 
     #[test]
     fn modern_probe_carries_the_required_meta_keys() {
-        let value = modern_probe_params();
-        let meta = value.get("_meta").and_then(Value::as_object).unwrap();
+        let value = modern_probe_params(lingxi_core::host::McpElicitationMode::FormAndUrl);
+        let meta = value.subprojection("/_meta").unwrap();
+        let meta_fields = meta.object_entries().unwrap();
         assert_eq!(
-            meta.len(),
+            meta_fields.len(),
             3,
             "modern probe _meta must be exactly three keys"
         );
-        assert!(meta.contains_key("io.modelcontextprotocol/protocolVersion"));
-        assert!(meta.contains_key("io.modelcontextprotocol/clientInfo"));
-        assert!(meta.contains_key("io.modelcontextprotocol/clientCapabilities"));
-        assert_eq!(value["protocolVersion"], MODERN_PROTOCOL_VERSION);
+        assert!(meta
+            .get_property("io.modelcontextprotocol/protocolVersion")
+            .is_some());
+        assert!(meta
+            .get_property("io.modelcontextprotocol/clientInfo")
+            .is_some());
+        assert!(meta
+            .get_property("io.modelcontextprotocol/clientCapabilities")
+            .is_some());
+        assert_eq!(
+            meta.string_at("/io.modelcontextprotocol~1protocolVersion"),
+            Some(platform_common::mcp_remote::MODERN_PROTOCOL_VERSION)
+        );
+        assert_eq!(value.object_entries().unwrap().len(), 1);
     }
 
     #[test]
     fn modern_result_envelope_is_strict_and_strips_complete_marker() {
-        let mut complete = json!({"resultType": "complete", "tools": []});
-        validate_modern_envelope(&mut complete).expect("complete envelope");
-        assert!(!complete.as_object().unwrap().contains_key("resultType"));
+        let complete = source_from_test_json(
+            &json!({"resultType": "complete", "ttlMs":0,"cacheScope":"private","tools": []}),
+        );
+        let DecodedMcpResult::Complete(complete) =
+            decode_modern_result("tools/list", complete).expect("complete envelope")
+        else {
+            panic!("complete expected")
+        };
+        assert!(complete.get_property("resultType").is_none());
 
         for invalid in [
             json!({"tools": []}),
             json!({"resultType": "partial"}),
             json!(null),
         ] {
-            let mut invalid = invalid;
-            assert!(validate_modern_envelope(&mut invalid).is_err());
+            assert!(decode_modern_result("tools/list", source_from_test_json(&invalid)).is_err());
         }
     }
 }

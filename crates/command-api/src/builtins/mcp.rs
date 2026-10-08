@@ -40,7 +40,9 @@ impl BuiltinCommandHandler for McpHandler {
             "No MCP servers configured. Use `claude mcp add` to add a server.",
         );
         telemetry::emit_command_completed(cmd_evt::MCP_COMPLETED, "");
-        CommandResult::Done { display: Some(s) }
+        CommandResult::Done {
+            display: Some((s).into()),
+        }
     }
     fn name(&self) -> &str {
         "mcp"
@@ -67,7 +69,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "mcp".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

@@ -1,0 +1,586 @@
+{
+  "version": "2.1.286",
+  "oracle_sha256": "c989596b92bf28f6872d5e44c2baa4686838501f35a4882bc437149b151c2b95",
+  "cases": [
+    {
+      "name": "fallback",
+      "options": {},
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/AGENTS.md",
+              "content": "outer"
+            }
+          ]
+        },
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "inner"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/AGENTS.md",
+          "kind": "project",
+          "content": "outer"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "kind": "project",
+          "content": "inner"
+        }
+      ]
+    },
+    {
+      "name": "fallback_yields_to_ancestor",
+      "options": {},
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/LINGXI.md",
+          "content": "legacy",
+          "kind": "project"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture",
+          "name": "LINGXI.md",
+          "parts": [
+            {
+              "path": "/fixture/LINGXI.md",
+              "content": "legacy"
+            }
+          ]
+        },
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "inner"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/LINGXI.md",
+          "content": "legacy",
+          "kind": "project"
+        }
+      ]
+    },
+    {
+      "name": "both_directory_order",
+      "options": {
+        "instructionFiles": "claude-md-and-agents-md"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/LINGXI.md",
+          "content": "outer legacy",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "inner legacy",
+          "kind": "project"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/AGENTS.md",
+              "content": "outer agent"
+            }
+          ]
+        },
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "inner agent"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/LINGXI.md",
+          "content": "outer legacy",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/AGENTS.md",
+          "kind": "project",
+          "content": "outer agent"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "inner legacy",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "kind": "project",
+          "content": "inner agent"
+        }
+      ]
+    },
+    {
+      "name": "same_body_is_suppressed",
+      "options": {
+        "instructionFiles": "claude-md-and-agents-md"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "same",
+          "kind": "project"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": " same "
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "same",
+          "kind": "project"
+        }
+      ]
+    },
+    {
+      "name": "same_candidate_body_kept",
+      "options": {},
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/AGENTS.md",
+              "content": "same"
+            }
+          ]
+        },
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "same"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/AGENTS.md",
+          "kind": "project",
+          "content": "same"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "kind": "project",
+          "content": "same"
+        }
+      ]
+    },
+    {
+      "name": "imports_follow_root",
+      "options": {
+        "instructionFiles": "claude-md-and-agents-md"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "legacy",
+          "kind": "project"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/AGENTS.md",
+              "content": "outer\n@./shared.md"
+            },
+            {
+              "path": "/fixture/shared.md",
+              "content": "shared"
+            }
+          ]
+        },
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "inner"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/AGENTS.md",
+          "kind": "project",
+          "content": "outer\n@./shared.md"
+        },
+        {
+          "path": "/fixture/shared.md",
+          "kind": "project",
+          "content": "shared",
+          "parent": "/fixture/AGENTS.md"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "legacy",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "kind": "project",
+          "content": "inner"
+        }
+      ]
+    },
+    {
+      "name": "existing_import_path_suppressed",
+      "options": {
+        "instructionFiles": "claude-md-and-agents-md"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "legacy\n@./AGENTS.md",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "content": "agent",
+          "kind": "project",
+          "parent": "/fixture/repo/LINGXI.md"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "agent"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "legacy\n@./AGENTS.md",
+          "kind": "project"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "content": "agent",
+          "kind": "project",
+          "parent": "/fixture/repo/LINGXI.md"
+        }
+      ]
+    },
+    {
+      "name": "managed_only",
+      "options": {
+        "instructionFiles": "managed-only"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/LINGXI.md",
+          "content": "legacy",
+          "kind": "project"
+        }
+      ],
+      "groups": [],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        }
+      ]
+    },
+    {
+      "name": "claude_only",
+      "options": {
+        "instructionFiles": "claude-md"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "ignored"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        }
+      ]
+    },
+    {
+      "name": "legacy_both",
+      "options": {
+        "projectInstructions": "both"
+      },
+      "engine": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        }
+      ],
+      "groups": [
+        {
+          "dir": "/fixture/repo",
+          "name": "AGENTS.md",
+          "parts": [
+            {
+              "path": "/fixture/repo/AGENTS.md",
+              "content": "agent"
+            }
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "path": "/fixture/managed/LINGXI.md",
+          "content": "managed",
+          "kind": "managed"
+        },
+        {
+          "path": "/fixture/home/.lingxi/LINGXI.md",
+          "content": "user",
+          "kind": "user"
+        },
+        {
+          "path": "/fixture/repo/AGENTS.md",
+          "kind": "project",
+          "content": "agent"
+        }
+      ]
+    }
+  ]
+}

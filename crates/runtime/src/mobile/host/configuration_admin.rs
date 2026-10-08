@@ -15,7 +15,8 @@ use client::protocol::listings::{
     ConfigurationOperationStatusDto as Status,
 };
 use lingxi_core::host::OrchestratorHandle;
-use serde_json::{json, Value};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::{Value, json};
 
 async fn protocol_error(sink: &dyn ClientEventSink, message: impl Into<String>) {
     sink.emit(ClientEvent::Error {
@@ -92,7 +93,26 @@ fn mutation_fields<'a>(
     ))
 }
 
-fn mobile_bundled_entries() -> Vec<Value> {
+fn source_string(value: impl Into<Utf16JsonProjection>) -> Utf16JsonProjection {
+    value.into()
+}
+
+fn source_with_prefix(prefix: &str, value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        value
+            .string_units("")
+            .expect("mobile catalog text fields are root strings"),
+    );
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("prefixing text preserves the source string")
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("generated mobile skill objects have unique fields")
+}
+
+fn mobile_bundled_entries() -> Vec<Utf16JsonProjection> {
     let mut registry = skill_api::SkillRegistry::new();
     skill_api::builtin::register_mobile(&mut registry);
     let mut names = registry.names();
@@ -100,13 +120,46 @@ fn mobile_bundled_entries() -> Vec<Value> {
     names
         .into_iter()
         .filter_map(|name| {
-            registry.get(name).map(|skill| json!({
-        "id": format!("<bundled:{name}>"), "name": name, "source": "bundled",
-        "directory": format!("<bundled:{name}>"), "rootDir": "<bundled>", "writable": false,
-        "readonlyReason": "Bundled mobile skills are compiled into the app.",
-        "revision": config_admin::sha256_hex(skill.content.as_bytes()),
-        "description": skill.description, "whenToUse": skill.frontmatter.when_to_use,
-    }))
+            registry.get(name).map(|skill| {
+                let body = skill
+                    .content
+                    .string_at("")
+                    .expect("bundled mobile skill body is generated from UTF-8 text");
+                source_object(vec![
+                    ("id".into(), source_string(format!("<bundled:{name}>"))),
+                    ("name".into(), source_string(name)),
+                    ("source".into(), source_string("bundled")),
+                    (
+                        "directory".into(),
+                        source_string(format!("<bundled:{name}>")),
+                    ),
+                    ("rootDir".into(), source_string("<bundled>")),
+                    (
+                        "writable".into(),
+                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                    ),
+                    (
+                        "readonlyReason".into(),
+                        source_string("Bundled mobile skills are compiled into the app."),
+                    ),
+                    (
+                        "revision".into(),
+                        source_string(config_admin::sha256_hex(body.as_bytes())),
+                    ),
+                    ("description".into(), skill.description.clone()),
+                    (
+                        "whenToUse".into(),
+                        skill
+                            .frontmatter
+                            .when_to_use
+                            .as_deref()
+                            .map(source_string)
+                            .unwrap_or_else(|| {
+                                Utf16JsonProjection::parse("null").expect("null JSON")
+                            }),
+                    ),
+                ])
+            })
         })
         .collect()
 }
@@ -121,9 +174,32 @@ fn mobile_bundled_document(target: &str) -> Result<String, String> {
     let skill = registry
         .get(name)
         .ok_or_else(|| "This bundled skill is not available on mobile.".to_string())?;
-    Ok(json!({"id":target,"name":name,"source":"bundled","rootDir":"<bundled>","directory":target,
-        "markdown":skill.content,"writable":false,"revision":config_admin::sha256_hex(skill.content.as_bytes()),
-        "readonlyReason":"Bundled mobile skills are compiled into the app."}).to_string())
+    let markdown = skill
+        .content
+        .string_at("")
+        .expect("bundled mobile skill body is generated from UTF-8 text");
+    source_object(vec![
+        ("id".into(), source_string(target)),
+        ("name".into(), source_string(name)),
+        ("source".into(), source_string("bundled")),
+        ("rootDir".into(), source_string("<bundled>")),
+        ("directory".into(), source_string(target)),
+        ("markdown".into(), skill.content.clone()),
+        (
+            "writable".into(),
+            Utf16JsonProjection::parse("false").expect("boolean JSON"),
+        ),
+        (
+            "revision".into(),
+            source_string(config_admin::sha256_hex(markdown.as_bytes())),
+        ),
+        (
+            "readonlyReason".into(),
+            source_string("Bundled mobile skills are compiled into the app."),
+        ),
+    ])
+    .to_json_string()
+    .map_err(|error| error.to_string())
 }
 
 impl MobileEngineHandle {
@@ -136,22 +212,39 @@ impl MobileEngineHandle {
 
     pub(super) async fn emit_skill_catalog(&self, sink: &dyn ClientEventSink) {
         let result = skills_admin::catalog_json(&self.skills_admin_context()).and_then(|raw| {
-            let mut catalog: Value =
-                serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-            let entries = catalog
-                .get_mut("entries")
-                .and_then(Value::as_array_mut)
+            let mut catalog =
+                Utf16JsonProjection::parse(&raw).map_err(|error| error.to_string())?;
+            let entry_count = catalog
+                .array_len("/entries")
                 .ok_or("skill catalog entries missing")?;
+            let mut entries = Vec::with_capacity(entry_count);
             // The shared disk catalog includes Desktop builtins. Replace only that
             // synthetic source; retain all real user/project/managed entries.
-            entries.retain(|entry| entry.get("source").and_then(Value::as_str) != Some("bundled"));
+            for index in 0..entry_count {
+                let entry = catalog
+                    .subprojection(&format!("/entries/{index}"))
+                    .map_err(|error| error.to_string())?;
+                if entry.string_at("/source") != Some("bundled") {
+                    entries.push(entry);
+                }
+            }
             entries.extend(mobile_bundled_entries());
+            catalog
+                .set_field(
+                    "entries",
+                    Utf16JsonProjection::array(entries).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
             Ok(catalog)
         });
         match result {
             Ok(mut catalog) => {
                 let registry = self.inner.slash_registry.read().await;
-                if let Some(entries) = catalog.get_mut("entries").and_then(Value::as_array_mut) {
+                let entry_count = catalog.array_len("/entries").unwrap_or_default();
+                let mut entries = (0..entry_count)
+                    .filter_map(|index| catalog.subprojection(&format!("/entries/{index}")).ok())
+                    .collect::<Vec<_>>();
+                {
                     for command in registry.list_all() {
                         if let command_api::SlashCommandKind::Plugin {
                             plugin_id,
@@ -167,15 +260,44 @@ impl MobileEngineHandle {
                                 .as_deref()
                                 .or_else(|| file_path.parent())
                                 .unwrap_or(file_path);
-                            entries.push(json!({"id":format!("command:{}",command.name),"name":command.name,"source":"plugin",
-                                "pluginOwner":plugin_id.to_string(),"rootDir":root.to_string_lossy(),"directory":root.to_string_lossy(),
-                                "writable":false,"readonlyReason":"Managed by the owning plugin.","description":command.description}));
+                            entries.push(source_object(vec![
+                                ("id".into(), source_with_prefix("command:", &command.name)),
+                                ("name".into(), command.name.clone()),
+                                ("source".into(), source_string("plugin")),
+                                ("pluginOwner".into(), source_string(plugin_id.to_string())),
+                                (
+                                    "rootDir".into(),
+                                    source_string(root.to_string_lossy().into_owned()),
+                                ),
+                                (
+                                    "directory".into(),
+                                    source_string(root.to_string_lossy().into_owned()),
+                                ),
+                                (
+                                    "writable".into(),
+                                    Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                                ),
+                                (
+                                    "readonlyReason".into(),
+                                    source_string("Managed by the owning plugin."),
+                                ),
+                                ("description".into(), command.description.clone()),
+                            ]));
                         }
                     }
                 }
+                catalog
+                    .set_field(
+                        "entries",
+                        Utf16JsonProjection::array(entries)
+                            .expect("mobile skill catalog entries are valid JSON"),
+                    )
+                    .expect("skill catalog root has an entries field");
                 drop(registry);
                 sink.emit(ClientEvent::SkillCatalog {
-                    catalog_json: catalog.to_string(),
+                    catalog_json: catalog
+                        .to_json_string()
+                        .expect("mobile skill catalog is a valid source JSON object"),
                 })
                 .await;
             }
@@ -188,7 +310,7 @@ impl MobileEngineHandle {
             mobile_bundled_document(target)
         } else if let Some(name) = target.strip_prefix("command:") {
             let registry = self.inner.slash_registry.read().await;
-            registry.list_all().into_iter().find(|command| command.name == name).ok_or_else(|| "Unknown plugin skill.".to_string()).and_then(|command| {
+            registry.list_all().into_iter().find(|command| command.name.string_at("") == Some(name)).ok_or_else(|| "Unknown plugin skill.".to_string()).and_then(|command| {
                 if let command_api::SlashCommandKind::Plugin { file_path, plugin_id, .. } = &command.kind {
                     let markdown = std::fs::read_to_string(file_path).map_err(|error| format!("Cannot read plugin skill: {error}"))?;
                     let root = command.skill_root.as_deref().or_else(|| file_path.parent()).unwrap_or(file_path);
@@ -490,13 +612,21 @@ impl MobileEngineHandle {
                             settings.active_snapshot(),
                             settings.managed.clone(),
                         );
-                        let mut enabled = snapshot
+                        let mut enabled = serde_json::Map::new();
+                        if let Some(entries) = snapshot
                             .layers
                             .get(scope)
-                            .and_then(|layer| layer.get("enabledPlugins"))
-                            .and_then(Value::as_object)
-                            .cloned()
-                            .unwrap_or_default();
+                            .and_then(|layer| layer.get_property("enabledPlugins"))
+                            .and_then(|value| value.object_entries())
+                        {
+                            for entry in entries {
+                                if let (Ok(key), Some(value)) =
+                                    (String::from_utf16(entry.code_units), entry.value.as_bool())
+                                {
+                                    enabled.insert(key, Value::Bool(value));
+                                }
+                            }
+                        }
                         enabled.insert(
                             crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.into(),
                             json!(
@@ -640,19 +770,37 @@ mod tests {
     #[test]
     fn bundled_catalog_is_mobile_scoped_and_documents_are_readonly() {
         for entry in mobile_bundled_entries() {
-            let document: Value = serde_json::from_str(
-                &mobile_bundled_document(entry["id"].as_str().unwrap()).unwrap(),
-            )
-            .unwrap();
+            let id = entry
+                .string_at("/id")
+                .expect("bundled entry id is a string");
+            let document: Value =
+                serde_json::from_str(&mobile_bundled_document(id).unwrap()).unwrap();
             assert_eq!(document["writable"], false);
-            assert_eq!(document["id"], entry["id"]);
+            assert_eq!(document["id"], id);
             assert!(document["markdown"].is_string());
         }
+    }
+
+    #[test]
+    fn mobile_skill_json_keeps_source_utf16_text() {
+        let description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&[u16::from(b'A'), 0xd800, u16::from(b'B')]),
+            vec![u16::from(b'A'), 0xd800, u16::from(b'B')],
+        )
+        .expect("valid source string");
+        let raw = source_object(vec![("description".into(), description)])
+            .to_json_string()
+            .expect("source object serializes as JSON");
+        let decoded = Utf16JsonProjection::parse(&raw).expect("serialized source JSON parses");
+        assert_eq!(
+            decoded.string_units("/description"),
+            Some(vec![u16::from(b'A'), 0xd800, u16::from(b'B')])
+        );
     }
     #[tokio::test]
     async fn mobile_recorded_plugin_reconnect_uses_layers_and_secure_fields() {
         use crate::mobile::test_support::{
-            test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
+            CollectingPermissionSink, FakeListener, HostFakePlatform, test_config,
         };
         use lingxi_core::host::SecureStorage;
         use std::sync::Arc;
@@ -686,21 +834,25 @@ mod tests {
             )
         };
         let disabled = build(cfg.clone()).await.unwrap();
-        assert!(disabled
-            .slash_registry
-            .read()
-            .await
-            .resolve("fixture:ping")
-            .is_none());
+        assert!(
+            disabled
+                .slash_registry
+                .read()
+                .await
+                .resolve("fixture:ping")
+                .is_none()
+        );
         drop(disabled);
         std::fs::write(workspace.join(branding::DOT_DIR).join("settings.local.json"),json!({"enabledPlugins":{"fixture@tests":true},"pluginConfigs":{"fixture@tests":{"options":{"REGION":"eu"}}}}).to_string()).unwrap();
         let missing_secret = build(cfg.clone()).await.unwrap();
-        assert!(missing_secret
-            .slash_registry
-            .read()
-            .await
-            .resolve("fixture:ping")
-            .is_none());
+        assert!(
+            missing_secret
+                .slash_registry
+                .read()
+                .await
+                .resolve("fixture:ping")
+                .is_none()
+        );
         drop(missing_secret);
         storage
             .store(

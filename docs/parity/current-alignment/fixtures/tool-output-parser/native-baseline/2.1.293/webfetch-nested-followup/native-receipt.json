@@ -1,0 +1,224 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "40a84e1e2817d342e0221224bd013a3e9f84985175bb4410b56c45b44fb27738",
+  "hook_sha256": "3b7aea739344187f0a34ee27dff48e1b0b5c65cf2e76f1b32bfcdf6e2e139fb5",
+  "fixed_resource": {
+    "host": "127.0.0.1",
+    "port": 41237,
+    "body": "fixed loopback WebFetch document\\n"
+  },
+  "dummy_model_key_only": true,
+  "no_external_model_or_webfetch_destination": true,
+  "selected_cases": [
+    "bytes-missing-slug-number-seeded-true",
+    "artifact-read-null"
+  ],
+  "cases": [
+    {
+      "case": "bytes-missing-slug-number-seeded-true",
+      "session_id": "00000000-0000-4000-8000-000000012086",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/bytes-missing-slug-number-seeded-true",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012086",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/bytes-missing-slug-number-seeded-true"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43683,
+          "sha256": "131dd66b04deedba55f9876ed9fc265a689bcf4bdae7a686990275e50e0ec8dd",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44880,
+          "sha256": "a42b270c717d8bb8f1152aec93f7d3ae4ebbfb42953bf0afc23116272cc26097",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 982,
+          "sha256": "2b62e6baa75a2150ab9ff3623e26dbb7a8730dbf396b8b3881d0fdfdaed80ff4"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:19:09.439Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"bytes-missing-slug-number-seeded-true\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/bytes-missing-slug-number-seeded-true\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/bytes-missing-slug-number-seeded-true\",\"artifactRead\":{\"slug\":13,\"ver\":\"v1\",\"seeded\":true}},\"replacement\":{\"ref\":1,\"result\":{\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/bytes-missing-slug-number-seeded-true\",\"artifactRead\":{\"slug\":13,\"ver\":\"v1\",\"seeded\":true}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 821,
+        "sha256": "62df7f097ef4c509f83e9f0c4135feafa86bf95276267bc3b03a6130779260ea"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "f3b2299ceac4918a83e63a86487bd052fa3406ca5cc5a53d4e335f52d3e6114b"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 703,
+        "sha256": "bca7d0f0a8780c8361faca2db9805a5dc4251a74ca4479471e68569c4a1e5442"
+      },
+      "hook_sha256": "3b7aea739344187f0a34ee27dff48e1b0b5c65cf2e76f1b32bfcdf6e2e139fb5",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    },
+    {
+      "case": "artifact-read-null",
+      "session_id": "00000000-0000-4000-8000-000000012087",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/artifact-read-null",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012087",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/artifact-read-null"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43626,
+          "sha256": "fc1c71a9f0b1586df50b1a61d477715663160a214d266ddf6a8e813ac81297b6",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44390,
+          "sha256": "05d8bfd9853c445753122f0e392d967a3401fe360bb24e4b99ee4a2c36e8262b",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 963,
+          "sha256": "f8689f5b00aa60449f2649fe736eebedb608b6ebc5a5e236025fcdb2f6eb0fe0"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:19:12.229Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"artifact-read-null\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/artifact-read-null\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/artifact-read-null\",\"artifactRead\":null},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/artifact-read-null\",\"artifactRead\":null},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 407,
+        "sha256": "1fba65cf070406b536012eab43306b0574717b13df04adb9222706026d45f276"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "651110e4caddca6dccc884b6ffb7d7898a3ba9fc4cf0c68a6f96cbffdf84970c"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 289,
+        "sha256": "12e41ca10baff916c4e987a2e309bf85bd1eb021f2da16577bb54cffdf5d5041"
+      },
+      "hook_sha256": "3b7aea739344187f0a34ee27dff48e1b0b5c65cf2e76f1b32bfcdf6e2e139fb5",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    }
+  ],
+  "scope": "Native 2.1.293 public WebFetch tool.call continuation-wrapper output parser observations; not a candidate Harness pass"
+}

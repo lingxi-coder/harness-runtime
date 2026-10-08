@@ -1,4 +1,27 @@
 //! Regression fixtures for host conversion using the independent SDK.
+
+pub(super) fn json_payload(value: serde_json::Value) -> lingxi_llm_client::protocol::JsonPayload {
+    lingxi_llm_client::protocol::JsonPayload::from_generated_value(&value)
+        .expect("test fixture is valid JSON")
+}
+
+pub(super) fn json_payload_value(
+    payload: &lingxi_llm_client::protocol::JsonPayload,
+) -> serde_json::Value {
+    serde_json::from_str(payload.as_json_source()).expect("generated provider body is valid JSON")
+}
+
+pub(super) fn fragment_is_text(
+    fragment: &lingxi_llm_client::protocol::JsonPayloadFragment,
+    expected: &str,
+) -> bool {
+    fragment
+        .utf16_code_units()
+        .iter()
+        .copied()
+        .eq(expected.encode_utf16())
+}
+
 mod anthropic_codec_test;
 mod anthropic_usage_test;
 mod cited_text_replay_test;

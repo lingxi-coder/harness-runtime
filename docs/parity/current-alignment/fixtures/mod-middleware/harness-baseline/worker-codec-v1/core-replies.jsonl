@@ -1,0 +1,5 @@
+{"id":3,"kind":"next.result","callId":1,"result":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"uuid":"rewrite"}}
+{"id":5,"kind":"next.result","callId":2,"result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"cancel"}}
+{"id":6,"kind":"next.result","callId":3,"result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"throw"}}
+{"id":8,"kind":"next.result","callId":4,"result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"rewrite"}}
+{"id":11,"kind":"next.result","callId":5,"result":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"uuid":"rewrite"}}

@@ -3,6 +3,7 @@ use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use async_trait::async_trait;
+use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, SystemPromptInput};
 use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -47,7 +48,7 @@ impl SideQueryClient for BlockingSideQuery {
         self.started.notify_waiters();
         self.release.notified().await;
         Ok(SideQueryResponse {
-            text: Some("durable notes from the old session".to_string()),
+            text: Some("durable notes from the old session".into()),
             structured: None,
             tool_calls: Vec::new(),
             usage: cost::Usage::default(),
@@ -59,7 +60,8 @@ impl SideQueryClient for BlockingSideQuery {
 
 fn cache_safe_params() -> sidequery::CacheSafeParams {
     sidequery::CacheSafeParams {
-        system_prompt: Arc::from("SYS"),
+        system_prompt: Arc::new("SYS".into()),
+        system_prompt_input: Some(SystemPromptInput::custom_prompt("SYS".into())),
         tools: Vec::new(),
         effort: None,
         user_context: std::collections::HashMap::new(),
@@ -98,17 +100,31 @@ async fn compact_snapshot_keeps_request_tool_schema_profile_and_effort() {
     .with_cache_safe_slot(slot.clone());
     orch.session.lock().await.model_profile = Some("parent-provider".into());
     orch.set_effort(Some("high".into()));
-    let tools = vec![serde_json::json!({
-        "name": "Read", "description": "Read text 🧭",
-        "input_schema": {"type": "object", "properties": {}},
-        "defer_loading": true,
-    })];
-    orch.save_cache_safe_params(Some("parent prompt"), "claude-sonnet-4-6", &tools)
+    let tools = vec![lingxi_core::host::SourceToolWireDefinition {
+        name: "Read".into(),
+        description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Read text 🧭"),
+        input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"type":"object","properties":{}}"#,
+        )
+        .unwrap(),
+        strict: false,
+        defer_loading: true,
+    }];
+    let system = SystemPromptInput::source_vector(
+        vec![PromptText::from_utf16(vec![0xd800]), "parent prompt".into()],
+        Some(PromptText::from_utf16(vec![0xdc00])),
+        None,
+    );
+    orch.save_cache_safe_params(Some(&system), "claude-sonnet-4-6", &tools)
         .await;
     let captured = slot.get_last().await.unwrap();
     assert_eq!(captured.tools, tools);
     assert_eq!(captured.effort, Some(serde_json::json!("high")));
-    assert_eq!(captured.system_prompt.as_ref(), "parent prompt");
+    assert_eq!(captured.system_prompt_input.as_ref(), Some(&system));
+    let mut expected = vec![0xd800];
+    expected.extend("\n\nparent prompt\n\n".encode_utf16());
+    expected.push(0xdc00);
+    assert_eq!(captured.system_prompt.string_units(""), Some(expected));
     assert_eq!(
         captured.tool_use_options.model_profile.as_deref(),
         Some("parent-provider")

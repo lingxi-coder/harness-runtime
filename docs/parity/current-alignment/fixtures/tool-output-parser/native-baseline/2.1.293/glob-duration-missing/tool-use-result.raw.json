@@ -1,0 +1,1 @@
+"Error: tool.call step resolved Glob with a result that does not match its output shape: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durationMs\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  }\n]"

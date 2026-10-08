@@ -75,9 +75,12 @@ pub fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDe
         },
         reasoning: lower_reasoning_control_spec(&listing.reasoning),
         supports_fast_mode: listing.provider_id == "anthropic"
-            && lingxi_core::host::model_capabilities::has_capability(
+            && lingxi_core::host::model_capabilities::fast_model_allowed(
                 &listing.request_model,
-                lingxi_core::host::model_capabilities::ModelCapability::FastMode,
+                &lingxi_core::host::model_capabilities::normalize_model_id(&listing.request_model),
+                None,
+                true,
+                false,
             ),
         fusion_analyst_capable: listing.fusion_analyst_capable,
     }

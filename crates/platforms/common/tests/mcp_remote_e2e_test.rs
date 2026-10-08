@@ -1,15 +1,15 @@
 //! Real HTTP and SSE round trips for the shared remote-only transport.
 
 use axum::{
+    Json, Router,
     extract::State,
     response::sse::{Event, Sse},
     routing::{get, post},
-    Json, Router,
 };
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use lingxi_core::host::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_common::RemoteMcpTransport;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,23 +186,16 @@ async fn exercise(kind: &str, url: String) {
         transport.list_tools(&conn).await.unwrap()[0].tool_name,
         "echo"
     );
-    let result = transport
-        .call_tool(&conn, "echo", json!({"text": "hello"}))
-        .await
-        .unwrap();
-    assert_eq!(
-        result.content.pointer("/0/text").and_then(Value::as_str),
-        Some("hello")
-    );
+    let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &json!({"text": "hello"}),
+    )
+    .unwrap();
+    let result = transport.call_tool(&conn, "echo", input).await.unwrap();
+    assert_eq!(result.content.string_at("/0/text"), Some("hello"));
     assert_eq!(transport.list_resources(&conn).await.unwrap().len(), 1);
-    assert_eq!(
-        transport
-            .read_resource(&conn, "test://one")
-            .await
-            .unwrap()
-            .content,
-        "resource"
-    );
+    let uri = lingxi_core::types::utf16_json::Utf16JsonProjection::from("test://one");
+    let resource = transport.read_resource(&conn, &uri).await.unwrap();
+    assert_eq!(resource.content.string_at(""), Some("resource"));
     assert_eq!(transport.list_prompts(&conn).await.unwrap().len(), 1);
     transport.disconnect(conn.connection_id).await.unwrap();
     assert!(matches!(
@@ -232,6 +225,7 @@ async fn remote_disposable_probe_classifies_wrong_id_and_redials_legacy() {
                 expected_era: Some(McpProtocolEra::Modern),
                 deadline_ms: 5_000,
                 probe_timeout_ms: Some(50_000),
+                elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             },
         )
         .await

@@ -209,22 +209,66 @@ fn io_error(error: std::io::Error) -> ProcessError {
     ProcessError::Io(error.to_string())
 }
 
+#[derive(Default)]
+struct DrainDeadline {
+    at: Option<tokio::time::Instant>,
+    expired: bool,
+    #[cfg(windows)]
+    job: Option<super::supervisor_gate::CommandJob>,
+}
+
+impl DrainDeadline {
+    fn completed_foreground(&self) -> Result<(), ProcessError> {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.disarm_on_close()?;
+        }
+        Ok(())
+    }
+
+    async fn terminate(&self, child: &mut tokio::process::Child) -> Result<(), ProcessError> {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            return job.terminate();
+        }
+        if let Some(pid) = child.id() {
+            let _ = super::kill_tree::kill_tree_windows(pid).await;
+            child.kill().await.map_err(io_error)?;
+        }
+        Ok(())
+    }
+}
+
 async fn drain(
     child: &mut tokio::process::Child,
     stdout: &mut tokio::process::ChildStdout,
     stderr: &mut tokio::process::ChildStderr,
     capture: &mut Capture,
     mut eof: [bool; 2],
+    deadline: &mut DrainDeadline,
 ) -> Result<std::process::ExitStatus, ProcessError> {
     let mut out = [0; 8192];
     let mut err = [0; 8192];
-    while !eof.iter().all(|eof| *eof) {
+    let mut deadline_handled = false;
+    loop {
         tokio::select! {
+            // A completed publish always finishes before we poll the timer:
+            // consumed bytes and the UTF-8 decoder state cannot be cancelled
+            // halfway through an output-manager append.
+            biased;
+            () = async {
+                if let Some(at) = deadline.at { tokio::time::sleep_until(at).await; }
+                else { std::future::pending::<()>().await; }
+            }, if !deadline_handled => {
+                deadline_handled = true;
+                deadline.terminate(child).await?;
+                deadline.expired = true;
+            }
+            result = child.wait(), if eof.iter().all(|eof| *eof) => return result.map_err(io_error),
             result = stdout.read(&mut out), if !eof[0] => { let n = result.map_err(io_error)?; eof[0] = n == 0; capture.chunk(&out[..n], false, n == 0).await?; }
             result = stderr.read(&mut err), if !eof[1] => { let n = result.map_err(io_error)?; eof[1] = n == 0; capture.chunk(&err[..n], true, n == 0).await?; }
         }
     }
-    child.wait().await.map_err(io_error)
 }
 
 pub(super) async fn run(
@@ -239,20 +283,21 @@ pub(super) async fn run(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
-    let gated = super::supervisor_gate::enabled();
-    #[cfg(windows)]
-    if gated {
-        command.creation_flags(0x0000_0004);
-    } // CREATE_SUSPENDED
+    command.creation_flags(0x0000_0004); // CREATE_SUSPENDED until payload job ownership is installed.
     let mut child = command.spawn().map_err(io_error)?;
     let pid = child
         .id()
         .ok_or_else(|| ProcessError::Io("spawned child has no pid".into()))?;
     let mut guard = StreamingProcessTreeGuard(Some(pid));
+    let mut deadline = DrainDeadline::default();
     #[cfg(windows)]
-    let initial_thread = if gated {
-        match super::supervisor_gate::suspended_thread(&child) {
-            Ok(thread) => Some(thread),
+    let initial_thread = {
+        let owned = super::supervisor_gate::CommandJob::assign_suspended(&child).and_then(|job| {
+            deadline.job = Some(job);
+            super::supervisor_gate::suspended_thread(&child)
+        });
+        match owned {
+            Ok(thread) => thread,
             Err(error) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -260,8 +305,6 @@ pub(super) async fn run(
                 return Err(error);
             }
         }
-    } else {
-        None
     };
 
     if let Some((binding, sink)) = cmd
@@ -278,8 +321,8 @@ pub(super) async fn run(
     }
 
     #[cfg(windows)]
-    if let Some(thread) = initial_thread {
-        if let Err(error) = super::supervisor_gate::release(thread) {
+    {
+        if let Err(error) = super::supervisor_gate::release(initial_thread) {
             let _ = super::kill_tree::kill_tree_windows(pid).await;
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -307,8 +350,8 @@ pub(super) async fn run(
     let mut eof = [false; 2];
     let mut timed_out = false;
     if !explicit {
-        let deadline = tokio::time::sleep(cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT));
-        tokio::pin!(deadline);
+        let foreground_wait = tokio::time::sleep(cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT));
+        tokio::pin!(foreground_wait);
         let demand = capture.binding.on_demand.clone();
         let requested = async {
             match demand {
@@ -356,16 +399,18 @@ pub(super) async fn run(
                     // output drain; direct-child settlement is already joined.
                     tree?;
                     killed?;
-                    drain(&mut child, &mut stdout, &mut stderr, &mut capture, eof).await?;
+                    drain(&mut child, &mut stdout, &mut stderr, &mut capture, eof, &mut deadline).await?;
                     capture.flush().await?;
                     capture.finalize_persisted().await?;
                     return Err(ProcessError::Io("supervisor command cancelled".into()));
                 }
                 () = &mut requested => break,
-                () = &mut deadline => { timed_out = true; break; }
+                () = &mut foreground_wait => { timed_out = true; break; }
                 result = child.wait(), if eof.iter().all(|eof| *eof) => {
                     let status = result.map_err(io_error)?;
-                    capture.flush().await?; capture.finalize_persisted().await?; guard.0 = None;
+                    guard.0 = None;
+                    capture.flush().await?; capture.finalize_persisted().await?;
+                    deadline.completed_foreground()?;
                     return Ok(ForegroundRunResult {output_file: capture.metadata(), outcome: ForegroundOutcome::Completed(ProcessOutput {stdout: capture.stdout, stderr: capture.stderr, exit_code: status.code().unwrap_or(-1), timed_out: false})});
                 }
                 result = stdout.read(&mut out), if !eof[0] => { let n = result.map_err(io_error)?; eof[0] = n == 0; capture.chunk(&out[..n], false, n == 0).await?; }
@@ -374,9 +419,17 @@ pub(super) async fn run(
         }
         // A starved deadline/request must not background an already exited PID.
         if let Some(status) = child.try_wait().map_err(io_error)? {
+            guard.0 = None;
             if let Ok(result) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
-                drain(&mut child, &mut stdout, &mut stderr, &mut capture, eof),
+                drain(
+                    &mut child,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    eof,
+                    &mut deadline,
+                ),
             )
             .await
             {
@@ -384,7 +437,7 @@ pub(super) async fn run(
             }
             capture.flush().await?;
             capture.finalize_persisted().await?;
-            guard.0 = None;
+            deadline.completed_foreground()?;
             return Ok(ForegroundRunResult {
                 output_file: capture.metadata(),
                 outcome: ForegroundOutcome::Completed(ProcessOutput {
@@ -421,10 +474,21 @@ pub(super) async fn run(
         task_id: capture.binding.task_id.clone(),
         pid,
     };
+    deadline.at = cmd
+        .background_timeout()
+        .map(|timeout| tokio::time::Instant::now() + timeout);
     tokio::spawn(async move {
         // Ownership crosses only after the complete prefix has been accepted.
         let mut guard = guard;
-        let result = drain(&mut child, &mut stdout, &mut stderr, &mut capture, eof).await;
+        let result = drain(
+            &mut child,
+            &mut stdout,
+            &mut stderr,
+            &mut capture,
+            eof,
+            &mut deadline,
+        )
+        .await;
         if result.is_err() {
             let _ = super::kill_tree::kill_tree_windows(pid).await;
             let _ = child.kill().await;
@@ -437,15 +501,17 @@ pub(super) async fn run(
         let flushed = capture.flush().await;
         guard.0 = None;
         if let Some(sink) = capture.binding.on_exit.as_ref() {
-            sink.on_exit(
-                &capture.binding.task_id,
-                if flushed.is_ok() {
-                    status.and_then(|status| status.code())
-                } else {
-                    None
-                },
-            )
-            .await;
+            let code = if flushed.is_ok() {
+                status.and_then(|status| status.code())
+            } else {
+                None
+            };
+            if deadline.expired {
+                sink.on_background_deadline_exit(&capture.binding.task_id, code)
+                    .await;
+            } else {
+                sink.on_exit(&capture.binding.task_id, code).await;
+            }
         }
     });
     Ok(ForegroundRunResult {
@@ -463,6 +529,10 @@ mod tests {
     struct Sink {
         reject_output: std::sync::atomic::AtomicBool,
         reject_spawn: std::sync::atomic::AtomicBool,
+        pause_output: std::sync::atomic::AtomicBool,
+        output_started: tokio::sync::Notify,
+        output_resume: tokio::sync::Notify,
+        deadlines: std::sync::atomic::AtomicUsize,
         spawned: Mutex<Vec<(String, u32)>>,
         byte_cap: std::sync::atomic::AtomicUsize,
         content: Mutex<String>,
@@ -484,6 +554,22 @@ mod tests {
             if self.reject_output.load(std::sync::atomic::Ordering::SeqCst) && !text.is_empty() {
                 return Err(ProcessError::Io("writer refused prefix".into()));
             }
+            let text = if !text.is_empty()
+                && self
+                    .pause_output
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Simulate a writer that has accepted a prefix before waiting
+                // for its next lock/write. Cancellation here would lose the
+                // rest, and restarting the append could duplicate the prefix.
+                let first = text.chars().next().unwrap().len_utf8();
+                self.content.lock().unwrap().push_str(&text[..first]);
+                self.output_started.notify_one();
+                self.output_resume.notified().await;
+                &text[first..]
+            } else {
+                text
+            };
             let mut content = self.content.lock().unwrap();
             content.push_str(text);
             let cap = self.byte_cap.load(std::sync::atomic::Ordering::SeqCst);
@@ -504,10 +590,53 @@ mod tests {
             }
             Ok(Some(size))
         }
+        async fn on_background_deadline_exit(&self, id: &str, code: Option<i32>) {
+            self.deadlines
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.on_exit(id, code).await;
+        }
         async fn on_exit(&self, id: &str, code: Option<i32>) {
             self.exits.lock().unwrap().push((id.into(), code));
         }
     }
+    #[tokio::test]
+    async fn windows_background_deadline_finishes_pending_output_publish_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        sink.pause_output
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let cmd = command(
+            "printf '🦀payload'; exec sleep 60",
+            5000,
+            dir.path(),
+            sink.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+        )
+        .with_background_timeout(Some(std::time::Duration::from_millis(100)));
+        let process = WindowsProcess::new();
+        let handle = process.spawn_background(&cmd).await.unwrap();
+        let began = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sink.output_started.notified(),
+        )
+        .await;
+        if began.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        began.expect("writer receives the captured bytes");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let exited_while_pending = !sink.exits.lock().unwrap().is_empty();
+        sink.output_resume.notify_one();
+        finished(&sink).await;
+        assert!(
+            !exited_while_pending,
+            "deadline cannot cancel an accepted output chunk"
+        );
+        assert_eq!(*sink.content.lock().unwrap(), "🦀payload");
+        assert_eq!(sink.exits.lock().unwrap().len(), 1);
+        assert_eq!(sink.deadlines.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn windows_spawn_identity_callback_precedes_handoff_and_rejection_reaps_child() {
         let dir = tempfile::tempdir().unwrap();

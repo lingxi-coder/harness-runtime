@@ -239,7 +239,11 @@ mod ask_timeout_wiring_tests {
         // No setting ⇒ `never` ⇒ an interactive call blocks (does NOT auto-pick).
         let tool = register_and_get_ask(None);
         let err = tool
-            .call(one_question(), fresh_ctx(), fresh_tx())
+            .call(
+                tool_api::tool_trait::generated_builtin_result(&one_question()),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("never must block an interactive call");
         assert!(matches!(err, ToolError::InteractionRequired(_)));
@@ -250,7 +254,11 @@ mod ask_timeout_wiring_tests {
         // Unparsable value ⇒ zod `.catch` fallback to `never` (blocks).
         let tool = register_and_get_ask(Some("bogus"));
         let err = tool
-            .call(one_question(), fresh_ctx(), fresh_tx())
+            .call(
+                tool_api::tool_trait::generated_builtin_result(&one_question()),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("bogus must fall back to never and block");
         assert!(matches!(err, ToolError::InteractionRequired(_)));
@@ -260,7 +268,11 @@ mod ask_timeout_wiring_tests {
     async fn duration_carrier_without_ui_requires_interaction() {
         let tool = register_and_get_ask(Some("60s"));
         let err = tool
-            .call(one_question(), fresh_ctx(), fresh_tx())
+            .call(
+                tool_api::tool_trait::generated_builtin_result(&one_question()),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("a resolver without a UI cannot invent answers");
         assert!(matches!(err, tool_api::ToolError::InteractionRequired(_)));
@@ -272,7 +284,11 @@ mod ask_timeout_wiring_tests {
         let mut ctx = fresh_ctx();
         ctx.options.is_non_interactive_session = true;
         let err = tool
-            .call(one_question(), ctx, fresh_tx())
+            .call(
+                tool_api::tool_trait::generated_builtin_result(&one_question()),
+                ctx,
+                fresh_tx(),
+            )
             .await
             .expect_err("headless cannot answer on the user's behalf");
         assert!(matches!(err, tool_api::ToolError::InteractionRequired(_)));

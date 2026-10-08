@@ -1,0 +1,865 @@
+{
+  "versions": {
+    "2.1.288": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+    "2.1.289": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69"
+  },
+  "scope": "Actual pinned rule helpers, compound Bash m6o producer, Pst core projection, $Ln/ELn permission arbitration and sec-default ue managed deny consumer. Parser callbacks, plugin aggregate decisions, config/session state, settings and filesystem are explicit injections; this is not a full installed-Mod or permission-pipeline launch.",
+  "sourceByteRanges": [
+    {
+      "version": "2.1.288",
+      "label": "Vrt/Yrt direct-only subcommand rule lookup",
+      "start": 187327473,
+      "end": 187327796,
+      "sha256": "85fea4ee43fd9dfcbcbc1f55223cdab35f98e328f1d91be45673c6d4f401b203"
+    },
+    {
+      "version": "2.1.289",
+      "label": "wEe/Ast recursive subcommand rule lookup",
+      "start": 187628314,
+      "end": 187628661,
+      "sha256": "e1613f5a8ad7e8c0b33cee74af4b6a1646cc5a52c09ace9b8e511c8222e47191"
+    },
+    {
+      "version": "2.1.289",
+      "label": "m6o compound Bash subcommand-result producer",
+      "start": 189692731,
+      "end": 189695182,
+      "sha256": "782f6076975014582b28413b34b6c6e91d9520cebd4353080b3dbe8f611017a2"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Pst core decision projection",
+      "start": 187628661,
+      "end": 187628952,
+      "sha256": "1087d88f782be664074cd9229366e8c69bff407434f4d3fd3de82bf20f5e0a1d"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Rst/rQ/Cst/xst tool.check core fields",
+      "start": 187627964,
+      "end": 187628314,
+      "sha256": "66d4d7970ef6499020d845496442e0f70b111ac52321c1b8352453601c3d1a24"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Mst core hook wrapper",
+      "start": 187628802,
+      "end": 187628858,
+      "sha256": "6520a71b656d6e2f9a9a75addba8b5038685c45a2e3dbf9abecc293cc47c29ca"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Ist hook decision reason",
+      "start": 187628858,
+      "end": 187628952,
+      "sha256": "b7e2b075009aca9fc4fa2a189f3a593fe5e58b1996a3cf4bd57d779ddb9c768c"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Ost same-behavior preservation and message projection",
+      "start": 187628952,
+      "end": 187629060,
+      "sha256": "78b22a5e2c89a4e8de2378af5b19be0490995a253e62718c443d645b62abb429"
+    },
+    {
+      "version": "2.1.289",
+      "label": "ELn hook/core decision arbitration",
+      "start": 187629060,
+      "end": 187629730,
+      "sha256": "cd62acd92a1bde567e84ba97fb801bf85b51df59edf47e73d1004931d58d07eb"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Dst retained core result",
+      "start": 187629730,
+      "end": 187629818,
+      "sha256": "5cd6ee7c77e515375a8b54315cfb6fd696a4e4af9a7291b0e12facb0c1f931bc"
+    },
+    {
+      "version": "2.1.289",
+      "label": "$Ln tool.check decision caller",
+      "start": 187630030,
+      "end": 187630770,
+      "sha256": "c6f5e6c8bf158ed514906506da208fad09e6254dd6d5e6e0048f3652dd9d0167"
+    },
+    {
+      "version": "2.1.289",
+      "label": "_r WebFetch tool name",
+      "start": 183190392,
+      "end": 183190459,
+      "sha256": "f73e84506163c032831f0b853bd2ed0ba92b5a10880827926f57f0c517a69f5e"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Pm WebSearch tool name",
+      "start": 183304712,
+      "end": 183304731,
+      "sha256": "191c8bb713b7a0e2b2a27fef9c3c7d2003e35eb736a850a6e86d0244ad06c5d9"
+    },
+    {
+      "version": "2.1.289",
+      "label": "Uoe Projects-session WebFetch/WebSearch predicate",
+      "start": 183805687,
+      "end": 183805858,
+      "sha256": "7507090d046e83385390644695e89b695b66ec7b919048cc1dda2e69e98fa3cb"
+    },
+    {
+      "version": "2.1.289",
+      "label": "permission rule display escaping helper",
+      "start": 179185572,
+      "end": 179185663,
+      "sha256": "62865469619d8f4a2c2cb5938e8d8716cea1a498098491787975accccf34d4d4"
+    },
+    {
+      "version": "2.1.289",
+      "label": "permission rule display formatter",
+      "start": 179186704,
+      "end": 179186806,
+      "sha256": "072153e9efee2a236ba56a1b9112c379858dd0702ffdbf15cdcd4f04e0c6c04b"
+    },
+    {
+      "version": "2.1.289",
+      "label": "sec-default managed Mods tool.check consumer",
+      "start": 213011071,
+      "end": 213014666,
+      "sha256": "8d1bc3c4ea247bff06104cccf6389a242e626db59f26ba1105954f683838a2ae"
+    }
+  ],
+  "nestedRuleCases": [
+    {
+      "id": "direct-ask-rule",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "Bash",
+              "ruleContent": "rm:*"
+            },
+            "source": "managed"
+          }
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "one-subcommand-level-ask-rule",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "subcommandResults",
+          "reasons": {
+            "entries": [
+              [
+                "child",
+                {
+                  "behavior": "ask",
+                  "decisionReason": {
+                    "type": "rule",
+                    "rule": {
+                      "ruleValue": {
+                        "toolName": "Bash",
+                        "ruleContent": "rm:*"
+                      },
+                      "source": "managed"
+                    }
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "two-subcommand-level-ask-rule",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "subcommandResults",
+          "reasons": {
+            "entries": [
+              [
+                "middle",
+                {
+                  "behavior": "ask",
+                  "decisionReason": {
+                    "type": "subcommandResults",
+                    "reasons": {
+                      "entries": [
+                        [
+                          "child",
+                          {
+                            "behavior": "ask",
+                            "decisionReason": {
+                              "type": "rule",
+                              "rule": {
+                                "ruleValue": {
+                                  "toolName": "Bash",
+                                  "ruleContent": "rm:*"
+                                },
+                                "source": "managed"
+                              }
+                            }
+                          }
+                        ]
+                      ]
+                    }
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "three-subcommand-level-deny-rule",
+      "input": {
+        "behavior": "deny",
+        "decisionReason": {
+          "type": "subcommandResults",
+          "reasons": {
+            "entries": [
+              [
+                "outer",
+                {
+                  "behavior": "deny",
+                  "decisionReason": {
+                    "type": "subcommandResults",
+                    "reasons": {
+                      "entries": [
+                        [
+                          "middle",
+                          {
+                            "behavior": "ask",
+                            "decisionReason": {
+                              "type": "subcommandResults",
+                              "reasons": {
+                                "entries": [
+                                  [
+                                    "child",
+                                    {
+                                      "behavior": "ask",
+                                      "decisionReason": {
+                                        "type": "rule",
+                                        "rule": {
+                                          "ruleValue": {
+                                            "toolName": "Bash",
+                                            "ruleContent": "rm:*"
+                                          },
+                                          "source": "managed"
+                                        }
+                                      }
+                                    }
+                                  ]
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      ]
+                    }
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "mismatched-child-behavior",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "subcommandResults",
+          "reasons": {
+            "entries": [
+              [
+                "child",
+                {
+                  "behavior": "deny",
+                  "decisionReason": {
+                    "type": "rule",
+                    "rule": {
+                      "ruleValue": {
+                        "toolName": "Bash",
+                        "ruleContent": "rm:*"
+                      },
+                      "source": "managed"
+                    }
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "first-matching-rule-wins",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "subcommandResults",
+          "reasons": {
+            "entries": [
+              [
+                "first",
+                {
+                  "behavior": "ask",
+                  "decisionReason": {
+                    "type": "rule",
+                    "rule": {
+                      "ruleValue": {
+                        "toolName": "Bash",
+                        "ruleContent": "first:*"
+                      },
+                      "source": "managed"
+                    }
+                  }
+                }
+              ],
+              [
+                "second",
+                {
+                  "behavior": "ask",
+                  "decisionReason": {
+                    "type": "rule",
+                    "rule": {
+                      "ruleValue": {
+                        "toolName": "Bash",
+                        "ruleContent": "second:*"
+                      },
+                      "source": "managed"
+                    }
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "first:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "first:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "root-rule-precedes-subcommands",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "Bash",
+              "ruleContent": "rm:*"
+            },
+            "source": "managed"
+          }
+        },
+        "matchedAskRule": {
+          "ruleValue": {
+            "toolName": "Bash",
+            "ruleContent": "matched-ask:*"
+          },
+          "source": "managed"
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "matched-ask-rule-fallback",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "other",
+          "reason": "ask"
+        },
+        "matchedAskRule": {
+          "ruleValue": {
+            "toolName": "Bash",
+            "ruleContent": "fallback:*"
+          },
+          "source": "managed"
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "fallback:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "fallback:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "deny-does-not-use-matched-ask-rule",
+      "input": {
+        "behavior": "deny",
+        "decisionReason": {
+          "type": "other",
+          "reason": "deny"
+        },
+        "matchedAskRule": {
+          "ruleValue": {
+            "toolName": "Bash",
+            "ruleContent": "must-not-appear:*"
+          },
+          "source": "managed"
+        }
+      }
+    },
+    {
+      "id": "allow-direct-rule",
+      "input": {
+        "behavior": "allow",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "Bash",
+              "ruleContent": "rm:*"
+            },
+            "source": "managed"
+          }
+        }
+      },
+      "expected288": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      },
+      "expected289": {
+        "ruleValue": {
+          "toolName": "Bash",
+          "ruleContent": "rm:*"
+        },
+        "source": "managed"
+      }
+    },
+    {
+      "id": "allow-without-rule",
+      "input": {
+        "behavior": "allow",
+        "decisionReason": {
+          "type": "other",
+          "reason": "allowed"
+        }
+      }
+    },
+    {
+      "id": "ask-without-rule",
+      "input": {
+        "behavior": "ask",
+        "decisionReason": {
+          "type": "other",
+          "reason": "ask"
+        }
+      }
+    }
+  ],
+  "nativeCompoundProducer": {
+    "childInput": "Bash(rm:*)",
+    "ask": {
+      "behavior": "ask",
+      "decisionReason": {
+        "type": "subcommandResults",
+        "reasons": {
+          "entries": [
+            [
+              "rm -rf /tmp/target",
+              {
+                "behavior": "ask",
+                "message": "Native child ask",
+                "decisionReason": {
+                  "type": "rule",
+                  "rule": {
+                    "ruleValue": {
+                      "toolName": "Bash",
+                      "ruleContent": "rm:*"
+                    },
+                    "source": "managed"
+                  }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "coreProjection": {
+        "decision": "ask",
+        "reason": "Native compound Bash decision",
+        "rule": "Bash(rm:*)"
+      }
+    },
+    "deny": {
+      "behavior": "deny",
+      "decisionReason": {
+        "type": "subcommandResults",
+        "reasons": {
+          "entries": [
+            [
+              "rm -rf /tmp/target",
+              {
+                "behavior": "deny",
+                "message": "Native child deny",
+                "decisionReason": {
+                  "type": "rule",
+                  "rule": {
+                    "ruleValue": {
+                      "toolName": "Bash",
+                      "ruleContent": "rm:*"
+                    },
+                    "source": "managed"
+                  }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "coreProjection": {
+        "decision": "deny",
+        "reason": "Native child deny",
+        "rule": "Bash(rm:*)"
+      }
+    }
+  },
+  "projectsEligibilityCases": [
+    {
+      "id": "Bash-is-not-project-eligible",
+      "tool": "Bash",
+      "expected": false
+    },
+    {
+      "id": "WebFetch-outside-project-session",
+      "tool": "WebFetch",
+      "expected": false
+    },
+    {
+      "id": "WebFetch-project-session",
+      "tool": "WebFetch",
+      "expected": true
+    },
+    {
+      "id": "WebSearch-project-session",
+      "tool": "WebSearch",
+      "expected": true
+    },
+    {
+      "id": "explicit-project-state",
+      "tool": "WebFetch",
+      "expected": true
+    },
+    {
+      "id": "payload-disabled-unless-eligible",
+      "tool": "WebSearch",
+      "expected": false
+    },
+    {
+      "id": "payload-eligible",
+      "tool": "WebSearch",
+      "expected": true
+    }
+  ],
+  "mainToolCheckArbitration": [
+    {
+      "id": "Projects-WebFetch-Mod-allow-core-ask-is-retained",
+      "tool": "WebFetch",
+      "projectsSession": true,
+      "modDecision": "allow",
+      "callCoreInsideMod": false,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "ask",
+        "message": "Native WebFetch rule ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "WebFetch",
+              "ruleContent": "https://*"
+            },
+            "source": "managed"
+          }
+        }
+      }
+    },
+    {
+      "id": "Projects-WebFetch-Mod-allow-core-deny-is-retained",
+      "tool": "WebFetch",
+      "projectsSession": true,
+      "modDecision": "allow",
+      "callCoreInsideMod": false,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "deny",
+        "message": "Native WebFetch rule deny",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "WebFetch",
+              "ruleContent": "https://*"
+            },
+            "source": "managed"
+          }
+        }
+      }
+    },
+    {
+      "id": "Projects-WebFetch-Mod-allow-core-allow-is-retained",
+      "tool": "WebFetch",
+      "projectsSession": true,
+      "modDecision": "allow",
+      "callCoreInsideMod": false,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "allow",
+        "updatedInput": {
+          "command": "fixture"
+        },
+        "decisionReason": {
+          "type": "other",
+          "reason": "native allow"
+        }
+      }
+    },
+    {
+      "id": "Projects-WebFetch-same-ask-keeps-core-reason",
+      "tool": "WebFetch",
+      "projectsSession": true,
+      "modDecision": "ask",
+      "callCoreInsideMod": true,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "ask",
+        "message": "Native WebFetch rule ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "WebFetch",
+              "ruleContent": "https://*"
+            },
+            "source": "managed"
+          }
+        }
+      }
+    },
+    {
+      "id": "WebFetch-without-project-gate-does-not-force-core",
+      "tool": "WebFetch",
+      "projectsSession": false,
+      "modDecision": "allow",
+      "callCoreInsideMod": false,
+      "coreRuns": 0,
+      "expected": {
+        "behavior": "allow",
+        "updatedInput": {
+          "command": "fixture"
+        },
+        "decisionReason": {
+          "type": "hook",
+          "hookName": "tool.check",
+          "hookSource": "plugin:user-mod"
+        }
+      }
+    },
+    {
+      "id": "Bash-Mod-allow-does-not-force-core",
+      "tool": "Bash",
+      "projectsSession": false,
+      "modDecision": "allow",
+      "callCoreInsideMod": false,
+      "coreRuns": 0,
+      "expected": {
+        "behavior": "allow",
+        "updatedInput": {
+          "command": "fixture"
+        },
+        "decisionReason": {
+          "type": "hook",
+          "hookName": "tool.check",
+          "hookSource": "plugin:user-mod"
+        }
+      }
+    },
+    {
+      "id": "Bash-already-evaluated-core-ask-versus-Mod-allow",
+      "tool": "Bash",
+      "projectsSession": false,
+      "modDecision": "allow",
+      "callCoreInsideMod": true,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "allow",
+        "updatedInput": {
+          "command": "fixture"
+        },
+        "decisionReason": {
+          "type": "hook",
+          "hookName": "tool.check",
+          "hookSource": "plugin:user-mod"
+        }
+      }
+    },
+    {
+      "id": "Bash-same-ask-behavior-keeps-core-decision",
+      "tool": "Bash",
+      "projectsSession": false,
+      "modDecision": "ask",
+      "callCoreInsideMod": true,
+      "coreRuns": 1,
+      "expected": {
+        "behavior": "ask",
+        "message": "Native core ask",
+        "decisionReason": {
+          "type": "rule",
+          "rule": {
+            "ruleValue": {
+              "toolName": "Bash",
+              "ruleContent": "rm:*"
+            },
+            "source": "managed"
+          }
+        }
+      }
+    }
+  ],
+  "secDefaultManagedConsumer": [
+    {
+      "id": "managed-nested-deny-rule-is-held",
+      "appendedDecision": "deny",
+      "appendedRule": "Bash(rm:*)",
+      "allowModsToOverrideDenyRules": false,
+      "readFailure": false,
+      "expected": {
+        "decision": "deny",
+        "rule": "Bash(rm:*)"
+      }
+    },
+    {
+      "id": "managed-nested-ask-rule-does-not-trigger-deny-hold",
+      "appendedDecision": "ask",
+      "appendedRule": "Bash(rm:*)",
+      "allowModsToOverrideDenyRules": false,
+      "readFailure": false,
+      "expected": {
+        "decision": "allow"
+      }
+    },
+    {
+      "id": "managed-deny-without-rule-does-not-trigger-rule-hold",
+      "appendedDecision": "deny",
+      "allowModsToOverrideDenyRules": false,
+      "readFailure": false,
+      "expected": {
+        "decision": "allow"
+      }
+    },
+    {
+      "id": "explicit-allowMods-override-option-skips-hold",
+      "appendedDecision": "deny",
+      "appendedRule": "Bash(rm:*)",
+      "allowModsToOverrideDenyRules": true,
+      "readFailure": false,
+      "expected": {
+        "decision": "allow"
+      }
+    },
+    {
+      "id": "settings-read-failure-fails-closed-for-deny-rule",
+      "appendedDecision": "deny",
+      "appendedRule": "Bash(rm:*)",
+      "allowModsToOverrideDenyRules": false,
+      "readFailure": true,
+      "expected": {
+        "decision": "deny",
+        "rule": "Bash(rm:*)"
+      }
+    }
+  ],
+  "boundaries": {
+    "proven": [
+      "The native compound Bash producer packages matched child results under decisionReason.type=subcommandResults.",
+      "2.1.289 Ast/wEe recursively extracts a rule from matching-behavior nested subcommandResults; 2.1.288 Yrt/Vrt stops after the direct child result.",
+      "Pst projects a returned rule through Pn(ruleValue), preserving decision and message-derived reason.",
+      "The $Ln force-evaluate/core-retention branch is only eligible for WebFetch or WebSearch in the Projects/session gate (plus the source-specific explicit/payload gate).",
+      "The exact sec-default ue consumer only replaces a prior non-deny result with an appended deny that has a defined rule; ask+rule does not satisfy its isRuleDeny predicate."
+    ],
+    "open": [
+      "The complete installed user-Mod lifecycle and real permission callback/config acquisition are not driven by this callback-injected oracle.",
+      "This evidence does not establish a universal managed Bash ask-over-Mod-allow hold. In a callback-injected $Ln case where a Bash core ask has already been evaluated and the aggregate Mod result is allow, Bash is outside Uoe and the helper returns allow. The complete ya/plugin-runner result source remains outside the fixture."
+    ]
+  }
+}

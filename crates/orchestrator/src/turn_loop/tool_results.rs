@@ -1,5 +1,5 @@
 use crate::conversation::ConversationOrchestrator;
-use lingxi_core::types::{ConversationMessage, ToolUseId};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, ToolUseId};
 
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
@@ -23,19 +23,25 @@ use lingxi_core::types::{ConversationMessage, ToolUseId};
 /// None`) or the verbatim block array — so the array arm is driven by
 /// `content_blocks` and the string arm by `content`.
 pub(super) fn tool_result_is_blank(
-    content: &str,
-    content_blocks: Option<&[serde_json::Value]>,
+    content: &Utf16JsonProjection,
+    content_blocks: Option<&Utf16JsonProjection>,
 ) -> bool {
     match content_blocks {
-        None => content.trim().is_empty(),
+        None => content
+            .string_at("")
+            .is_some_and(|text| text.trim().is_empty()),
         Some(blocks) => {
-            blocks.is_empty()
-                || blocks.iter().all(|b| {
-                    b.get("type").and_then(serde_json::Value::as_str) == Some("text")
-                        && b.get("text").is_some()
-                        && b.get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .is_none_or(|t| t.trim().is_empty())
+            let Some(count) = blocks.array_len("") else {
+                return false;
+            };
+            count == 0
+                || (0..count).all(|index| {
+                    let item = format!("/{index}");
+                    blocks.string_at(&format!("{item}/type")) == Some("text")
+                        && blocks.at_pointer(&format!("{item}/text")).is_some()
+                        && blocks
+                            .string_at(&format!("{item}/text"))
+                            .is_none_or(|text| text.trim().is_empty())
                 })
         }
     }
@@ -43,11 +49,11 @@ pub(super) fn tool_result_is_blank(
 
 /// `U0u` (2.1.220 BIN off **230271605**): an array containing ANY `image` or
 /// `document` block is never persisted, regardless of size.
-pub(super) fn tool_result_has_media(content_blocks: Option<&[serde_json::Value]>) -> bool {
+pub(super) fn tool_result_has_media(content_blocks: Option<&Utf16JsonProjection>) -> bool {
     content_blocks.is_some_and(|blocks| {
-        blocks.iter().any(|b| {
+        (0..blocks.array_len("").unwrap_or_default()).any(|index| {
             matches!(
-                b.get("type").and_then(serde_json::Value::as_str),
+                blocks.string_at(&format!("/{index}/type")),
                 Some("image" | "document")
             )
         })
@@ -57,18 +63,17 @@ pub(super) fn tool_result_has_media(content_blocks: Option<&[serde_json::Value]>
 /// `q0u` (2.1.220 BIN off **230271734**): a string's own length, or the sum of
 /// the `text` block lengths in an array (non-text blocks contribute 0).
 pub(super) fn tool_result_size(
-    content: &str,
-    content_blocks: Option<&[serde_json::Value]>,
+    content: &Utf16JsonProjection,
+    content_blocks: Option<&Utf16JsonProjection>,
 ) -> usize {
     match content_blocks {
-        None => content.encode_utf16().count(),
-        Some(blocks) => blocks
-            .iter()
-            .map(|b| {
-                if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
-                    b.get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .map_or(0, |text| text.encode_utf16().count())
+        None => content.string_units("").map_or(0, |units| units.len()),
+        Some(blocks) => (0..blocks.array_len("").unwrap_or_default())
+            .map(|index| {
+                if blocks.string_at(&format!("/{index}/type")) == Some("text") {
+                    blocks
+                        .string_units(&format!("/{index}/text"))
+                        .map_or(0, |units| units.len())
                 } else {
                     0
                 }
@@ -108,47 +113,58 @@ pub(super) fn tool_result_size(
 /// receives the full payload. The caller MUST clear `content_blocks` whenever
 /// this reports `true`.
 pub(super) struct PersistenceOutcome {
-    pub(super) utf16_code_units: Option<Vec<u16>>,
-    pub(super) content: String,
+    pub(super) content: Utf16JsonProjection,
     pub(super) replaced: bool,
 }
 
-/// Read the process-output spill identity emitted by the Bash tool.
-///
-/// 2.1.263 result data carries `persistedOutputPath` / `persistedOutputSize`.
-/// Older in-flight results still used `outputTaskId` / `outputFilePath` /
-/// `outputFileSize`; both shapes are accepted so a mid-upgrade transcript
-/// keeps the same file. A partial object is rejected so the persistence
-/// layer cannot fall back to a path that cannot be tied to the spill.
-pub(super) fn process_output_file_from_data(
-    data: &serde_json::Value,
+/// Read the rooted process-output identity emitted by the Bash tool.
+pub(super) fn process_output_file_from_source(
+    data: &Utf16JsonProjection,
 ) -> Option<lingxi_core::host::process::ProcessOutputFile> {
-    let object = data.as_object()?;
-    let path = object
-        .get("persistedOutputPath")
-        .or_else(|| object.get("outputFilePath"))?
-        .as_str()?;
-    let size = object
-        .get("persistedOutputSize")
-        .or_else(|| object.get("outputFileSize"))?
-        .as_u64()?;
-    let task_id = object
-        .get("outputTaskId")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    let path = data
+        .string_at("/persistedOutputPath")
+        .or_else(|| data.string_at("/outputFilePath"))?;
+    let size = data
+        .number_at("/persistedOutputSize")
+        .or_else(|| data.number_at("/outputFileSize"))?;
+    if !size.is_finite() || size < 0.0 || size.fract() != 0.0 || size >= u64::MAX as f64 {
+        return None;
+    }
+    let task_id = data
+        .string_at("/outputTaskId")
+        .map(str::to_owned)
         .or_else(|| {
             std::path::Path::new(path)
                 .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
+                .map(|stem| stem.to_string_lossy().into_owned())
         })?;
     if task_id.is_empty() || path.is_empty() {
         return None;
     }
     Some(lingxi_core::host::process::ProcessOutputFile {
         task_id,
-        path: path.to_string(),
-        size,
+        path: path.to_owned(),
+        size: size as u64,
     })
+}
+
+fn source_text_from_units(units: &[u16]) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+        .expect("display text matches its UTF-16 source")
+}
+
+fn preview_source_text(content: &Utf16JsonProjection, limit: usize) -> (Vec<u16>, bool) {
+    let mut units = content.string_units("").unwrap_or_default();
+    if units.len() <= limit {
+        return (units, false);
+    }
+    units.truncate(limit);
+    if let Some(index) = units.iter().rposition(|unit| *unit == u16::from(b'\n')) {
+        if index > limit / 2 {
+            units.truncate(index);
+        }
+    }
+    (units, true)
 }
 
 /// Reuse a process runner's rooted output file when building the model-facing
@@ -160,8 +176,8 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
     tool_name: &str,
     tool_use_id: &ToolUseId,
     threshold: Option<usize>,
-    content: String,
-    content_blocks: Option<&[serde_json::Value]>,
+    content: Utf16JsonProjection,
+    content_blocks: Option<&Utf16JsonProjection>,
     output_file: Option<&lingxi_core::host::process::ProcessOutputFile>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
@@ -172,7 +188,7 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
         // seam, but its structured media blocks must remain inline.
         if !tool_result_is_blank(&content, content_blocks) && !tool_result_has_media(content_blocks)
         {
-            let (preview, content_has_more) = trp::preview_utf16(&content, trp::PREVIEW_CHARS);
+            let (preview, content_has_more) = preview_source_text(&content, trp::PREVIEW_CHARS);
             let original_size = usize::try_from(output_file.size).unwrap_or(usize::MAX);
             let exact_replacement = trp::wrap_utf16(
                 original_size,
@@ -190,7 +206,7 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
                             .unwrap_or(usize::MAX),
                     ),
             );
-            let replacement = String::from_utf16_lossy(&exact_replacement);
+            let replacement = source_text_from_units(&exact_replacement);
             tracing::info!(
                 task_id = %output_file.task_id,
                 path = %output_file.path,
@@ -224,9 +240,6 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
                 bus.log_event("tengu_tool_result_persisted", metadata).await;
             }
             return PersistenceOutcome {
-                utf16_code_units: String::from_utf16(&exact_replacement)
-                    .is_err()
-                    .then_some(exact_replacement),
                 content: replacement,
                 replaced: true,
             };
@@ -310,8 +323,8 @@ pub(super) async fn apply_tool_result_persistence(
     tool_name: &str,
     tool_use_id: &ToolUseId,
     threshold: Option<usize>,
-    content: String,
-    content_blocks: Option<&[serde_json::Value]>,
+    content: Utf16JsonProjection,
+    content_blocks: Option<&Utf16JsonProjection>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
 
@@ -325,21 +338,18 @@ pub(super) async fn apply_tool_result_persistence(
             bus.log_event("tengu_tool_empty_result", metadata).await;
         }
         return PersistenceOutcome {
-            utf16_code_units: None,
-            content: format!("({tool_name} completed with no output)"),
+            content: format!("({tool_name} completed with no output)").into(),
             replaced: true,
         };
     }
     if tool_result_has_media(content_blocks) {
         return PersistenceOutcome {
-            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(threshold) = threshold else {
         return PersistenceOutcome {
-            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -347,14 +357,12 @@ pub(super) async fn apply_tool_result_persistence(
     let size = tool_result_size(&content, content_blocks);
     if size <= threshold {
         return PersistenceOutcome {
-            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(home) = orch.config_home.as_ref() else {
         return PersistenceOutcome {
-            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -363,16 +371,15 @@ pub(super) async fn apply_tool_result_persistence(
     // `x2e` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
     // string body verbatim; the extension follows (`kKr`).
     let (body, is_json) = match content_blocks {
-        Some(blocks) => match serde_json::to_string_pretty(blocks) {
-            Ok(s) => (s, true),
+        Some(blocks) => match blocks.to_pretty_json_string() {
+            Ok(s) => (s.into(), true),
             // `e.some(l=>l.type!=="text")` already returned an error above in
             // the oracle; an unserializable array is the same "leave it alone".
             Err(_) => {
                 return PersistenceOutcome {
-                    utf16_code_units: None,
                     content,
                     replaced: false,
-                }
+                };
             }
         },
         None => (content.clone(), false),
@@ -403,7 +410,6 @@ pub(super) async fn apply_tool_result_persistence(
                 "Failed to persist tool result: {msg}"
             );
             return PersistenceOutcome {
-                utf16_code_units: None,
                 content,
                 replaced: false,
             };
@@ -414,14 +420,18 @@ pub(super) async fn apply_tool_result_persistence(
         "Persisted tool result to {path_display} ({})",
         trp::format_bytes(persisted.original_size)
     );
+    let (preview, has_more) = match content_blocks {
+        Some(_) => (persisted.preview_utf16.clone(), persisted.has_more),
+        None => preview_source_text(&content, trp::PREVIEW_CHARS),
+    };
     let exact_replacement = trp::wrap_utf16(
         persisted.original_size,
         &path_display,
-        &persisted.preview_utf16,
-        persisted.has_more,
+        &preview,
+        has_more,
         persisted.truncated_at,
     );
-    let replacement = String::from_utf16_lossy(&exact_replacement);
+    let replacement = source_text_from_units(&exact_replacement);
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         #[allow(clippy::cast_possible_wrap)]
         fn int(v: usize) -> telemetry::AnalyticsValue {
@@ -446,9 +456,6 @@ pub(super) async fn apply_tool_result_persistence(
         bus.log_event("tengu_tool_result_persisted", metadata).await;
     }
     PersistenceOutcome {
-        utf16_code_units: String::from_utf16(&exact_replacement)
-            .is_err()
-            .then_some(exact_replacement),
         content: replacement,
         replaced: true,
     }
@@ -462,45 +469,47 @@ pub(super) async fn apply_tool_result_persistence(
 /// the TUI payload — e.g. Read's cat -n + reminders, where the TUI shows raw
 /// content) or, failing that, the verbatim `content` string (Bash stdout,
 /// Edit/Write confirmations, where the model and TUI strings coincide). Tools
-/// that expose neither fall back to the JSON object — the legacy behavior, kept
-/// for structured-only results that have no human-facing string.
+/// that expose neither fall back to bounded JavaScript-compatible JSON text,
+/// matching Claude 2.1.286 for non-text tool and hook results. Raw string
+/// replacements are retained verbatim.
 ///
 /// The full `result.data` object still flows to the TUI (`emit_tool_result`)
 /// and the `PostToolUse` hook unchanged; only the model-facing string is derived
 /// here.
-pub(super) fn tool_result_to_model_text(data: &serde_json::Value) -> String {
-    data.get("model_content")
-        .and_then(|v| v.as_str())
-        .or_else(|| data.get("content").and_then(|v| v.as_str()))
-        // `result` is WebFetch's content field (claude-code's WebFetch result
-        // `data` names the model-facing markdown `result`, byte-faithful to the
-        // binary's `{bytes,code,codeText,result,durationMs,url}`). Without this
-        // arm a WebFetch result (no `content`/`model_content`) would fall through
-        // to the JSON dump below and show the model the whole object.
-        .or_else(|| data.get("result").and_then(|v| v.as_str()))
-        .map_or_else(
-            || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
-            std::string::ToString::to_string,
-        )
+pub(super) fn tool_result_to_model_text(data: &Utf16JsonProjection) -> Utf16JsonProjection {
+    if data.string_units("").is_some() {
+        return data.clone();
+    }
+    for pointer in ["/model_content", "/content", "/result"] {
+        if let Ok(value) = data.subprojection(pointer) {
+            if value.string_units("").is_some() {
+                return value;
+            }
+        }
+    }
+    crate::tool_result_text::normalized_tool_result_projection(data)
 }
 
 /// Map ToolSearch's matched names to Anthropic `tool_reference` blocks. Empty
 /// results stay on the text path (`model_content` carries the upstream copy).
 pub(super) fn tool_search_reference_blocks(
-    data: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    let matches = data.get("matches")?.as_array()?;
-    if matches.is_empty() {
+    data: &Utf16JsonProjection,
+) -> Option<Vec<Utf16JsonProjection>> {
+    let count = data.array_len("/matches")?;
+    if count == 0 {
         return None;
     }
-    let blocks: Vec<serde_json::Value> = matches
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(|name| {
-            serde_json::json!({
-                "type": "tool_reference",
-                "tool_name": name,
-            })
+    let blocks: Vec<Utf16JsonProjection> = (0..count)
+        .filter_map(|index| {
+            let name = data.subprojection(&format!("/matches/{index}")).ok()?;
+            name.string_units("")?;
+            Some(
+                Utf16JsonProjection::object(vec![
+                    ("type".into(), "tool_reference".into()),
+                    ("tool_name".into(), name),
+                ])
+                .expect("ToolSearch reference is a JSON object"),
+            )
         })
         .collect();
     (!blocks.is_empty()).then_some(blocks)
@@ -518,7 +527,9 @@ pub(super) fn tool_search_reference_blocks(
 /// runner needs the identical answer, and it is in another crate. This stays a
 /// named function so the call chain above and the oracle note it carries are
 /// untouched.
-pub(super) fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+pub(super) fn image_tool_result_blocks(
+    data: &Utf16JsonProjection,
+) -> Option<Vec<Utf16JsonProjection>> {
     tool_api::tool_result_media::image_content_blocks(data)
 }
 
@@ -531,35 +542,7 @@ pub(super) fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<s
 /// magic) returns `None` — the tool_result falls back to the text `content`,
 /// exactly the binary's `if(g)` fall-through.
 pub(super) fn bash_image_tool_result_blocks(
-    data: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    use base64::Engine as _;
-    if data.get("isImage") != Some(&serde_json::Value::Bool(true)) {
-        return None;
-    }
-    let stdout = data.get("stdout").and_then(serde_json::Value::as_str)?;
-    // `Xyu`: /^data:([^;]+);base64,(.+)$/ on the trimmed string.
-    let rest = stdout.trim().strip_prefix("data:")?;
-    let semi = rest.find(';')?;
-    if semi == 0 {
-        return None;
-    }
-    let payload = rest[semi..].strip_prefix(";base64,")?;
-    if payload.is_empty() {
-        return None;
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .ok()?;
-    // `Wfe` — magic-byte sniff (shared impl in tool-api, same fn the Bash
-    // tool's image gate uses, so gate and mapper always agree).
-    let media_type = tool_api::util::image_sniff::sniff_image_media_type(&bytes)?;
-    Some(vec![serde_json::json!({
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": media_type,
-            "data": payload,
-        },
-    })])
+    data: &Utf16JsonProjection,
+) -> Option<Vec<Utf16JsonProjection>> {
+    tool_api::tool_result_media::bash_image_content_blocks(data)
 }

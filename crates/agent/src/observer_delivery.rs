@@ -449,36 +449,35 @@ pub fn activity_from_message(
     match message {
         ConversationMessage::Assistant { content, .. } => {
             for block in content {
-                match block {
-                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                        if !text.trim().is_empty() {
-                            out.push(ObservedActivity::AssistantText { text: text.clone() });
-                        }
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        out.push(ObservedActivity::ToolCall {
-                            name: name.clone(),
-                            input: input.to_string(),
+                if let Some(text) = block.visible_text() {
+                    if !text.trim().is_empty() {
+                        out.push(ObservedActivity::AssistantText {
+                            text: text.to_owned(),
                         });
                     }
-                    _ => {}
+                } else if let ContentBlock::ToolUse { name, input, .. } = block {
+                    out.push(ObservedActivity::ToolCall {
+                        name: name.clone(),
+                        input: input.to_json_string().unwrap_or_else(|_| "null".into()),
+                    });
                 }
             }
         }
         ConversationMessage::User { content, .. } => {
             for block in content {
-                match block {
-                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                        if !text.trim().is_empty() {
-                            out.push(ObservedActivity::UserMessage { text: text.clone() });
-                        }
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        out.push(ObservedActivity::ToolResult {
-                            content: content.clone(),
+                if let Some(text) = block.visible_text() {
+                    if !text.trim().is_empty() {
+                        out.push(ObservedActivity::UserMessage {
+                            text: text.to_owned(),
                         });
                     }
-                    _ => {}
+                } else if let ContentBlock::ToolResult { content, .. } = block {
+                    out.push(ObservedActivity::ToolResult {
+                        content: content.string_at("").map_or_else(
+                            || content.to_json_string().unwrap_or_default(),
+                            str::to_owned,
+                        ),
+                    });
                 }
             }
         }
@@ -499,11 +498,15 @@ mod projection_tests {
             content: vec![
                 ContentBlock::Text {
                     text: "thinking".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: "Bash".into(),
-                    input: serde_json::json!({"command": "ls"}),
+                    input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command": "ls"}),
+                    )
+                    .expect("test tool input is valid JSON"),
                     provider_id: None,
                 },
             ],
@@ -513,6 +516,32 @@ mod projection_tests {
         assert_eq!(got.len(), 2);
         assert!(matches!(got[0], ObservedActivity::AssistantText { .. }));
         assert!(matches!(got[1], ObservedActivity::ToolCall { .. }));
+    }
+
+    #[test]
+    fn opaque_anthropic_text_is_observed_once_as_assistant_text() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ProviderContent {
+                protocol: "anthropic_messages".into(),
+                value: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({
+                        "type":"text",
+                        "text":"visible answer",
+                        "future_annotation":{"keep":true}
+                    }),
+                )
+                .expect("test provider content is valid JSON"),
+            }],
+            stop_reason: None,
+        };
+
+        assert_eq!(
+            activity_from_message(&msg),
+            vec![ObservedActivity::AssistantText {
+                text: "visible answer".into(),
+            }]
+        );
     }
 
     /// A user turn's tool results are what the observed agent SAW, so they are
@@ -525,12 +554,13 @@ mod projection_tests {
                 ContentBlock::ToolResult {
                     tool_use_id: ToolUseId::new(),
                     content: "file listing".into(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 },
                 ContentBlock::Text {
                     text: "now do X".into(),
+                    citations: None,
                 },
             ],
             is_meta: false,
@@ -552,6 +582,7 @@ mod projection_tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "  \n".into(),
+                citations: None,
             }],
             stop_reason: None,
         };
@@ -567,6 +598,7 @@ mod projection_tests {
             content: "you are…".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert!(activity_from_message(&msg).is_empty());

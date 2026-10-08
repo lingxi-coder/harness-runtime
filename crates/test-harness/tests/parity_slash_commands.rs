@@ -23,6 +23,7 @@ use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{
     AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -36,6 +37,12 @@ struct MockAuth {
 
 #[async_trait::async_trait]
 impl AuthHandle for MockAuth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         self.result.lock().unwrap().clone()
     }
@@ -288,7 +295,7 @@ async fn every_fixture_command_dispatches_to_handled() {
 
     for entry in &f.commands {
         let raw = format!("/{}", entry.name);
-        match d.dispatch(&raw).await {
+        match d.dispatch(Utf16JsonProjection::from(raw)).await {
             SlashDispatchResult::Handled { .. } => {}
             other => panic!("/{} must dispatch to Handled, got {other:?}", entry.name),
         }
@@ -300,10 +307,12 @@ async fn unknown_command_uses_locked_literal() {
     let reg = fully_wired_registry();
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
-    let outcome = d.dispatch("/definitely-not-a-real-command").await;
+    let outcome = d
+        .dispatch(Utf16JsonProjection::from("/definitely-not-a-real-command"))
+        .await;
     match outcome {
         SlashDispatchResult::Unknown { name, display } => {
-            assert_eq!(name, "definitely-not-a-real-command");
+            assert_eq!(name.string_at(""), Some("definitely-not-a-real-command"));
             assert_eq!(display, "Unknown command: /definitely-not-a-real-command");
         }
         other => panic!("expected Unknown, got {other:?}"),
@@ -320,9 +329,12 @@ fn core_command_description_matches_fixture() {
             .description
             .as_deref()
             .unwrap_or_else(|| panic!("core /{} missing description in fixture", entry.name));
-        let cmd = reg.resolve(&entry.name).expect("core cmd missing");
+        let cmd = reg
+            .resolve(&Utf16JsonProjection::from(entry.name.as_str()))
+            .expect("core cmd missing");
         assert_eq!(
-            cmd.description, expected,
+            cmd.description.string_at(""),
+            Some(expected),
             "/{}: description drift (fixture vs registry)",
             entry.name
         );
@@ -460,11 +472,11 @@ async fn target_implemented_commands_do_not_return_m5_stub() {
             continue;
         }
         let h = reg
-            .get_handler(name)
+            .get_handler(&Utf16JsonProjection::from(*name))
             .unwrap_or_else(|| panic!("/{name} handler missing"));
         let args = command_api::ParsedSlashCommand {
-            name: (*name).to_string(),
-            raw_args: String::new(),
+            name: Utf16JsonProjection::from(*name),
+            raw_args: Utf16JsonProjection::from(""),
             positional_args: vec![],
         };
         if let command_api::CommandResult::Done { display: Some(s) } = h.handle(&args).await {

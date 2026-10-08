@@ -1,0 +1,5 @@
+<tool_use_error>Error: No such tool available: Glob. Glob is not available in this session — find files with `find` via the Bash tool instead.</tool_use_error>
+
+<system-reminder>
+<total_tokens>14999994 tokens left</total_tokens>
+</system-reminder>

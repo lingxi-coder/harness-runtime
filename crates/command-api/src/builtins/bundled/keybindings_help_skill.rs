@@ -28,7 +28,7 @@ use crate::builtins::keybindings::reserved::{
 use crate::builtins::keybindings::schema::{
     KEYBINDING_ACTIONS, KEYBINDING_CONTEXTS, KEYBINDING_CONTEXT_DESCRIPTIONS,
 };
-use crate::BundledPromptFn;
+use crate::model::BundledPromptFn;
 use std::collections::BTreeMap;
 
 /// The eight static sections, joined (`ys` … `Es`).
@@ -132,23 +132,29 @@ fn reserved_shortcuts() -> String {
 pub struct KeybindingsHelpPromptFn;
 
 impl BundledPromptFn for KeybindingsHelpPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         let mut sections = vec![
             KEYBINDINGS_HELP_BODY.to_string(),
             format!("## Reserved Shortcuts\n\n{}", reserved_shortcuts()),
             format!("## Available Contexts\n\n{}", contexts_table()),
             format!("## Available Actions\n\n{}", actions_table()),
         ];
-        if !args.is_empty() {
-            sections.push(format!("## User Request\n\n{args}"));
+        let mut output = sections.join("\n\n").encode_utf16().collect::<Vec<_>>();
+        if !args.string_units("").is_some_and(|units| units.is_empty()) {
+            output.extend("\n\n## User Request\n\n".encode_utf16());
+            output.extend(args.string_units("").unwrap_or_default());
         }
-        sections.join("\n\n")
+        crate::model::source_from_units(output)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn the_body_is_branded() {
@@ -162,7 +168,7 @@ mod tests {
     /// transcribed, a context added to the validator would not appear here.
     #[test]
     fn the_tables_are_generated_from_the_live_keybinding_data() {
-        let out = KeybindingsHelpPromptFn.build("");
+        let out = KeybindingsHelpPromptFn.build(&"".into());
         for context in KEYBINDING_CONTEXTS {
             assert!(
                 out.contains(&format!("`{context}`")),
@@ -213,16 +219,16 @@ mod tests {
 
     #[test]
     fn a_request_is_appended_last() {
-        let out = KeybindingsHelpPromptFn.build("rebind ctrl+s");
+        let out = KeybindingsHelpPromptFn.build(&"rebind ctrl+s".into());
         assert!(out.ends_with("\n\n## User Request\n\nrebind ctrl+s"));
         assert!(!KeybindingsHelpPromptFn
-            .build("")
+            .build(&"".into())
             .contains("## User Request"));
     }
 
     #[test]
     fn the_section_order_matches_upstream() {
-        let out = KeybindingsHelpPromptFn.build("");
+        let out = KeybindingsHelpPromptFn.build(&"".into());
         let reserved = out.find("## Reserved Shortcuts").expect("reserved");
         let contexts = out.find("## Available Contexts").expect("contexts");
         let actions = out.find("## Available Actions").expect("actions");

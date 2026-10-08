@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use serde_json::Value;
+use crate::types::utf16_json::Utf16JsonProjection;
 use thiserror::Error;
 
 use crate::host::permission_gate::PermissionGate;
@@ -36,7 +36,7 @@ pub enum PermissionRequest {
         tool_name: String,
         /// The model's `tool_input` JSON (preserved for context; not currently
         /// shown in the M5-05 prompt — M5-06 hooks may use it).
-        tool_input: Value,
+        tool_input: Utf16JsonProjection,
         /// Default decision when the user presses Enter only.
         default_decision: PromptDefault,
         /// §27b — oracle `suppressesAlwaysAllowRule` (client.ts factory,
@@ -133,7 +133,11 @@ pub trait PromptingGate: PermissionGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    macro_rules! json {
+        ($($tokens:tt)+) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+        };
+    }
 
     #[test]
     fn permission_request_constructs_with_allow_default() {

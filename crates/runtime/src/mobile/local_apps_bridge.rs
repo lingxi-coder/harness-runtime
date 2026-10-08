@@ -37,6 +37,7 @@ use client::protocol::local_apps::{
     AppRuntimeProfileStatusDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppSurfaceDto,
     AppWorkflowStateDto, DeviceContextDto,
 };
+use client::protocol::text::ClientTextDto;
 use local_apps::{
     derive_publication_state, load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind,
     AppDependencySnapshot, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout,
@@ -45,6 +46,11 @@ use local_apps::{
     DataFieldSchema,
 };
 use tokio::sync::{mpsc, oneshot};
+
+fn lower_error_message(error: &AppError) -> ClientTextDto {
+    ClientTextDto::from_projection(&error.source_message())
+        .expect("AppError::source_message returns a root string")
+}
 
 /// One item on the bridge's ordered app-emission channel (see
 /// [`AppEmissionQueue`]).
@@ -159,7 +165,7 @@ impl AppEmissionQueue {
         self.enqueue_engine(ClientEvent::AppOperationFailed {
             app_id,
             code: lower_error_code(error.code()),
-            message: error.to_string(),
+            message: lower_error_message(error),
             request_id,
         });
     }
@@ -662,6 +668,28 @@ pub(crate) fn raise_surface(surface: AppSurfaceDto) -> Result<AppSurface, AppErr
 mod tests {
     use super::*;
     use local_apps::AppPublicationState;
+
+    #[test]
+    fn lsp_failure_client_message_retains_unpaired_utf16_units() {
+        let mut units = "vite ".encode_utf16().collect::<Vec<_>>();
+        units.extend([0xd800]);
+        units.extend(" failed".encode_utf16());
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units,
+        )
+        .unwrap();
+        let error = AppError::LspDiagnosticsFailed(source);
+        let message = lower_error_message(&error);
+        let source_message = error.source_message();
+        assert_eq!(
+            message.code_units,
+            source_message.string_units("").expect("source root string")
+        );
+        let wire = serde_json::to_string(&message).unwrap();
+        assert!(wire.contains("d800"));
+        assert!(!wire.contains('�'));
+    }
 
     #[test]
     fn file_capabilities_lower_to_distinct_wire_kinds() {

@@ -17,7 +17,7 @@
 //! in tests) so no real home directory is ever written during tests.
 
 use lingxi_core::host::McpResourceContentsRich;
-use serde_json::Value;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::{Path, PathBuf};
 
 /// One element of a `resources/read` `contents[]` array as decoded off the
@@ -28,13 +28,13 @@ use std::path::{Path, PathBuf};
 pub struct RawResourceContent {
     /// Echoed URI for this content block (the request URI is substituted when
     /// the server omits one).
-    pub uri: String,
+    pub uri: Utf16JsonProjection,
     /// MIME type as advertised by the server.
     pub mime_type: Option<String>,
     /// Opaque vendor metadata preserved from the wire.
-    pub meta: Option<Value>,
-    /// UTF-8 text body, for text content blocks.
-    pub text: Option<String>,
+    pub meta: Option<Utf16JsonProjection>,
+    /// Exact source text body, for text content blocks.
+    pub text: Option<Utf16JsonProjection>,
     /// base64-encoded body, for binary blob content blocks.
     pub blob: Option<String>,
 }
@@ -89,7 +89,16 @@ pub fn map_resource_contents(
             // Blob block: decode + persist. `persistId` mirrors the TS template
             // `mcp-resource-${Date.now()}-${i}-${rand}`.
             let persist_id = format!("mcp-resource-{now_millis}-{i}-{rand_tag}");
-            let source_description = format!("[Resource from {server_name} at {}] ", c.uri);
+            let mut source_description_units = format!("[Resource from {server_name} at ")
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            source_description_units.extend(
+                c.uri
+                    .string_units("")
+                    .expect("resource URI is a root-string projection"),
+            );
+            source_description_units.extend("] ".encode_utf16());
+            let source_description = source_text_from_units(source_description_units);
             let bytes = match decode_base64(&blob) {
                 Ok(b) => b,
                 Err(e) => {
@@ -97,7 +106,9 @@ pub fn map_resource_contents(
                         uri: c.uri,
                         mime_type: c.mime_type,
                         meta: c.meta,
-                        text: Some(format!("Binary content could not be saved to disk: {e}")),
+                        text: Some(
+                            format!("Binary content could not be saved to disk: {e}").into(),
+                        ),
                         blob_saved_to: None,
                     };
                 }
@@ -122,9 +133,9 @@ pub fn map_resource_contents(
                     uri: c.uri,
                     mime_type: c.mime_type,
                     meta: c.meta,
-                    text: Some(format!(
-                        "Binary content could not be saved to disk: {error}"
-                    )),
+                    text: Some(
+                        format!("Binary content could not be saved to disk: {error}").into(),
+                    ),
                     blob_saved_to: None,
                 },
             }
@@ -211,15 +222,25 @@ pub fn binary_blob_saved_message(
     filepath: &str,
     mime_type: Option<&str>,
     size: u64,
-    source_description: &str,
-) -> String {
+    source_description: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
     let mt = mime_type
         .filter(|m| !m.is_empty())
         .unwrap_or("unknown type");
-    format!(
-        "{source_description}Binary content ({mt}, {}) saved to {filepath}",
+    let generated = format!(
+        "Binary content ({mt}, {}) saved to {filepath}",
         format_file_size(size)
-    )
+    );
+    let mut units = source_description
+        .string_units("")
+        .expect("source description is a root-string projection");
+    units.extend(generated.encode_utf16());
+    source_text_from_units(units)
+}
+
+fn source_text_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("lossy display matches the exact source UTF-16 units")
 }
 
 /// Outcome of [`persist_binary_content`].
@@ -382,6 +403,10 @@ impl std::error::Error for Base64Error {}
 mod tests {
     use super::*;
 
+    fn source(input: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(input).expect("valid exact source JSON fixture")
+    }
+
     #[test]
     fn format_file_size_matches_ts() {
         // Mirrors format.ts examples and boundaries.
@@ -417,17 +442,17 @@ mod tests {
             "/tmp/out/mcp-resource-x.pdf",
             Some("application/pdf"),
             1536,
-            "[Resource from fs at file:///doc] ",
+            &"[Resource from fs at file:///doc] ".into(),
         );
         assert_eq!(
-            msg,
-            "[Resource from fs at file:///doc] Binary content (application/pdf, 1.5KB) saved to /tmp/out/mcp-resource-x.pdf"
+            msg.string_at(""),
+            Some("[Resource from fs at file:///doc] Binary content (application/pdf, 1.5KB) saved to /tmp/out/mcp-resource-x.pdf")
         );
         // Absent mime → "unknown type".
-        let msg2 = binary_blob_saved_message("/p.bin", None, 10, "");
+        let msg2 = binary_blob_saved_message("/p.bin", None, 10, &"".into());
         assert_eq!(
-            msg2,
-            "Binary content (unknown type, 10 bytes) saved to /p.bin"
+            msg2.string_at(""),
+            Some("Binary content (unknown type, 10 bytes) saved to /p.bin")
         );
     }
 
@@ -483,10 +508,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = map_resource_contents(
             vec![RawResourceContent {
-                uri: "mock://readme".into(),
+                uri: source(r#""mock://readme\ud800""#),
                 mime_type: Some("text/plain".into()),
-                meta: Some(serde_json::json!({"openai/widgetDescription":"Readme"})),
-                text: Some("hello from mock resource".into()),
+                meta: Some(source(
+                    r#"{"openai/widgetDescription":"Readme","vendor-\udfff":"\ud800"}"#,
+                )),
+                text: Some(source(r#""hello from mock \udfff""#)),
                 blob: None,
             }],
             "fs",
@@ -495,13 +522,33 @@ mod tests {
             "abc",
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].uri, "mock://readme");
+        assert_eq!(
+            out[0].uri.string_units(""),
+            Some("mock://readme".encode_utf16().chain([0xd800]).collect())
+        );
         assert_eq!(out[0].mime_type.as_deref(), Some("text/plain"));
         assert_eq!(
-            out[0].meta,
-            Some(serde_json::json!({"openai/widgetDescription":"Readme"}))
+            out[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.string_at("/openai~1widgetDescription")),
+            Some("Readme")
         );
-        assert_eq!(out[0].text.as_deref(), Some("hello from mock resource"));
+        let meta_key = "vendor-".encode_utf16().chain([0xdfff]).collect::<Vec<_>>();
+        assert_eq!(
+            out[0]
+                .meta
+                .as_ref()
+                .unwrap()
+                .subprojection_property_units(&meta_key)
+                .unwrap()
+                .string_units(""),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            out[0].text.as_ref().and_then(|text| text.string_units("")),
+            Some("hello from mock ".encode_utf16().chain([0xdfff]).collect())
+        );
         assert_eq!(out[0].blob_saved_to, None);
         // Nothing should have been written to disk for a pure text block.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
@@ -527,7 +574,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         let entry = &out[0];
-        assert_eq!(entry.uri, "mock://image");
+        assert_eq!(entry.uri.string_at(""), Some("mock://image"));
         assert_eq!(entry.mime_type.as_deref(), Some("image/png"));
         let saved = entry.blob_saved_to.as_deref().expect("blob persisted");
         // persistId template: mcp-resource-<now>-<i>-<rand>.<ext>
@@ -535,13 +582,40 @@ mod tests {
         // Bytes on disk are the raw decoded payload (NOT base64).
         assert_eq!(std::fs::read(saved).unwrap(), payload);
         // text carries the exact getBinaryBlobSavedMessage line.
-        assert_eq!(
-            entry.text.as_deref().unwrap(),
-            format!(
-                "[Resource from imgsrv at mock://image] Binary content (image/png, {}) saved to {saved}",
-                format_file_size(payload.len() as u64)
-            )
+        let expected = format!(
+            "[Resource from imgsrv at mock://image] Binary content (image/png, {}) saved to {saved}",
+            format_file_size(payload.len() as u64)
         );
+        assert_eq!(
+            entry.text.as_ref().and_then(|text| text.string_at("")),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn blob_saved_model_message_preserves_lone_surrogate_resource_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = map_resource_contents(
+            vec![RawResourceContent {
+                uri: source(r#""mock://image/\ud800""#),
+                mime_type: Some("image/png".into()),
+                meta: None,
+                text: None,
+                blob: Some(encode_for_test(b"image")),
+            }],
+            "imgsrv",
+            dir.path(),
+            1701,
+            "z10",
+        );
+        let message = out[0].text.as_ref().expect("saved message");
+        let units = message.string_units("").expect("root string");
+        let expected_prefix = "[Resource from imgsrv at mock://image/"
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("] Binary content (image/png, 5 bytes) saved to ".encode_utf16())
+            .collect::<Vec<_>>();
+        assert!(units.starts_with(&expected_prefix));
     }
 
     #[test]
@@ -563,7 +637,8 @@ mod tests {
         assert_eq!(out[0].blob_saved_to, None);
         assert!(out[0]
             .text
-            .as_deref()
+            .as_ref()
+            .and_then(|text| text.string_at(""))
             .unwrap()
             .starts_with("Binary content could not be saved to disk:"));
     }
@@ -584,7 +659,7 @@ mod tests {
             1,
             "r",
         );
-        assert_eq!(out[0].uri, "mock://opaque");
+        assert_eq!(out[0].uri.string_at(""), Some("mock://opaque"));
         assert_eq!(
             out[0].mime_type.as_deref(),
             Some("application/octet-stream")
@@ -619,7 +694,10 @@ mod tests {
             "q",
         );
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].text.as_deref(), Some("# title"));
+        assert_eq!(
+            out[0].text.as_ref().and_then(|text| text.string_at("")),
+            Some("# title")
+        );
         assert_eq!(out[0].blob_saved_to, None);
         // Second element used index i=1 in its persistId.
         let saved = out[1].blob_saved_to.as_deref().unwrap();

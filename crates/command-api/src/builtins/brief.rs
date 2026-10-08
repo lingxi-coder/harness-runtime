@@ -34,7 +34,7 @@ impl BuiltinCommandHandler for BriefHandler {
             "Brief-only mode disabled"
         };
         CommandResult::Done {
-            display: Some(display.to_string()),
+            display: Some((display.to_string()).into()),
         }
     }
 
@@ -53,8 +53,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "brief".to_string(),
-            raw_args: String::new(),
+            name: "brief".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

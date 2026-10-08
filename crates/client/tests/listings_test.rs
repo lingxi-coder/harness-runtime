@@ -96,7 +96,7 @@ fn session_lifecycle_events_round_trip() {
             loop_wakeup: None,
             role: "user".to_string(),
             blocks: vec![MessageBlockDto::Text {
-                text: "prior turn".to_string(),
+                text: "prior turn".into(),
             }],
             images: Vec::new(),
         }],
@@ -839,7 +839,7 @@ fn task_row_round_trips() {
             task_id: "b1234abcd".to_string(),
             task_type: "background".to_string(),
             status: TaskStatusDto::Running,
-            description: "Build the docs".to_string(),
+            description: client::protocol::text::ClientTextDto::from_utf8("Build the docs"),
             can_resume: false,
             started_at_ms: None,
             error: None,

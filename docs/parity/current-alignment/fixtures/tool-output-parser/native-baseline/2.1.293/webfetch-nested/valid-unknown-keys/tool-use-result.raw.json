@@ -1,0 +1,1 @@
+{"bytes":24,"code":200,"codeText":"200 OK","result":"fixed loopback WebFetch result","durationMs":1,"url":"http://127.0.0.1:41237/fixture/valid-unknown-keys","artifactRead":{"slug":"fixture-artifact","ver":"v1","seeded":false}}

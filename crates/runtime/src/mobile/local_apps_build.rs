@@ -10,11 +10,13 @@ use crate::mobile::local_app_runtime_profiles::{
     THREE_3D_R4_EDITABLE_FILES, THREE_3D_R4_MANAGED_FILES, TREE_PROOF_FILE_REL,
 };
 use crate::mobile::local_apps_host::LocalAppsHostBroker;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use local_apps::{
     AppDataStore, AppError, AppLayout, AppManifest, AppRecord, AppRuntimeProfile,
     AppRuntimeProfileBinding,
 };
-use lsp_types::{DiagnosticSeverity, NumberOrString};
+use lsp::diagnostics_format::DiagnosticCodeSource;
+use lsp_types::DiagnosticSeverity;
 
 use mobile_linux_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
@@ -236,15 +238,41 @@ fn is_app_managed_javascript_file(relative: &str) -> bool {
         )
 }
 
-fn bounded_lsp_diagnostic_message(message: &str) -> String {
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text derives from the exact UTF-16 units")
+}
+
+fn bounded_lsp_diagnostic_message(message: &Utf16JsonProjection) -> Utf16JsonProjection {
     const MAX_CHARS: usize = 300;
-    let flattened = message.replace(['\n', '\r'], " ");
-    let mut chars = flattened.chars();
-    let mut bounded = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        bounded.push('…');
+    let source = message
+        .string_units("")
+        .expect("LSP diagnostic message is a root string");
+    let mut output = Vec::new();
+    let mut index = 0;
+    let mut char_count = 0;
+    while index < source.len() && char_count < MAX_CHARS {
+        let unit = source[index];
+        if matches!(unit, 0x000a | 0x000d) {
+            output.push(u16::from(b' '));
+            index += 1;
+        } else if (0xd800..=0xdbff).contains(&unit)
+            && source
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            output.extend_from_slice(&source[index..index + 2]);
+            index += 2;
+        } else {
+            output.push(unit);
+            index += 1;
+        }
+        char_count += 1;
     }
-    bounded
+    if index < source.len() {
+        output.extend("…".encode_utf16());
+    }
+    source_from_units(output)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -1201,22 +1229,38 @@ impl LocalAppBuilder<'_> {
                     advisory = advisory.saturating_add(1);
                     continue;
                 }
-                let code = diagnostic
-                    .code
-                    .as_ref()
-                    .map(|code| match code {
-                        NumberOrString::Number(number) => number.to_string(),
-                        NumberOrString::String(text) => text.clone(),
-                    })
-                    .map(|code| format!(" [{code}]"))
-                    .unwrap_or_default();
-                blocking.push(format!(
-                    "{relative}:{}:{}{} {}",
-                    diagnostic.range.start.line + 1,
-                    diagnostic.range.start.character + 1,
-                    code,
+                let mut diagnostic_units = relative.encode_utf16().collect::<Vec<_>>();
+                diagnostic_units.extend(
+                    format!(
+                        ":{}:{}",
+                        diagnostic.range.start.line + 1,
+                        diagnostic.range.start.character + 1
+                    )
+                    .encode_utf16(),
+                );
+                if let Some(code) = &diagnostic.code {
+                    diagnostic_units.extend(" [".encode_utf16());
+                    match code {
+                        DiagnosticCodeSource::Number(number) => {
+                            diagnostic_units.extend(number.to_string().encode_utf16());
+                        }
+                        DiagnosticCodeSource::String(source) => {
+                            diagnostic_units.extend(
+                                source
+                                    .string_units("")
+                                    .expect("LSP diagnostic code is a root string"),
+                            );
+                        }
+                    }
+                    diagnostic_units.extend("]".encode_utf16());
+                }
+                diagnostic_units.push(u16::from(b' '));
+                diagnostic_units.extend(
                     bounded_lsp_diagnostic_message(&diagnostic.message)
-                ));
+                        .string_units("")
+                        .expect("bounded LSP diagnostic message is a root string"),
+                );
+                blocking.push(source_from_units(diagnostic_units));
                 if blocking.len() >= 20 {
                     break;
                 }
@@ -1241,9 +1285,21 @@ impl LocalAppBuilder<'_> {
         if blocking.is_empty() {
             Ok(())
         } else {
-            Err(AppError::LspDiagnosticsFailed(format!(
-                "lsp_diagnostics_failed: vite_started=false; fix TypeScript diagnostics before LocalAppBuild:\n{}",
-                blocking.join("\n")
+            let mut message_units = "lsp_diagnostics_failed: vite_started=false; fix TypeScript diagnostics before LocalAppBuild:\n"
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            for (index, diagnostic) in blocking.iter().enumerate() {
+                if index > 0 {
+                    message_units.push(u16::from(b'\n'));
+                }
+                message_units.extend(
+                    diagnostic
+                        .string_units("")
+                        .expect("formatted LSP diagnostic is a root string"),
+                );
+            }
+            Err(AppError::LspDiagnosticsFailed(source_from_units(
+                message_units,
             )))
         }
     }
@@ -2871,6 +2927,24 @@ fn bounded_message(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_lsp_diagnostic_message_keeps_exact_utf16_units() {
+        let message = Utf16JsonProjection::parse(r#""line one\r\nline two\ud800""#)
+            .expect("source message JSON");
+        let bounded = bounded_lsp_diagnostic_message(&message);
+        let mut expected = "line one  line two".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        assert_eq!(bounded.string_units(""), Some(expected));
+
+        let mut long_message = vec![u16::from(b'a'); 299];
+        long_message.extend([0xd800, u16::from(b'z')]);
+        let long_message = source_from_units(long_message);
+        let bounded = bounded_lsp_diagnostic_message(&long_message);
+        let units = bounded.string_units("").unwrap();
+        assert_eq!(units.len(), 301);
+        assert_eq!(units[299..], [0xd800, 0x2026]);
+    }
 
     #[test]
     fn current_r4_bindings_route_to_their_exact_build_assets() {

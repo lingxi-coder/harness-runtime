@@ -16,6 +16,7 @@ pub(super) fn process_visible_response<'a>(
     request_history: Vec<ConversationMessage>,
     same_turn_tool_uses: Vec<ContentBlock>,
     request_history_source: super::mod_batched_step::RequestHistorySource,
+    query_depth: u32,
 ) -> futures::future::BoxFuture<'a, Result<TurnStepOutcome, OrchestratorError>> {
     Box::pin(async move {
         // 2. Translate `HistoryResponse.content` -> `ContentBlock` history entry.
@@ -33,6 +34,10 @@ pub(super) fn process_visible_response<'a>(
             id: assistant_id,
             content: assistant_blocks.clone(),
             stop_reason: response.stop_reason.clone(),
+            resumable: response
+                .resumable
+                .as_ref()
+                .map(crate::streaming_loop::resumable_projection),
         };
         let (generation_root, publication_lock) = orch
             .lifecycle_runtime
@@ -126,8 +131,8 @@ pub(super) fn process_visible_response<'a>(
         // 4. Emit each Text block to the output stream (whole-body in M5-02;
         //    M5-04 will switch to per-delta).
         for blk in &assistant_blocks {
-            if let Some(text) = blk.visible_text() {
-                orch.output.emit_text(text).await;
+            if let Some(text) = crate::streaming_loop::visible_text_projection(blk) {
+                orch.output.emit_text(&text).await;
             }
         }
         crate::server_fallback::flush_pending_notice(orch).await;
@@ -169,19 +174,23 @@ pub(super) fn process_visible_response<'a>(
 
         // 5. If there are tool_use blocks, dispatch them and feed results back.
         // `/loop` fold span: this response's calls, and the messages it adds.
-        let tool_uses: Vec<(ToolUseId, String, serde_json::Value, Option<String>)> =
-            assistant_blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        provider_id,
-                    } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
-                    _ => None,
-                })
-                .collect();
+        let tool_uses: Vec<(
+            ToolUseId,
+            String,
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            Option<String>,
+        )> = assistant_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
+                _ => None,
+            })
+            .collect();
         orch.turn_span.note_assistant_response(tool_uses.len());
 
         // HOOK.2: a PreToolUse hook returning `continue:false` (preventContinuation)
@@ -210,6 +219,7 @@ pub(super) fn process_visible_response<'a>(
                     &tool_uses,
                     assistant_id,
                     super::tool_dispatch::ToolUseDispatchFacts {
+                        native_query_depth: query_depth,
                         query_history: request_history,
                         assistant_message: assistant_msg.clone(),
                         same_turn_tool_uses,
@@ -274,6 +284,10 @@ pub(super) fn process_visible_response<'a>(
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
                 };
                 if crate::native_computer::is_native_result(orch, &tool_result_msg).await {
                     tool_result_msg = orch
@@ -400,13 +414,12 @@ pub(super) fn process_visible_response<'a>(
             // AFTER `injected_messages` so it mirrors the streaming twin's ordering.
             // Empty for every existing tool + non-`model:` skills → strict no-op
             // (session.model untouched → byte-identical turn-loop fixtures).
-            let mut model_result = Ok(());
             publication_fence
-                .commit_if_current(Box::pin(async {
-                    model_result = apply_model_context_modifiers(orch, context_modifiers).await;
-                }))
+                .commit_if_current(Box::pin(apply_model_context_modifiers(
+                    orch,
+                    context_modifiers,
+                )))
                 .await;
-            model_result?;
         }
         crate::native_computer::prepare_receipts(
             orch,
@@ -596,7 +609,9 @@ pub(super) fn process_visible_response<'a>(
                 // to the recovery/terminal arms below unchanged. The common `tool_use`+
                 // tools case (previously handled by the `_ => Continue` fallback) is
                 // unaffected.
-                _ if !tool_uses.is_empty() => TurnStepOutcome::Continue,
+                _ if !tool_uses.is_empty() => {
+                    TurnStepOutcome::Continue(NativeQueryTransition::NextTurn)
+                }
                 // #77 malformed-tool-use retry (batched twin): `stop_reason ==
                 // "tool_use"` but the response produced ZERO tool_use blocks. Only
                 // the recovery-aware drivers participate (the per-turn guard lives on
@@ -647,7 +662,7 @@ pub(super) fn process_visible_response<'a>(
                     if !has_server_fallback_event
                         && orch.maybe_swap_to_refusal_fallback().await =>
                 {
-                    TurnStepOutcome::Continue
+                    TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
                 }
                 // Terminal error stop_reasons (batched twin of the streaming
                 // `Some(other)` arm, claude.ts:2266/2279): surface the byte-locked
@@ -661,9 +676,13 @@ pub(super) fn process_visible_response<'a>(
                 Some(other @ ("model_context_window_exceeded" | "refusal")) => {
                     // Pass the response's refusal `stop_details` so the cyber/bio
                     // variant fires (no-op for model_context_window_exceeded).
-                    let surfaced_id =
-                        surface_terminal_api_error(orch, other, response.stop_details.as_ref())
-                            .await;
+                    let surfaced_id = surface_terminal_api_error(
+                        orch,
+                        other,
+                        response.stop_details.as_ref(),
+                        Some(&response.id),
+                    )
+                    .await;
                     TurnStepOutcome::Ended {
                         final_message_id: surfaced_id.unwrap_or(assistant_id),
                         stop_reason: other.to_string(),
@@ -671,7 +690,7 @@ pub(super) fn process_visible_response<'a>(
                         tool_requested_end: false,
                     }
                 }
-                _ => TurnStepOutcome::Continue,
+                _ => TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry),
             }
         };
         Ok(outcome)

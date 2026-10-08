@@ -9,11 +9,11 @@
 //! - `WEB_SEARCH_DEFAULT_MAX_TOKENS = 4096`
 //! Provider beta headers are supplied by the hosted-search session service.
 
+use crate::source::{self, generated, object, Source};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -109,16 +109,14 @@ fn web_search_budget_notice(used: u32, max: u32) -> String {
 }
 
 /// Input schema for `WebSearchTool`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WebSearchInput {
     /// Search query (>= 2 characters).
-    pub query: String,
+    pub query: Source,
     /// If present, restrict results to these domains.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_domains: Option<Vec<String>>,
+    pub allowed_domains: Option<Vec<Source>>,
     /// If present, exclude these domains.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_domains: Option<Vec<String>>,
+    pub blocked_domains: Option<Vec<Source>>,
 }
 
 pub use tool_api::hosted_search::SearchResultEntry;
@@ -136,27 +134,80 @@ pub use tool_api::hosted_search::SearchResultEntry;
 ///   [`SearchResultEntry::Hit`] is `{tool_use_id, content:[{title,url}]}`, so
 ///   `content` is the hits array serialized verbatim into the `Links:` line.
 #[must_use]
-pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String {
-    let mut out = format!("Web search results for query: \"{query}\"\n\n");
+pub fn build_model_content(query: &Source, results: &[SearchResultEntry]) -> Source {
+    let mut units = "Web search results for query: \""
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(query.string_units("").expect("query is a string"));
+    units.extend("\"\n\n".encode_utf16());
     for entry in results {
         match entry {
-            SearchResultEntry::Text(s) => {
-                out.push_str(s);
-                out.push_str("\n\n");
+            SearchResultEntry::Text(value) => {
+                units.extend(
+                    value
+                        .root_string_code_units()
+                        .expect("search text is a string"),
+                );
+                units.extend("\n\n".encode_utf16());
             }
-            SearchResultEntry::Hit(v) => match v.get("content").and_then(Value::as_array) {
-                Some(arr) if !arr.is_empty() => {
-                    let rendered = serde_json::to_string(arr).unwrap_or_default();
-                    out.push_str(&format!("Links: {rendered}\n\n"));
+            SearchResultEntry::Hit(value) => {
+                if let Some(content) = value
+                    .payload_at("/content")
+                    .filter(|value| value.array_len("").is_some_and(|len| len > 0))
+                {
+                    units.extend("Links: ".encode_utf16());
+                    // Native stringifies the links array; keep source string units
+                    // inside the JSON text while applying JavaScript key/number rules.
+                    let content =
+                        Source::parse(content.as_json_source()).expect("SDK search source");
+                    units.extend(
+                        content
+                            .to_json_string()
+                            .expect("links stringify")
+                            .encode_utf16(),
+                    );
+                    units.extend("\n\n".encode_utf16());
+                } else {
+                    units.extend("No links found.\n\n".encode_utf16());
                 }
-                _ => out.push_str("No links found.\n\n"),
-            },
+            }
         }
     }
-    out.push_str(
-        "\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
-    );
-    out.trim().to_string()
+    units.extend("\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.".encode_utf16());
+    let start = units
+        .iter()
+        .position(|unit| !source::js_whitespace(*unit))
+        .unwrap_or(units.len());
+    let end = units
+        .iter()
+        .rposition(|unit| !source::js_whitespace(*unit))
+        .map_or(start, |index| index + 1);
+    source::text(units[start..end].to_vec())
+}
+
+fn map_web_search_result_text(data: &Source) -> Option<Source> {
+    let query = source::string_field(data, "query").ok()?;
+    let results = match data.at_pointer("/results") {
+        None => Vec::new(),
+        Some(value) if value.is_null() => Vec::new(),
+        Some(_) => (0..data.array_len("/results")?)
+            .filter_map(|index| {
+                let item = data.subprojection(&format!("/results/{index}")).ok()?;
+                if item.at_pointer("")?.is_null() {
+                    return None;
+                }
+                let payload =
+                    tool_api::hosted_search::JsonPayload::parse(&item.to_json_string().ok()?)
+                        .ok()?;
+                Some(if item.string_units("").is_some() {
+                    SearchResultEntry::Text(payload)
+                } else {
+                    SearchResultEntry::Hit(payload)
+                })
+            })
+            .collect(),
+    };
+    Some(build_model_content(&query, &results))
 }
 
 /// Build the budget-capped [`ToolCallResult`] returned WITHOUT searching once the
@@ -167,21 +218,27 @@ pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String
 /// which wraps every result set in the `Web search results for query: "<q>"`
 /// header + cite-sources footer). `is_error` stays `false`: CC returns the cap as
 /// a normal (non-thrown) tool result so the model reads the notice and stops.
-fn budget_capped_result(query: &str, used: u32, max: u32) -> ToolCallResult {
+fn budget_capped_result(query: &Source, used: u32, max: u32) -> ToolCallResult {
     let notice = web_search_budget_notice(used, max);
-    let model_content = build_model_content(query, &[SearchResultEntry::Text(notice.clone())]);
+    let model_content = build_model_content(
+        query,
+        &[SearchResultEntry::Text(
+            tool_api::hosted_search::JsonPayload::string(&notice),
+        )],
+    );
     ToolCallResult {
-        data: json!({
-            "query": query,
-            "results": [notice],
-            "durationSeconds": 0,
-            "searchCount": 0,
-        }),
+        data: object([
+            ("query", query.clone()),
+            ("results", Source::array(vec![notice.into()]).unwrap()),
+            ("durationSeconds", generated(json!(0))),
+            ("searchCount", generated(json!(0))),
+        ]),
         model_content: Some(model_content),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -317,9 +374,22 @@ impl WebSearchTool {
         };
         use crate::web_search_config::WebSearchConfig;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
-        let allowed = input.allowed_domains.clone().unwrap_or_default();
-        let blocked = input.blocked_domains.clone().unwrap_or_default();
-        self.emit_started(&invocation_id, &input.query, allowed.len(), blocked.len())
+        let query = input.query.string_at("").expect("query source string");
+        let allowed = input
+            .allowed_domains
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|value| value.string_at("").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let blocked = input
+            .blocked_domains
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|value| value.string_at("").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        self.emit_started(&invocation_id, &query, allowed.len(), blocked.len())
             .await;
         let started = Instant::now();
         let (web_cfg, providers) = if let Some(loader) = &self.ctx.web_search_config {
@@ -359,15 +429,8 @@ impl WebSearchTool {
         let mut success = None;
         for provider in providers {
             let label = provider.label();
-            match run_client_web_search(
-                &self.ctx.http,
-                &provider,
-                &input.query,
-                &allowed,
-                &blocked,
-                0,
-            )
-            .await
+            match run_client_web_search(&self.ctx.http, &provider, &query, &allowed, &blocked, 0)
+                .await
             {
                 Ok(hits) => {
                     success = Some((provider, hits));
@@ -386,18 +449,19 @@ impl WebSearchTool {
             Some((provider, hits)) => {
                 self.emit_completed(&invocation_id, hits.len() as u64, 0, 0, elapsed_ms)
                     .await;
-                let model_content = format_results_for_model(&input.query, &hits, provider.label());
+                let model_content = format_results_for_model(&query, &hits, provider.label());
                 Ok(ToolCallResult {
-                    data: serde_json::json!({
-                        "query": input.query,
-                        "provider": provider.label(),
-                        "result_count": hits.len(),
-                    }),
-                    model_content: Some(model_content),
+                    data: object([
+                        ("query", input.query.clone()),
+                        ("provider", provider.label().into()),
+                        ("result_count", generated(json!(hits.len()))),
+                    ]),
+                    model_content: Some(model_content.into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             None => {
@@ -408,20 +472,24 @@ impl WebSearchTool {
                 self.emit_failed(&invocation_id, "client_search", None, elapsed_ms)
                     .await;
                 Ok(ToolCallResult {
-                    data: serde_json::json!({ "query": input.query, "error": msg }),
-                    model_content: Some(msg),
+                    data: object([
+                        ("query", input.query.clone()),
+                        ("error", msg.clone().into()),
+                    ]),
+                    model_content: Some(msg.into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: true,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
         }
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Source> = Lazy::new(|| {
+    generated(json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["query"],
@@ -430,8 +498,117 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Only include search results from these domains" },
             "blocked_domains": { "type": "array", "items": { "type": "string" }, "description": "Never include search results from these domains" }
         }
-    })
+    }))
 });
+
+/// Claude Code 2.1.287 WebSearch output union: commentary text or a search
+/// result with a tool-use id and title/URL hits.
+static OUTPUT_SCHEMA: Lazy<Source> = Lazy::new(|| {
+    generated(json!({
+        "type":"object",
+        "required":["query","results","durationSeconds"],
+        "properties":{
+            "query":{"type":"string"},
+            "results":{"type":"array","items":{"oneOf":[
+                {"type":"string"},
+                {"type":"object","required":["tool_use_id","content"],"properties":{
+                    "tool_use_id":{"type":"string"},
+                    "content":{"type":"array","items":{"type":"object","required":["title","url"],"properties":{
+                        "title":{"type":"string"},"url":{"type":"string"}
+                    }}}
+                }}
+            ]}},
+            "durationSeconds":{"type":"number"},
+            "searchCount":{"type":"number"}
+        }
+    }))
+});
+
+fn parse_web_search_output(output: &Source) -> Result<Source, ToolError> {
+    use tool_api::native_output as o;
+    let mut parsed = o::parse_object(
+        output,
+        TOOL_NAME,
+        &[
+            o::OutputField {
+                name: "query",
+                kind: o::OutputFieldType::String,
+                required: true,
+            },
+            o::OutputField {
+                name: "results",
+                kind: o::OutputFieldType::Array,
+                required: true,
+            },
+            o::OutputField {
+                name: "durationSeconds",
+                kind: o::OutputFieldType::Number,
+                required: true,
+            },
+            o::OutputField {
+                name: "searchCount",
+                kind: o::OutputFieldType::Number,
+                required: false,
+            },
+        ],
+        o::UnknownOutputKeys::Strip,
+    )?;
+    let mut results = Vec::new();
+    for result in o::array_values(&parsed, "/results", TOOL_NAME, "results")? {
+        if result.string_units("").is_some() {
+            results.push(result);
+            continue;
+        }
+        let mut result = o::parse_object(
+            &result,
+            TOOL_NAME,
+            &[
+                o::OutputField {
+                    name: "tool_use_id",
+                    kind: o::OutputFieldType::String,
+                    required: true,
+                },
+                o::OutputField {
+                    name: "content",
+                    kind: o::OutputFieldType::Array,
+                    required: true,
+                },
+            ],
+            o::UnknownOutputKeys::Strip,
+        )?;
+        let mut hits = Vec::new();
+        for hit in o::array_values(&result, "/content", TOOL_NAME, "results.content")? {
+            hits.push(o::parse_object(
+                &hit,
+                TOOL_NAME,
+                &[
+                    o::OutputField {
+                        name: "title",
+                        kind: o::OutputFieldType::String,
+                        required: true,
+                    },
+                    o::OutputField {
+                        name: "url",
+                        kind: o::OutputFieldType::String,
+                        required: true,
+                    },
+                ],
+                o::UnknownOutputKeys::Strip,
+            )?);
+        }
+        result
+            .set_field("content", Source::array(hits).expect("parsed hit array"))
+            .expect("parsed result is an object");
+        results.push(result);
+    }
+    parsed
+        .set_field(
+            "results",
+            Source::array(results).expect("parsed result array"),
+        )
+        .expect("parsed output is an object");
+    Ok(parsed)
+}
 
 /// Verbatim claude-code v2.1.181 WebSearch tool description. The "current month"
 /// is a RUNTIME slot (claude-code computes it at render time); the format is
@@ -527,11 +704,30 @@ impl Tool for WebSearchTool {
         TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("search the web for current information")
+    fn search_hint(&self) -> Option<Source> {
+        Some("search the web for current information".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn input_schema(&self) -> &Source {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Source> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(&self, output: &Source) -> Result<Source, ToolError> {
+        parse_web_search_output(output)
+    }
+    fn map_result_text(&self, result: &Source) -> Option<Source> {
+        map_web_search_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         // Always offered: on Anthropic first-party (and Vertex/Foundry per
@@ -544,20 +740,20 @@ impl Tool for WebSearchTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Source) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Source) -> bool {
         true
     }
-    fn is_open_world(&self, _input: &Value) -> bool {
+    fn is_open_world(&self, _input: &Source) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _input: &Source) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _input: &Source, _ctx: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-03 default)".into(),
@@ -570,7 +766,7 @@ impl Tool for WebSearchTool {
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Source,
         _ctx: &ToolUseContext,
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
         // Binary `validateInput`: `if(!t.length) return {message:"Error: Missing
@@ -578,13 +774,13 @@ impl Tool for WebSearchTool {
         // (`A.string().min(2)` == the "minLength":2 in this tool's input schema),
         // NOT a validateInput message — the manual <2 guard below is belt-and-
         // suspenders and keeps the port safe if the schema is not pre-validated.
-        let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+        let q = input.string_units("/query").unwrap_or_default();
         if q.is_empty() {
             return Err(tool_api::tool_trait::ValidationError(
                 "Error: Missing query".into(),
             ));
         }
-        if q.chars().count() < 2 {
+        if q.len() < 2 {
             return Err(tool_api::tool_trait::ValidationError(
                 "query must be at least 2 characters".into(),
             ));
@@ -592,13 +788,11 @@ impl Tool for WebSearchTool {
         // Mirror upstream `validateInput` (`WebSearchTool.ts:244`, errorCode 2):
         // reject when BOTH allowed_domains and blocked_domains are non-empty.
         let allowed_non_empty = input
-            .get("allowed_domains")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+            .array_len("/allowed_domains")
+            .is_some_and(|len| len > 0);
         let blocked_non_empty = input
-            .get("blocked_domains")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+            .array_len("/blocked_domains")
+            .is_some_and(|len| len > 0);
         if allowed_non_empty && blocked_non_empty {
             return Err(tool_api::tool_trait::ValidationError(
                 "Error: Cannot specify both allowed_domains and blocked_domains in the same request"
@@ -608,7 +802,7 @@ impl Tool for WebSearchTool {
         Ok(())
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Source, _opts: &DescriptionOptions) -> String {
         // claude-code's WebSearch tool object has NO model-gated `description`
         // method — only `async prompt({model:e}){return CNi(e)}` carries the
         // `Dh(model)` CONCISE/VERBOSE gate (binary @202215633), exactly as
@@ -617,7 +811,7 @@ impl Tool for WebSearchTool {
         // this returns the VERBOSE variant (== the `Dh(None)`-false default).
         web_search_description()
     }
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Source {
         // On non-hosted providers WebSearch runs CLIENT-SIDE (see `call` /
         // `web_search_client`), so advertise it as a plain, callable web search
         // instead of the Anthropic-hosted framing ("automatic", "US only") that
@@ -633,29 +827,35 @@ impl Tool for WebSearchTool {
                     information you don't already know \u{2014} current events, weather, \
                     prices, release notes, documentation, or anything past your training \
                     cutoff. After answering, end with a \"Sources:\" list of the URLs you used."
-                .to_string();
+                .into();
         }
         // 1:1 with claude-code `async prompt({model:e}){return CNi(e)}`
         // (binary @202215633), where `CNi(model)=Dh(model)?CONCISE:VERBOSE`
         // (@~197074952). The session/subagent model is threaded via
         // `PromptOptions::model`; `None` ⇒ `Dh(undefined)` ⇒ VERBOSE.
-        select_web_search_prompt(opts.model.as_deref())
+        select_web_search_prompt(opts.model.as_deref()).into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Source,
         ctx: ToolUseContext,
         tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let parsed_input: WebSearchInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
+        let parsed_input = (|| -> Result<WebSearchInput, String> {
+            Ok(WebSearchInput {
+                query: source::string_field(&input, "query")?,
+                allowed_domains: source::optional_strings(&input, "allowed_domains")?,
+                blocked_domains: source::optional_strings(&input, "blocked_domains")?,
+            })
+        })()
+        .map_err(|error| ToolError::InvalidInput(format!("invalid input: {error}").into()))?;
         // Binary `validateInput`: empty query -> "Error: Missing query"; min-2 is
         // schema-enforced (belt-and-suspenders guard retained).
-        if parsed_input.query.is_empty() {
+        if parsed_input.query.string_units("").unwrap().is_empty() {
             return Err(ToolError::InvalidInput("Error: Missing query".into()));
         }
-        if parsed_input.query.chars().count() < 2 {
+        if parsed_input.query.string_units("").unwrap().len() < 2 {
             return Err(ToolError::InvalidInput(
                 "query must be at least 2 characters".into(),
             ));
@@ -706,7 +906,7 @@ impl Tool for WebSearchTool {
         let blocked_count = parsed_input.blocked_domains.as_ref().map_or(0, Vec::len);
         self.emit_started(
             &invocation_id,
-            &parsed_input.query,
+            &parsed_input.query.string_at("").unwrap(),
             allowed_count,
             blocked_count,
         )
@@ -763,17 +963,17 @@ impl WebSearchTool {
     /// present, falling back to a fresh id (the channel key must be a real
     /// [`lingxi_core::types::ToolUseId`], unlike TS's free-form string). Best-effort
     /// (`try_send`), matching TS's synchronous fire-and-forget `onProgress`.
-    fn emit_progress(ctx: &ToolUseContext, tx: &ToolProgressSender, query: &str, counter: u64) {
+    fn emit_progress(ctx: &ToolUseContext, tx: &ToolProgressSender, query: &Source, counter: u64) {
         // `Default for ToolUseId` generates a fresh random id (same as `new()`),
         // so the channel key is the model's tool-use id when present, else fresh.
         let tool_use_id = ctx.tool_use_id.clone().unwrap_or_default();
         let _ = tx.try_send(tool_api::progress::ToolProgress {
             tool_use_id,
-            data: json!({
-                "type": "query_update",
-                "toolUseID": format!("search-progress-{counter}"),
-                "query": query,
-            }),
+            data: object([
+                ("type", "query_update".into()),
+                ("toolUseID", format!("search-progress-{counter}").into()),
+                ("query", query.clone()),
+            ]),
         });
     }
 
@@ -784,7 +984,7 @@ impl WebSearchTool {
     async fn build_success_result(
         &self,
         invocation_id: &str,
-        query: &str,
+        query: &Source,
         results: Vec<SearchResultEntry>,
         search_count: u64,
         input_tokens: u64,
@@ -804,17 +1004,24 @@ impl WebSearchTool {
         // f64-seconds elapsed, not the integer millisecond `duration_ms`.
         let duration_seconds = elapsed_ms as f64 / 1000.0;
         ToolCallResult {
-            data: json!({
-                "query": query,
-                "results": results,
-                "durationSeconds": duration_seconds,
-                "searchCount": search_count,
-            }),
+            data: object([
+                ("query", query.clone()),
+                (
+                    "results",
+                    Source::parse(
+                        &serde_json::to_string(&results).expect("SDK entries serialize raw source"),
+                    )
+                    .unwrap(),
+                ),
+                ("durationSeconds", generated(json!(duration_seconds))),
+                ("searchCount", generated(json!(search_count))),
+            ]),
             model_content: Some(model_content),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         }
     }
 
@@ -833,7 +1040,7 @@ impl WebSearchTool {
         };
         self.emit_failed(invocation_id, kind, error.http_status, elapsed_ms)
             .await;
-        ToolError::Transport(format!("WebSearch: {}", error.message))
+        ToolError::Transport(source::affix("WebSearch: ", &error.message, ""))
     }
 }
 
@@ -848,9 +1055,64 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
-    use tool_api::hosted_search::parse_response_content;
+    use tool_api::hosted_search::{parse_response_content, JsonPayload};
     use tool_api::progress::progress_channel;
     use tool_api::test_support::fresh_ctx;
+
+    fn source_blocks(values: Vec<Value>) -> Vec<JsonPayload> {
+        values
+            .iter()
+            .map(|value| JsonPayload::from_generated_value(value).unwrap())
+            .collect()
+    }
+
+    fn source(value: &Value) -> Source {
+        Source::from_serde_value(value).expect("generated test JSON is valid")
+    }
+
+    fn payload(value: Value) -> JsonPayload {
+        JsonPayload::from_generated_value(&value).expect("generated test JSON is valid")
+    }
+
+    fn payload_source(value: &JsonPayload) -> Source {
+        Source::parse(value.as_json_source()).expect("SDK JSON source is valid")
+    }
+
+    fn source_text(source: &Source) -> String {
+        String::from_utf16(&source.string_units("").expect("root string"))
+            .expect("fixture contains only Unicode scalar values")
+    }
+
+    fn assert_payload_text(payload: &JsonPayload, expected: &str) {
+        assert_eq!(
+            payload.root_string_code_units(),
+            Some(expected.encode_utf16().collect())
+        );
+    }
+
+    fn payload_text_is(payload: &JsonPayload, expected: &str) -> bool {
+        payload.root_string_code_units().as_deref()
+            == Some(expected.encode_utf16().collect::<Vec<_>>().as_slice())
+    }
+
+    fn assert_source_text(source: &Source, expected: &str) {
+        assert_eq!(
+            source.string_units(""),
+            Some(expected.encode_utf16().collect())
+        );
+    }
+
+    fn validate_generated_output(_source_schema: &Source, output: &Value) -> Result<(), String> {
+        parse_web_search_output(&crate::source::generated(output.clone()))
+            .map(|_| ())
+            .map_err(|error| {
+                error
+                    .model_facing_message()
+                    .string_at("")
+                    .unwrap_or("invalid WebSearch output")
+                    .to_owned()
+            })
+    }
 
     /// Minimal `TaskRegistryHandle` exposing ONLY the session WebSearch counter;
     /// the 7 CRUD methods are unused error/empty stubs. `at(n)` presets the count;
@@ -1012,14 +1274,14 @@ mod tests {
         // Mirrors upstream: while `in_text`, consecutive `text` blocks append to
         // the same buffer and flush as a SINGLE entry at the end (not one per
         // block).
-        let blocks = vec![
+        let blocks = source_blocks(vec![
             json!({ "type": "text", "text": "Here are some results:" }),
             json!({ "type": "text", "text": "1. ..." }),
-        ];
+        ]);
         let parsed = parse_response_content(&blocks);
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
-            SearchResultEntry::Text(s) => assert_eq!(s, "Here are some results:1. ..."),
+            SearchResultEntry::Text(s) => assert_payload_text(s, "Here are some results:1. ..."),
             SearchResultEntry::Hit(_) => panic!("expected Text"),
         }
     }
@@ -1027,7 +1289,7 @@ mod tests {
     fn web_search_tool_result_success_produces_hit() {
         // The QUERY-carrying `server_tool_use` block is NOT a result; the actual
         // results live in the `web_search_tool_result` block's `content` array.
-        let blocks = vec![
+        let blocks = source_blocks(vec![
             json!({
                 "type": "server_tool_use",
                 "id": "stu_1",
@@ -1042,22 +1304,28 @@ mod tests {
                     { "title": "crates.io", "url": "https://crates.io" }
                 ]
             }),
-        ];
+        ]);
         let parsed = parse_response_content(&blocks);
         assert_eq!(parsed.len(), 1, "server_tool_use must not produce a result");
         match &parsed[0] {
             SearchResultEntry::Hit(v) => {
-                assert_eq!(v["tool_use_id"], "stu_1");
-                let hits = v["content"].as_array().expect("content array");
-                assert_eq!(hits.len(), 2);
+                let hit = payload_source(v);
+                assert_eq!(hit.string_at("/tool_use_id"), Some("stu_1"));
+                assert_eq!(hit.array_len("/content"), Some(2));
                 // Only `title` and `url` are projected (extra fields dropped).
                 assert_eq!(
-                    hits[0],
-                    json!({ "title": "Docs.rs", "url": "https://docs.rs" })
+                    hit.subprojection("/content/0")
+                        .unwrap()
+                        .to_json_string()
+                        .unwrap(),
+                    r#"{"title":"Docs.rs","url":"https://docs.rs"}"#
                 );
                 assert_eq!(
-                    hits[1],
-                    json!({ "title": "crates.io", "url": "https://crates.io" })
+                    hit.subprojection("/content/1")
+                        .unwrap()
+                        .to_json_string()
+                        .unwrap(),
+                    r#"{"title":"crates.io","url":"https://crates.io"}"#
                 );
             }
             SearchResultEntry::Text(_) => panic!("expected Hit"),
@@ -1067,15 +1335,17 @@ mod tests {
     fn web_search_tool_result_error_produces_error_string() {
         // When `content` is an error object (not an array), upstream pushes the
         // `Web search error: <error_code>` string.
-        let blocks = vec![json!({
+        let blocks = source_blocks(vec![json!({
             "type": "web_search_tool_result",
             "tool_use_id": "stu_9",
             "content": { "type": "web_search_tool_result_error", "error_code": "max_uses_exceeded" }
-        })];
+        })]);
         let parsed = parse_response_content(&blocks);
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
-            SearchResultEntry::Text(s) => assert_eq!(s, "Web search error: max_uses_exceeded"),
+            SearchResultEntry::Text(s) => {
+                assert_payload_text(s, "Web search error: max_uses_exceeded")
+            }
             SearchResultEntry::Hit(_) => panic!("expected Text error string"),
         }
     }
@@ -1083,7 +1353,7 @@ mod tests {
     fn server_tool_use_flushes_accumulated_text() {
         // Leading text accumulates, then a `server_tool_use` flushes it (trimmed)
         // as one entry; the `server_tool_use` itself is never emitted.
-        let blocks = vec![
+        let blocks = source_blocks(vec![
             json!({ "type": "text", "text": "Found: " }),
             json!({ "type": "text", "text": "  things  " }),
             json!({
@@ -1092,11 +1362,11 @@ mod tests {
                 "name": "web_search",
                 "input": { "query": "q" }
             }),
-        ];
+        ]);
         let parsed = parse_response_content(&blocks);
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
-            SearchResultEntry::Text(s) => assert_eq!(s, "Found:   things"),
+            SearchResultEntry::Text(s) => assert_payload_text(s, "Found:   things"),
             SearchResultEntry::Hit(_) => panic!("expected Text"),
         }
     }
@@ -1104,7 +1374,7 @@ mod tests {
     fn canonical_sequence_text_tooluse_result_text() {
         // The documented per-search block order, with a trailing commentary text
         // block after the result.
-        let blocks = vec![
+        let blocks = source_blocks(vec![
             json!({ "type": "text", "text": "Let me search." }),
             json!({
                 "type": "server_tool_use",
@@ -1118,23 +1388,27 @@ mod tests {
                 "content": [ { "title": "T", "url": "https://t.example" } ]
             }),
             json!({ "type": "text", "text": "Here is what I found." }),
-        ];
+        ]);
         let parsed = parse_response_content(&blocks);
         assert_eq!(parsed.len(), 3);
-        assert!(matches!(&parsed[0], SearchResultEntry::Text(s) if s == "Let me search."));
+        assert!(
+            matches!(&parsed[0], SearchResultEntry::Text(s) if payload_text_is(s, "Let me search."))
+        );
         assert!(matches!(&parsed[1], SearchResultEntry::Hit(_)));
-        assert!(matches!(&parsed[2], SearchResultEntry::Text(s) if s == "Here is what I found."));
+        assert!(
+            matches!(&parsed[2], SearchResultEntry::Text(s) if payload_text_is(s, "Here is what I found."))
+        );
     }
     #[test]
     fn server_tool_use_alone_yields_no_results() {
         // A lone `server_tool_use` (query carrier) with no result block produces
         // nothing — it only flushes the (empty) text buffer.
-        let blocks = vec![json!({
+        let blocks = source_blocks(vec![json!({
             "type": "server_tool_use",
             "id": "stu_2",
             "name": "advisor",
             "input": {}
-        })];
+        })]);
         let parsed = parse_response_content(&blocks);
         assert!(
             parsed.is_empty(),
@@ -1144,38 +1418,112 @@ mod tests {
     #[test]
     fn model_content_has_header_and_reminder_footer() {
         let results = vec![
-            SearchResultEntry::Text("First summary.".into()),
-            SearchResultEntry::Hit(json!({
+            SearchResultEntry::Text(JsonPayload::string("First summary.")),
+            SearchResultEntry::Hit(payload(json!({
                 "content": [ { "title": "Docs.rs", "url": "https://docs.rs" } ]
-            })),
-            SearchResultEntry::Hit(json!({ "query": "rust async" })),
+            }))),
+            SearchResultEntry::Hit(payload(json!({ "query": "rust async" }))),
         ];
-        let mc = build_model_content("rust async", &results);
+        let query = source(&json!("rust async"));
+        let mc = build_model_content(&query, &results);
+        let text = source_text(&mc);
         // Exact TS header bytes.
         assert!(
-            mc.starts_with("Web search results for query: \"rust async\"\n\n"),
-            "model_content must start with the TS header, got: {mc}"
+            text.starts_with("Web search results for query: \"rust async\"\n\n"),
+            "model_content must start with the TS header, got: {text}"
         );
         // Text entry rendered verbatim.
-        assert!(mc.contains("First summary."));
+        assert!(text.contains("First summary."));
         // Hit with a non-empty `content` array renders a `Links:` JSON line.
         assert!(
-            mc.contains("Links: [{\"title\":\"Docs.rs\",\"url\":\"https://docs.rs\"}]"),
-            "hit with content must render Links: <json>, got: {mc}"
+            text.contains("Links: [{\"title\":\"Docs.rs\",\"url\":\"https://docs.rs\"}]"),
+            "hit with content must render Links: <json>, got: {text}"
         );
         // Hit without a `content` array renders the `No links found.` fallback.
-        assert!(mc.contains("No links found."));
+        assert!(text.contains("No links found."));
         // Exact TS footer bytes, and trailing `.trim()` means it ends there.
         assert!(
-            mc.ends_with(
+            text.ends_with(
                 "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
             ),
-            "model_content must end with the REMINDER footer, got: {mc}"
+            "model_content must end with the REMINDER footer, got: {text}"
         );
+    }
+
+    #[test]
+    fn model_content_preserves_lone_units_from_sdk_search_entries() {
+        let query_units = vec![b'q' as u16, 0xd800];
+        let query = crate::source::text(query_units.clone());
+        let summary_units = vec![b'S' as u16, 0xdfff, b'E' as u16];
+        let result = build_model_content(
+            &query,
+            &[SearchResultEntry::Text(
+                JsonPayload::string_from_utf16_code_units(&summary_units),
+            )],
+        );
+        let mut expected = "Web search results for query: \""
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend(query_units);
+        expected.extend("\"\n\n".encode_utf16());
+        expected.extend(summary_units);
+        expected.extend("\n\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.".encode_utf16());
+        assert_eq!(result.string_units(""), Some(expected));
+    }
+
+    #[test]
+    fn mod_replacement_uses_web_search_model_text_mapper() {
+        let data = json!({
+            "query":"rust async",
+            "results":[null, "First summary.", {"content":[{"title":"Docs.rs","url":"https://docs.rs"}]}, 42]
+        });
+        let query = source(&json!("rust async"));
+        let expected = build_model_content(
+            &query,
+            &[
+                SearchResultEntry::Text(JsonPayload::string("First summary.")),
+                SearchResultEntry::Hit(payload(
+                    json!({"content":[{"title":"Docs.rs","url":"https://docs.rs"}]}),
+                )),
+                SearchResultEntry::Hit(payload(json!(42))),
+            ],
+        );
+        let data_source = source(&data);
+        assert_eq!(
+            map_web_search_result_text(&data_source)
+                .unwrap()
+                .string_units(""),
+            expected.string_units("")
+        );
+        let query_only = source(&json!({"query":"q"}));
+        assert_eq!(
+            map_web_search_result_text(&query_only)
+                .unwrap()
+                .string_units(""),
+            build_model_content(&source(&json!("q")), &[]).string_units("")
+        );
+    }
+
+    #[test]
+    fn mod_replacement_validates_web_search_output_shape() {
+        let valid = json!({
+            "query":"rust async", "durationSeconds":0.5, "searchCount":1,
+            "results":["Summary",{"tool_use_id":"stu_1","content":[
+                {"title":"Docs.rs","url":"https://docs.rs"}
+            ]}]
+        });
+        assert!(validate_generated_output(&OUTPUT_SCHEMA, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["results"][1]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("url");
+        assert!(validate_generated_output(&OUTPUT_SCHEMA, &invalid).is_err());
     }
     #[test]
     fn model_content_trims_and_keeps_footer_when_no_results() {
-        let mc = build_model_content("q", &[]);
+        let query = source(&json!("q"));
+        let mc = source_text(&build_model_content(&query, &[]));
         assert!(mc.starts_with("Web search results for query: \"q\""));
         assert!(mc.ends_with(
             "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
@@ -1185,7 +1533,10 @@ mod tests {
     }
     #[test]
     fn ignores_thinking_blocks() {
-        let blocks = vec![json!({ "type": "thinking", "thinking": "let me think" })];
+        let blocks = source_blocks(vec![json!({
+            "type": "thinking",
+            "thinking": "let me think"
+        })]);
         let parsed = parse_response_content(&blocks);
         assert!(parsed.is_empty());
     }
@@ -1258,9 +1609,9 @@ mod tests {
                 return Err(error.clone());
             }
             Ok(tool_api::HostedSearchOutput {
-                results: vec![SearchResultEntry::Hit(
+                results: vec![SearchResultEntry::Hit(payload(
                     json!({"tool_use_id":"search","content":[{"title":"Rust", "url":"https://rust-lang.org"}]}),
-                )],
+                ))],
                 searches: 1,
                 input_tokens: 7,
                 output_tokens: 9,
@@ -1286,7 +1637,7 @@ mod tests {
         let (tx, mut rx) = progress_channel();
         let result = tool
             .call(
-                json!({"query":"rust language","allowed_domains":["rust-lang.org"]}),
+                generated(json!({"query":"rust language","allowed_domains":["rust-lang.org"]})),
                 ctx,
                 tx,
             )
@@ -1298,11 +1649,8 @@ mod tests {
         assert_eq!(seen[0].profile.as_deref(), Some("live-profile"));
         assert_eq!(seen[0].allowed_domains, vec!["rust-lang.org"]);
         assert!(rx.try_recv().is_ok());
-        assert!(result
-            .model_content
-            .unwrap()
-            .contains("https://rust-lang.org"));
-        assert_eq!(result.data["searchCount"], 1);
+        assert!(source_text(&result.model_content.unwrap()).contains("https://rust-lang.org"));
+        assert_eq!(result.data.number_at("/searchCount"), Some(1.0));
     }
     #[tokio::test]
     async fn hosted_failure_does_not_trigger_a_second_model_request() {
@@ -1317,7 +1665,7 @@ mod tests {
         let tool = WebSearchTool::new(hosted_context(hosted.clone()));
         let (tx, _) = progress_channel();
         assert!(tool
-            .call(json!({"query":"rust language"}), fresh_ctx(), tx)
+            .call(generated(json!({"query":"rust language"})), fresh_ctx(), tx)
             .await
             .is_err());
         assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);
@@ -1330,10 +1678,10 @@ mod tests {
         ctx.task_registry = Some(registry.clone());
         let (tx, _) = progress_channel();
         let result = WebSearchTool::new(ctx)
-            .call(json!({"query":"rust language"}), fresh_ctx(), tx)
+            .call(generated(json!({"query":"rust language"})), fresh_ctx(), tx)
             .await
             .unwrap();
-        assert_eq!(result.data["searchCount"], 0);
+        assert_eq!(result.data.number_at("/searchCount"), Some(0.0));
         assert_eq!(hosted.calls.load(Ordering::SeqCst), 0);
         assert_eq!(registry.increments(), 0);
     }
@@ -1345,7 +1693,7 @@ mod tests {
         ctx.task_registry = Some(registry.clone());
         let (tx, _) = progress_channel();
         WebSearchTool::new(ctx)
-            .call(json!({"query":"rust language"}), fresh_ctx(), tx)
+            .call(generated(json!({"query":"rust language"})), fresh_ctx(), tx)
             .await
             .unwrap();
         assert_eq!(registry.increments(), 1);
@@ -1386,7 +1734,7 @@ mod tests {
             ctx.bus.attach_sink(sink.clone()).await;
             let (tx, _rx) = progress_channel();
             assert!(WebSearchTool::new(ctx)
-                .call(json!({"query":"rust language"}), fresh_ctx(), tx)
+                .call(generated(json!({"query":"rust language"})), fresh_ctx(), tx)
                 .await
                 .is_err());
             assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);

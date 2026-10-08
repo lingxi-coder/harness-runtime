@@ -4,13 +4,28 @@
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::{HookEvent, HookEventType};
 use crate::matcher::{
-    comma_mode_for, is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with,
+    comma_mode_for, is_bare_mcp_server_matcher, matches_if_condition_projection,
+    matches_pattern_source_with,
 };
 use lingxi_core::host::SubagentInheritance;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 use telemetry::otel::SerializedTraceContext;
+
+/// Host-owned logical route of the agent whose hook is being evaluated.
+///
+/// This is carried outside hook payload JSON so a hook cannot assert its own
+/// provider or model selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookModelSelection {
+    /// Provider-local logical model id.
+    pub model: String,
+    /// Configured provider connection paired with the model.
+    pub model_profile: Option<String>,
+}
 
 /// Per-call context handed to hooks alongside the event payload.
 ///
@@ -22,6 +37,12 @@ use telemetry::otel::SerializedTraceContext;
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Current logical route of the immediate agent.
+    pub model_selection: Option<HookModelSelection>,
+    /// Optional lease for visible side effects produced by this hook dispatch.
+    /// Tool dispatches set it to their executor generation; lifecycle and
+    /// standalone hook calls leave it absent.
+    pub publication_guard: Option<Arc<dyn crate::attachment::HookPublicationGuard>>,
     /// Live history for prompt evaluation; never serialized into command/HTTP input.
     pub prompt_transcript: Option<crate::PromptHookTranscript>,
     /// Session this event belongs to.
@@ -139,6 +160,10 @@ pub struct HookContext {
 /// agent's lifetime — that index is plumbed in Plan 09 alongside the agent
 /// loader.
 pub struct HookRegistry {
+    /// Shared session Mod host, installed when the first plugin Mod loads.
+    mod_host: Option<Arc<crate::mods::ModHost>>,
+    mod_background_context: Option<Weak<dyn crate::mods::ModSessionContext>>,
+    mod_model_policy: Option<Arc<dyn crate::mods::ModSettingsReader>>,
     sources: HashMap<HookSource, Vec<HookDefinition>>,
     plugin: HashMap<PluginId, Vec<HookDefinition>>,
     /// Session-scoped named hooks keyed by session id then logical hook name.
@@ -161,8 +186,8 @@ pub struct HookRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSourceReplaceResult {
     pub replaced_count: usize,
-    pub file_changed_matchers_before: Vec<String>,
-    pub file_changed_matchers_after: Vec<String>,
+    pub file_changed_matchers_before: Vec<Utf16JsonProjection>,
+    pub file_changed_matchers_after: Vec<Utf16JsonProjection>,
 }
 
 impl HookRegistry {
@@ -170,12 +195,74 @@ impl HookRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            mod_host: None,
+            mod_background_context: None,
+            mod_model_policy: None,
             sources: HashMap::new(),
             plugin: HashMap::new(),
             session_named: HashMap::new(),
             frontmatter: HashMap::new(),
             frontmatter_is_agent: HashMap::new(),
         }
+    }
+
+    /// Expose the session's Mod host without keeping the registry lock while
+    /// a handler waits on tool execution or user interaction.
+    pub fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
+        self.mod_host.clone()
+    }
+
+    /// The live session binding to attach to a newly created Mod worker
+    /// before its first `plugin.register` policy check.
+    pub fn mod_background_context(&self) -> Option<Weak<dyn crate::mods::ModSessionContext>> {
+        self.mod_background_context.clone()
+    }
+
+    pub fn mod_model_policy(&self) -> Option<Arc<dyn crate::mods::ModSettingsReader>> {
+        self.mod_model_policy.clone()
+    }
+
+    pub fn attach_mod_model_policy(&mut self, reader: Arc<dyn crate::mods::ModSettingsReader>) {
+        if let Some(host) = &self.mod_host {
+            host.attach_model_policy(reader.clone());
+        }
+        self.mod_model_policy = Some(reader);
+    }
+
+    /// Interim safety gate until managed PreToolUse hooks can run before the
+    /// Mod chain and again after a rewritten call. A matching managed hook must
+    /// never be bypassed by a Mod's short-circuit answer.
+    pub fn has_managed_pre_tool_use_match(&self, event: &HookEvent, ctx: &HookContext) -> bool {
+        self.match_event(event, ctx).into_iter().any(|hook| {
+            hook.source == HookSource::Settings(lingxi_core::types::SettingsScope::Managed)
+        })
+    }
+
+    /// Install the host shared by plugin lifecycle and event dispatch.
+    pub fn set_mod_host(&mut self, host: Arc<crate::mods::ModHost>) {
+        if let Some(context) = &self.mod_background_context {
+            host.attach_background_context(context.clone());
+        }
+        if let Some(policy) = &self.mod_model_policy {
+            host.attach_model_policy(policy.clone());
+        }
+        self.mod_host = Some(host);
+    }
+
+    /// Attach the owning session for callbacks fired after a hook has settled.
+    pub fn attach_mod_background_context(
+        &mut self,
+        context: Weak<dyn crate::mods::ModSessionContext>,
+    ) {
+        if let Some(host) = &self.mod_host {
+            host.attach_background_context(context.clone());
+        }
+        self.mod_background_context = Some(context);
+    }
+
+    /// Stop dispatching through a Mod host when no modules remain active.
+    pub fn clear_mod_host(&mut self) {
+        self.mod_host = None;
     }
 
     /// Register a hook under its declared source.
@@ -415,7 +502,6 @@ impl HookRegistry {
         // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
         // `r` extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
-        let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
             if !h.events.contains(&et) {
@@ -424,12 +510,9 @@ impl HookRegistry {
             // TS `getMatchingHooks`: only apply the tool-name matcher filter when
             // the event yields a `matchQuery`; otherwise every subscribed hook
             // passes. A hook with no matcher always passes.
-            let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => {
-                    matches_pattern_with(query, matcher, comma_mode, None)
-                }
-                _ => true,
-            };
+            let tool_name_ok = h.matcher().map_or(true, |matcher| {
+                Self::matches_event_matcher(event, matcher, comma_mode)
+            });
             if !tool_name_ok {
                 return false;
             }
@@ -441,7 +524,7 @@ impl HookRegistry {
                     match &if_target {
                         // if-evaluable event → both tool-name + content must match.
                         Some((tool_name, tool_input)) => {
-                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                            if !matches_if_condition_projection(if_cond, tool_name, tool_input) {
                                 return false;
                             }
                         }
@@ -520,18 +603,14 @@ impl HookRegistry {
         // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
         // `r` extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
-        let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
             if !h.events.contains(&et) {
                 return false;
             }
-            let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => {
-                    matches_pattern_with(query, matcher, comma_mode, None)
-                }
-                _ => true,
-            };
+            let tool_name_ok = h.matcher().map_or(true, |matcher| {
+                Self::matches_event_matcher(event, matcher, comma_mode)
+            });
             if !tool_name_ok {
                 return false;
             }
@@ -539,7 +618,7 @@ impl HookRegistry {
                 if Self::if_condition_applies(h) {
                     match &if_target {
                         Some((tool_name, tool_input)) => {
-                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                            if !matches_if_condition_projection(if_cond, tool_name, tool_input) {
                                 return false;
                             }
                         }
@@ -575,18 +654,14 @@ impl HookRegistry {
         // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
         // `r` extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
-        let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
             if !h.events.contains(&et) {
                 return false;
             }
-            let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => {
-                    matches_pattern_with(query, matcher, comma_mode, None)
-                }
-                _ => true,
-            };
+            let tool_name_ok = h.matcher().map_or(true, |matcher| {
+                Self::matches_event_matcher(event, matcher, comma_mode)
+            });
             if !tool_name_ok {
                 return false;
             }
@@ -594,7 +669,7 @@ impl HookRegistry {
                 if Self::if_condition_applies(h) {
                     match &if_target {
                         Some((tool_name, tool_input)) => {
-                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                            if !matches_if_condition_projection(if_cond, tool_name, tool_input) {
                                 return false;
                             }
                         }
@@ -613,28 +688,31 @@ impl HookRegistry {
         matched
     }
 
-    /// Compute the `matchQuery` string for `event`, mirroring the per-event
-    /// `switch (hook_event_name)` in claude-code `getMatchingHooks`
-    /// (`utils/hooks.ts`, as of 2.1.195) — every case the binary derives a query
-    /// for is reproduced here so the declared matcher actually filters that
-    /// event. Events with no case (`TeammateIdle`/`TaskCreated`/`TaskCompleted`
-    /// and `default`) derive no query and return `None`, so the matcher filter
-    /// is skipped (TS `matchQuery ? filter : hookMatchers`) and subscribed hooks
-    /// fire regardless of any declared matcher.
-    ///
-    /// claude's full switch:
-    /// - tool events → `tool_name`;
-    /// - `UserPromptExpansion` → `command_name`; `SessionStart` → `source`;
-    ///   `SessionEnd` → `reason`; `StopFailure` → `error`;
-    ///   `SubagentStart`/`SubagentStop` → `agent_type`; `Notification` →
-    ///   `notification_type`; `Setup`/`PreCompact`/`PostCompact` → `trigger`;
-    /// - `Elicitation`/`ElicitationResult` → `mcp_server_name`; `ConfigChange`
-    ///   → `source`; `InstructionsLoaded` → `load_reason`; `FileChanged` →
-    ///   `basename(file_path)`; model-switch events → `to_model`.
-    ///
-    /// `Setup` (trigger `init`/`maintenance`) and `PostCompact` (trigger
-    /// `manual`/`auto`) both carry `trigger` on the port variant and derive
-    /// their query from it, exactly like `PreCompact`.
+    /// Apply the per-event `matchQuery` filter from claude-code
+    /// `getMatchingHooks`. UserPromptExpansion keeps its command name as a
+    /// source projection through the matcher. Other query fields are typed
+    /// host strings; events without a query skip the matcher filter entirely.
+    fn matches_event_matcher(
+        event: &HookEvent,
+        matcher: &Utf16JsonProjection,
+        comma_mode: bool,
+    ) -> bool {
+        match event {
+            HookEvent::UserPromptExpansion { command_name, .. } => {
+                matches_pattern_source_with(command_name, matcher, comma_mode, None)
+            }
+            _ => match Self::match_query_for(event) {
+                Some(query) => matches_pattern_source_with(
+                    &Utf16JsonProjection::from(query),
+                    matcher,
+                    comma_mode,
+                    None,
+                ),
+                None => true,
+            },
+        }
+    }
+
     fn match_query_for(event: &HookEvent) -> Option<String> {
         match event {
             HookEvent::PreToolUse { tool_name, .. }
@@ -642,8 +720,6 @@ impl HookRegistry {
             | HookEvent::PostToolUseFailure { tool_name, .. }
             | HookEvent::PermissionRequest { tool_name, .. }
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
-            // claude `i = r.command_name`.
-            HookEvent::UserPromptExpansion { command_name, .. } => Some(command_name.clone()),
             // claude `i = r.source` — the session-start trigger source string.
             HookEvent::SessionStart { source, .. } => Some(source.clone()),
             // claude `i = r.reason`.
@@ -700,7 +776,9 @@ impl HookRegistry {
     /// ([`Self::match_query_for`]) — is deliberately excluded here (it also
     /// carries no `tool_input`), so an `if`-conditioned hook subscribed to
     /// `PermissionDenied` is dropped, exactly as in TS.
-    fn if_match_target(event: &HookEvent) -> Option<(&str, &serde_json::Value)> {
+    fn if_match_target(
+        event: &HookEvent,
+    ) -> Option<(&str, &lingxi_core::types::utf16_json::Utf16JsonProjection)> {
         match event {
             HookEvent::PreToolUse {
                 tool_name,
@@ -785,11 +863,11 @@ impl HookRegistry {
     /// buckets. The desktop file watcher resolves this same matcher set into
     /// watched paths.
     #[must_use]
-    pub fn file_changed_matchers(&self) -> Vec<String> {
+    pub fn file_changed_matchers(&self) -> Vec<Utf16JsonProjection> {
         self.all_hooks()
             .into_iter()
             .filter(|hook| hook.events.contains(&HookEventType::FileChanged))
-            .filter_map(|hook| hook.matcher().map(ToString::to_string))
+            .filter_map(|hook| hook.matcher().cloned())
             .collect()
     }
 }
@@ -833,13 +911,18 @@ fn drop_http_for_session_events<'a>(
 /// dedup point) rather than per-dispatch; it is a non-behavioral log.
 fn warn_if_bare_mcp_matcher(hook: &HookDefinition) {
     if let Some(matcher) = hook.matcher() {
-        if is_bare_mcp_server_matcher(matcher) {
+        let Some(matcher_text) = matcher.string_at("") else {
+            return;
+        };
+        if is_bare_mcp_server_matcher(matcher_text) {
             // Byte-exact wording from the binary `utf` warning (`{level:"warn"}`).
             tracing::warn!(
-                matcher = %matcher,
-                "Hook matcher `{matcher}` matches no tool (it is compared as an \
+                matcher = %matcher_text,
+                "Hook matcher `{}` matches no tool (it is compared as an \
                  exact string). To match all tools from this server, use \
-                 `{matcher}__.*`. See CHANGELOG v2.1.195."
+                 `{}__.*`. See CHANGELOG v2.1.195.",
+                matcher_text,
+                matcher_text,
             );
         }
     }
@@ -971,7 +1054,8 @@ mod all_hooks_tests {
         let pre = r.match_event(
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
-                tool_input: serde_json::json!({}),
+                tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .unwrap(),
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext::default(),
@@ -1176,7 +1260,7 @@ mod all_hooks_tests {
             HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         replacement.if_condition = Some(HookCondition {
-            pattern: ".mise.toml".into(),
+            pattern: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
             match_tool_name: true,
             match_input: false,
             if_pattern: None,
@@ -1185,13 +1269,22 @@ mod all_hooks_tests {
             HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             vec![replacement],
         );
-        let mut before = result.file_changed_matchers_before;
+        let mut before: Vec<Vec<u16>> = result
+            .file_changed_matchers_before
+            .into_iter()
+            .map(|matcher| matcher.string_units("").expect("matcher is a root string"))
+            .collect();
         before.sort();
-        let mut after = result.file_changed_matchers_after;
+        let mut after: Vec<Vec<u16>> = result
+            .file_changed_matchers_after
+            .into_iter()
+            .map(|matcher| matcher.string_units("").expect("matcher is a root string"))
+            .collect();
         after.sort();
 
-        assert_eq!(before, vec![".env".to_string(), ".envrc".to_string()]);
-        assert_eq!(after, vec![".env".to_string(), ".mise.toml".to_string()]);
+        let units = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(before, vec![units(".env"), units(".envrc")]);
+        assert_eq!(after, vec![units(".env"), vec![0xd800]]);
     }
 
     #[test]
@@ -1278,7 +1371,8 @@ mod all_hooks_tests {
         let matched = r.match_event(
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
-                tool_input: serde_json::json!({}),
+                tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .unwrap(),
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext {
@@ -1291,7 +1385,8 @@ mod all_hooks_tests {
         let parent = r.match_event(
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
-                tool_input: serde_json::json!({}),
+                tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .unwrap(),
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext::default(),
@@ -1301,7 +1396,8 @@ mod all_hooks_tests {
         let sibling = r.match_event(
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
-                tool_input: serde_json::json!({}),
+                tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .unwrap(),
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext {
@@ -1537,6 +1633,21 @@ mod match_event_matcher_tests {
         }
     }
 
+    fn hook_with_source_matcher(
+        name: &str,
+        event: HookEventType,
+        matcher: Utf16JsonProjection,
+    ) -> HookDefinition {
+        let mut hook = hook_with(name, event, None);
+        hook.if_condition = Some(HookCondition {
+            pattern: matcher,
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        hook
+    }
+
     /// A hook carrying an `if`-condition (and optional tool-name `matcher`),
     /// executed by a Command arm so the `if`-condition filter actually applies
     /// (Builtin hooks bypass it, mirroring TS `callback`/`function`).
@@ -1578,17 +1689,16 @@ mod match_event_matcher_tests {
     fn pre_tool_use_in(tool: &str, input: serde_json::Value) -> HookEvent {
         HookEvent::PreToolUse {
             tool_name: tool.into(),
-            tool_input: input,
+            tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &input,
+            )
+            .expect("bounded test fixture is valid JSON"),
             tool_use_id: ToolUseId::new(),
         }
     }
 
     fn pre_tool_use(tool: &str) -> HookEvent {
-        HookEvent::PreToolUse {
-            tool_name: tool.into(),
-            tool_input: serde_json::json!({}),
-            tool_use_id: ToolUseId::new(),
-        }
+        pre_tool_use_in(tool, serde_json::json!({}))
     }
 
     fn matched_names(reg: &HookRegistry, event: &HookEvent) -> Vec<String> {
@@ -1623,6 +1733,68 @@ mod match_event_matcher_tests {
         assert_eq!(matched_names(&reg, &pre_tool_use("Bash")), vec!["always"]);
         assert_eq!(matched_names(&reg, &pre_tool_use("Write")), vec!["always"]);
         assert_eq!(matched_names(&reg, &pre_tool_use("Read")), vec!["always"]);
+    }
+
+    #[test]
+    fn prompt_expansion_matcher_receives_exact_command_name_units() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "one-code-unit",
+            HookEventType::UserPromptExpansion,
+            Some("^.$"),
+        ));
+        reg.register(hook_with(
+            "two-code-units",
+            HookEventType::UserPromptExpansion,
+            Some("^..$"),
+        ));
+
+        let lone = HookEvent::UserPromptExpansion {
+            expansion_type: crate::events::PromptExpansionType::SlashCommand,
+            command_name: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""\ud800""#)
+                .unwrap(),
+            command_args: "".into(),
+            command_source: None,
+            prompt: "prompt".into(),
+        };
+        assert_eq!(
+            matched_names(&reg, &lone),
+            vec!["one-code-unit"],
+            "an isolated surrogate is one JavaScript regex unit"
+        );
+
+        let paired = HookEvent::UserPromptExpansion {
+            expansion_type: crate::events::PromptExpansionType::SlashCommand,
+            command_name: lingxi_core::types::utf16_json::Utf16JsonProjection::from("😀"),
+            command_args: "".into(),
+            command_source: None,
+            prompt: "prompt".into(),
+        };
+        assert_eq!(
+            matched_names(&reg, &paired),
+            vec!["two-code-units"],
+            "a paired surrogate is two JavaScript regex units"
+        );
+    }
+
+    #[test]
+    fn source_group_matcher_keeps_an_unpaired_regexp_unit() {
+        let mut reg = HookRegistry::new();
+        let matcher = Utf16JsonProjection::parse(r#""^\ud800$""#).unwrap();
+        reg.register(hook_with_source_matcher(
+            "exact-surrogate",
+            HookEventType::UserPromptExpansion,
+            matcher,
+        ));
+
+        let event = HookEvent::UserPromptExpansion {
+            expansion_type: crate::events::PromptExpansionType::SlashCommand,
+            command_name: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+            command_args: "".into(),
+            command_source: None,
+            prompt: "prompt".into(),
+        };
+        assert_eq!(matched_names(&reg, &event), vec!["exact-surrogate"]);
     }
 
     #[test]
@@ -1867,7 +2039,10 @@ mod match_event_matcher_tests {
         ));
         let ev = HookEvent::PermissionDenied {
             tool_name: "Bash".into(),
-            tool_input: serde_json::json!({ "command": "git push" }),
+            tool_input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"command":"git push"}"#,
+            )
+            .unwrap(),
             tool_use_id: ToolUseId::new(),
             reason: "no".into(),
         };
@@ -1976,6 +2151,96 @@ mod match_event_matcher_tests {
         };
         assert_eq!(matched_names(&reg, &start("startup")), vec!["boot"]);
         assert!(matched_names(&reg, &start("resume")).is_empty());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct NativeMatcherCase {
+        id: String,
+        pattern_json: String,
+        query_json: String,
+        expected: bool,
+        #[serde(default)]
+        event: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct NativeMatcherCorpus {
+        native_comparable: Vec<NativeMatcherCase>,
+        source_projection_only: Vec<NativeMatcherCase>,
+    }
+
+    /// Compare the production public HookRegistry route against the same raw
+    /// JSON corpus used by the pinned Native 2.1.293 fixture. Keep this manual
+    /// acceptance test ignored by default because the corpus belongs to the
+    /// integration acceptance workspace, not this standalone crate.
+    #[test]
+    #[ignore = "run with LINGXI_HOOK_MATCHER_CORPUS pointing at the shared acceptance corpus"]
+    fn shared_native_matcher_corpus_matches_through_hook_registry() {
+        let path = std::env::var_os("LINGXI_HOOK_MATCHER_CORPUS")
+            .expect("set LINGXI_HOOK_MATCHER_CORPUS to the shared acceptance corpus");
+        let source = std::fs::read_to_string(path).expect("read shared Native matcher corpus");
+        let corpus: NativeMatcherCorpus =
+            serde_json::from_str(&source).expect("parse shared Native matcher corpus");
+
+        for case in corpus.native_comparable {
+            let matcher = Utf16JsonProjection::parse(&case.pattern_json)
+                .unwrap_or_else(|error| panic!("{} pattern JSON: {error}", case.id));
+            let query = Utf16JsonProjection::parse(&case.query_json)
+                .unwrap_or_else(|error| panic!("{} query JSON: {error}", case.id));
+            let query = query
+                .string_at("")
+                .unwrap_or_else(|| panic!("{} Native query must be a root string", case.id));
+            let mut registry = HookRegistry::new();
+            registry.register(hook_with_source_matcher(
+                &case.id,
+                HookEventType::SessionStart,
+                matcher,
+            ));
+            let event = HookEvent::SessionStart {
+                session_id: SessionId::new(),
+                source: query.to_owned(),
+            };
+            let matched = registry
+                .match_event(&event, &HookContext::default())
+                .iter()
+                .any(|hook| hook.name == case.id);
+            assert_eq!(
+                matched, case.expected,
+                "Native SessionStart case {}",
+                case.id
+            );
+        }
+
+        for case in corpus.source_projection_only {
+            assert_eq!(
+                case.event.as_deref(),
+                Some("UserPromptExpansion"),
+                "{} must stay on the source-projection event path",
+                case.id
+            );
+            let matcher = Utf16JsonProjection::parse(&case.pattern_json)
+                .unwrap_or_else(|error| panic!("{} pattern JSON: {error}", case.id));
+            let query = Utf16JsonProjection::parse(&case.query_json)
+                .unwrap_or_else(|error| panic!("{} query JSON: {error}", case.id));
+            let mut registry = HookRegistry::new();
+            registry.register(hook_with_source_matcher(
+                &case.id,
+                HookEventType::UserPromptExpansion,
+                matcher,
+            ));
+            let event = HookEvent::UserPromptExpansion {
+                expansion_type: crate::events::PromptExpansionType::SlashCommand,
+                command_name: query,
+                command_args: Utf16JsonProjection::from(""),
+                command_source: None,
+                prompt: Utf16JsonProjection::from(""),
+            };
+            let matched = registry
+                .match_event(&event, &HookContext::default())
+                .iter()
+                .any(|hook| hook.name == case.id);
+            assert_eq!(matched, case.expected, "source-only case {}", case.id);
+        }
     }
 
     #[test]

@@ -24,6 +24,20 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Conversation state copied into a background session. Model reminders keep
+/// their structured attachment payloads as well as rendered messages, so the
+/// new session can replay MCP deltas without announcing them a second time.
+#[derive(Debug, Clone, Default)]
+pub struct BgSessionSnapshot {
+    /// Live transcript messages in their original order and identity.
+    pub history: Vec<crate::types::ConversationMessage>,
+    /// Original payloads for retained durable model reminders.
+    pub model_reminder_attachments: Vec<(
+        crate::types::MessageId,
+        crate::types::utf16_json::Utf16JsonProjection,
+    )>,
+}
+
 /// Failure modes for [`BgSessionForker::fork_to_background`]. Projected to a
 /// coarse `HandleError::ActionFailed` by the handle impl (the `/fork` handler
 /// renders "Could not fork to background session: …").
@@ -54,10 +68,11 @@ pub trait BgSessionForker: Send + Sync {
     ) {
     }
 
-    /// Snapshot `history` (+ the parent's rendered `system_prompt`, when the
+    /// Snapshot `conversation` (+ the parent's rendered `system_prompt`, when the
     /// live session has completed a turn) into a new background session and
     /// dispatch a detached worker that resumes it. `prompt` is the OPTIONAL
-    /// `[prompt]` argument (empty string = no seed turn).
+    /// `[prompt]` argument as its source-preserving JSON string projection
+    /// (the empty string means no seed turn).
     ///
     /// `model` is the parent session's CURRENT active model: the snapshot
     /// stamps it onto the copied assistant lines so the resumed background
@@ -65,15 +80,16 @@ pub trait BgSessionForker: Send + Sync {
     /// by id) instead of the `DEFAULT_MODEL` seed — `ConversationMessage`s carry
     /// no per-line model, so the live session model is the only source.
     ///
-    /// Returns the system line to display in the LIVE (interactive) session —
-    /// the composition root owns the exact text since it mints the new short id.
+    /// Returns the system line to display in the LIVE (interactive) session as
+    /// a source-preserving JSON string projection — the composition root owns
+    /// the exact text since it mints the new short id.
     async fn fork_to_background(
         &self,
-        history: &[crate::types::ConversationMessage],
-        system_prompt: Option<Arc<str>>,
-        prompt: &str,
+        conversation: &BgSessionSnapshot,
+        system_prompt: Option<Arc<crate::types::utf16_json::Utf16JsonProjection>>,
+        prompt: &crate::types::utf16_json::Utf16JsonProjection,
         model: &str,
-    ) -> Result<String, BgForkError>;
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, BgForkError>;
 
     /// Move a live conversation boundary into a background session.
     ///
@@ -82,14 +98,14 @@ pub trait BgSessionForker: Send + Sync {
     /// its PTY launch spec.
     async fn background_conversation(
         &self,
-        history: &[crate::types::ConversationMessage],
-        system_prompt: Option<Arc<str>>,
-        prompt: &str,
+        conversation: &BgSessionSnapshot,
+        system_prompt: Option<Arc<crate::types::utf16_json::Utf16JsonProjection>>,
+        prompt: &crate::types::utf16_json::Utf16JsonProjection,
         model: &str,
         snapshot: &crate::host::BackgroundingSnapshot,
-    ) -> Result<String, BgForkError> {
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, BgForkError> {
         let _ = snapshot;
-        self.fork_to_background(history, system_prompt, prompt, model)
+        self.fork_to_background(conversation, system_prompt, prompt, model)
             .await
     }
 

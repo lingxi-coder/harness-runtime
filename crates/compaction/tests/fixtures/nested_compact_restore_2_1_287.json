@@ -1,0 +1,784 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "native pure schema 178308215",
+      "start": 178308215,
+      "end": 178319857,
+      "sha256": "7937729d686f4b04d732397a99a2b5bc051de27751c50ca2c80a23ec84890644"
+    },
+    {
+      "label": "native pure schema 178319858",
+      "start": 178319858,
+      "end": 178410352,
+      "sha256": "bf0b9819eea4ab1b4e8a70ffb924d5f5a1a62c148ea2ebf839429258515b91aa"
+    },
+    {
+      "label": "native pure schema 178237228",
+      "start": 178237228,
+      "end": 178238209,
+      "sha256": "91b433ccc5add9cada15ca727fd71e45dc2b3042168625a06d879b12cab45945"
+    },
+    {
+      "label": "native Sv.create checkPermissions/validateInput/call methods",
+      "start": 186662227,
+      "end": 186664062,
+      "sha256": "548d07173c551631ed7b211653d347dd3fc108ae64355c358c443be1f39689e1"
+    },
+    {
+      "label": "function g_n(",
+      "start": 181982160,
+      "end": 181982215,
+      "sha256": "037f143bdc3c2d4c277319dc1508dc28cded8df1da804381afb83308b0815d68"
+    },
+    {
+      "label": "function Ww(",
+      "start": 181980903,
+      "end": 181981012,
+      "sha256": "7b76ff3a2e143625ab33e33e55e8cffec4b03cc9f60337f3a5599c85872adf60"
+    },
+    {
+      "label": "function pZ(",
+      "start": 181187888,
+      "end": 181188110,
+      "sha256": "1709891fe4c79d473a6b0a0832b8c25110c12dd5b0f0e8fe52c8a26d1ffc8770"
+    },
+    {
+      "label": "var C3=",
+      "start": 185899162,
+      "end": 185899449,
+      "sha256": "8f488640a6ebd0cc63eb390ebea11147067412e127c5dab157e59e1275764c85"
+    },
+    {
+      "label": "var nor=",
+      "start": 189069255,
+      "end": 189069557,
+      "sha256": "dc6f79788cb08b1e3a7a1e6eb3f9b875d82bd400ce93743e13ba161cf1a85078"
+    },
+    {
+      "label": "function m9e(",
+      "start": 185900042,
+      "end": 185900123,
+      "sha256": "99fff3a117fb0f0dbbce49ea9f700e901f3e81dc1a338ddc93b8a9c6f1768076"
+    },
+    {
+      "label": "function csn(",
+      "start": 185900123,
+      "end": 185900478,
+      "sha256": "377955dae65138c818544bfcf0e6de75df02d75ceea0309fcc145fb549dcf706"
+    },
+    {
+      "label": "function hdt(",
+      "start": 189915276,
+      "end": 189915364,
+      "sha256": "3909a693ced6889d43b51a0b4e8a890474d41a11f056c4d71c1d0fa0a7948318"
+    },
+    {
+      "label": "function ai(",
+      "start": 189915364,
+      "end": 189915421,
+      "sha256": "5b2477082f0e7bf0d8eec9882d623deac5300bd4c0e4dc32027c384b1f8031a0"
+    },
+    {
+      "label": "async function tzn(",
+      "start": 186650879,
+      "end": 186651067,
+      "sha256": "9fb38341dfe9bf7b2bd2a77a6aa451594cf31cd1e290352d458f2609566e4ee9"
+    },
+    {
+      "label": "function Trr(",
+      "start": 189134052,
+      "end": 189134129,
+      "sha256": "1651bd446b2f345d81b18cd1b90ca28037da651f84b10810a1f467eab2d1d42d"
+    },
+    {
+      "label": "function a1e(",
+      "start": 189066338,
+      "end": 189066434,
+      "sha256": "ddf8877937039eb89356f1d3873557b22d9c235e6cd4d520b3f04eebe85364ea"
+    },
+    {
+      "label": "async function m7t(",
+      "start": 189134129,
+      "end": 189135099,
+      "sha256": "b27514ac09ca2e0127a16e804714cf1e22bdbac0748f09c650ff1e4dc0ab73c4"
+    },
+    {
+      "label": "async function O7t(",
+      "start": 189135099,
+      "end": 189135705,
+      "sha256": "31b0acbf6bd8091d170d3588b8fb46f9b5152b8c5fc42252f6fbad367417ab0f"
+    },
+    {
+      "label": "async function Iie(",
+      "start": 187653110,
+      "end": 187654592,
+      "sha256": "e991d46ecf455ed61ca6228cc6300acabb9f9648bbd5f52fcf271c68f8b3fd05"
+    },
+    {
+      "label": "async function Evo(",
+      "start": 187654592,
+      "end": 187655164,
+      "sha256": "ee97cd2febe92b846f5393c2e52256266c1c4476a9eb31b96827fc959bac2130"
+    },
+    {
+      "label": "function Mvo(",
+      "start": 187657749,
+      "end": 187658312,
+      "sha256": "75be7f01fb54a21328cbc69f32c588fd6f6fc4bc4d4b136f0517df0d8376c571"
+    },
+    {
+      "label": "function Ovo(",
+      "start": 187658396,
+      "end": 187658476,
+      "sha256": "0f28468a65933bd22046055484ff215d6e5dd9352ab63764cce33b89dc246a60"
+    },
+    {
+      "label": "function Dvo(",
+      "start": 187658476,
+      "end": 187658569,
+      "sha256": "1423d00a352cbf2bc25061e105ea670f66f10e25d2fe9721be242c40d499ec32"
+    },
+    {
+      "label": "async function JOe(",
+      "start": 187655815,
+      "end": 187656256,
+      "sha256": "1202c4190a66914dd5ea0f1f634a8e4bad64c0d3d0924eacf8a5037162169163"
+    },
+    {
+      "label": "async function uLt(",
+      "start": 189153527,
+      "end": 189155868,
+      "sha256": "a3bc0976b85f891aa497430eda0964f492348b8d17e0715c04b19cc33e8dee8d"
+    },
+    {
+      "label": "function ln(",
+      "start": 189155868,
+      "end": 189156090,
+      "sha256": "deb14c47567453008fec0b6cf75f119ed8e5296d7433a2b367809722fc098602"
+    },
+    {
+      "label": "function LCe(",
+      "start": 186659318,
+      "end": 186660224,
+      "sha256": "8f133fd54b099bad4d65bb420710ac701b5ec5d9e6a9245460f145a7b2e00063"
+    },
+    {
+      "label": "async function AKn(",
+      "start": 186665663,
+      "end": 186668159,
+      "sha256": "4c41e6f5fafa81d3c3799d46b1b1fea9e70c76877c4ccaa1e550cf0a8f9c6b30"
+    },
+    {
+      "label": "async function qgt(",
+      "start": 186669477,
+      "end": 186669823,
+      "sha256": "9a9c8d45bb8fc319bcbc2b76e7e3085664d47f8b216ed8686bdba4924d2c9ea9"
+    },
+    {
+      "label": "async function IKn(",
+      "start": 186669823,
+      "end": 186679062,
+      "sha256": "278e91116c205aabf618e97fc06c638879a90c7aa8d0481962bc4563ef9c9740"
+    },
+    {
+      "label": "async function Ngt(",
+      "start": 186668522,
+      "end": 186668702,
+      "sha256": "234d86d775de3567c98fefad32e9c6bba58448bc5f98e6cca993f288628c7ea6"
+    }
+  ],
+  "scope": "Actual unchanged m7t/O7t/l1e/g_n/Iie/Evo/uLt/Sv.create validateInput+call/LCe/AKn/qgt/IKn/Ngt/Mvo/Ovo/Dvo/JOe/pZ; whole native plain schema modules are executed. Selected text files are read from a private real temporary directory through controlled Node file-handle/stat/line-reader adapters. Small ordinary text fixtures stay below the controlled token budget. Map represents the readFileState host, excluding native LRU internals. Permission, absent unrelated Iie restore capabilities, artifact-path predicate (ordinary paths only), telemetry/hooks, UUID and clock are controlled. Source helper bodies are unchanged and individually hash-checked against the current full-binary SHA. One case supplies controlled fresh resume ReadState with post-boundary file history; it does not execute or validate the native cold/hot resume initializer. This is a Node helper oracle, not native CLI or Bun acceptance. The folder filename uses the permitted LingXi branding difference; five eager entrypoints retain native pZ bytes.",
+  "cases": [
+    {
+      "name": "discarded-nested-seed-restores-file",
+      "input": {
+        "file": {
+          "path": "/repo/pkg/LINGXI.md",
+          "type": "Project",
+          "content": "Folder guidance",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "Folder guidance",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "pkg/LINGXI.md"
+          }
+        ],
+        "snapshot": {
+          "/repo/pkg/LINGXI.md": {
+            "content": "Folder guidance",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [
+            {
+              "attachment": {
+                "type": "file",
+                "filename": "/repo/pkg/LINGXI.md",
+                "content": {
+                  "type": "text",
+                  "file": {
+                    "filePath": "/repo/pkg/LINGXI.md",
+                    "content": "Folder guidance",
+                    "numLines": 1,
+                    "startLine": 1,
+                    "totalLines": 1
+                  }
+                },
+                "displayPath": "pkg/LINGXI.md"
+              },
+              "type": "attachment",
+              "uuid": "attachment-1",
+              "timestamp": "2026-10-01T00:00:00.000Z"
+            }
+          ],
+          "hookResults": []
+        },
+        "afterReadState": [
+          [
+            "/repo/pkg/LINGXI.md",
+            {
+              "content": "Folder guidance",
+              "timestamp": 77,
+              "offset": 1
+            }
+          ]
+        ],
+        "subsequent": [],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "telemetry": [
+          {
+            "name": "tengu_file_read_limits_override",
+            "args": {
+              "hasMaxTokens": true,
+              "hasMaxSizeBytes": false
+            }
+          },
+          {
+            "name": "tengu_session_file_read",
+            "args": {
+              "totalLines": 1,
+              "readLines": 1,
+              "totalBytes": 15,
+              "readBytes": 15,
+              "offset": 1,
+              "is_session_transcript": false
+            }
+          },
+          {
+            "name": "tengu_post_compact_file_restore_success",
+            "args": {}
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "retained-nested-seed-restores-file",
+      "input": {
+        "file": {
+          "path": "/repo/pkg/LINGXI.md",
+          "type": "Project",
+          "content": "Folder guidance",
+          "contentDiffersFromDisk": false
+        },
+        "history": [
+          {
+            "type": "attachment",
+            "uuid": "initial",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "Folder guidance",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          }
+        ],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "Folder guidance",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "pkg/LINGXI.md"
+          }
+        ],
+        "snapshot": {
+          "/repo/pkg/LINGXI.md": {
+            "content": "Folder guidance",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [
+            {
+              "attachment": {
+                "type": "file",
+                "filename": "/repo/pkg/LINGXI.md",
+                "content": {
+                  "type": "text",
+                  "file": {
+                    "filePath": "/repo/pkg/LINGXI.md",
+                    "content": "Folder guidance",
+                    "numLines": 1,
+                    "startLine": 1,
+                    "totalLines": 1
+                  }
+                },
+                "displayPath": "pkg/LINGXI.md"
+              },
+              "type": "attachment",
+              "uuid": "attachment-1",
+              "timestamp": "2026-10-01T00:00:00.000Z"
+            }
+          ],
+          "hookResults": []
+        },
+        "afterReadState": [
+          [
+            "/repo/pkg/LINGXI.md",
+            {
+              "content": "Folder guidance",
+              "timestamp": 77,
+              "offset": 1
+            }
+          ]
+        ],
+        "subsequent": [],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "telemetry": [
+          {
+            "name": "tengu_file_read_limits_override",
+            "args": {
+              "hasMaxTokens": true,
+              "hasMaxSizeBytes": false
+            }
+          },
+          {
+            "name": "tengu_session_file_read",
+            "args": {
+              "totalLines": 1,
+              "readLines": 1,
+              "totalBytes": 15,
+              "readBytes": 15,
+              "offset": 1,
+              "is_session_transcript": false
+            }
+          },
+          {
+            "name": "tengu_post_compact_file_restore_success",
+            "args": {}
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "controlled-fresh-resume-file-history-emits-nested",
+      "input": {
+        "file": {
+          "path": "/repo/pkg/LINGXI.md",
+          "type": "Project",
+          "content": "Folder guidance",
+          "contentDiffersFromDisk": false
+        },
+        "history": [
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "fixture-boundary"
+          },
+          {
+            "attachment": {
+              "type": "file",
+              "filename": "/repo/pkg/LINGXI.md",
+              "content": {
+                "type": "text",
+                "file": {
+                  "filePath": "/repo/pkg/LINGXI.md",
+                  "content": "Folder guidance",
+                  "numLines": 1,
+                  "startLine": 1,
+                  "totalLines": 1
+                }
+              },
+              "displayPath": "pkg/LINGXI.md"
+            },
+            "type": "attachment",
+            "uuid": "attachment-1",
+            "timestamp": "2026-10-01T00:00:00.000Z"
+          }
+        ],
+        "trigger": "/repo/pkg/handler.rs",
+        "readState": [],
+        "controlledFreshResume": true
+      },
+      "expected": {
+        "nested": [],
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "Folder guidance",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "pkg/LINGXI.md"
+          }
+        ],
+        "readState": [
+          [
+            "/repo/pkg/LINGXI.md",
+            {
+              "content": "Folder guidance",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          ]
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "eager-Managed-entrypoint-excluded",
+      "input": {
+        "file": {
+          "path": "/managed/CLAUDE.md",
+          "type": "Managed",
+          "content": "Managed guide",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "filename": "/managed/CLAUDE.md",
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/managed/CLAUDE.md",
+            "content": {
+              "path": "/managed/CLAUDE.md",
+              "type": "Managed",
+              "content": "Managed guide",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "../managed/CLAUDE.md"
+          }
+        ],
+        "snapshot": {
+          "/managed/CLAUDE.md": {
+            "content": "Managed guide",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [],
+          "hookResults": []
+        },
+        "afterReadState": [],
+        "hooks": [
+          {
+            "filename": "/managed/CLAUDE.md",
+            "type": "Managed",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [],
+        "telemetry": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "eager-User-entrypoint-excluded",
+      "input": {
+        "file": {
+          "path": "/home/.claude/CLAUDE.md",
+          "type": "User",
+          "content": "User guide",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "filename": "/home/.claude/CLAUDE.md",
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/home/.claude/CLAUDE.md",
+            "content": {
+              "path": "/home/.claude/CLAUDE.md",
+              "type": "User",
+              "content": "User guide",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "../home/.claude/CLAUDE.md"
+          }
+        ],
+        "snapshot": {
+          "/home/.claude/CLAUDE.md": {
+            "content": "User guide",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [],
+          "hookResults": []
+        },
+        "afterReadState": [],
+        "hooks": [
+          {
+            "filename": "/home/.claude/CLAUDE.md",
+            "type": "User",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [],
+        "telemetry": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "eager-Project-entrypoint-excluded",
+      "input": {
+        "file": {
+          "path": "/repo/CLAUDE.md",
+          "type": "Project",
+          "content": "Project guide",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "filename": "/repo/CLAUDE.md",
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/CLAUDE.md",
+            "content": {
+              "path": "/repo/CLAUDE.md",
+              "type": "Project",
+              "content": "Project guide",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "CLAUDE.md"
+          }
+        ],
+        "snapshot": {
+          "/repo/CLAUDE.md": {
+            "content": "Project guide",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [],
+          "hookResults": []
+        },
+        "afterReadState": [],
+        "hooks": [
+          {
+            "filename": "/repo/CLAUDE.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [],
+        "telemetry": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "eager-Local-entrypoint-excluded",
+      "input": {
+        "file": {
+          "path": "/repo/CLAUDE.local.md",
+          "type": "Local",
+          "content": "Local guide",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "filename": "/repo/CLAUDE.local.md",
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/CLAUDE.local.md",
+            "content": {
+              "path": "/repo/CLAUDE.local.md",
+              "type": "Local",
+              "content": "Local guide",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "CLAUDE.local.md"
+          }
+        ],
+        "snapshot": {
+          "/repo/CLAUDE.local.md": {
+            "content": "Local guide",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [],
+          "hookResults": []
+        },
+        "afterReadState": [],
+        "hooks": [
+          {
+            "filename": "/repo/CLAUDE.local.md",
+            "type": "Local",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/handler.rs"
+            }
+          }
+        ],
+        "reads": [],
+        "telemetry": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "eager-AutoMem-entrypoint-excluded",
+      "input": {
+        "file": {
+          "path": "/home/.claude/projects/repo/memory/MEMORY.md",
+          "type": "AutoMem",
+          "content": "AutoMem guide",
+          "contentDiffersFromDisk": false
+        },
+        "history": [],
+        "trigger": "/repo/pkg/handler.rs"
+      },
+      "expected": {
+        "filename": "/home/.claude/projects/repo/memory/MEMORY.md",
+        "initial": [
+          {
+            "type": "nested_memory",
+            "path": "/home/.claude/projects/repo/memory/MEMORY.md",
+            "content": {
+              "path": "/home/.claude/projects/repo/memory/MEMORY.md",
+              "type": "AutoMem",
+              "content": "AutoMem guide",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "../home/.claude/projects/repo/memory/MEMORY.md"
+          }
+        ],
+        "snapshot": {
+          "/home/.claude/projects/repo/memory/MEMORY.md": {
+            "content": "AutoMem guide",
+            "timestamp": 77,
+            "isPartialView": false,
+            "seededFromContext": true,
+            "keepContent": true
+          }
+        },
+        "restored": {
+          "attachments": [],
+          "hookResults": []
+        },
+        "afterReadState": [],
+        "hooks": [],
+        "reads": [],
+        "telemetry": [],
+        "errors": []
+      }
+    }
+  ]
+}

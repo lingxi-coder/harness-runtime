@@ -1,0 +1,24 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "session_id": "00000000-0000-4000-8000-000000002934",
+  "plugin_name": "native-tool-result-persist-fixture",
+  "tool_name": "probe",
+  "tool_use_id": "toolu_native_tool_result_fixture",
+  "prompt": "Use the probe tool once, then report the fixed completion.",
+  "result_prefix": "begin",
+  "lone_unit": 55296,
+  "padding_character": "z",
+  "padding_units": 50001,
+  "unicode_boundary": {
+    "session_id": "00000000-0000-4000-8000-000000002935",
+    "tool_use_id": "toolu_native_tool_result_boundary_fixture",
+    "result_prefix_units": 1999,
+    "result_prefix_character": "a",
+    "boundary_character": "😀",
+    "middle_text": "TAIL",
+    "tail_character": "😀",
+    "padding_character": "z",
+    "padding_units": 48000
+  }
+}

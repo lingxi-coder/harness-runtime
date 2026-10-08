@@ -154,8 +154,8 @@ async fn poll_once(
     spool: &str,
     server_name: &str,
     watch: &[String],
-    prev: Option<&HashMap<String, String>>,
-) -> HashMap<String, String> {
+    prev: Option<&HashMap<Vec<u16>, String>>,
+) -> HashMap<Vec<u16>, String> {
     // 1. Resolve the live client. A disconnected server is not fatal: the
     //    registry's reconnect loop may bring it up on a later tick.
     let Some(client) = mcp.get_client(server_name).await else {
@@ -192,31 +192,54 @@ async fn poll_once(
     // 3. Build this tick's snapshot. If `watch` URIs are given, restrict to
     //    them and fingerprint by content (read_resource); otherwise watch the
     //    whole catalog and fingerprint by list signature (uri + mime).
-    let mut snapshot: HashMap<String, String> = HashMap::new();
+    let mut snapshot: HashMap<Vec<u16>, String> = HashMap::new();
     if watch.is_empty() {
         for r in &resources {
-            snapshot.insert(r.uri.clone(), list_signature(&r.mime_type));
+            let uri_units = r
+                .uri
+                .string_units("")
+                .expect("MCP resource URI is a root-string projection");
+            snapshot.insert(uri_units, list_signature(&r.mime_type));
         }
     } else {
-        let present: HashMap<&str, &Option<String>> = resources
-            .iter()
-            .map(|r| (r.uri.as_str(), &r.mime_type))
-            .collect();
         for uri in watch {
+            let requested_units = uri.encode_utf16().collect::<Vec<_>>();
             // Only fingerprint watched URIs the server currently advertises.
-            if let Some(mime) = present.get(uri.as_str()) {
+            if let Some(resource) = resources.iter().find(|resource| {
+                resource.uri.string_units("").as_deref() == Some(requested_units.as_slice())
+            }) {
                 // Prefer a content hash so we catch *content* changes, not
                 // just catalog membership. Fall back to the list signature if
                 // the read fails.
-                let sig = match client.read_resource(uri).await {
+                let uri_units = resource
+                    .uri
+                    .string_units("")
+                    .expect("MCP resource URI is a root-string projection");
+                let sig = match client.read_resource(&resource.uri).await {
                     Ok(c) => {
                         let mut hasher = DefaultHasher::new();
-                        c.content.hash(&mut hasher);
-                        format!("len:{};hash:{:016x}", c.content.len(), hasher.finish())
+                        let content_units = c
+                            .content
+                            .string_units("")
+                            .expect("MCP resource content is a root-string projection");
+                        match String::from_utf16(&content_units) {
+                            Ok(content) => {
+                                content.hash(&mut hasher);
+                                format!("len:{};hash:{:016x}", content.len(), hasher.finish())
+                            }
+                            Err(_) => {
+                                content_units.hash(&mut hasher);
+                                format!(
+                                    "utf16-len:{};hash:{:016x}",
+                                    content_units.len(),
+                                    hasher.finish()
+                                )
+                            }
+                        }
                     }
-                    Err(_) => list_signature(mime),
+                    Err(_) => list_signature(&resource.mime_type),
                 };
-                snapshot.insert(uri.clone(), sig);
+                snapshot.insert(uri_units, sig);
             }
         }
     }
@@ -230,7 +253,10 @@ async fn poll_once(
                     append_line(
                         fs,
                         spool,
-                        &format!("[{ts}] mcp:{server_name} resource added: {uri}"),
+                        &format!(
+                            "[{ts}] mcp:{server_name} resource added: {}",
+                            String::from_utf16_lossy(uri)
+                        ),
                     )
                     .await;
                 }
@@ -238,7 +264,10 @@ async fn poll_once(
                     append_line(
                         fs,
                         spool,
-                        &format!("[{ts}] mcp:{server_name} resource changed: {uri}"),
+                        &format!(
+                            "[{ts}] mcp:{server_name} resource changed: {}",
+                            String::from_utf16_lossy(uri)
+                        ),
                     )
                     .await;
                 }
@@ -250,7 +279,10 @@ async fn poll_once(
                 append_line(
                     fs,
                     spool,
-                    &format!("[{ts}] mcp:{server_name} resource removed: {uri}"),
+                    &format!(
+                        "[{ts}] mcp:{server_name} resource removed: {}",
+                        String::from_utf16_lossy(uri)
+                    ),
                 )
                 .await;
             }

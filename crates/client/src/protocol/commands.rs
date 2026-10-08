@@ -31,6 +31,7 @@
 //! bytes are a base64 [`String`] in [`ImageRefDto`]; `serde_json::Value` never
 //! enters this crate.
 
+use crate::protocol::ask_user_question::AskUserQuestionAnswersDto;
 use crate::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioOperationIdDto, AudioOperationResultDto,
 };
@@ -42,7 +43,8 @@ use crate::protocol::local_apps::{
     AppSurfaceDto, PluginCommandDto,
 };
 use crate::protocol::permission::PermissionResponseDto;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use std::collections::HashMap;
 
 fn default_git_version_control() -> bool {
@@ -198,6 +200,17 @@ pub struct HookAdminCommandDto {
     pub payload_json: Option<String>,
 }
 
+/// Remote UI surface that can attach to a running session's Mod surface roster.
+/// `terminal` is host-owned and is never announced by a remote client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "lowercase")]
+pub enum UiSurfaceDto {
+    Desktop,
+    Mobile,
+    Vscode,
+}
+
 /// The inbound command envelope a client sends to the engine.
 ///
 /// `#[non_exhaustive]` (mirrors `lingxi_core::host::OutputEvent`) so adding a command is
@@ -236,12 +249,24 @@ pub struct HookAdminCommandDto {
 //
 // `tests/uniffi_metadata_budget_test.rs` holds the line from here on: it names
 // this enum and prints the byte count long before the hard wall is reached.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ClientCommand {
+macro_rules! define_client_command {
+    ($($variants:tt)*) => {
+        #[allow(missing_docs)]
+        #[derive(Debug, Clone, PartialEq, Serialize)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[non_exhaustive]
+        pub enum ClientCommand { $($variants)* }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum ClientCommandWire { $($variants)* }
+
+    };
+}
+
+define_client_command! {
     // ── Turn driving ──────────────────────────────────────────────────────
     // Submit a user prompt to drive a turn. Carries the text, an optional
     // [`PromptModeDto`], inline image bytes (decision §0.8), and an optional
@@ -318,7 +343,7 @@ pub enum ClientCommand {
         // [`AskUserQuestionRequestDto`](crate::protocol::ask_user_question::AskUserQuestionRequestDto).
         request_id: u64,
         // Question text to the user's selected label(s) or free-text answer.
-        answers: HashMap<String, String>,
+        answers: AskUserQuestionAnswersDto,
     },
 
     // Cancel a parked interactive questionnaire.
@@ -980,6 +1005,528 @@ pub enum ClientCommand {
     UpdateAudioCapabilities {
         capabilities: AudioCapabilitySnapshotDto,
     },
+
+    // Explicit renderer lifecycle. These are separate from the bridge hello
+    // and socket close: a renderer attaches only after its session is ready,
+    // and the host uses connection ownership to clean up a lost renderer.
+    UiAttach {
+        surface: UiSurfaceDto,
+        client_id: String,
+    },
+    UiDetach {
+        client_id: String,
+    },
+    // Session-bound Mod UI control request. `request_json` is the canonical
+    // Native control payload including its subtype; the correlation id is an
+    // outer client-protocol field and must not be copied into that payload.
+    UiRender {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientModule {
+        request_id: String,
+        plugin: String,
+    },
+    UiMessage {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientFault {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientPress {
+        request_id: String,
+        request_json: String,
+    },
+    // Parent UI held-action controls. These are Native `$` controls and remain
+    // distinct from the nested Client surface's `ui_client_press` route.
+    UiPress {
+        request_id: String,
+        request_json: String,
+    },
+    UiInput {
+        request_id: String,
+        request_json: String,
+    },
+    UiSelect {
+        request_id: String,
+        request_json: String,
+    },
+    // Host-local UI VM adapter operation; this is not a Native $.ui subtype.
+    UiClientOperation {
+        request_id: String,
+        operation_json: String,
+    },
+
+}
+
+impl From<ClientCommandWire> for ClientCommand {
+    fn from(value: ClientCommandWire) -> Self {
+        match value {
+            ClientCommandWire::SendPrompt {
+                text,
+                prompt_mode,
+                images,
+                turn_id,
+            } => Self::SendPrompt {
+                text,
+                prompt_mode,
+                images,
+                turn_id,
+            },
+            ClientCommandWire::Cancel { turn_id } => Self::Cancel { turn_id },
+            ClientCommandWire::ApprovePermission {
+                request_id,
+                response,
+            } => Self::ApprovePermission {
+                request_id,
+                response,
+            },
+            ClientCommandWire::DenyPermission { request_id } => Self::DenyPermission { request_id },
+            ClientCommandWire::ApproveComputerAccess {
+                request_id,
+                response,
+            } => Self::ApproveComputerAccess {
+                request_id,
+                response,
+            },
+            ClientCommandWire::DenyComputerAccess { request_id } => {
+                Self::DenyComputerAccess { request_id }
+            }
+            ClientCommandWire::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => Self::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            },
+            ClientCommandWire::CancelAskUserQuestion { request_id } => {
+                Self::CancelAskUserQuestion { request_id }
+            }
+            ClientCommandWire::SetPermissionMode { mode } => Self::SetPermissionMode { mode },
+            ClientCommandWire::ListProviderCredentials {
+                operation_id,
+                provider_ids,
+                preview_provider_ids,
+            } => Self::ListProviderCredentials {
+                operation_id,
+                provider_ids,
+                preview_provider_ids,
+            },
+            ClientCommandWire::SetProviderCredential {
+                operation_id,
+                provider_id,
+                credential,
+            } => Self::SetProviderCredential {
+                operation_id,
+                provider_id,
+                credential,
+            },
+            ClientCommandWire::DeleteProviderCredential {
+                operation_id,
+                provider_id,
+            } => Self::DeleteProviderCredential {
+                operation_id,
+                provider_id,
+            },
+            ClientCommandWire::SetModel { model } => Self::SetModel { model },
+            ClientCommandWire::ListModels => Self::ListModels,
+            ClientCommandWire::RunSlashCommand { raw, turn_id } => {
+                Self::RunSlashCommand { raw, turn_id }
+            }
+            ClientCommandWire::RefreshListings { which } => Self::RefreshListings { which },
+            ClientCommandWire::ListSessionAgents => Self::ListSessionAgents,
+            ClientCommandWire::LoadSessionAgentTranscript { agent_id } => {
+                Self::LoadSessionAgentTranscript { agent_id }
+            }
+            ClientCommandWire::NewSession { cwd, model } => Self::NewSession { cwd, model },
+            ClientCommandWire::ResumeSession { session_id, cwd } => {
+                Self::ResumeSession { session_id, cwd }
+            }
+            ClientCommandWire::ListSessions { limit } => Self::ListSessions { limit },
+            ClientCommandWire::Login => Self::Login,
+            ClientCommandWire::Logout => Self::Logout,
+            ClientCommandWire::ForceCompact => Self::ForceCompact,
+            ClientCommandWire::ClearSession => Self::ClearSession,
+            ClientCommandWire::TaskList {
+                status_filter,
+                request_id,
+            } => Self::TaskList {
+                status_filter,
+                request_id,
+            },
+            ClientCommandWire::TaskOutput { task_id, offset } => {
+                Self::TaskOutput { task_id, offset }
+            }
+            ClientCommandWire::TaskStop { task_id } => Self::TaskStop { task_id },
+            ClientCommandWire::ResumeWorkflow { task_id } => Self::ResumeWorkflow { task_id },
+            ClientCommandWire::ListApps => Self::ListApps,
+            ClientCommandWire::GetAppDetails { app_id } => Self::GetAppDetails { app_id },
+            ClientCommandWire::CreateApp {
+                name,
+                origin,
+                brief,
+                git_enabled,
+                workflow_model,
+                conversation_id,
+                surface,
+                mode,
+                request_id,
+            } => Self::CreateApp {
+                name,
+                origin,
+                brief,
+                git_enabled,
+                workflow_model,
+                conversation_id,
+                surface,
+                mode,
+                request_id,
+            },
+            ClientCommandWire::StartApp { app_id } => Self::StartApp { app_id },
+            ClientCommandWire::StopApp { app_id } => Self::StopApp { app_id },
+            ClientCommandWire::RestartApp { app_id } => Self::RestartApp { app_id },
+            ClientCommandWire::ExecuteAppBridgeRequest { request } => {
+                Self::ExecuteAppBridgeRequest { request }
+            }
+            ClientCommandWire::ResolveAppUiRequest {
+                request_id,
+                decision,
+                result_json,
+                error,
+            } => Self::ResolveAppUiRequest {
+                request_id,
+                decision,
+                result_json,
+                error,
+            },
+            ClientCommandWire::ResolveAppCapabilityRequest {
+                request_id,
+                decision,
+            } => Self::ResolveAppCapabilityRequest {
+                request_id,
+                decision,
+            },
+            ClientCommandWire::ResolveAppProfileProposal {
+                app_id,
+                approval_token,
+                approved,
+            } => Self::ResolveAppProfileProposal {
+                app_id,
+                approval_token,
+                approved,
+            },
+            ClientCommandWire::ResetAppPermissions { app_id } => {
+                Self::ResetAppPermissions { app_id }
+            }
+            ClientCommandWire::ListAppSessions {
+                app_id,
+                offset,
+                limit,
+            } => Self::ListAppSessions {
+                app_id,
+                offset,
+                limit,
+            },
+            ClientCommandWire::ListAppCheckpoints { app_id } => Self::ListAppCheckpoints { app_id },
+            ClientCommandWire::RestoreAppCheckpoint {
+                app_id,
+                checkpoint_id,
+            } => Self::RestoreAppCheckpoint {
+                app_id,
+                checkpoint_id,
+            },
+            ClientCommandWire::DeleteApp { app_id } => Self::DeleteApp { app_id },
+            ClientCommandWire::RequestExit => Self::RequestExit,
+            ClientCommandWire::GetConversationControls => Self::GetConversationControls,
+            ClientCommandWire::SetReasoningSelection { selection } => {
+                Self::SetReasoningSelection { selection }
+            }
+            ClientCommandWire::SetFastMode { enabled } => Self::SetFastMode { enabled },
+            ClientCommandWire::ResolveAppDependencyChangeConfirmation {
+                request_id,
+                approved,
+            } => Self::ResolveAppDependencyChangeConfirmation {
+                request_id,
+                approved,
+            },
+            ClientCommandWire::PluginCommand { command } => Self::PluginCommand { command },
+            ClientCommandWire::SkillAdmin { command } => Self::SkillAdmin { command },
+            ClientCommandWire::McpAdmin { command } => Self::McpAdmin { command },
+            ClientCommandWire::PluginAdmin { command } => Self::PluginAdmin { command },
+            ClientCommandWire::HookAdmin { command } => Self::HookAdmin { command },
+            ClientCommandWire::UpdateSettings {
+                destination,
+                patch_json,
+            } => Self::UpdateSettings {
+                destination,
+                patch_json,
+            },
+            ClientCommandWire::UpdatePermissionRules {
+                destination,
+                behavior,
+                add,
+                remove,
+            } => Self::UpdatePermissionRules {
+                destination,
+                behavior,
+                add,
+                remove,
+            },
+            ClientCommandWire::SetDefaultPermissionMode { destination, mode } => {
+                Self::SetDefaultPermissionMode { destination, mode }
+            }
+            ClientCommandWire::UpdateWorkspaceDirectories {
+                destination,
+                add,
+                remove,
+            } => Self::UpdateWorkspaceDirectories {
+                destination,
+                add,
+                remove,
+            },
+            ClientCommandWire::UpsertMcpServer {
+                scope,
+                name,
+                config_json,
+            } => Self::UpsertMcpServer {
+                scope,
+                name,
+                config_json,
+            },
+            ClientCommandWire::RemoveMcpServer { scope, name } => {
+                Self::RemoveMcpServer { scope, name }
+            }
+            ClientCommandWire::AudioResponse { identity, result } => {
+                Self::AudioResponse { identity, result }
+            }
+            ClientCommandWire::AttachTurn {
+                turn_id,
+                after_sequence,
+            } => Self::AttachTurn {
+                turn_id,
+                after_sequence,
+            },
+            ClientCommandWire::ResumeTurn { turn_id } => Self::ResumeTurn { turn_id },
+            ClientCommandWire::PauseTurn { turn_id, reason } => Self::PauseTurn { turn_id, reason },
+            ClientCommandWire::SetTypescriptLspMode { mode } => Self::SetTypescriptLspMode { mode },
+            ClientCommandWire::ResolveAppRuntimeProfileSelection {
+                request_id,
+                selected_family,
+            } => Self::ResolveAppRuntimeProfileSelection {
+                request_id,
+                selected_family,
+            },
+            ClientCommandWire::ForkSession {
+                session_id,
+                target_mode,
+            } => Self::ForkSession {
+                session_id,
+                target_mode,
+            },
+            ClientCommandWire::TestProviderConnection {
+                operation_id,
+                provider_id,
+                api_base,
+                model,
+                credential_override,
+            } => Self::TestProviderConnection {
+                operation_id,
+                provider_id,
+                api_base,
+                model,
+                credential_override,
+            },
+            ClientCommandWire::CronManage {
+                request_id,
+                request,
+            } => Self::CronManage {
+                request_id,
+                request,
+            },
+            ClientCommandWire::TaskMessage { task_id, message } => {
+                Self::TaskMessage { task_id, message }
+            }
+            ClientCommandWire::CronRunStarted { run_id, session_id } => {
+                Self::CronRunStarted { run_id, session_id }
+            }
+            ClientCommandWire::ScheduledRunTurn {
+                run_id,
+                prompt,
+                model,
+                reasoning,
+            } => Self::ScheduledRunTurn {
+                run_id,
+                prompt,
+                model,
+                reasoning,
+            },
+            ClientCommandWire::CronRunCompleted {
+                run_id,
+                session_id,
+                summary,
+                error,
+            } => Self::CronRunCompleted {
+                run_id,
+                session_id,
+                summary,
+                error,
+            },
+            ClientCommandWire::UpdateAudioCapabilities { capabilities } => {
+                Self::UpdateAudioCapabilities { capabilities }
+            }
+            ClientCommandWire::UiAttach { surface, client_id } => {
+                Self::UiAttach { surface, client_id }
+            }
+            ClientCommandWire::UiDetach { client_id } => Self::UiDetach { client_id },
+            ClientCommandWire::UiRender {
+                request_id,
+                request_json,
+            } => Self::UiRender {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiClientModule { request_id, plugin } => {
+                Self::UiClientModule { request_id, plugin }
+            }
+            ClientCommandWire::UiMessage {
+                request_id,
+                request_json,
+            } => Self::UiMessage {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiClientFault {
+                request_id,
+                request_json,
+            } => Self::UiClientFault {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiClientPress {
+                request_id,
+                request_json,
+            } => Self::UiClientPress {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiPress {
+                request_id,
+                request_json,
+            } => Self::UiPress {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiInput {
+                request_id,
+                request_json,
+            } => Self::UiInput {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiSelect {
+                request_id,
+                request_json,
+            } => Self::UiSelect {
+                request_id,
+                request_json,
+            },
+            ClientCommandWire::UiClientOperation {
+                request_id,
+                operation_json,
+            } => Self::UiClientOperation {
+                request_id,
+                operation_json,
+            },
+        }
+    }
+}
+struct RawEnvelopeFields(HashMap<String, Box<RawValue>>);
+
+impl<'de> Deserialize<'de> for RawEnvelopeFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RawObjectVisitor {
+            type Value = RawEnvelopeFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object with raw member values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    // Match JSON.parse's last-member-wins behavior while
+                    // capturing each value before recursively decoding it.
+                    fields.insert(key, map.next_value::<Box<RawValue>>()?);
+                }
+                Ok(RawEnvelopeFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(RawObjectVisitor)
+    }
+}
+
+fn command_raw_required<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    let raw = fields.remove(name).ok_or_else(|| E::missing_field(name))?;
+    serde_json::from_str(raw.get()).map_err(E::custom)
+}
+
+fn command_raw_fallback_json<E>(
+    tag: &str,
+    fields: HashMap<String, Box<RawValue>>,
+) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    let mut json = String::from("{\"type\":");
+    json.push_str(&serde_json::to_string(tag).map_err(E::custom)?);
+    for (key, value) in fields {
+        json.push(',');
+        json.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
+        json.push(':');
+        json.push_str(value.get());
+    }
+    json.push('}');
+    Ok(json)
+}
+
+impl<'de> Deserialize<'de> for ClientCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawEnvelopeFields(mut fields) = RawEnvelopeFields::deserialize(deserializer)?;
+        let tag = command_raw_required::<String, D::Error>(&mut fields, "type")?;
+        match tag.as_str() {
+            "answer_ask_user_question" => Ok(Self::AnswerAskUserQuestion {
+                request_id: command_raw_required(&mut fields, "request_id")?,
+                answers: command_raw_required(&mut fields, "answers")?,
+            }),
+            _ => {
+                let json = command_raw_fallback_json::<D::Error>(&tag, fields)?;
+                let wire: ClientCommandWire =
+                    serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
+                Ok(wire.into())
+            }
+        }
+    }
 }
 
 /// A settings tier the user can WRITE to, as named on the wire.

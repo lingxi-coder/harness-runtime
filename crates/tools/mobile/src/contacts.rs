@@ -2,19 +2,23 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::contacts::{ContactsError, ContactsQuery};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::PermissionResult;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::BuiltinToolContext;
 
-use crate::device_support::{ask, bound_text, bounded_records, execute, failure, invalid, parse};
+use crate::device_support::{
+    ask, bound_text, bounded_records, execute, failure, generated_projection,
+    generated_schema_repair, invalid, parse,
+};
 
 /// Canonical model-facing tool name.
 pub const TOOL_NAME: &str = "contacts";
@@ -33,7 +37,7 @@ struct Input {
     limit: u32,
 }
 
-fn query(input: &Value) -> Result<ContactsQuery, ValidationError> {
+fn query(input: &Utf16JsonProjection) -> Result<ContactsQuery, ValidationError> {
     let input: Input = parse(input)?;
     let query = input.query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
@@ -66,13 +70,13 @@ impl ContactsTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object", "properties": {
             "query": { "type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS, "description": "Non-empty display-name search text; surrounding whitespace is trimmed." },
             "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20 }
         }, "required": ["query"], "additionalProperties": false
-    })
+    }))
 });
 
 #[async_trait]
@@ -80,43 +84,54 @@ impl Tool for ContactsTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.contacts.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         32768
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("Search contacts, address book, phone numbers and email addresses by name")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("Search contacts, address book, phone numbers and email addresses by name".into())
     }
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        ask(TOOL_NAME, "Search contacts by the requested name and read matching phone numbers and email addresses. Native contacts permission may also be required.")
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
+        ask(
+            TOOL_NAME,
+            "Search contacts by the requested name and read matching phone numbers and email addresses. Native contacts permission may also be required.",
+        )
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Searching device contacts by name".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Search native contacts by a non-empty display-name query of at most 200 characters. Returns contacts with id, display_name, phones and emails. Limit is 1..50 (default 20). A true truncated flag means the native result reached the requested limit (more contacts may exist), or returned data was shortened or omitted. It does not prove that more contacts exist. Use the specific person requested; this tool cannot modify contacts or list the entire address book.".into()
     }
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         query(input).map(|_| ())
     }
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {

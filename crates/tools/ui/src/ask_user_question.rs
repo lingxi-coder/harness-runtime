@@ -64,21 +64,26 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
     ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
 };
 use telemetry::AnalyticsBus;
-use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
+use tool_api::ask_user_question::{
+    join_answer_labels, AskOption, AskQuestion, AskUserQuestionExchange,
+};
 
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use tokio::sync::mpsc;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 // -- Wire identifier locks ---------------------------------------------------
@@ -205,21 +210,21 @@ impl AskUserQuestionTimeout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionOption {
     /// Display text the user selects (concise, 1-5 words).
-    pub label: String,
+    pub label: Utf16JsonProjection,
     /// Explanation of what choosing this option means.
-    pub description: String,
+    pub description: Utf16JsonProjection,
     /// Optional preview content rendered when this option is focused
     /// (markdown/HTML/code/etc.). Passthrough in headless Rust.
-    pub preview: Option<String>,
+    pub preview: Option<Utf16JsonProjection>,
 }
 
 /// One question (`questionSchema`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
     /// The complete question text.
-    pub question: String,
+    pub question: Utf16JsonProjection,
     /// Very short chip/tag label (≤ chip width).
-    pub header: String,
+    pub header: Utf16JsonProjection,
     /// 2-4 mutually-exclusive (unless `multi_select`) options.
     pub options: Vec<QuestionOption>,
     /// Allow multiple selections. Defaults to `false`.
@@ -228,13 +233,13 @@ pub struct Question {
 
 /// Synthesize the first-option answer map — each question answered with its
 /// first option's label. Used only by [`FirstOptionResolver`] in hermetic tests.
-fn first_option_answers(questions: &[Question]) -> HashMap<String, String> {
-    let mut out = HashMap::with_capacity(questions.len());
+fn first_option_answers(questions: &[Question]) -> Vec<(Utf16JsonProjection, Utf16JsonProjection)> {
+    let mut out = Vec::with_capacity(questions.len());
     for q in questions {
         // `options` is guaranteed non-empty by validation; first label is
         // the synthesized single-select answer.
         if let Some(first) = q.options.first() {
-            out.insert(q.question.clone(), first.label.clone());
+            out.push((q.question.clone(), first.label.clone()));
         }
     }
     out
@@ -283,7 +288,7 @@ pub trait AskUserQuestionResolver: Send + Sync {
         &self,
         questions: &[Question],
         non_interactive: bool,
-    ) -> Result<HashMap<String, String>, ToolError>;
+    ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError>;
 }
 
 /// Hermetic resolver — answers each question with its first option's label.
@@ -298,7 +303,7 @@ impl AskUserQuestionResolver for FirstOptionResolver {
         &self,
         questions: &[Question],
         _non_interactive: bool,
-    ) -> Result<HashMap<String, String>, ToolError> {
+    ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
         Ok(first_option_answers(questions))
     }
 }
@@ -368,7 +373,7 @@ impl AskUserQuestionResolver for DefaultTimeoutResolver {
         &self,
         _questions: &[Question],
         _non_interactive: bool,
-    ) -> Result<HashMap<String, String>, ToolError> {
+    ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
         let _ = self.window;
         Err(ToolError::InteractionRequired(
             ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
@@ -382,7 +387,7 @@ impl AskUserQuestionResolver for TuiBridgeResolver {
         &self,
         questions: &[Question],
         non_interactive: bool,
-    ) -> Result<HashMap<String, String>, ToolError> {
+    ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
         if non_interactive {
             return Err(ToolError::InteractionRequired(
                 ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
@@ -434,134 +439,168 @@ impl AskUserQuestionTool {
 
 /// Parse one option object. Requires non-empty string `label` + `description`;
 /// `preview` is an optional string.
-fn parse_option(idx_q: usize, idx_o: usize, v: &Value) -> Result<QuestionOption, ToolError> {
-    let obj = v.as_object().ok_or_else(|| {
-        ToolError::InvalidInput(format!(
+fn parse_option(
+    idx_q: usize,
+    idx_o: usize,
+    value: JsonValueView<'_>,
+) -> Result<QuestionOption, ToolError> {
+    if value.object_entries().is_none() {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}].options[{idx_o}] must be an object"
-        ))
-    })?;
-    let label = obj.get("label").and_then(Value::as_str).ok_or_else(|| {
-        ToolError::InvalidInput(format!(
-            "AskUserQuestion: questions[{idx_q}].options[{idx_o}].label must be a string"
-        ))
-    })?;
-    if label.is_empty() {
-        return Err(ToolError::InvalidInput(format!(
+        )));
+    }
+    let label_units = value
+        .get_property("label")
+        .and_then(JsonValueView::code_units)
+        .ok_or_else(|| {
+            invalid_tool_input(format!(
+                "AskUserQuestion: questions[{idx_q}].options[{idx_o}].label must be a string"
+            ))
+        })?;
+    if label_units.is_empty() {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}].options[{idx_o}].label is empty"
         )));
     }
-    let description = obj
-        .get("description")
-        .and_then(Value::as_str)
+    let label = source_text_projection_units(label_units);
+    let description = value
+        .get_property("description")
+        .and_then(JsonValueView::code_units)
+        .map(source_text_projection_units)
         .ok_or_else(|| {
-            ToolError::InvalidInput(format!(
+            invalid_tool_input(format!(
                 "AskUserQuestion: questions[{idx_q}].options[{idx_o}].description must be a string"
             ))
         })?;
     // `preview` optional: if present it must be a string (passthrough).
-    let preview = match obj.get("preview") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
+    let preview = match value.get_property("preview") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) if value.code_units().is_some() => Some(source_text_projection_units(
+            value.code_units().expect("checked string"),
+        )),
         Some(_) => {
-            return Err(ToolError::InvalidInput(format!(
+            return Err(invalid_tool_input(format!(
                 "AskUserQuestion: questions[{idx_q}].options[{idx_o}].preview must be a string"
-            )))
+            )));
         }
     };
     Ok(QuestionOption {
-        label: label.to_string(),
-        description: description.to_string(),
+        label,
+        description,
         preview,
     })
 }
 
 /// Parse one question object, enforcing the per-question option-count bounds.
-fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
-    let obj = v.as_object().ok_or_else(|| {
-        ToolError::InvalidInput(format!(
+fn parse_question(idx_q: usize, value: JsonValueView<'_>) -> Result<Question, ToolError> {
+    if value.object_entries().is_none() {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}] must be an object"
-        ))
-    })?;
-    let question = obj.get("question").and_then(Value::as_str).ok_or_else(|| {
-        ToolError::InvalidInput(format!(
-            "AskUserQuestion: questions[{idx_q}].question must be a string"
-        ))
-    })?;
-    if question.is_empty() {
-        return Err(ToolError::InvalidInput(format!(
+        )));
+    }
+    let question_units = value
+        .get_property("question")
+        .and_then(JsonValueView::code_units)
+        .ok_or_else(|| {
+            invalid_tool_input(format!(
+                "AskUserQuestion: questions[{idx_q}].question must be a string"
+            ))
+        })?;
+    if question_units.is_empty() {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}].question is empty"
         )));
     }
-    let header = obj.get("header").and_then(Value::as_str).ok_or_else(|| {
-        ToolError::InvalidInput(format!(
-            "AskUserQuestion: questions[{idx_q}].header must be a string"
-        ))
-    })?;
-    let opts_v = obj
-        .get("options")
-        .and_then(Value::as_array)
+    let question = source_text_projection_units(question_units);
+    let header = value
+        .get_property("header")
+        .and_then(JsonValueView::code_units)
+        .map(source_text_projection_units)
         .ok_or_else(|| {
-            ToolError::InvalidInput(format!(
+            invalid_tool_input(format!(
+                "AskUserQuestion: questions[{idx_q}].header must be a string"
+            ))
+        })?;
+    let opts_v = value
+        .get_property("options")
+        .and_then(JsonValueView::array_len)
+        .ok_or_else(|| {
+            invalid_tool_input(format!(
                 "AskUserQuestion: questions[{idx_q}].options must be an array"
             ))
         })?;
-    if opts_v.len() < MIN_ASK_OPTIONS {
-        return Err(ToolError::InvalidInput(format!(
+    if opts_v < MIN_ASK_OPTIONS {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}].options must have at least {MIN_ASK_OPTIONS} options"
         )));
     }
-    if opts_v.len() > MAX_ASK_OPTIONS {
-        return Err(ToolError::InvalidInput(format!(
+    if opts_v > MAX_ASK_OPTIONS {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: questions[{idx_q}].options count {} exceeds max {MAX_ASK_OPTIONS}",
-            opts_v.len()
+            opts_v
         )));
     }
-    let mut options = Vec::with_capacity(opts_v.len());
-    for (idx_o, ov) in opts_v.iter().enumerate() {
-        options.push(parse_option(idx_q, idx_o, ov)?);
+    let mut options = Vec::with_capacity(opts_v);
+    let options_view = value
+        .get_property("options")
+        .expect("options array was checked");
+    for idx_o in 0..opts_v {
+        options.push(parse_option(
+            idx_q,
+            idx_o,
+            options_view.get_index(idx_o).expect("array item exists"),
+        )?);
     }
 
     // `multiSelect` defaults to false (TS `z.boolean().default(false)`).
-    let multi_select = match obj.get("multiSelect") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
+    let multi_select = match value.get_property("multiSelect") {
+        None => false,
+        Some(value) if value.is_null() => false,
+        Some(value) if value.as_bool().is_some() => value.as_bool().unwrap_or(false),
         Some(_) => {
-            return Err(ToolError::InvalidInput(format!(
+            return Err(invalid_tool_input(format!(
                 "AskUserQuestion: questions[{idx_q}].multiSelect must be a boolean"
-            )))
+            )));
         }
     };
 
     Ok(Question {
-        question: question.to_string(),
-        header: header.to_string(),
+        question,
+        header,
         options,
         multi_select,
     })
 }
 
 /// Parse the top-level `questions` array, enforcing question-count bounds.
-pub(crate) fn parse_questions(input: &Value) -> Result<Vec<Question>, ToolError> {
+pub(crate) fn parse_questions_source(
+    input: &Utf16JsonProjection,
+) -> Result<Vec<Question>, ToolError> {
     let arr = input
-        .get("questions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            ToolError::InvalidInput("AskUserQuestion: missing or non-array questions".into())
-        })?;
-    if arr.len() < MIN_ASK_QUESTIONS {
-        return Err(ToolError::InvalidInput(format!(
+        .get_property("questions")
+        .and_then(JsonValueView::array_len)
+        .ok_or_else(|| invalid_tool_input("AskUserQuestion: missing or non-array questions"))?;
+    if arr < MIN_ASK_QUESTIONS {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: at least {MIN_ASK_QUESTIONS} question is required"
         )));
     }
-    if arr.len() > MAX_ASK_QUESTIONS {
-        return Err(ToolError::InvalidInput(format!(
+    if arr > MAX_ASK_QUESTIONS {
+        return Err(invalid_tool_input(format!(
             "AskUserQuestion: question count {} exceeds max {MAX_ASK_QUESTIONS}",
-            arr.len()
+            arr
         )));
     }
-    let mut out = Vec::with_capacity(arr.len());
-    for (idx_q, qv) in arr.iter().enumerate() {
-        out.push(parse_question(idx_q, qv)?);
+    let mut out = Vec::with_capacity(arr);
+    let questions = input
+        .get_property("questions")
+        .expect("questions array was checked");
+    for idx_q in 0..arr {
+        out.push(parse_question(
+            idx_q,
+            questions.get_index(idx_q).expect("question item exists"),
+        )?);
     }
     Ok(out)
 }
@@ -570,15 +609,17 @@ pub(crate) fn parse_questions(input: &Value) -> Result<Vec<Question>, ToolError>
 /// question texts must be unique, and option labels must be unique within each
 /// question. On failure returns [`UNIQUENESS_REFINE_MESSAGE`].
 pub(crate) fn check_uniqueness(questions: &[Question]) -> Result<(), ToolError> {
-    let mut seen_q: HashSet<&str> = HashSet::with_capacity(questions.len());
+    let mut seen_q: HashSet<Vec<u16>> = HashSet::with_capacity(questions.len());
     for q in questions {
-        if !seen_q.insert(q.question.as_str()) {
-            return Err(ToolError::InvalidInput(UNIQUENESS_REFINE_MESSAGE.into()));
+        let question_units = q.question.string_units("").unwrap_or_default();
+        if !seen_q.insert(question_units) {
+            return Err(invalid_tool_input(UNIQUENESS_REFINE_MESSAGE));
         }
-        let mut seen_l: HashSet<&str> = HashSet::with_capacity(q.options.len());
+        let mut seen_l: HashSet<Vec<u16>> = HashSet::with_capacity(q.options.len());
         for opt in &q.options {
-            if !seen_l.insert(opt.label.as_str()) {
-                return Err(ToolError::InvalidInput(UNIQUENESS_REFINE_MESSAGE.into()));
+            let label_units = opt.label.string_units("").unwrap_or_default();
+            if !seen_l.insert(label_units) {
+                return Err(invalid_tool_input(UNIQUENESS_REFINE_MESSAGE));
             }
         }
     }
@@ -586,39 +627,88 @@ pub(crate) fn check_uniqueness(questions: &[Question]) -> Result<(), ToolError> 
 }
 
 /// Full input validation: parse + uniqueness refine.
-pub(crate) fn validate_input_internal(input: &Value) -> Result<Vec<Question>, ToolError> {
-    let questions = parse_questions(input)?;
+pub(crate) fn validate_input_internal_source(
+    input: &Utf16JsonProjection,
+) -> Result<Vec<Question>, ToolError> {
+    let questions = parse_questions_source(input)?;
     check_uniqueness(&questions)?;
     Ok(questions)
 }
 
-/// Re-serialize the parsed questions back to the wire/output shape, applying
-/// the `multiSelect` default and dropping absent `preview`. This is what the TS
-/// `call` echoes back as `data.questions`.
-fn questions_to_json(questions: &[Question]) -> Value {
-    Value::Array(
-        questions
-            .iter()
-            .map(|q| {
-                let mut opts = Vec::with_capacity(q.options.len());
-                for opt in &q.options {
-                    let mut o = Map::new();
-                    o.insert("label".into(), Value::String(opt.label.clone()));
-                    o.insert("description".into(), Value::String(opt.description.clone()));
-                    if let Some(p) = &opt.preview {
-                        o.insert("preview".into(), Value::String(p.clone()));
-                    }
-                    opts.push(Value::Object(o));
-                }
-                let mut m = Map::new();
-                m.insert("question".into(), Value::String(q.question.clone()));
-                m.insert("header".into(), Value::String(q.header.clone()));
-                m.insert("options".into(), Value::Array(opts));
-                m.insert("multiSelect".into(), Value::Bool(q.multi_select));
-                Value::Object(m)
-            })
-            .collect(),
-    )
+#[cfg(test)]
+pub(crate) fn validate_input_internal(input: &Value) -> Result<Vec<Question>, ToolError> {
+    validate_input_internal_source(&generated_builtin_result(input))
+}
+
+fn questions_to_projection(
+    input: &Utf16JsonProjection,
+    questions: &[Question],
+) -> Utf16JsonProjection {
+    let mut rendered = Vec::with_capacity(questions.len());
+    for question_index in 0..questions.len() {
+        let pointer = format!("/questions/{question_index}");
+        let question_source = input
+            .subprojection(&format!("{pointer}/question"))
+            .expect("validated question text exists");
+        let header_source = input
+            .subprojection(&format!("{pointer}/header"))
+            .expect("validated question header exists");
+        let options_source = input
+            .at_pointer(&format!("{pointer}/options"))
+            .expect("validated options exist");
+        let option_count = options_source.array_len().expect("options are an array");
+        let mut options = Vec::with_capacity(option_count);
+        for option_index in 0..option_count {
+            let option_pointer = format!("{pointer}/options/{option_index}");
+            let mut fields = vec![
+                (
+                    "label".into(),
+                    input
+                        .subprojection(&format!("{option_pointer}/label"))
+                        .expect("validated option label exists"),
+                ),
+                (
+                    "description".into(),
+                    input
+                        .subprojection(&format!("{option_pointer}/description"))
+                        .expect("validated option description exists"),
+                ),
+            ];
+            if input
+                .at_pointer(&format!("{option_pointer}/preview"))
+                .is_some_and(|value| !value.is_null())
+            {
+                fields.push((
+                    "preview".into(),
+                    input
+                        .subprojection(&format!("{option_pointer}/preview"))
+                        .expect("validated option preview exists"),
+                ));
+            }
+            options.push(
+                Utf16JsonProjection::object(fields).expect("AskUserQuestion option is valid JSON"),
+            );
+        }
+        let multi_select = input
+            .at_pointer(&format!("{pointer}/multiSelect"))
+            .filter(|value| !value.is_null())
+            .and_then(|_| input.subprojection(&format!("{pointer}/multiSelect")).ok())
+            .unwrap_or_else(|| generated_builtin_result(&json!(false)));
+        rendered.push(
+            Utf16JsonProjection::object(vec![
+                ("question".into(), question_source),
+                ("header".into(), header_source),
+                (
+                    "options".into(),
+                    Utf16JsonProjection::array(options)
+                        .expect("AskUserQuestion options are valid JSON"),
+                ),
+                ("multiSelect".into(), multi_select),
+            ])
+            .expect("AskUserQuestion question is valid JSON"),
+        );
+    }
+    Utf16JsonProjection::array(rendered).expect("AskUserQuestion question list is valid JSON")
 }
 
 // -- Schema ------------------------------------------------------------------
@@ -681,6 +771,8 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
+
 // -- Telemetry helpers -------------------------------------------------------
 
 fn pii_str(s: &str) -> AnalyticsValue {
@@ -709,48 +801,88 @@ impl Tool for AskUserQuestionTool {
         ASK_USER_QUESTION_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("prompt the user with a multiple-choice question")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("prompt the user with a multiple-choice question".into())
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_SCHEMA
     }
-    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn input_validation_issues(&self, input: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
         // 2.1.263 j$e runs after base types parse, including a dirty (too many
         // options/questions) parse. Do not reuse the length-rejecting call parser.
-        let Some(questions) = input.get("questions").and_then(Value::as_array) else {
+        let Some(questions) = input
+            .get_property("questions")
+            .and_then(JsonValueView::array_len)
+        else {
             return Vec::new();
         };
-        let mut texts = std::collections::HashSet::new();
+        let mut texts = std::collections::HashSet::<Vec<u16>>::new();
         let mut duplicate = false;
-        for question in questions {
+        for index in 0..questions {
+            let Some(question) = input
+                .get_property("questions")
+                .and_then(|questions| questions.get_index(index))
+            else {
+                return Vec::new();
+            };
             let (Some(text), Some(_header), Some(options)) = (
-                question.get("question").and_then(Value::as_str),
-                question.get("header").and_then(Value::as_str),
-                question.get("options").and_then(Value::as_array),
+                question
+                    .get_property("question")
+                    .and_then(JsonValueView::code_units),
+                question
+                    .get_property("header")
+                    .and_then(JsonValueView::code_units),
+                question
+                    .get_property("options")
+                    .and_then(JsonValueView::array_len),
             ) else {
                 return Vec::new();
             };
-            if question.get("multiSelect").is_some_and(|v| !v.is_boolean()) {
+            if question
+                .get_property("multiSelect")
+                .is_some_and(|value| !value.is_null() && value.as_bool().is_none())
+            {
                 return Vec::new();
             }
-            duplicate |= !texts.insert(text);
-            let mut labels = std::collections::HashSet::new();
-            for option in options {
+            duplicate |= !texts.insert(text.to_vec());
+            let mut labels = std::collections::HashSet::<Vec<u16>>::new();
+            let options_view = question
+                .get_property("options")
+                .expect("options array was checked");
+            for option_index in 0..options {
+                let Some(option) = options_view.get_index(option_index) else {
+                    return Vec::new();
+                };
                 let (Some(label), Some(_description)) = (
-                    option.get("label").and_then(Value::as_str),
-                    option.get("description").and_then(Value::as_str),
+                    option
+                        .get_property("label")
+                        .and_then(JsonValueView::code_units),
+                    option
+                        .get_property("description")
+                        .and_then(JsonValueView::code_units),
                 ) else {
                     return Vec::new();
                 };
-                if option.get("preview").is_some_and(|v| !v.is_string()) {
+                if option
+                    .get_property("preview")
+                    .is_some_and(|value| !value.is_null() && value.code_units().is_none())
+                {
                     return Vec::new();
                 }
-                duplicate |= !labels.insert(label);
+                duplicate |= !labels.insert(label.to_vec());
             }
         }
         if duplicate {
-            vec![json!({"code":"custom","path":[],"message":UNIQUENESS_REFINE_MESSAGE})]
+            vec![generated_builtin_result(
+                &json!({"code":"custom","path":[],"message":UNIQUENESS_REFINE_MESSAGE}),
+            )]
         } else {
             Vec::new()
         }
@@ -762,29 +894,33 @@ impl Tool for AskUserQuestionTool {
         // TS `maxResultSizeChars: 100_000`.
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         // TS `isConcurrencySafe() { return true }`.
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         // TS `isReadOnly() { return true }`.
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
     fn requires_user_interaction(&self) -> bool {
         // TS `requiresUserInteraction() { return true }`.
         true
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // 🚨 This must NOT be an `Ask`, even though the oracle's own
         // `checkPermissions` is `{behavior:"ask", message:"Answer questions?"}`
         // (2.1.270 `As` tool object, src_169588164.js @3607405). Upstream, that
@@ -828,12 +964,12 @@ impl Tool for AskUserQuestionTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // `prompt.ts:7-8` DESCRIPTION.
         "Asks the user multiple choice questions to gather information, clarify ambiguity, understand preferences, make decisions or offer them choices.".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // `prompt.ts:32-44` ASK_USER_QUESTION_TOOL_PROMPT. The preview-format
         // suffix (`PREVIEW_FEATURE_PROMPT[format]`) is gated on
         // `getQuestionPreviewFormat()` which has no Rust substrate — omitted.
@@ -847,23 +983,24 @@ impl Tool for AskUserQuestionTool {
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        validate_input_internal(input).map_err(|e| ValidationError(format!("{e}")))?;
+        validate_input_internal_source(input)
+            .map_err(|error| ValidationError(error.model_facing_message()))?;
         Ok(())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let questions = match validate_input_internal(&input) {
+        let questions = match validate_input_internal_source(&input) {
             Ok(q) => q,
             Err(e) => {
                 emit_failed(&bus, "invalid_input", started.elapsed().as_millis() as u64).await;
@@ -880,10 +1017,11 @@ impl Tool for AskUserQuestionTool {
         // `toAutoClassifierInput`: questions joined with " | ".
         let joined = questions
             .iter()
-            .map(|q| q.question.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        md.insert("_PROTO_questions".into(), pii_str(&joined));
+            .map(|q| q.question.string_at("").map(str::to_owned))
+            .collect::<Option<Vec<_>>>();
+        if let Some(joined) = joined {
+            md.insert("_PROTO_questions".into(), pii_str(&joined.join(" | ")));
+        }
         bus.log_event(ASK_USER_QUESTION_STARTED, md).await;
 
         // Resolve the per-question answers (UI substitute). The resolver keys
@@ -893,7 +1031,7 @@ impl Tool for AskUserQuestionTool {
         // broker can then remove exactly this request by observing a closed
         // sender, while unrelated workflow questions remain parked.
         let resolve = self.resolver.resolve(&questions, non_interactive);
-        let answers_map = match if let Some(cancel) = ctx.cancel {
+        let answers = match if let Some(cancel) = ctx.cancel {
             tokio::select! {
                 result = resolve => result,
                 // `interrupt_behavior()` above is `Block`, so `turn_loop`'s
@@ -918,12 +1056,22 @@ impl Tool for AskUserQuestionTool {
 
         // Build the answers object keyed by question text (insertion-stable in
         // question order for deterministic output).
-        let mut answers = Map::new();
-        for q in &questions {
-            if let Some(answer) = answers_map.get(&q.question) {
-                answers.insert(q.question.clone(), Value::String(answer.clone()));
+        let mut answer_fields = Vec::new();
+        for question in &questions {
+            let question_units = question
+                .question
+                .string_units("")
+                .expect("validated question text is a source string");
+            if let Some((_, answer)) = answers
+                .iter()
+                .find(|(key, _)| key.string_units("").as_deref() == Some(question_units.as_slice()))
+            {
+                answer_fields.push((question_units, answer.clone()));
             }
         }
+        let answer_count = answer_fields.len();
+        let answers = Utf16JsonProjection::object_units(answer_fields)
+            .expect("AskUserQuestion answers object is valid JSON");
 
         let mut completed: LogEventMetadata = HashMap::new();
         completed.insert(
@@ -932,29 +1080,100 @@ impl Tool for AskUserQuestionTool {
         );
         completed.insert(
             "answer_count".into(),
-            AnalyticsValue::Int(answers.len() as i64),
+            AnalyticsValue::Int(answer_count as i64),
         );
         bus.log_event(ASK_USER_QUESTION_COMPLETED, completed).await;
 
         // Output `{ questions, answers, ...(annotations && {annotations}) }`.
         // Rust headless has no UI to produce annotations, so they are omitted
         // unless the input already carried them (passthrough parity).
-        let mut data = Map::new();
-        data.insert("questions".into(), questions_to_json(&questions));
-        data.insert("answers".into(), Value::Object(answers));
-        if let Some(annotations) = input.get("annotations").filter(|value| !value.is_null()) {
-            data.insert("annotations".into(), annotations.clone());
+        let mut data = vec![
+            (
+                "questions".into(),
+                questions_to_projection(&input, &questions),
+            ),
+            ("answers".into(), answers),
+        ];
+        if input
+            .get_property("annotations")
+            .is_some_and(|value| !value.is_null())
+        {
+            data.push((
+                "annotations".into(),
+                input
+                    .subprojection("/annotations")
+                    .expect("annotations field exists"),
+            ));
         }
 
         Ok(ToolCallResult {
-            data: Value::Object(data),
+            data: Utf16JsonProjection::object(data).expect("AskUserQuestion result is valid JSON"),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestAskUserQuestionResult {
+    data: Value,
+    model_content: Option<String>,
+}
+
+#[cfg(test)]
+impl AskUserQuestionTool {
+    fn input_schema(&self) -> &Value {
+        &SCHEMA
+    }
+
+    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+        Tool::input_validation_issues(self, &generated_builtin_result(input))
+            .into_iter()
+            .map(|issue| {
+                serde_json::from_str(
+                    &issue
+                        .to_json_string()
+                        .expect("test issue projection serializes"),
+                )
+                .expect("test issue is JSON")
+            })
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestAskUserQuestionResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection serializes"),
+        )
+        .expect("test result JSON parses");
+        let model_content = result
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .map(str::to_owned);
+        Ok(TestAskUserQuestionResult {
+            data,
+            model_content,
+        })
+    }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -994,7 +1213,9 @@ mod tests {
                 "multiSelect": false
             }]
         });
-        let result = tool.check_permissions(&input, &fresh_ctx()).await;
+        let result = tool
+            .check_permissions(&generated_builtin_result(&input), &fresh_ctx())
+            .await;
         assert!(
             matches!(result, PermissionResult::Allow { .. }),
             "AskUserQuestion owns its own dialog; the permission layer must not add one: {result:?}"
@@ -1204,7 +1425,10 @@ mod tests {
         let qs = validate_input_internal(&input).expect("ok");
         assert!(!qs[0].multi_select);
         assert_eq!(
-            qs[0].options[0].preview.as_deref(),
+            qs[0].options[0]
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.string_at("")),
             Some("```rust\nfn a(){}\n```")
         );
         assert_eq!(qs[0].options[1].preview, None);
@@ -1265,7 +1489,7 @@ mod tests {
     }
 
     struct CustomResolver {
-        answers: HashMap<String, String>,
+        answers: Vec<(Utf16JsonProjection, Utf16JsonProjection)>,
     }
 
     #[async_trait]
@@ -1274,15 +1498,17 @@ mod tests {
             &self,
             _questions: &[Question],
             _non_interactive: bool,
-        ) -> Result<HashMap<String, String>, ToolError> {
+        ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
             Ok(self.answers.clone())
         }
     }
 
     #[tokio::test]
     async fn custom_single_answer_is_preserved_without_generated_annotations() {
-        let mut answers = HashMap::new();
-        answers.insert("Q?".to_string(), "Use unicode 自由输入".to_string());
+        let answers = vec![(
+            source_text_projection("Q?"),
+            source_text_projection("Use unicode 自由输入"),
+        )];
         let tool = AskUserQuestionTool::with_resolver(
             shell_test_ctx(dummy_out()),
             Arc::new(CustomResolver { answers }),
@@ -1296,9 +1522,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_question_and_answer_retain_unpaired_utf16_units() {
+        let question_units = vec![b'Q' as u16, 0xD800];
+        let selected_units = vec![b'A' as u16, 0xDC00];
+        let question = source_text_projection_units(&question_units);
+        let selected = source_text_projection_units(&selected_units);
+        let input = Utf16JsonProjection::object(vec![(
+            "questions".into(),
+            Utf16JsonProjection::array(vec![Utf16JsonProjection::object(vec![
+                ("question".into(), question.clone()),
+                ("header".into(), source_text_projection("H")),
+                (
+                    "options".into(),
+                    Utf16JsonProjection::array(vec![
+                        Utf16JsonProjection::object(vec![
+                            ("label".into(), selected.clone()),
+                            ("description".into(), source_text_projection("first")),
+                        ])
+                        .unwrap(),
+                        Utf16JsonProjection::object(vec![
+                            ("label".into(), source_text_projection("B")),
+                            ("description".into(), source_text_projection("second")),
+                        ])
+                        .unwrap(),
+                    ])
+                    .unwrap(),
+                ),
+            ])
+            .unwrap()])
+            .unwrap(),
+        )])
+        .unwrap();
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(CustomResolver {
+                answers: vec![(question, selected)],
+            }),
+        );
+
+        let result = Tool::call(&tool, input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("source question resolves");
+        assert_eq!(
+            result.data.string_units("/questions/0/question"),
+            Some(question_units.clone())
+        );
+        let answers = result.data.subprojection("/answers").unwrap();
+        let answer_entries = answers.object_entries().unwrap();
+        assert_eq!(answer_entries[0].code_units, question_units);
+        assert_eq!(
+            answer_entries[0].value.code_units(),
+            Some(selected_units.as_slice())
+        );
+    }
+
+    #[tokio::test]
     async fn custom_multi_answer_preserves_input_annotations_only() {
-        let mut answers = HashMap::new();
-        answers.insert("Which?".to_string(), "A, pasted value".to_string());
+        let answers = vec![(
+            source_text_projection("Which?"),
+            source_text_projection("A, pasted value"),
+        )];
         let tool = AskUserQuestionTool::with_resolver(
             shell_test_ctx(dummy_out()),
             Arc::new(CustomResolver { answers }),
@@ -1322,8 +1605,10 @@ mod tests {
 
     #[tokio::test]
     async fn partial_resolver_output_omits_unanswered_questions() {
-        let mut answers = HashMap::new();
-        answers.insert("First?".to_string(), "A".to_string());
+        let answers = vec![(
+            source_text_projection("First?"),
+            source_text_projection("A"),
+        )];
         let tool = AskUserQuestionTool::with_resolver(
             shell_test_ctx(dummy_out()),
             Arc::new(CustomResolver { answers }),
@@ -1357,19 +1642,18 @@ mod tests {
             &self,
             questions: &[Question],
             _non_interactive: bool,
-        ) -> Result<HashMap<String, String>, ToolError> {
-            let mut m = HashMap::new();
+        ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
+            let mut answers = Vec::new();
             for q in questions {
                 // Multi-select answer: comma-join all option labels.
-                let joined = q
+                let labels = q
                     .options
                     .iter()
                     .map(|o| o.label.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                m.insert(q.question.clone(), joined);
+                    .collect::<Vec<_>>();
+                answers.push((q.question.clone(), join_answer_labels(&labels)));
             }
-            Ok(m)
+            Ok(answers)
         }
     }
 
@@ -1589,7 +1873,7 @@ mod tests {
             &self,
             _questions: &[Question],
             _non_interactive: bool,
-        ) -> Result<HashMap<String, String>, ToolError> {
+        ) -> Result<Vec<(Utf16JsonProjection, Utf16JsonProjection)>, ToolError> {
             std::future::pending::<()>().await;
             unreachable!()
         }
@@ -1611,8 +1895,8 @@ mod tests {
              toolDenialKind=\"interrupted\", got {err:?}"
         );
         assert_eq!(
-            err.model_facing_message(),
-            "aborted",
+            err.model_facing_message().string_at(""),
+            Some("aborted"),
             "the abort variant carries no fabricated failure copy"
         );
     }
@@ -1623,7 +1907,7 @@ mod tests {
     fn ask_user_question_blocks_on_interrupt() {
         let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
         assert!(matches!(
-            tool.interrupt_behavior(&one_question()),
+            tool.interrupt_behavior(&generated_builtin_result(&one_question())),
             InterruptBehavior::Block
         ));
     }

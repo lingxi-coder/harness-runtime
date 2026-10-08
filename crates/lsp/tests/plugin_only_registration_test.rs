@@ -7,6 +7,7 @@
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::PluginId;
 use lsp::LspRegistry;
 use std::collections::HashMap;
@@ -30,15 +31,15 @@ impl LspTransport for DummyTransport {
         &self,
         _: &LspRawConnection,
         _: &str,
-        _: serde_json::Value,
-    ) -> Result<serde_json::Value, LspError> {
+        _: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         Err(LspError::Unavailable)
     }
     async fn notify(
         &self,
         _: &LspRawConnection,
         _: &str,
-        _: serde_json::Value,
+        _: Utf16JsonProjection,
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
@@ -84,8 +85,8 @@ async fn register_plugin_servers_is_public_and_works() {
 /// impl LspTransport for T {
 ///     async fn start_server(&self, _: &LspServerConfig) -> Result<LspRawConnection, LspError> { Err(LspError::Unavailable) }
 ///     async fn initialize(&self, _: &LspRawConnection, _: &str) -> Result<LspServerCapabilities, LspError> { Err(LspError::Unavailable) }
-///     async fn request(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<serde_json::Value, LspError> { Err(LspError::Unavailable) }
-///     async fn notify(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<(), LspError> { Err(LspError::Unavailable) }
+///     async fn request(&self, _: &LspRawConnection, _: &str, _: Utf16JsonProjection) -> Result<Utf16JsonProjection, LspError> { Err(LspError::Unavailable) }
+///     async fn notify(&self, _: &LspRawConnection, _: &str, _: Utf16JsonProjection) -> Result<(), LspError> { Err(LspError::Unavailable) }
 ///     async fn shutdown(&self, _: lingxi_core::types::McpConnectionId) -> Result<(), LspError> { Err(LspError::Unavailable) }
 ///     fn is_available(&self) -> bool { false }
 /// }

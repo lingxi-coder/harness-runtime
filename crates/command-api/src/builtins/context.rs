@@ -41,7 +41,7 @@ impl BuiltinCommandHandler for ContextHandler {
         let snap = self.handle.get_status_snapshot().await;
         let usage = self.handle.context_usage_snapshot().await;
         CommandResult::Done {
-            display: Some(render_context(&snap.model, &usage)),
+            display: Some((render_context(&snap.model, &usage)).into()),
         }
     }
     fn name(&self) -> &str {
@@ -158,8 +158,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "context".to_string(),
-            raw_args: String::new(),
+            name: "context".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

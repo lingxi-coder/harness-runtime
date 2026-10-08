@@ -24,7 +24,7 @@
 //! Branding: `Claude Code` → `LingXi`, `.claude/` → `.lingxi/`,
 //! `claude --debug` → `lingxi-cli --debug` in all three bodies.
 
-use crate::BundledPromptFn;
+use crate::model::{trim_source_text, BundledPromptFn};
 
 /// The main body (`Vs`).
 const UPDATE_CONFIG_BODY: &str = include_str!("update_config_body.md");
@@ -53,31 +53,45 @@ fn settings_schema_json() -> String {
 pub struct UpdateConfigPromptFn;
 
 impl BundledPromptFn for UpdateConfigPromptFn {
-    fn build(&self, args: &str) -> String {
-        if let Some(rest) = args.strip_prefix(HOOKS_ONLY_PREFIX) {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        let units = args.string_units("").unwrap_or_default();
+        let prefix_units = HOOKS_ONLY_PREFIX.encode_utf16().collect::<Vec<_>>();
+        if units.starts_with(&prefix_units) {
             // The hooks-only shape skips the main body AND the schema — it is
             // the reference's narrow entry point for hook authoring.
-            let task = rest.trim();
-            let mut out = format!("{HOOKS_REFERENCE}\n\n{HOOK_CONSTRUCTION}");
-            if !task.is_empty() {
-                out.push_str(&format!("\n\n## Task\n\n{task}"));
+            let task = trim_source_text(&crate::model::source_from_units(
+                units[prefix_units.len()..].to_vec(),
+            ));
+            let mut out = format!("{HOOKS_REFERENCE}\n\n{HOOK_CONSTRUCTION}")
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            if !task.string_units("").is_some_and(|units| units.is_empty()) {
+                out.extend("\n\n## Task\n\n".encode_utf16());
+                out.extend(task.string_units("").unwrap_or_default());
             }
-            return out;
+            return crate::model::source_from_units(out);
         }
         let mut out = format!(
             "{UPDATE_CONFIG_BODY}\n\n## Full Settings JSON Schema\n\n```json\n{}\n```",
             settings_schema_json()
-        );
-        if !args.is_empty() {
-            out.push_str(&format!("\n\n## User Request\n\n{args}"));
+        )
+        .encode_utf16()
+        .collect::<Vec<_>>();
+        if !units.is_empty() {
+            out.extend("\n\n## User Request\n\n".encode_utf16());
+            out.extend(units);
         }
-        out
+        crate::model::source_from_units(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn the_bodies_are_branded() {
@@ -92,7 +106,7 @@ mod tests {
     /// The point of the skill: the model is handed the REAL settings shape.
     #[test]
     fn the_default_shape_carries_the_live_settings_schema() {
-        let out = UpdateConfigPromptFn.build("");
+        let out = UpdateConfigPromptFn.build(&"".into());
         assert!(out.starts_with("# Update Config Skill"));
         assert!(out.contains("## Full Settings JSON Schema"));
         // A key that only exists because it is on the real `SettingsJson`.
@@ -108,7 +122,7 @@ mod tests {
 
     #[test]
     fn a_request_is_appended_under_its_own_header() {
-        let out = UpdateConfigPromptFn.build("allow npm commands");
+        let out = UpdateConfigPromptFn.build(&"allow npm commands".into());
         assert!(out.ends_with("\n\n## User Request\n\nallow npm commands"));
     }
 
@@ -116,7 +130,7 @@ mod tests {
     /// walkthrough, and deliberately no schema and no main body.
     #[test]
     fn the_hooks_only_shape_swaps_the_whole_prompt() {
-        let out = UpdateConfigPromptFn.build("[hooks-only] run prettier after writes");
+        let out = UpdateConfigPromptFn.build(&"[hooks-only] run prettier after writes".into());
         assert!(out.starts_with("## Hooks Configuration"));
         assert!(out.contains("## Constructing a Hook"));
         assert!(
@@ -128,7 +142,7 @@ mod tests {
 
     #[test]
     fn a_bare_hooks_only_marker_appends_no_task() {
-        let out = UpdateConfigPromptFn.build("[hooks-only]");
+        let out = UpdateConfigPromptFn.build(&"[hooks-only]".into());
         assert!(!out.contains("## Task"));
     }
 }

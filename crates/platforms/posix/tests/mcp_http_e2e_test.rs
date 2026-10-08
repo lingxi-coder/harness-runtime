@@ -10,8 +10,8 @@
 //! returns the appropriate result envelope, echoing the request `id` back.
 //! HTTP is 1:1 request/response, so a single handler suffices (no SSE channel).
 
-use axum::{routing::post, Json, Router};
-use serde_json::{json, Value};
+use axum::{Json, Router, routing::post};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 use lingxi_core::host::{McpTransport, McpTransportSpec};
@@ -116,16 +116,20 @@ async fn full_mcp_surface_roundtrips_over_http() {
     assert_eq!(tools[0].full_name, "mcp____echo");
 
     // --- tools/call ----------------------------------------------------
+    let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &json!({ "text": "hi there" }),
+    )
+    .unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.call_tool(&conn, "echo", json!({ "text": "hi there" })),
+        transport.call_tool(&conn, "echo", input),
     )
     .await
     .expect("call_tool timed out")
     .expect("call_tool failed");
     assert!(!result.is_error, "echo should not flag an error");
     assert_eq!(
-        result.content.pointer("/0/text").and_then(Value::as_str),
+        result.content.string_at("/0/text"),
         Some("hi there"),
         "echo must round-trip the input text in content[0].text"
     );

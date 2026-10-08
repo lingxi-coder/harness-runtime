@@ -10,6 +10,7 @@ use lingxi_core::host::{
     haptics::{HapticError, HapticService, HapticStyle},
     location::{LocationError, LocationFix, LocationProvider},
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::PermissionResult;
 use serde_json::{json, Value};
 use std::sync::{
@@ -228,9 +229,15 @@ fn tools(ctx: &BuiltinToolContext) -> Vec<(Box<dyn Tool>, Value)> {
 }
 
 async fn call(tool: &dyn Tool, input: Value) -> ToolCallResult {
+    let input = Utf16JsonProjection::from_serde_value(&input).expect("test input is JSON");
     tool.call(input, fresh_ctx(), fresh_tx())
         .await
         .expect("native call")
+}
+
+fn json_view(value: &Utf16JsonProjection) -> Value {
+    let source = value.to_json_string().expect("test result is valid JSON");
+    serde_json::from_str(&source).expect("test result parses as JSON")
 }
 
 #[tokio::test]
@@ -239,12 +246,12 @@ async fn typed_tools_dispatch_and_return_structured_results() {
     let ctx = with_devices(fake.clone());
     let location = call(&LocationTool::new(ctx.clone()), json!({})).await;
     assert_eq!(
-        location.data,
+        json_view(&location.data),
         json!({ "latitude": 31.2, "longitude": 121.4, "accuracy_m": 4.0, "timestamp_ms": 1000 })
     );
     let status = call(&DeviceStatusTool::new(ctx.clone()), json!({})).await;
     assert_eq!(
-        status.data,
+        json_view(&status.data),
         json!({ "battery_percent": 75.0, "charging": true, "network": "wifi", "low_power_mode": null })
     );
     let haptic = call(
@@ -253,7 +260,7 @@ async fn typed_tools_dispatch_and_return_structured_results() {
     )
     .await;
     assert_eq!(
-        haptic.data,
+        json_view(&haptic.data),
         json!({ "triggered": true, "style": "success" })
     );
     assert_eq!(*fake.styles.lock().unwrap(), vec![HapticStyle::Success]);
@@ -263,7 +270,7 @@ async fn typed_tools_dispatch_and_return_structured_results() {
     )
     .await;
     assert_eq!(
-        url.data,
+        json_view(&url.data),
         json!({ "requested": true, "url": "https://example.com/" })
     );
     assert_eq!(*fake.urls.lock().unwrap(), vec!["https://example.com/"]);
@@ -272,9 +279,10 @@ async fn typed_tools_dispatch_and_return_structured_results() {
         json!({ "start_ms": 1000, "end_ms": 2000, "limit": 1 }),
     )
     .await;
-    assert_eq!(calendar.data["events"].as_array().unwrap().len(), 1);
-    assert_eq!(calendar.data["truncated"], true);
-    assert_eq!(calendar.data["events"][0]["start_ms"], 1000);
+    let calendar_data = json_view(&calendar.data);
+    assert_eq!(calendar_data["events"].as_array().unwrap().len(), 1);
+    assert_eq!(calendar_data["truncated"], true);
+    assert_eq!(calendar_data["events"][0]["start_ms"], 1000);
     assert_eq!(
         *fake.calendar_queries.lock().unwrap(),
         vec![CalendarQuery {
@@ -288,10 +296,11 @@ async fn typed_tools_dispatch_and_return_structured_results() {
         json!({ "query": "  Alice  ", "limit": 2 }),
     )
     .await;
-    assert_eq!(contacts.data["contacts"].as_array().unwrap().len(), 2);
-    assert_eq!(contacts.data["truncated"], true);
+    let contacts_data = json_view(&contacts.data);
+    assert_eq!(contacts_data["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(contacts_data["truncated"], true);
     assert_eq!(
-        contacts.data["contacts"][0]["emails"],
+        contacts_data["contacts"][0]["emails"],
         json!(["alice@example.com"])
     );
     assert_eq!(
@@ -328,12 +337,13 @@ async fn native_capped_results_report_potential_truncation() {
                     .await
                 };
                 assert!(!result.is_error);
+                let data = json_view(&result.data);
                 assert_eq!(
-                    result.data[kind].as_array().unwrap().len(),
+                    data[kind].as_array().unwrap().len(),
                     record_count.min(limit)
                 );
                 assert_eq!(
-                    result.data["truncated"],
+                    data["truncated"],
                     record_count >= limit,
                     "{kind}: {record_count} matches with native limit {limit}"
                 );
@@ -370,8 +380,9 @@ async fn over_limit_native_results_are_bounded_and_report_truncation() {
             .await
         };
         assert!(!result.is_error);
-        assert_eq!(result.data[kind].as_array().unwrap().len(), limit);
-        assert_eq!(result.data["truncated"], true);
+        let data = json_view(&result.data);
+        assert_eq!(data[kind].as_array().unwrap().len(), limit);
+        assert_eq!(data["truncated"], true);
     }
 }
 
@@ -387,15 +398,17 @@ async fn shortened_native_fields_report_truncation_below_result_limit() {
         json!({ "start_ms": 0, "end_ms": 1, "limit": 100 }),
     )
     .await;
-    assert_eq!(calendar.data["events"].as_array().unwrap().len(), 1);
-    assert_eq!(calendar.data["truncated"], true);
+    let calendar_data = json_view(&calendar.data);
+    assert_eq!(calendar_data["events"].as_array().unwrap().len(), 1);
+    assert_eq!(calendar_data["truncated"], true);
     let contacts = call(
         &ContactsTool::new(ctx),
         json!({ "query": "王", "limit": 50 }),
     )
     .await;
-    assert_eq!(contacts.data["contacts"].as_array().unwrap().len(), 1);
-    assert_eq!(contacts.data["truncated"], true);
+    let contacts_data = json_view(&contacts.data);
+    assert_eq!(contacts_data["contacts"].as_array().unwrap().len(), 1);
+    assert_eq!(contacts_data["truncated"], true);
 }
 
 #[tokio::test]
@@ -410,16 +423,18 @@ async fn oversized_native_records_are_bounded_without_breaking_utf8_or_json() {
         json!({ "start_ms": 0, "end_ms": 1, "limit": 100 }),
     )
     .await;
-    assert_eq!(events.data["truncated"], true);
-    assert!(events.data.to_string().len() <= calendar.max_result_size_chars());
-    let events = events.data["events"].as_array().unwrap();
+    let events_data = json_view(&events.data);
+    assert_eq!(events_data["truncated"], true);
+    assert!(events.data.to_json_string().unwrap().len() <= calendar.max_result_size_chars());
+    let events = events_data["events"].as_array().unwrap();
     assert!(!events.is_empty() && events.len() < 100);
     assert_eq!(events[0]["notes"].as_str().unwrap().chars().count(), 4000);
     let contacts = ContactsTool::new(ctx);
     let result = call(&contacts, json!({ "query": "王", "limit": 50 })).await;
-    assert_eq!(result.data["truncated"], true);
-    assert!(result.data.to_string().len() <= contacts.max_result_size_chars());
-    let rows = result.data["contacts"].as_array().unwrap();
+    let contacts_data = json_view(&result.data);
+    assert_eq!(contacts_data["truncated"], true);
+    assert!(result.data.to_json_string().unwrap().len() <= contacts.max_result_size_chars());
+    let rows = contacts_data["contacts"].as_array().unwrap();
     assert!(!rows.is_empty() && rows.len() < 50);
     assert_eq!(
         rows[0]["display_name"].as_str().unwrap().chars().count(),
@@ -535,13 +550,23 @@ async fn malformed_inputs_never_reach_a_native_service_even_on_direct_calls() {
     for (tool, inputs) in cases {
         for input in inputs {
             assert!(
-                tool.validate_input(&input, &fresh_ctx()).await.is_err(),
+                tool.validate_input(
+                    &Utf16JsonProjection::from_serde_value(&input).unwrap(),
+                    &fresh_ctx(),
+                )
+                .await
+                .is_err(),
                 "{} accepted {input}",
                 tool.name()
             );
             assert!(
                 matches!(
-                    tool.call(input.clone(), fresh_ctx(), fresh_tx()).await,
+                    tool.call(
+                        Utf16JsonProjection::from_serde_value(&input).unwrap(),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
+                    .await,
                     Err(ToolError::InvalidInput(_))
                 ),
                 "{} dispatched {input}",
@@ -586,8 +611,12 @@ async fn unsafe_or_malformed_urls_are_rejected_before_native_open() {
     ] {
         assert!(
             matches!(
-                tool.call(json!({ "url": url }), fresh_ctx(), fresh_tx())
-                    .await,
+                tool.call(
+                    Utf16JsonProjection::from_serde_value(&json!({ "url": url })).unwrap(),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await,
                 Err(ToolError::InvalidInput(_))
             ),
             "accepted {url:?}"
@@ -606,7 +635,12 @@ async fn precancelled_calls_do_not_enter_any_native_provider() {
         ctx.cancel = Some(cancel);
         assert!(
             matches!(
-                tool.call(input, ctx, fresh_tx()).await,
+                tool.call(
+                    Utf16JsonProjection::from_serde_value(&input).unwrap(),
+                    ctx,
+                    fresh_tx(),
+                )
+                .await,
                 Err(ToolError::Aborted)
             ),
             "{} ignored cancellation",
@@ -626,7 +660,8 @@ async fn cancellation_drops_an_inflight_native_wait() {
     let mut ctx = fresh_ctx();
     let cancel = tokio_util::sync::CancellationToken::new();
     ctx.cancel = Some(cancel.clone());
-    let task = tokio::spawn(async move { tool.call(json!({}), ctx, fresh_tx()).await });
+    let input = Utf16JsonProjection::parse("{}").unwrap();
+    let task = tokio::spawn(async move { tool.call(input, ctx, fresh_tx()).await });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while fake.calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -649,7 +684,7 @@ async fn native_failures_preserve_codes_and_error_status() {
         for (tool, input) in tools(&ctx) {
             let result = call(tool.as_ref(), input).await;
             assert!(result.is_error, "{} must flag {code}", tool.name());
-            assert_eq!(result.data["error"]["code"], code);
+            assert_eq!(json_view(&result.data)["error"]["code"], code);
         }
     }
     let denied = with_devices(Arc::new(FakeDevices {
@@ -662,14 +697,17 @@ async fn native_failures_preserve_codes_and_error_status() {
     {
         let result = call(tool.as_ref(), input).await;
         assert!(result.is_error);
-        assert_eq!(result.data["error"]["code"], "permission_denied");
+        assert_eq!(
+            json_view(&result.data)["error"]["code"],
+            "permission_denied"
+        );
     }
     let timeout = with_devices(Arc::new(FakeDevices {
         failure: Some("timeout"),
         ..Default::default()
     }));
     assert_eq!(
-        call(&LocationTool::new(timeout), json!({})).await.data["error"]["code"],
+        json_view(&call(&LocationTool::new(timeout), json!({})).await.data)["error"]["code"],
         "timeout"
     );
     let rejected = with_devices(Arc::new(FakeDevices {
@@ -677,12 +715,14 @@ async fn native_failures_preserve_codes_and_error_status() {
         ..Default::default()
     }));
     assert_eq!(
-        call(
-            &OpenUrlTool::new(rejected),
-            json!({ "url": "https://example.com" })
-        )
-        .await
-        .data["error"]["code"],
+        json_view(
+            &call(
+                &OpenUrlTool::new(rejected),
+                json!({ "url": "https://example.com" })
+            )
+            .await
+            .data
+        )["error"]["code"],
         "rejected"
     );
     let invalid = with_devices(Arc::new(FakeDevices {
@@ -690,18 +730,22 @@ async fn native_failures_preserve_codes_and_error_status() {
         ..Default::default()
     }));
     assert_eq!(
-        call(
-            &CalendarTool::new(invalid.clone()),
-            json!({ "start_ms": 0, "end_ms": 1 })
-        )
-        .await
-        .data["error"]["code"],
+        json_view(
+            &call(
+                &CalendarTool::new(invalid.clone()),
+                json!({ "start_ms": 0, "end_ms": 1 })
+            )
+            .await
+            .data
+        )["error"]["code"],
         "invalid_request"
     );
     assert_eq!(
-        call(&ContactsTool::new(invalid), json!({ "query": "Alice" }))
-            .await
-            .data["error"]["code"],
+        json_view(
+            &call(&ContactsTool::new(invalid), json!({ "query": "Alice" }))
+                .await
+                .data
+        )["error"]["code"],
         "invalid_request"
     );
 }
@@ -709,16 +753,22 @@ async fn native_failures_preserve_codes_and_error_status() {
 #[tokio::test]
 async fn missing_services_return_unavailable_and_sensitive_tools_ask() {
     for (tool, input) in tools(&bare_ctx()) {
-        let permissions = tool.check_permissions(&input, &fresh_ctx()).await;
+        let input_source = Utf16JsonProjection::from_serde_value(&input).unwrap();
+        let permissions = tool.check_permissions(&input_source, &fresh_ctx()).await;
         if matches!(tool.name(), "device_status" | "haptics") {
             assert!(matches!(permissions, PermissionResult::Allow { .. }));
         } else {
             assert!(matches!(permissions, PermissionResult::Ask { .. }));
         }
-        assert_eq!(tool.input_schema()["additionalProperties"], false);
+        assert_eq!(
+            tool.input_schema()
+                .at_pointer("/additionalProperties")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
         let result = call(tool.as_ref(), input).await;
         assert!(result.is_error);
-        assert_eq!(result.data["error"]["code"], "unavailable");
+        assert_eq!(json_view(&result.data)["error"]["code"], "unavailable");
     }
 }
 

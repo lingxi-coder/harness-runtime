@@ -1,0 +1,417 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "cases": [
+    {
+      "case": "omitted",
+      "input_spec": {
+        "name": "probe",
+        "isDeferred": null,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "description": "Fixed fixture value"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--plugin-dir",
+        "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/plugins/current",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--debug",
+        "hooks",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002931",
+        "Report the fixed fixture result."
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/cwd",
+      "config_dir": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/config",
+      "loopback_url": "http://127.0.0.1:52378",
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 125772,
+          "request_sha256": "41d33eb9d22e03b717035a5738aa3c8497beb559534389325521fa246360decf",
+          "stream": true,
+          "raw_file": "run-output/requests/omitted.request-00.json"
+        }
+      ],
+      "captured_requests": [
+        {
+          "raw_file": "run-output/requests/omitted.request-00.json",
+          "raw_bytes": 125772,
+          "raw_sha256": "41d33eb9d22e03b717035a5738aa3c8497beb559534389325521fa246360decf",
+          "tools_raw_file": "run-output/requests/omitted.tools.raw.json",
+          "tools_raw_bytes": 74134,
+          "tools_raw_sha256": "e07858f1c0732dbc3867eec63ffff46a4112f848f6eb1897dceaeb400ff7ea9a",
+          "stream": true,
+          "tool_count": 25,
+          "tool_names": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskStop",
+            "TaskUpdate",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write",
+            "mcp__native-tool-register-fixture__probe"
+          ],
+          "registered_tool_entries": [
+            {
+              "name": "mcp__native-tool-register-fixture__probe",
+              "description": "Native fixed deferred-contract fixture",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "description": "Fixed fixture value"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_bytes": 17,
+      "stdout_sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_file": "omitted.stdout",
+      "stderr_file": "omitted.stderr"
+    },
+    {
+      "case": "false",
+      "input_spec": {
+        "name": "probe",
+        "isDeferred": false,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "description": "Fixed fixture value"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--plugin-dir",
+        "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/plugins/current",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--debug",
+        "hooks",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002931",
+        "Report the fixed fixture result."
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/cwd",
+      "config_dir": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/config",
+      "loopback_url": "http://127.0.0.1:52385",
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 125772,
+          "request_sha256": "412086d4147f861671cc75ec505fa78e9006ee482955db98fb2c7c7a6f4264a8",
+          "stream": true,
+          "raw_file": "run-output/requests/false.request-00.json"
+        }
+      ],
+      "captured_requests": [
+        {
+          "raw_file": "run-output/requests/false.request-00.json",
+          "raw_bytes": 125772,
+          "raw_sha256": "412086d4147f861671cc75ec505fa78e9006ee482955db98fb2c7c7a6f4264a8",
+          "tools_raw_file": "run-output/requests/false.tools.raw.json",
+          "tools_raw_bytes": 74134,
+          "tools_raw_sha256": "e07858f1c0732dbc3867eec63ffff46a4112f848f6eb1897dceaeb400ff7ea9a",
+          "stream": true,
+          "tool_count": 25,
+          "tool_names": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskStop",
+            "TaskUpdate",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write",
+            "mcp__native-tool-register-fixture__probe"
+          ],
+          "registered_tool_entries": [
+            {
+              "name": "mcp__native-tool-register-fixture__probe",
+              "description": "Native fixed deferred-contract fixture",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "description": "Fixed fixture value"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_bytes": 17,
+      "stdout_sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_file": "false.stdout",
+      "stderr_file": "false.stderr"
+    },
+    {
+      "case": "true",
+      "input_spec": {
+        "name": "probe",
+        "isDeferred": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "description": "Fixed fixture value"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "argv": [
+        "/private/tmp/mods-current-native-293-reference-v1614/claude",
+        "--plugin-dir",
+        "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/plugins/current",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--debug",
+        "hooks",
+        "--session-id",
+        "00000000-0000-4000-8000-000000002931",
+        "Report the fixed fixture result."
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/cwd",
+      "config_dir": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/run-output/run/current/config",
+      "loopback_url": "http://127.0.0.1:52394",
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "request_bytes": 125772,
+          "request_sha256": "d8b242239815d5c5d25085d01f8d0c592b69e6d3801bb0b58cceb3e96f570f2d",
+          "stream": true,
+          "raw_file": "run-output/requests/true.request-00.json"
+        }
+      ],
+      "captured_requests": [
+        {
+          "raw_file": "run-output/requests/true.request-00.json",
+          "raw_bytes": 125772,
+          "raw_sha256": "d8b242239815d5c5d25085d01f8d0c592b69e6d3801bb0b58cceb3e96f570f2d",
+          "tools_raw_file": "run-output/requests/true.tools.raw.json",
+          "tools_raw_bytes": 74134,
+          "tools_raw_sha256": "e07858f1c0732dbc3867eec63ffff46a4112f848f6eb1897dceaeb400ff7ea9a",
+          "stream": true,
+          "tool_count": 25,
+          "tool_names": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskStop",
+            "TaskUpdate",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write",
+            "mcp__native-tool-register-fixture__probe"
+          ],
+          "registered_tool_entries": [
+            {
+              "name": "mcp__native-tool-register-fixture__probe",
+              "description": "Native fixed deferred-contract fixture",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "description": "Fixed fixture value"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_bytes": 17,
+      "stdout_sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_file": "true.stdout",
+      "stderr_file": "true.stderr"
+    }
+  ],
+  "all_requests_loopback_dummy_key_only": true,
+  "no_upstream_relay": true,
+  "captured_original_request_bytes": true,
+  "registered_tool_present": {
+    "omitted": true,
+    "false": true,
+    "true": true
+  },
+  "all_cases_have_one_captured_request": true,
+  "tools_array_raw_bytes_identical_across_cases": true,
+  "registered_tool_schema_objects_equal_across_cases": true,
+  "full_request_raw_bytes_identical_across_cases": false,
+  "pairwise": {
+    "omitted_vs_false": {
+      "request_bytes_equal": false,
+      "tools_array_raw_bytes_equal": true,
+      "parsed_top_level_fields_with_different_values": [
+        "metadata"
+      ],
+      "removed_tool_names_in_native_order": [],
+      "added_tool_names_in_native_order": [],
+      "registered_probe_entry_equal": true
+    },
+    "omitted_vs_true": {
+      "request_bytes_equal": false,
+      "tools_array_raw_bytes_equal": true,
+      "parsed_top_level_fields_with_different_values": [
+        "metadata"
+      ],
+      "removed_tool_names_in_native_order": [],
+      "added_tool_names_in_native_order": [],
+      "registered_probe_entry_equal": true
+    },
+    "false_vs_true": {
+      "request_bytes_equal": false,
+      "tools_array_raw_bytes_equal": true,
+      "parsed_top_level_fields_with_different_values": [
+        "metadata"
+      ],
+      "removed_tool_names_in_native_order": [],
+      "added_tool_names_in_native_order": [],
+      "registered_probe_entry_equal": true
+    }
+  },
+  "scope": "Native 2.1.293 public plugin module session.start -> $.tool.register, first Messages request tool catalog; Harness comparison is separate and pending"
+}

@@ -122,8 +122,30 @@ pub struct CostModelResponse {
     pub bus: Option<Arc<AnalyticsBus>>,
 }
 
-/// Immutable provider facts captured before accounting performs its first
-/// await. The owning session retains this record even if every waiter drops.
+/// Captured price policy for one physical model response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CostResponsePricing {
+    /// Price aggregate usage using the captured host catalog.
+    #[default]
+    Catalog,
+    /// Frozen token quote; hosted tool fees still come from the host catalog.
+    TokenQuote(u64),
+    /// Frozen complete quote, including hosted tools. Do not add other fees.
+    CompleteQuote(u64),
+    /// The physical response requires a quote that could not be completed.
+    /// Preserve usage and mark its model unpriced without inventing a charge.
+    Unpriced,
+}
+
+/// Whether an SDK usage measurement accompanies the price facts. An observed
+/// partial report does not imply every aggregate counter was supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostResponseMeasurement {
+    Observed,
+    Missing,
+}
+
+/// Immutable provider facts transferred to the session accounting owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CostResponseObservation {
     /// Provider model identity.
@@ -132,6 +154,10 @@ pub struct CostResponseObservation {
     pub usage: Usage,
     /// Price from a frozen client quote or the captured catalog fallback.
     pub observed_nano_usd: u64,
+    /// Pricing policy retained with the observed amount, including unknown
+    /// prices so an absent charge cannot be interpreted as a free model.
+    pub pricing: CostResponsePricing,
+    pub measurement: CostResponseMeasurement,
     /// Provider wall time.
     pub duration: Duration,
     /// Adapter retry count.
@@ -387,27 +413,39 @@ impl CostSessionScope {
     /// operation after this call is task transfer; queue capacity/state locks
     /// are awaited only by the detached owner.
     pub fn submit_model_response(&self, response: CostModelResponse) -> CostResponseReceipt {
-        self.submit_model_response_with_quote(response, None)
+        self.submit_model_response_with_pricing(
+            response,
+            CostResponsePricing::Catalog,
+            CostResponseMeasurement::Observed,
+        )
     }
 
-    /// Settle one response using the USD token estimate frozen by the client
-    /// for this exact physical attempt, when that estimate is available.
-    /// Unknown or incomplete SDK prices keep the catalog fallback policy.
-    pub fn submit_model_response_with_quote(
+    /// Settle one response using its explicit frozen price policy. Complete
+    /// quotes include hosted tools; unpriced responses never fall back to a
+    /// different aggregate tariff.
+    pub fn submit_model_response_with_pricing(
         &self,
-        response: CostModelResponse,
-        quoted_nano_usd: Option<u64>,
+        mut response: CostModelResponse,
+        response_pricing: CostResponsePricing,
+        measurement: CostResponseMeasurement,
     ) -> CostResponseReceipt {
+        if measurement == CostResponseMeasurement::Missing {
+            response.usage = Usage::default();
+            response.cache_read_input_tokens = 0;
+            response.cache_creation_input_tokens = 0;
+        }
         let tracker = self.tracker.clone();
         let authority = tracker.selected_entry();
         let durability_turn = tracker.register_durable_mutation_for(&authority);
         let (pricing, _) = tracker.resolve_pricing_with_default(&response.model_ref);
-        let quoted_nano_usd = quoted_nano_usd.map(|quoted| {
-            quoted.saturating_add(CostCalculator::non_token_nano_usd(
-                &response.usage,
-                &pricing,
-            ))
-        });
+        let quoted_nano_usd = match response_pricing {
+            CostResponsePricing::Catalog => None,
+            CostResponsePricing::TokenQuote(quoted) => Some(quoted.saturating_add(
+                CostCalculator::non_token_nano_usd(&response.usage, &pricing),
+            )),
+            CostResponsePricing::CompleteQuote(quoted) => Some(quoted),
+            CostResponsePricing::Unpriced => Some(0),
+        };
         let observed_nano_usd = quoted_nano_usd
             .unwrap_or_else(|| CostCalculator::calculate_nano_usd(&response.usage, &pricing));
         let gate = authority.durability_gate.clone();
@@ -415,6 +453,8 @@ impl CostSessionScope {
             model_ref: response.model_ref.clone(),
             usage: response.usage,
             observed_nano_usd,
+            pricing: response_pricing,
+            measurement,
             duration: response.duration,
             retries: response.retries,
             cache_read_input_tokens: response.cache_read_input_tokens,
@@ -479,6 +519,8 @@ impl CostSessionScope {
                         response.is_batch_request,
                         response.bus,
                         quoted_nano_usd,
+                        response_pricing,
+                        measurement,
                         durability_turn,
                     )
                     .await
@@ -1642,6 +1684,8 @@ impl CostTracker {
         is_batch_request: bool,
         bus: Option<Arc<AnalyticsBus>>,
         quoted_nano_usd: Option<u64>,
+        response_pricing: CostResponsePricing,
+        measurement: CostResponseMeasurement,
         mut durability_turn: Option<CostDurabilityTurn>,
     ) -> CostResponseSettlement {
         // A complete frozen USD quote from the physical call is authoritative
@@ -1741,10 +1785,12 @@ impl CostTracker {
                             .non_token_rates_nano_usd
                             .contains_key(&crate::NonTokenBillableUnit::WebSearchRequest)))
             });
-            if (quoted_nano_usd.is_none()
-                && (matches!(resolution, PricingResolution::UnpricedModel { .. })
-                    || CostCalculator::uses_unknown_rate(&usage, &pricing)))
-                || unknown_hosted_tool
+            if response_pricing == CostResponsePricing::Unpriced
+                || (quoted_nano_usd.is_none()
+                    && (matches!(resolution, PricingResolution::UnpricedModel { .. })
+                        || CostCalculator::uses_unknown_rate(&usage, &pricing)))
+                || (unknown_hosted_tool
+                    && !matches!(response_pricing, CostResponsePricing::CompleteQuote(_)))
             {
                 staged.unpriced_models.insert(model_ref.clone());
             }
@@ -1753,10 +1799,12 @@ impl CostTracker {
                     .total_web_search_requests
                     .saturating_add(s.web_search_requests);
             }
-            staged.last_usage = Some(usage);
-            staged.last_usage_revision = Some(next_revision);
-            staged.last_cache_read_input_tokens = cache_read_input_tokens;
-            staged.last_cache_creation_input_tokens = cache_creation_input_tokens;
+            if measurement == CostResponseMeasurement::Observed {
+                staged.last_usage = Some(usage);
+                staged.last_usage_revision = Some(next_revision);
+                staged.last_cache_read_input_tokens = cache_read_input_tokens;
+                staged.last_cache_creation_input_tokens = cache_creation_input_tokens;
+            }
             match preflight_permit {
                 Some(permit) => match self.enqueue_snapshot_locked_with_id(
                     &staged,
@@ -2394,7 +2442,11 @@ mod tests {
         };
         let quoted = tracker
             .session_scope(session)
-            .submit_model_response_with_quote(response(), Some(750_000))
+            .submit_model_response_with_pricing(
+                response(),
+                CostResponsePricing::TokenQuote(750_000),
+                CostResponseMeasurement::Observed,
+            )
             .settle()
             .await;
         assert_eq!(quoted.observed_nano_usd(), 750_000);
@@ -2413,6 +2465,150 @@ mod tests {
             .await
             .unpriced_models
             .contains(&model_ref));
+    }
+
+    #[tokio::test]
+    async fn complete_quotes_include_tool_fees_and_incomplete_quotes_stay_unpriced() {
+        use crate::TokenClass;
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "quoted-model".into(),
+        };
+        for (pricing, expected_cost, unpriced, catalog_available) in [
+            (CostResponsePricing::Catalog, 21_000_000, false, true),
+            (
+                CostResponsePricing::TokenQuote(1_000),
+                20_001_000,
+                false,
+                true,
+            ),
+            (
+                CostResponsePricing::CompleteQuote(1_000),
+                1_000,
+                false,
+                true,
+            ),
+            (
+                CostResponsePricing::CompleteQuote(1_000),
+                1_000,
+                false,
+                false,
+            ),
+            (CostResponsePricing::CompleteQuote(0), 0, false, true),
+            (CostResponsePricing::Unpriced, 0, true, true),
+            (CostResponsePricing::Unpriced, 0, true, false),
+        ] {
+            let catalog_entry = crate::ModelPricing {
+                model_ref: model_ref.clone(),
+                token_rates: HashMap::from([
+                    (
+                        TokenClass::Input,
+                        crate::MoneyPerToken {
+                            nano_usd_per_token: 5_000,
+                        },
+                    ),
+                    (
+                        TokenClass::Output,
+                        crate::MoneyPerToken {
+                            nano_usd_per_token: 25_000,
+                        },
+                    ),
+                ]),
+                non_token_rates_nano_usd: HashMap::from([(
+                    crate::NonTokenBillableUnit::WebSearchRequest,
+                    10_000_000,
+                )]),
+                effective_from: None,
+                source: crate::PricingSource::BuiltInReference {
+                    provider: ProviderId::Anthropic,
+                },
+            };
+            let (persist_tx, _legacy_rx) = mpsc::channel(8);
+            let session_id = SessionId::new();
+            let catalog = if catalog_available {
+                PricingCatalog::empty().with_entry(catalog_entry)
+            } else {
+                PricingCatalog::empty()
+            };
+            let tracker = Arc::new(CostTracker::new(session_id, Arc::new(catalog), persist_tx));
+            let usage = Usage {
+                tokens: TokenUsage {
+                    input: 100,
+                    output: 20,
+                    ..Default::default()
+                },
+                server_tool_use: Some(crate::ServerToolUsage {
+                    web_search_requests: 2,
+                }),
+                ..Default::default()
+            };
+            let receipt = tracker
+                .session_scope(session_id)
+                .submit_model_response_with_pricing(
+                    CostModelResponse {
+                        model_ref: model_ref.clone(),
+                        usage,
+                        duration: Duration::ZERO,
+                        retries: 0,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        is_batch_request: false,
+                        bus: None,
+                    },
+                    pricing,
+                    CostResponseMeasurement::Observed,
+                );
+            let settled = receipt.settle().await;
+            assert_eq!(settled.observed_nano_usd(), expected_cost, "{pricing:?}");
+            let state = tracker.snapshot().await;
+            assert_eq!(state.total_nano_usd, expected_cost);
+            assert_eq!(state.unpriced_models.contains(&model_ref), unpriced);
+            assert_eq!(state.per_model_usage[&model_ref].usage, usage);
+        }
+    }
+
+    #[tokio::test]
+    async fn price_without_aggregate_usage_keeps_the_measurement_missing() {
+        let session_id = SessionId::new();
+        let (persist_tx, _legacy_rx) = mpsc::channel(8);
+        let tracker = Arc::new(CostTracker::new(
+            session_id,
+            Arc::new(PricingCatalog::empty()),
+            persist_tx,
+        ));
+        let scope = tracker.session_scope(session_id);
+        let receipt = scope.submit_model_response_with_pricing(
+            CostModelResponse {
+                model_ref: ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: "served".into(),
+                },
+                usage: Usage::default(),
+                duration: Duration::ZERO,
+                retries: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                is_batch_request: false,
+                bus: None,
+            },
+            CostResponsePricing::CompleteQuote(12_000_000),
+            CostResponseMeasurement::Missing,
+        );
+        let mutation_id = receipt.mutation_id().clone();
+        assert_eq!(receipt.settle().await.observed_nano_usd(), 12_000_000);
+        let state = tracker.snapshot().await;
+        assert_eq!(state.total_nano_usd, 12_000_000);
+        assert!(state.last_usage.is_none());
+        assert!(state.last_usage_revision.is_none());
+        assert!(state.unpriced_models.is_empty());
+        assert_eq!(
+            scope
+                .retained_response(&mutation_id)
+                .unwrap()
+                .observation
+                .measurement,
+            CostResponseMeasurement::Missing
+        );
     }
 
     struct TestLease(String);

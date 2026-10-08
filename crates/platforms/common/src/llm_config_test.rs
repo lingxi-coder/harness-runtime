@@ -978,9 +978,13 @@ async fn azure_profile_prepare_url_and_api_key_header() {
 
     // Model key must be absent from body (deployment is in the URL).
     assert!(
-        prepared.provider_request.body_json.get("model").is_none(),
+        prepared
+            .provider_request
+            .body_json
+            .payload_at("/model")
+            .is_none(),
         "Azure request body must not include model key; got: {}",
-        prepared.provider_request.body_json
+        prepared.provider_request.body_json.as_json_source()
     );
 }
 
@@ -1265,9 +1269,13 @@ async fn bedrock_claude_prepare_e2e_sigv4_headers() {
 
     // Model key must be absent from body.
     assert!(
-        prepared.provider_request.body_json.get("model").is_none(),
+        prepared
+            .provider_request
+            .body_json
+            .payload_at("/model")
+            .is_none(),
         "body must not contain model key; got: {}",
-        prepared.provider_request.body_json
+        prepared.provider_request.body_json.as_json_source()
     );
 
     // anthropic_version must be in body.
@@ -1275,8 +1283,8 @@ async fn bedrock_claude_prepare_e2e_sigv4_headers() {
         prepared
             .provider_request
             .body_json
-            .get("anthropic_version")
-            .and_then(serde_json::Value::as_str),
+            .string_at("/anthropic_version")
+            .as_deref(),
         Some("bedrock-2023-05-31"),
         "body must contain anthropic_version=bedrock-2023-05-31"
     );
@@ -1417,9 +1425,13 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
 
     // No model key in body.
     assert!(
-        prepared.provider_request.body_json.get("model").is_none(),
+        prepared
+            .provider_request
+            .body_json
+            .payload_at("/model")
+            .is_none(),
         "body must not contain model key; got: {}",
-        prepared.provider_request.body_json
+        prepared.provider_request.body_json.as_json_source()
     );
 
     // anthropic_version: vertex-2023-10-16 in body.
@@ -1427,8 +1439,8 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
         prepared
             .provider_request
             .body_json
-            .get("anthropic_version")
-            .and_then(serde_json::Value::as_str),
+            .string_at("/anthropic_version")
+            .as_deref(),
         Some("vertex-2023-10-16"),
         "body must contain anthropic_version=vertex-2023-10-16"
     );
@@ -1538,10 +1550,10 @@ async fn vertex_gemini_prepare_e2e_bearer_header() {
         prepared
             .provider_request
             .body_json
-            .get("contents")
+            .payload_at("/contents")
             .is_some(),
         "body must have 'contents' (Gemini format); got: {}",
-        prepared.provider_request.body_json
+        prepared.provider_request.body_json.as_json_source()
     );
 
     // No x-goog-api-key header (Vertex uses Bearer, not api-key).

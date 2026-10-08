@@ -54,21 +54,15 @@ pub const MAX_PERSIST_UTF16_UNITS: usize = 1_073_741_824;
 /// trim [`preview_utf16`] applies. A preview may end on a tidy line; a
 /// truncated persisted body must keep every unit that fits.
 #[must_use]
-fn truncate_utf16_units(s: &str, limit: usize) -> String {
-    if limit == 0 {
-        return String::new();
+fn truncate_utf16_units(source: &[u16], limit: usize) -> Vec<u16> {
+    if source.len() <= limit {
+        return source.to_vec();
     }
-    let mut units: Vec<u16> = s.encode_utf16().collect();
-    if units.len() <= limit {
-        return s.to_string();
-    }
-    units.truncate(limit);
-    // A trailing HIGH surrogate has lost its partner; dropping it is what keeps
-    // the written file valid text rather than ending in a replacement char.
-    if units.last().is_some_and(|u| (0xD800..=0xDBFF).contains(u)) {
+    let mut units = source[..limit].to_vec();
+    if units.last().is_some_and(|u| (0xd800..=0xdbff).contains(u)) {
         units.pop();
     }
-    String::from_utf16_lossy(&units)
+    units
 }
 
 /// `M0u`'s ceiling fold (2.1.220 @ 230269046):
@@ -155,14 +149,14 @@ pub fn format_bytes(n: usize) -> String {
 /// Display view of the exact JavaScript preview. Use `preview_utf16` for wire data.
 #[must_use]
 pub fn preview(s: &str, limit: usize) -> (String, bool) {
-    let (units, more) = preview_utf16(s, limit);
+    let (units, more) = preview_utf16(&s.encode_utf16().collect::<Vec<_>>(), limit);
     (String::from_utf16_lossy(&units), more)
 }
 
 /// JavaScript `slice` and newline midpoint measured in UTF-16 code units.
 #[must_use]
-pub fn preview_utf16(s: &str, limit: usize) -> (Vec<u16>, bool) {
-    let mut units: Vec<u16> = s.encode_utf16().collect();
+pub fn preview_utf16(source: &[u16], limit: usize) -> (Vec<u16>, bool) {
+    let mut units = source.to_vec();
     if units.len() <= limit {
         return (units, false);
     }
@@ -374,7 +368,7 @@ pub async fn persist(
     config_home: &Path,
     dir: &Path,
     id: &str,
-    body: &str,
+    body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     is_json: bool,
     cap_utf16_units: usize,
 ) -> Result<Persisted, String> {
@@ -382,10 +376,15 @@ pub async fn persist(
     // a runaway tool result cannot fill the disk. `originalSize` still reports
     // the FULL length (`p.length`), which is what makes the envelope able to
     // say how much was dropped.
-    let capped = truncate_utf16_units(body, cap_utf16_units);
-    let truncated_at = (capped.len() != body.len()).then_some(cap_utf16_units);
-    let original_size = body.encode_utf16().count();
-    let body: &str = &capped;
+    let units = body
+        .string_units("")
+        .ok_or_else(|| "persisted tool body must be a JSON string".to_owned())?;
+    let capped = truncate_utf16_units(&units, cap_utf16_units);
+    let truncated_at = (capped.len() != units.len()).then_some(cap_utf16_units);
+    let original_size = units.len();
+    // The OS byte boundary follows JS UTF-8 encoding; preview and lengths
+    // remain based on the source string before this conversion.
+    let encoded_body = String::from_utf16_lossy(&capped);
     check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
     check_directory(config_home, dir).await?;
@@ -411,7 +410,7 @@ pub async fn persist(
     {
         Ok(mut file) => {
             use tokio::io::AsyncWriteExt as _;
-            if let Err(e) = file.write_all(body.as_bytes()).await {
+            if let Err(e) = file.write_all(encoded_body.as_bytes()).await {
                 return Err(e.to_string());
             }
             if let Err(e) = file.flush().await {
@@ -431,7 +430,7 @@ pub async fn persist(
 
     // `Ytt(c, …)` — the preview comes off the WRITTEN body, not the original,
     // so a capped result previews what the file actually contains.
-    let (preview_utf16, has_more) = preview_utf16(body, PREVIEW_CHARS);
+    let (preview_utf16, has_more) = preview_utf16(&capped, PREVIEW_CHARS);
     Ok(Persisted {
         filepath,
         original_size,
@@ -509,7 +508,10 @@ mod tests {
         assert_eq!(preview(&s, PREVIEW_CHARS), (s.clone(), false));
         assert_eq!(preview("😀ab", 2), ("😀".to_string(), true));
         assert_eq!(preview("😀ab", 1), ("\u{fffd}".to_string(), true));
-        assert_eq!(preview_utf16("😀ab", 1), (vec![0xd83d], true));
+        assert_eq!(
+            preview_utf16(&[0xd83d, 0xde00, 97, 98], 1),
+            (vec![0xd83d], true)
+        );
         assert_eq!(preview("→→→\nabcd", 6), ("→→→\nab".to_string(), true));
         assert_eq!(preview("→→→→\nabcd", 6), ("→→→→".to_string(), true));
         assert_eq!(preview("", 0), ("".to_string(), false));
@@ -537,6 +539,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persist_keeps_source_preview_until_the_utf8_file_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tool-results");
+        let body =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""before \ud800 after""#)
+                .unwrap();
+        let persisted = persist(root.path(), &dir, "source", &body, false, 100)
+            .await
+            .unwrap();
+        assert_eq!(persisted.preview_utf16, body.string_units("").unwrap());
+        assert_eq!(persisted.original_size, 14);
+        assert_eq!(
+            std::fs::read(persisted.filepath).unwrap(),
+            "before \u{fffd} after".as_bytes()
+        );
+    }
+
     // T4 — `x2e`.
     #[tokio::test]
     async fn persist_writes_txt_and_creates_the_directory() {
@@ -547,7 +567,7 @@ mod tests {
             tmp.path(),
             &dir,
             "toolu_abc",
-            body,
+            &(body).into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -572,7 +592,7 @@ mod tests {
             tmp.path(),
             &dir,
             "id1",
-            "[\n  1\n]",
+            &("[\n  1\n]").into(),
             true,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -592,7 +612,7 @@ mod tests {
             tmp.path(),
             &dir,
             "id1",
-            "NEW-BODY",
+            &("NEW-BODY").into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -617,7 +637,7 @@ mod tests {
             tmp.path(),
             &dir,
             "unicode",
-            "中😀",
+            &("中😀").into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -637,7 +657,7 @@ mod tests {
                 tmp.path(),
                 &dir,
                 "id",
-                "new",
+                &("new").into(),
                 false,
                 MAX_PERSIST_UTF16_UNITS
             )
@@ -661,7 +681,7 @@ mod tests {
             tmp.path(),
             &dir,
             "id",
-            "new",
+            &("new").into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -681,9 +701,16 @@ mod tests {
         let root = tmp.path().join("config");
         symlink(&real, &root).unwrap();
         let dir = root.join(TOOL_RESULTS_DIR);
-        persist(&root, &dir, "id", "new", false, MAX_PERSIST_UTF16_UNITS)
-            .await
-            .unwrap();
+        persist(
+            &root,
+            &dir,
+            "id",
+            &("new").into(),
+            false,
+            MAX_PERSIST_UTF16_UNITS,
+        )
+        .await
+        .unwrap();
         let link = dir.join("collision.txt");
         symlink(dir.join("id.txt"), &link).unwrap();
         // `OIn` removes preexisting symlinks. A symlink appearing at the
@@ -719,7 +746,7 @@ mod tests {
                 tmp.path(),
                 &dir,
                 "id",
-                "new",
+                &("new").into(),
                 false,
                 MAX_PERSIST_UTF16_UNITS
             )
@@ -733,7 +760,7 @@ mod tests {
             tmp.path(),
             &dir,
             "id",
-            "new",
+            &("new").into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -757,7 +784,7 @@ mod tests {
                 tmp.path(),
                 &dir,
                 "id",
-                "new",
+                &("new").into(),
                 false,
                 MAX_PERSIST_UTF16_UNITS
             )
@@ -771,7 +798,7 @@ mod tests {
             tmp.path(),
             &link.join("nested"),
             "other",
-            "new",
+            &("new").into(),
             false,
             MAX_PERSIST_UTF16_UNITS,
         )
@@ -822,12 +849,27 @@ mod tests {
         // An astral char is ONE `char` but TWO UTF-16 units, so a cap of 3 over
         // "a😀b" must keep "a😀" — cutting at 3 would leave a lone high
         // surrogate, which is how a persisted file ends in a replacement char.
-        assert_eq!(truncate_utf16_units("a\u{1F600}b", 3), "a\u{1F600}");
-        assert_eq!(truncate_utf16_units("a\u{1F600}b", 2), "a");
-        assert_eq!(truncate_utf16_units("a\u{1F600}b", 4), "a\u{1F600}b");
-        assert_eq!(truncate_utf16_units("abc", 0), "");
+        assert_eq!(
+            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 3),
+            "a\u{1F600}".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 2),
+            "a".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            truncate_utf16_units(&"a\u{1F600}b".encode_utf16().collect::<Vec<_>>(), 4),
+            "a\u{1F600}b".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            truncate_utf16_units(&"abc".encode_utf16().collect::<Vec<_>>(), 0),
+            "".encode_utf16().collect::<Vec<_>>()
+        );
         // Under the cap is returned untouched.
-        assert_eq!(truncate_utf16_units("abc", 99), "abc");
+        assert_eq!(
+            truncate_utf16_units(&"abc".encode_utf16().collect::<Vec<_>>(), 99),
+            "abc".encode_utf16().collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -836,9 +878,16 @@ mod tests {
         let dir = tmp.path().join("projects/p/s/tool-results");
         let body = "x".repeat(5_000);
 
-        let p = persist(tmp.path(), &dir, "capped", &body, false, 1_000)
-            .await
-            .expect("persist");
+        let p = persist(
+            tmp.path(),
+            &dir,
+            "capped",
+            &body.as_str().into(),
+            false,
+            1_000,
+        )
+        .await
+        .expect("persist");
 
         // The FILE holds only what the cap allowed…
         let written = std::fs::read_to_string(&p.filepath).expect("read back");
@@ -857,7 +906,7 @@ mod tests {
     async fn a_body_under_the_cap_is_untouched_and_unmarked() {
         let tmp = tempfile::tempdir().expect("temp");
         let dir = tmp.path().join("projects/p/s/tool-results");
-        let p = persist(tmp.path(), &dir, "small", "hello", false, 1_000)
+        let p = persist(tmp.path(), &dir, "small", &("hello").into(), false, 1_000)
             .await
             .expect("persist");
         assert_eq!(

@@ -22,7 +22,9 @@
 //! [`Effect`] enum grows without needing a churn-per-variant update.
 
 use lingxi_core::host::EffectHandler;
-use lingxi_core::types::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
+use lingxi_core::types::{
+    effects::ModelRequest, Effect, RedactableContent, RequestId, SessionId, ToolUseId,
+};
 
 /// Run the standard [`EffectHandler`] contract against an impl.
 ///
@@ -33,7 +35,7 @@ pub async fn effect_handler_contract_tests<H: EffectHandler>(h: &H) {
     test_render_stream_delta_handled(h).await;
     test_render_error_handled(h).await;
     test_render_token_usage_update_handled(h).await;
-    test_send_api_request_handled(h).await;
+    test_request_model_handled(h).await;
     test_persist_session_snapshot_handled(h).await;
     test_load_session_handled(h).await;
     test_terminate_handled(h).await;
@@ -66,11 +68,16 @@ async fn test_render_token_usage_update_handled<H: EffectHandler>(h: &H) {
         .await;
 }
 
-async fn test_send_api_request_handled<H: EffectHandler>(h: &H) {
+async fn test_request_model_handled<H: EffectHandler>(h: &H) {
     let _ = h
-        .handle(Effect::SendApiRequest {
+        .handle(Effect::RequestModel {
             request_id: RequestId::nil(),
-            request_body: serde_json::json!({ "model": "contract-test" }),
+            request: ModelRequest {
+                model: "contract-test".into(),
+                profile: None,
+                messages: Vec::new(),
+                max_output_tokens: 1024,
+            },
         })
         .await;
 }

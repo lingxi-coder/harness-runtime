@@ -31,11 +31,12 @@ use telemetry::tengu::tool::{
 };
 use unicode_normalization::UnicodeNormalization;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -284,8 +285,8 @@ struct ExitInput {
 /// the 2.1.206 binary (`_wy=ye(()=>E.strictObject({name:...describe('...'),
 /// path:...describe("...")}))`). `strictObject` ⇒ `additionalProperties:false`;
 /// neither field is required.
-static ENTER_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static ENTER_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "name": {
@@ -298,14 +299,14 @@ static ENTER_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "additionalProperties": false
-    })
+    }))
 });
 
 /// 206 `Twy` input schema (byte-exact param descriptions, extracted from the
 /// 2.1.206 binary): `strictObject` ⇒ `additionalProperties:false`; `action`
 /// is required, `discard_changes` is optional.
-static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static EXIT_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "action": {
@@ -320,7 +321,7 @@ static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         },
         "additionalProperties": false,
         "required": ["action"]
-    })
+    }))
 });
 
 /// 206 `ExitWorktree` no-op message (`errorCode:1`, `Twy.validateInput`'s
@@ -654,15 +655,16 @@ impl EnterWorktreeTool {
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Entered", &display_path, &suffix);
                 Ok(ToolCallResult {
-                    data: json!({
+                    data: tool_api::tool_trait::generated_builtin_result(&json!({
                         "path": display_path,
                         "branch_name": handle.branch_name,
-                    }),
-                    model_content: Some(message),
+                    })),
+                    model_content: Some(message.into()),
                     new_messages: Vec::new(),
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(err) => self.map_error(invocation_id, duration_ms, err).await,
@@ -689,9 +691,7 @@ impl EnterWorktreeTool {
             let duration_ms = started_at.elapsed().as_millis() as u64;
             self.emit_failed(invocation_id, "already_in_worktree", duration_ms)
                 .await;
-            return Err(ToolError::InvalidInput(
-                ALREADY_IN_WORKTREE_MESSAGE.to_string(),
-            ));
+            return Err(ToolError::InvalidInput(ALREADY_IN_WORKTREE_MESSAGE.into()));
         }
 
         let slug = name.unwrap_or_else(gen_random_slug);
@@ -710,9 +710,9 @@ impl EnterWorktreeTool {
                 started_at.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
-                "EnterWorktree: invalid slug: {detail}"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("EnterWorktree: invalid slug: {detail}").into(),
+            ));
         }
 
         let result = self.ctx.worktree.create_worktree(&slug, None, &[]).await;
@@ -743,15 +743,16 @@ impl EnterWorktreeTool {
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Created", &display_path, &suffix);
                 Ok(ToolCallResult {
-                    data: json!({
+                    data: tool_api::tool_trait::generated_builtin_result(&json!({
                         "path": display_path,
                         "branch_name": handle.branch_name,
-                    }),
-                    model_content: Some(message),
+                    })),
+                    model_content: Some(message.into()),
                     new_messages: Vec::new(),
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(err) => self.map_error(invocation_id, duration_ms, err).await,
@@ -768,9 +769,9 @@ impl EnterWorktreeTool {
             WorktreeError::InvalidSlug(detail) => {
                 self.emit_failed(invocation_id, "invalid_slug", duration_ms)
                     .await;
-                Err(ToolError::InvalidInput(format!(
-                    "EnterWorktree: invalid slug: {detail}"
-                )))
+                Err(ToolError::InvalidInput(
+                    format!("EnterWorktree: invalid slug: {detail}").into(),
+                ))
             }
             WorktreeError::Unsupported => {
                 self.emit_failed(invocation_id, "unsupported", duration_ms)
@@ -787,7 +788,9 @@ impl EnterWorktreeTool {
             }
             WorktreeError::Io(msg) => {
                 self.emit_failed(invocation_id, "io", duration_ms).await;
-                Err(ToolError::Io(format!("EnterWorktree: io error: {msg}")))
+                Err(ToolError::Io(
+                    format!("EnterWorktree: io error: {msg}").into(),
+                ))
             }
             // The pre-flight symlink guard already carries the full
             // byte-faithful "Cannot create worktree: … is a symlink. …" text
@@ -814,17 +817,14 @@ impl Tool for EnterWorktreeTool {
         ENTER_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("create an isolated git worktree and switch into it")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("create an isolated git worktree and switch into it".into())
     }
     /// 2.1.206 `userFacingName(e){return e?.path?"Entering worktree":"Creating worktree"}`.
     /// `e.path` is a JS truthiness check, so an empty-string `path` counts as
     /// absent here too — matching the `call` dispatch's empty-string handling.
-    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
-        let has_path = input
-            .get("path")
-            .and_then(Value::as_str)
-            .is_some_and(|p| !p.is_empty());
+    fn user_facing_name_for_input(&self, input: &Utf16JsonProjection) -> Option<String> {
+        let has_path = input.string_at("/path").is_some_and(|p| !p.is_empty());
         Some(
             if has_path {
                 "Entering worktree"
@@ -834,8 +834,15 @@ impl Tool for EnterWorktreeTool {
             .to_string(),
         )
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &ENTER_INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -847,19 +854,19 @@ impl Tool for EnterWorktreeTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
@@ -882,14 +889,14 @@ impl Tool for EnterWorktreeTool {
     ///   realpath differs from the lexical resolve and a
     ///   ` (path sanitized for display)` clause when sanitization changed it —
     ///   byte-faithful to the binary's `${o}${a}${s}` assembly.
-    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // 206 `e.path` is a JS truthiness check — an empty string is falsy and
         // counts as "no path" (create). `!e.path` ⇒ allow (create branch).
-        let Some(path) = input
-            .get("path")
-            .and_then(Value::as_str)
-            .filter(|p| !p.is_empty())
-        else {
+        let Some(path) = input.string_at("/path").filter(|p| !p.is_empty()) else {
             return PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
                     reason: "EnterWorktree create stays under the managed worktrees root".into(),
@@ -913,8 +920,10 @@ impl Tool for EnterWorktreeTool {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned());
             let mut updated = input.clone();
-            if let (Some(obj), Some(real)) = (updated.as_object_mut(), real) {
-                obj.insert("path".into(), Value::String(real));
+            if let Some(real) = real {
+                updated
+                    .set_field("path", real.into())
+                    .expect("validated EnterWorktree input is an object");
             }
             return PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
@@ -959,13 +968,13 @@ impl Tool for EnterWorktreeTool {
         );
         PermissionResult::Ask {
             reason: PermissionDecisionReason::SafetyCheck {
-                reason,
+                reason: reason.into(),
                 classifier_approvable: false,
                 circuit_breaker: None,
             },
             prompt: PermissionPrompt {
                 title: ENTER_TOOL_NAME.into(),
-                message,
+                message: message.into(),
                 options: vec![],
             },
             pending_classifier_check: None,
@@ -975,7 +984,7 @@ impl Tool for EnterWorktreeTool {
 
     /// 2.1.206 `async description(){return"Creates an isolated worktree (via
     /// git or configured hooks) and switches the session into it"}` (byte-exact).
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Creates an isolated worktree (via git or configured hooks) and switches the session into it".into()
     }
     /// 2.1.206 `yCd()` tool-use prompt, extracted verbatim from the binary and
@@ -984,32 +993,25 @@ impl Tool for EnterWorktreeTool {
     /// convention, `branding::MEMORY_FILE`); `settings.json` is kept verbatim
     /// (the port's settings filename is unchanged, only relocated under
     /// `.lingxi/` — see `tools/meta/src/config.rs::CONFIG_FILE_NAME`).
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         ENTER_WORKTREE_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = fresh_invocation_id();
         let started_at = Instant::now();
 
-        let parsed: EnterInput = match serde_json::from_value(input) {
-            Ok(v) => v,
-            Err(e) => {
-                self.emit_failed(
-                    &invocation_id,
-                    "invalid_input",
-                    started_at.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "EnterWorktree: invalid input: {e}"
-                )));
-            }
+        // Input validation has already enforced string types. Reading the
+        // display form here is the explicit boundary to filesystem paths/slugs,
+        // whose host OS representation is UTF-8/OsString rather than JS units.
+        let parsed = EnterInput {
+            name: input.string_at("/name").map(str::to_owned),
+            path: input.string_at("/path").map(str::to_owned),
         };
 
         // 206 `e.path` is a JS truthiness check — an empty string is falsy,
@@ -1028,7 +1030,7 @@ impl Tool for EnterWorktreeTool {
                 self.emit_failed(&invocation_id, "subagent_cwd_override", duration_ms)
                     .await;
                 return Err(ToolError::InvalidInput(
-                    ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE.to_string(),
+                    ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE.into(),
                 ));
             }
             self.call_create(&invocation_id, started_at, parsed.name)
@@ -1342,8 +1344,8 @@ impl ExitWorktreeTool {
 /// `is_destructive`/`user_facing_name_for_input`, mirroring the 206
 /// `action==="remove"` checks off the RAW `Value` (those trait hooks never
 /// see the parsed/validated [`ExitInput`]).
-fn is_remove_action(input: &Value) -> bool {
-    input.get("action").and_then(Value::as_str) == Some("remove")
+fn is_remove_action(input: &Utf16JsonProjection) -> bool {
+    input.string_at("/action") == Some("remove")
 }
 
 #[async_trait]
@@ -1352,12 +1354,12 @@ impl Tool for ExitWorktreeTool {
         EXIT_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("exit a worktree session and return to the original directory")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("exit a worktree session and return to the original directory".into())
     }
     /// 2.1.206 `userFacingName(e){return e.action==="remove"?"Cleaning up
     /// worktree":"Exiting worktree"}`.
-    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
+    fn user_facing_name_for_input(&self, input: &Utf16JsonProjection) -> Option<String> {
         Some(
             if is_remove_action(input) {
                 "Cleaning up worktree"
@@ -1367,8 +1369,15 @@ impl Tool for ExitWorktreeTool {
             .to_string(),
         )
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &EXIT_INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -1380,24 +1389,28 @@ impl Tool for ExitWorktreeTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
     /// 2.1.206 `isDestructive(e){return e.action==="remove"}`.
-    fn is_destructive(&self, input: &Value) -> bool {
+    fn is_destructive(&self, input: &Utf16JsonProjection) -> bool {
         is_remove_action(input)
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ExitWorktree gated by M2-01 WorktreeManager".into(),
@@ -1411,36 +1424,43 @@ impl Tool for ExitWorktreeTool {
     /// 2.1.206 `async description(){return"Exits a worktree session created
     /// by EnterWorktree and restores the original working directory"}`
     /// (byte-exact).
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Exits a worktree session created by EnterWorktree and restores the original working directory".into()
     }
     /// 2.1.206 `vCd()` tool-use prompt, extracted verbatim from the binary.
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         EXIT_WORKTREE_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = fresh_invocation_id();
         let started_at = Instant::now();
 
-        let parsed: ExitInput = match serde_json::from_value(input) {
-            Ok(v) => v,
-            Err(e) => {
+        let action = match input.string_at("/action") {
+            Some("keep") => ExitAction::Keep,
+            Some("remove") => ExitAction::Remove,
+            _ => {
                 self.emit_failed(
                     &invocation_id,
                     "invalid_input",
                     started_at.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ExitWorktree: invalid input: {e}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    "ExitWorktree: invalid input: action must be keep or remove".into(),
+                ));
             }
+        };
+        let parsed = ExitInput {
+            action,
+            discard_changes: input
+                .at_pointer("/discard_changes")
+                .and_then(|value| value.as_bool()),
         };
 
         // 0. Subagent-cwd-override guard — 206 `validateInput`'s `Tze()` branch
@@ -1453,7 +1473,7 @@ impl Tool for ExitWorktreeTool {
             self.emit_failed(&invocation_id, "subagent_cwd_override", duration_ms)
                 .await;
             return Err(ToolError::InvalidInput(
-                EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE.to_string(),
+                EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE.into(),
             ));
         }
 
@@ -1470,7 +1490,7 @@ impl Tool for ExitWorktreeTool {
             )
             .await;
             return Err(ToolError::InvalidInput(
-                EXIT_NO_ACTIVE_SESSION_MESSAGE.to_string(),
+                EXIT_NO_ACTIVE_SESSION_MESSAGE.into(),
             ));
         };
 
@@ -1485,10 +1505,13 @@ impl Tool for ExitWorktreeTool {
                 started_at.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(exit_not_owner_message(
-                &session.worktree_path.to_string_lossy(),
-                &session.original_cwd.to_string_lossy(),
-            )));
+            return Err(ToolError::InvalidInput(
+                exit_not_owner_message(
+                    &session.worktree_path.to_string_lossy(),
+                    &session.original_cwd.to_string_lossy(),
+                )
+                .into(),
+            ));
         }
 
         self.emit_started(&invocation_id, &session.branch_name)
@@ -1545,9 +1568,9 @@ impl Tool for ExitWorktreeTool {
                             started_at.elapsed().as_millis() as u64,
                         )
                         .await;
-                        return Err(ToolError::InvalidInput(exit_has_changes_message(
-                            &parts.join(" and "),
-                        )));
+                        return Err(ToolError::InvalidInput(
+                            exit_has_changes_message(&parts.join(" and ")).into(),
+                        ));
                     }
                     Ok(Some(summary)) => {
                         // Clean — proceed. Retained for the discard note
@@ -1566,9 +1589,9 @@ impl Tool for ExitWorktreeTool {
                             started_at.elapsed().as_millis() as u64,
                         )
                         .await;
-                        return Err(ToolError::InvalidInput(exit_cannot_verify_message(
-                            &worktree_path_display,
-                        )));
+                        return Err(ToolError::InvalidInput(
+                            exit_cannot_verify_message(&worktree_path_display).into(),
+                        ));
                     }
                 }
             }
@@ -1745,29 +1768,53 @@ impl Tool for ExitWorktreeTool {
             )
         };
 
-        let mut data = json!({
+        let mut data = tool_api::tool_trait::generated_builtin_result(&json!({
             "action": if is_remove { "remove" } else { "keep" },
             "branch_name": session.branch_name,
             "worktree_path": worktree_path_display,
             "original_cwd": original_cwd_display,
-        });
+        }));
         if let Some(name) = tmux_session_name_for_data {
-            data["tmux_session_name"] = json!(name);
+            data.set_field(
+                "tmux_session_name",
+                tool_api::tool_trait::generated_builtin_result(&json!(name)),
+            )
+            .expect("ExitWorktree result data is an object");
         }
 
         Ok(ToolCallResult {
             data,
-            model_content: Some(message),
+            model_content: Some(message.into()),
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn source_json_value(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
+    }
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            source_json_value(json!($($tokens)*))
+        };
+    }
+
+    fn data_value(value: &Utf16JsonProjection) -> serde_json::Value {
+        serde_json::from_str(&value.to_json_string().expect("test data serializes"))
+            .expect("test data is JSON")
+    }
+
+    fn model_text(value: &Option<Utf16JsonProjection>) -> Option<&str> {
+        value.as_ref()?.string_at("")
+    }
+
     use super::*;
     use lingxi_core::host::worktree::WorktreeManager;
     use std::sync::Arc;
@@ -1852,11 +1899,18 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
-            .call(json!({ "name": "user/feature" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "name": "user/feature" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("create must succeed");
-        assert_eq!(res.data["branch_name"], "worktree-user+feature");
-        let path = res.data["path"].as_str().unwrap();
+        assert_eq!(
+            data_value(&res.data)["branch_name"],
+            "worktree-user+feature"
+        );
+        let path = data_value(&res.data)["path"].as_str().unwrap().to_owned();
         assert!(
             path.ends_with("/tmp/repo-A/.lingxi/worktrees/user+feature"),
             "path layout off: {path}"
@@ -1876,7 +1930,11 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let err = tool
-            .call(json!({ "name": "bad slug" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "name": "bad slug" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("space must reject");
         let msg = format!("{err}");
@@ -1893,7 +1951,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let err = tool
-            .call(json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
             .await
             .expect_err("git error must surface");
         let msg = format!("{err}");
@@ -1911,7 +1969,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let err = tool
-            .call(json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
             .await
             .expect_err("unsupported must surface");
         assert_eq!(
@@ -1929,7 +1987,7 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock.clone());
         let tool = EnterWorktreeTool::new(bctx);
         let _ = tool
-            .call(json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
             .await;
         // Only the scripted error fires; created list stays empty (no retry).
         assert_eq!(mock.created().len(), 0);
@@ -1943,12 +2001,12 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock);
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
-            .call(json!({ "name": "feat" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "feat" }), fresh_ctx(), fresh_tx())
             .await
             .expect("create must succeed");
-        let path = res.data["path"].as_str().unwrap().to_string();
+        let path = data_value(&res.data)["path"].as_str().unwrap().to_string();
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 format!(
                     "Created worktree at {path} on branch worktree-feat. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
@@ -1984,11 +2042,11 @@ mod tests {
         let tool = EnterWorktreeTool::new(bctx);
         let target = "/tmp/repo-enter/.lingxi/worktrees/feat";
         let res = tool
-            .call(json!({ "path": target }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "path": target }), fresh_ctx(), fresh_tx())
             .await
             .expect("enter existing must succeed");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Entered worktree at /tmp/repo-enter/.lingxi/worktrees/feat on branch worktree-feat. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
             )
@@ -2016,13 +2074,13 @@ mod tests {
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
             .call(
-                json!({ "path": target.to_string_lossy() }),
+                source_json!({ "path": target.to_string_lossy() }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("enter existing must succeed");
-        let msg = res.model_content.as_deref().unwrap();
+        let msg = model_text(&res.model_content).unwrap();
         assert!(!msg.contains("on branch HEAD"), "msg: {msg}");
         assert_eq!(
             msg,
@@ -2040,11 +2098,11 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
-            .call(json!({ "path": "" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "path": "" }), fresh_ctx(), fresh_tx())
             .await
             .expect("empty-string path must be treated as absent and create");
         assert_eq!(mock.created().len(), 1, "must have created, not entered");
-        let msg = res.model_content.as_deref().unwrap();
+        let msg = model_text(&res.model_content).unwrap();
         assert!(
             msg.starts_with("Created worktree at "),
             "msg should use the CREATE verb: {msg}"
@@ -2060,7 +2118,7 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock);
         let tool = EnterWorktreeTool::new(bctx);
         assert_eq!(
-            tool.user_facing_name_for_input(&json!({ "path": "" }))
+            tool.user_facing_name_for_input(&source_json!({ "path": "" }))
                 .as_deref(),
             Some("Creating worktree")
         );
@@ -2086,7 +2144,7 @@ mod tests {
         );
         let tool = EnterWorktreeTool::new(bctx);
         let err = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(source_json!({}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("create while already in a worktree must reject");
         assert_eq!(
@@ -2118,10 +2176,10 @@ mod tests {
         let tool = EnterWorktreeTool::new(bctx);
         let target = "/tmp/repo-switch/.lingxi/worktrees/second";
         let res = tool
-            .call(json!({ "path": target }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "path": target }), fresh_ctx(), fresh_tx())
             .await
             .expect("switching via path must succeed even mid-worktree");
-        assert_eq!(res.data["path"], target);
+        assert_eq!(data_value(&res.data)["path"], target);
     }
 
     #[tokio::test]
@@ -2137,7 +2195,7 @@ mod tests {
         let mut sub = fresh_ctx();
         sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
         let err = tool
-            .call(json!({}), sub, fresh_tx())
+            .call(source_json!({}), sub, fresh_tx())
             .await
             .expect_err("create from an isolated subagent must refuse");
         assert_eq!(
@@ -2163,10 +2221,10 @@ mod tests {
         sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
         let target = "/tmp/repo-sub2/.lingxi/worktrees/existing";
         let res = tool
-            .call(json!({ "path": target }), sub, fresh_tx())
+            .call(source_json!({ "path": target }), sub, fresh_tx())
             .await
             .expect("enter-existing via path is allowed from an isolated subagent");
-        assert_eq!(res.data["path"], target);
+        assert_eq!(data_value(&res.data)["path"], target);
     }
 
     #[tokio::test]
@@ -2178,7 +2236,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let _ = tool
-            .call(json!({ "name": "teltest" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "teltest" }), fresh_ctx(), fresh_tx())
             .await
             .expect("create");
         let ev = sink
@@ -2211,7 +2269,7 @@ mod tests {
         let tool = EnterWorktreeTool::new(bctx);
         let _ = tool
             .call(
-                json!({ "path": "/tmp/repo-tel2/.lingxi/worktrees/x" }),
+                source_json!({ "path": "/tmp/repo-tel2/.lingxi/worktrees/x" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2237,10 +2295,14 @@ mod tests {
         let boot_cwd = bctx.cwd();
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
-            .call(json!({ "name": "swaptest" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "name": "swaptest" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("create must succeed");
-        let path = PathBuf::from(res.data["path"].as_str().unwrap());
+        let path = PathBuf::from(data_value(&res.data)["path"].as_str().unwrap());
         assert_eq!(tool.ctx.cwd(), path, "session cwd must swap to worktree");
         assert_ne!(tool.ctx.cwd(), boot_cwd);
     }
@@ -2253,7 +2315,7 @@ mod tests {
         let boot_cwd = bctx.cwd();
         let tool = EnterWorktreeTool::new(bctx);
         let _ = tool
-            .call(json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "name": "ok-slug" }), fresh_ctx(), fresh_tx())
             .await
             .expect_err("scripted git error must surface");
         assert_eq!(tool.ctx.cwd(), boot_cwd, "an error path must not swap cwd");
@@ -2266,7 +2328,11 @@ mod tests {
         let boot_cwd = bctx.cwd();
         let tool = EnterWorktreeTool::new(bctx);
         let _ = tool
-            .call(json!({ "name": "bad slug" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "name": "bad slug" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("invalid slug must reject");
         assert_eq!(tool.ctx.cwd(), boot_cwd, "invalid input must not swap cwd");
@@ -2290,11 +2356,12 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock);
         let tool = EnterWorktreeTool::new(bctx);
         assert_eq!(
-            tool.user_facing_name_for_input(&json!({})).as_deref(),
+            tool.user_facing_name_for_input(&source_json!({}))
+                .as_deref(),
             Some("Creating worktree")
         );
         assert_eq!(
-            tool.user_facing_name_for_input(&json!({ "path": "/x" }))
+            tool.user_facing_name_for_input(&source_json!({ "path": "/x" }))
                 .as_deref(),
             Some("Entering worktree")
         );
@@ -2364,7 +2431,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let persister = Arc::new(RecordingPersister::default());
         let tool = EnterWorktreeTool::new(bctx).with_state_persister(persister.clone());
-        tool.call(json!({ "name": "feat" }), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({ "name": "feat" }), fresh_ctx(), fresh_tx())
             .await
             .expect("create must succeed");
         let calls = persister.calls.lock().unwrap();
@@ -2391,7 +2458,7 @@ mod tests {
         let persister = Arc::new(RecordingPersister::default());
         let tool =
             ExitWorktreeTool::new_assuming_cwd_exists(bctx).with_state_persister(persister.clone());
-        tool.call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep must succeed");
         let calls = persister.calls.lock().unwrap();
@@ -2412,7 +2479,7 @@ mod tests {
         let boot_cwd = bctx.cwd();
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect_err("no active session must be a no-op error");
         assert_eq!(
@@ -2447,7 +2514,7 @@ mod tests {
         let mut sub = fresh_ctx();
         sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
         let err = tool
-            .call(json!({ "action": "remove" }), sub, fresh_tx())
+            .call(source_json!({ "action": "remove" }), sub, fresh_tx())
             .await
             .expect_err("ExitWorktree from an isolated subagent must refuse");
         assert_eq!(
@@ -2483,7 +2550,11 @@ mod tests {
         bctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
-            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("remove on an entered worktree must refuse");
         assert_eq!(
@@ -2518,7 +2589,7 @@ mod tests {
         bctx.session_cwd.swap(wt.clone(), vec![wt]);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let _ = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep on an entered worktree is allowed");
         assert_eq!(tool.ctx.cwd(), original, "cwd restored");
@@ -2539,11 +2610,11 @@ mod tests {
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep must succeed");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited worktree. Your work is preserved at \
                  /tmp/repo-keep/.lingxi/worktrees/feat on branch worktree-feat. \
@@ -2637,11 +2708,11 @@ mod tests {
             p != std::path::Path::new("/tmp/repo-km-gone")
         });
         let res = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep must succeed even when original cwd is gone");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited worktree. Your work is preserved at \
                  /tmp/repo-km/.lingxi/worktrees/feat on branch worktree-feat. \
@@ -2669,13 +2740,13 @@ mod tests {
             ExitWorktreeTool::new_with_dir_exists(bctx, |p| p == std::env::temp_dir().as_path());
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("remove must succeed even when original cwd is gone");
-        let msg = res.model_content.unwrap_or_default();
+        let msg = model_text(&res.model_content).unwrap_or_default();
         assert!(
             msg.starts_with(
                 "Exited and removed worktree at /tmp/repo-rm-gone/.lingxi/worktrees/feat."
@@ -2705,14 +2776,14 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("remove must succeed");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited and removed worktree at /tmp/repo-remove/.lingxi/worktrees/feat. \
                  Session is now back in /tmp/repo-remove."
@@ -2743,14 +2814,14 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("a non-fatal removal failure must still return a normal tool result");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited worktree but could not remove it \u{2014} kept at \
                  /tmp/repo-remove-fail/.lingxi/worktrees/feat. \
@@ -2789,11 +2860,15 @@ mod tests {
         );
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
-            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("clean remove without discard_changes must succeed");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited and removed worktree at /tmp/repo-clean/.lingxi/worktrees/feat. \
                  Session is now back in /tmp/repo-clean."
@@ -2814,7 +2889,11 @@ mod tests {
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
-            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("unverifiable state must refuse");
         assert_eq!(
@@ -2851,7 +2930,11 @@ mod tests {
         );
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
-            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("dirty worktree must refuse");
         assert_eq!(
@@ -2887,7 +2970,11 @@ mod tests {
         );
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
-            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "action": "remove" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("dirty worktree must refuse");
         // Files fragment BEFORE commits fragment (oracle push order), commits
@@ -2922,7 +3009,7 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2931,7 +3018,7 @@ mod tests {
         // Discard note is commits-first, then uncommitted files (binary push
         // order), singular/plural applied independently to each count.
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited and removed worktree at /tmp/repo-force/.lingxi/worktrees/feat. \
                  Discarded 1 commit and 5 uncommitted files. \
@@ -2952,11 +3039,11 @@ mod tests {
         populate_session(&bctx, &original_cwd, &worktree_path, "HEAD", None);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep must succeed");
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited worktree. Your work is preserved at \
                  /tmp/repo-detached-exit/.lingxi/worktrees/feat. \
@@ -3073,7 +3160,7 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3091,9 +3178,9 @@ mod tests {
         // `remove` never surfaces `tmux_session_name` in `data` (206 doesn't
         // either — the session is already dead by the time the result is
         // built).
-        assert!(res.data.get("tmux_session_name").is_none());
+        assert!(data_value(&res.data).get("tmux_session_name").is_none());
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited and removed worktree at /tmp/repo-tmux-remove/.lingxi/worktrees/feat. \
                  Session is now back in /tmp/repo-tmux-remove."
@@ -3121,7 +3208,7 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
-                json!({ "action": "remove", "discard_changes": true }),
+                source_json!({ "action": "remove", "discard_changes": true }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3135,7 +3222,7 @@ mod tests {
         // Removal still succeeded despite the kill failure (non-fatal, warn-and-continue).
         assert_eq!(mock.removed().len(), 1);
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited and removed worktree at /tmp/repo-tmux-kill-fail/.lingxi/worktrees/feat. \
                  Session is now back in /tmp/repo-tmux-kill-fail."
@@ -3161,7 +3248,7 @@ mod tests {
         );
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("keep must succeed");
 
@@ -3172,12 +3259,12 @@ mod tests {
         );
         assert_eq!(mock.removed().len(), 0);
         // The session name is surfaced in `data` for reattach.
-        assert_eq!(res.data["tmux_session_name"], json!("wt-z"));
+        assert_eq!(data_value(&res.data)["tmux_session_name"], json!("wt-z"));
         // ... and in the model-facing message, as an additive reattach
         // clause — LEADING-SPACE-joined inline into the single-string
         // message (206's `${g}` suffix), NOT on its own line.
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some(
                 "Exited worktree. Your work is preserved at \
                  /tmp/repo-tmux-keep/.lingxi/worktrees/feat on branch worktree-feat. \
@@ -3208,9 +3295,9 @@ mod tests {
             populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
             let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
             let input = if action == "remove" {
-                json!({ "action": "remove", "discard_changes": true })
+                source_json!({ "action": "remove", "discard_changes": true })
             } else {
-                json!({ "action": "keep" })
+                source_json!({ "action": "keep" })
             };
             let res = tool
                 .call(input, fresh_ctx(), fresh_tx())
@@ -3220,7 +3307,7 @@ mod tests {
                 process.calls().is_empty(),
                 "no tmux call expected for {action} with tmux_session_name:None"
             );
-            assert!(res.data.get("tmux_session_name").is_none());
+            assert!(data_value(&res.data).get("tmux_session_name").is_none());
         }
     }
 
@@ -3229,15 +3316,15 @@ mod tests {
         let mock = Arc::new(MockWorktreeManager::new());
         let (bctx, _sink) = make_bctx(mock);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
-        assert!(tool.is_destructive(&json!({ "action": "remove" })));
-        assert!(!tool.is_destructive(&json!({ "action": "keep" })));
+        assert!(tool.is_destructive(&source_json!({ "action": "remove" })));
+        assert!(!tool.is_destructive(&source_json!({ "action": "keep" })));
         assert_eq!(
-            tool.user_facing_name_for_input(&json!({ "action": "remove" }))
+            tool.user_facing_name_for_input(&source_json!({ "action": "remove" }))
                 .as_deref(),
             Some("Cleaning up worktree")
         );
         assert_eq!(
-            tool.user_facing_name_for_input(&json!({ "action": "keep" }))
+            tool.user_facing_name_for_input(&source_json!({ "action": "keep" }))
                 .as_deref(),
             Some("Exiting worktree")
         );
@@ -3257,15 +3344,21 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock);
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let schema = tool.input_schema();
-        assert_eq!(schema["required"], json!(["action"]));
-        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema.string_at("/required/0"), Some("action"));
         assert_eq!(
-            schema["properties"]["action"]["enum"],
-            json!(["keep", "remove"])
+            schema
+                .at_pointer("/additionalProperties")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(schema.string_at("/properties/action/enum/0"), Some("keep"));
+        assert_eq!(
+            schema.string_at("/properties/action/enum/1"),
+            Some("remove")
         );
         assert_eq!(
-            schema["properties"]["discard_changes"]["type"],
-            json!("boolean")
+            schema.string_at("/properties/discard_changes/type"),
+            Some("boolean")
         );
     }
 
@@ -3276,15 +3369,15 @@ mod tests {
         let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let desc = tool
             .description(
-                &json!({}),
+                &source_json!({}),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
             )
             .await;
         assert_eq!(
-            desc,
-            "Exits a worktree session created by EnterWorktree and restores the original working directory"
+            desc.string_at(""),
+            Some("Exits a worktree session created by EnterWorktree and restores the original working directory")
         );
     }
 
@@ -3302,10 +3395,14 @@ mod tests {
 
         let enter = EnterWorktreeTool::new(bctx.clone());
         let enter_res = enter
-            .call(json!({ "name": "roundtrip" }), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({ "name": "roundtrip" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("enter must succeed");
-        let worktree_path = PathBuf::from(enter_res.data["path"].as_str().unwrap());
+        let worktree_path = PathBuf::from(data_value(&enter_res.data)["path"].as_str().unwrap());
 
         // EnterWorktree recorded the session AND swapped the cwd.
         assert_eq!(bctx.cwd(), worktree_path);
@@ -3319,11 +3416,11 @@ mod tests {
 
         let exit = ExitWorktreeTool::new(bctx.clone());
         let exit_res = exit
-            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .call(source_json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
             .expect("exit must succeed");
         assert_eq!(
-            exit_res.model_content.as_deref(),
+            model_text(&exit_res.model_content),
             Some(
                 format!(
                     "Exited worktree. Your work is preserved at {} on branch worktree-roundtrip. \
@@ -3368,7 +3465,7 @@ mod tests {
         let (_d, root) = scaffold_repo();
         let tool = EnterWorktreeTool::new(bctx_at(root));
         let res = tool
-            .check_permissions(&json!({ "name": "feat" }), &fresh_ctx())
+            .check_permissions(&source_json!({ "name": "feat" }), &fresh_ctx())
             .await;
         assert!(
             matches!(res, PermissionResult::Allow { .. }),
@@ -3386,12 +3483,15 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
         let res = tool
-            .check_permissions(&json!({ "path": wt.to_str().unwrap() }), &fresh_ctx())
+            .check_permissions(
+                &source_json!({ "path": wt.to_str().unwrap() }),
+                &fresh_ctx(),
+            )
             .await;
         match res {
             PermissionResult::Allow { updated_input, .. } => {
                 let updated = updated_input.expect("managed allow rewrites `path` to realpath");
-                assert_eq!(updated["path"], json!(wt.to_string_lossy().into_owned()));
+                assert_eq!(updated.string_at("/path"), Some(wt.to_str().unwrap()));
             }
             other => panic!("managed path must allow, got {other:?}"),
         }
@@ -3406,7 +3506,10 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
         let res = tool
-            .check_permissions(&json!({ "path": outside.to_str().unwrap() }), &fresh_ctx())
+            .check_permissions(
+                &source_json!({ "path": outside.to_str().unwrap() }),
+                &fresh_ctx(),
+            )
             .await;
         let o = outside.to_string_lossy();
         match res {
@@ -3419,10 +3522,10 @@ mod tests {
                 assert_eq!(prompt.title, "EnterWorktree");
                 assert!(prompt.options.is_empty());
                 assert_eq!(
-                    prompt.message,
-                    format!(
+                    prompt.message.string_at(""),
+                    Some(format!(
                         "Enter the worktree at \"{o}\"? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
-                    )
+                    ).as_str())
                 );
                 match reason {
                     PermissionDecisionReason::SafetyCheck {
@@ -3432,10 +3535,10 @@ mod tests {
                     } => {
                         assert!(!classifier_approvable, "must not be classifier-approvable");
                         assert_eq!(
-                            reason,
-                            format!(
+                            reason.string_at(""),
+                            Some(format!(
                                 "permission-root relocation to \"{o}\" \u{2014} a model-supplied worktree outside .lingxi/worktrees/"
-                            )
+                            ).as_str())
                         );
                     }
                     other => panic!("expected SafetyCheck reason, got {other:?}"),
@@ -3457,15 +3560,15 @@ mod tests {
         let raw = format!("{}/wt\u{200B}x", root.to_string_lossy());
         let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
         let res = tool
-            .check_permissions(&json!({ "path": raw }), &fresh_ctx())
+            .check_permissions(&source_json!({ "path": raw }), &fresh_ctx())
             .await;
         let sanitized = format!("{}/wt\u{FFFD}x", root.to_string_lossy());
         match res {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
-                prompt.message,
-                format!(
+                prompt.message.string_at(""),
+                Some(format!(
                     "Enter the worktree at \"{sanitized}\" (path sanitized for display)? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
-                )
+                ).as_str())
             ),
             other => panic!("must ask, got {other:?}"),
         }
@@ -3483,16 +3586,19 @@ mod tests {
         std::os::unix::fs::symlink(&real_target, &link).unwrap();
         let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
         let res = tool
-            .check_permissions(&json!({ "path": link.to_str().unwrap() }), &fresh_ctx())
+            .check_permissions(
+                &source_json!({ "path": link.to_str().unwrap() }),
+                &fresh_ctx(),
+            )
             .await;
         let o = link.to_string_lossy();
         let i = real_target.to_string_lossy();
         match res {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
-                prompt.message,
-                format!(
+                prompt.message.string_at(""),
+                Some(format!(
                     "Enter the worktree at \"{o}\" (resolves to \"{i}\")? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
-                )
+                ).as_str())
             ),
             other => panic!("must ask, got {other:?}"),
         }

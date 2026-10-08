@@ -28,6 +28,7 @@
 //! a host without Remote Control.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -36,7 +37,9 @@ use serde_json::{json, Value};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -67,8 +70,8 @@ const ROUTINE_ADDENDUM: &str = "
 This is a scheduled routine — the notification is how the run reaches its owner. Wrap the message in <routine_summary> tags: the first sentence becomes the phone banner, the full text becomes the email body.";
 
 /// Binary `$zp` — the input schema: `strictObject({message, status:literal("proactive")})`.
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -80,12 +83,12 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "status": { "type": "string", "const": "proactive" }
         },
         "required": ["message", "status"]
-    })
+    }))
 });
 
 /// Binary `qzp` — the output schema.
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "message": { "type": "string" },
@@ -97,7 +100,7 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "sentAt": { "type": "string" }
         },
         "required": ["message"]
-    })
+    }))
 });
 
 /// `PushNotification` — post a terminal/mobile notification (binary `Wzp`).
@@ -194,20 +197,98 @@ impl Tool for PushNotificationTool {
         PUSH_NOTIFICATION_TOOL_NAME
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("send a host notification to the user and optionally a remote push")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("send a host notification to the user and optionally a remote push".into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
         Some(PUSH_NOTIFICATION_TOOL_NAME)
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        let invalid = || invalid_tool_input("PushNotification returned invalid output");
+        let message = output
+            .get_property("message")
+            .filter(|value| value.code_units().is_some())
+            .ok_or_else(invalid)?;
+        let mut fields = vec![(
+            "message".to_owned(),
+            output.subprojection("/message").map_err(|_| invalid())?,
+        )];
+        for key in ["pushSent", "localSent"] {
+            if let Some(value) = output.get_property(key) {
+                if value.as_bool().is_none() {
+                    return Err(invalid());
+                }
+                fields.push((
+                    key.to_owned(),
+                    output
+                        .subprojection(&format!("/{key}"))
+                        .map_err(|_| invalid())?,
+                ));
+            }
+        }
+        if let Some(value) = output.get_property("disabledReason") {
+            if !value
+                .as_str()
+                .is_some_and(|text| matches!(text, "config_off" | "user_present" | "no_transport"))
+            {
+                return Err(invalid());
+            }
+            fields.push((
+                "disabledReason".to_owned(),
+                output
+                    .subprojection("/disabledReason")
+                    .map_err(|_| invalid())?,
+            ));
+        }
+        if let Some(value) = output.get_property("idleSec") {
+            if value.as_number().is_none() {
+                return Err(invalid());
+            }
+            fields.push((
+                "idleSec".to_owned(),
+                output.subprojection("/idleSec").map_err(|_| invalid())?,
+            ));
+        }
+        if let Some(value) = output.get_property("hasFocus") {
+            if value.as_bool().is_none() {
+                return Err(invalid());
+            }
+            fields.push((
+                "hasFocus".to_owned(),
+                output.subprojection("/hasFocus").map_err(|_| invalid())?,
+            ));
+        }
+        if let Some(value) = output.get_property("sentAt") {
+            if value.as_str().is_none() {
+                return Err(invalid());
+            }
+            fields.push((
+                "sentAt".to_owned(),
+                output.subprojection("/sentAt").map_err(|_| invalid())?,
+            ));
+        }
+        Utf16JsonProjection::object(fields).map_err(|_| invalid())
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -225,15 +306,19 @@ impl Tool for PushNotificationTool {
         1000
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // PARITY: binary `checkPermissions(e){return{behavior:"allow",updatedInput:e}}`.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -245,30 +330,34 @@ impl Tool for PushNotificationTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
         // PARITY: `YVi()` = `_in() ? KVi + q4d : KVi`.
         if is_routine() {
-            format!("{PROMPT}{ROUTINE_ADDENDUM}")
+            format!("{PROMPT}{ROUTINE_ADDENDUM}").into()
         } else {
-            PROMPT.to_string()
+            PROMPT.to_string().into()
         }
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let message = input
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let message_units = input.string_units("/message").unwrap_or_default();
+        let message_projection = input
+            .subprojection("/message")
+            .unwrap_or_else(|_| source_text_projection(""));
+        let message_len = message_units.len();
         let sent_at = now_iso8601();
 
         let is_remote = is_remote();
@@ -278,14 +367,14 @@ impl Tool for PushNotificationTool {
         // PARITY: config_off — transport exists, not remote, mobile-push opt-in off.
         if has_transport && !is_remote && !agent_push_notif_enabled() {
             telemetry::emit_push_notification_send(
-                message.len(),
+                message_len,
                 false,
                 false,
                 is_remote,
                 "config_off",
             );
             return Ok(result(
-                &message,
+                &message_projection,
                 false,
                 false,
                 Some("config_off"),
@@ -298,14 +387,14 @@ impl Tool for PushNotificationTool {
         // PARITY: user_present — not remote and the user is actively at the terminal.
         if !is_remote && user_present() {
             telemetry::emit_push_notification_send(
-                message.len(),
+                message_len,
                 false,
                 false,
                 is_remote,
                 "user_present",
             );
             return Ok(result(
-                &message,
+                &message_projection,
                 false,
                 false,
                 Some("user_present"),
@@ -325,14 +414,14 @@ impl Tool for PushNotificationTool {
         // PARITY: no_transport — no remote + no mobile push.
         if !has_transport {
             telemetry::emit_push_notification_send(
-                message.len(),
+                message_len,
                 false,
                 local_sent,
                 is_remote,
                 "no_transport",
             );
             return Ok(result(
-                &message,
+                &message_projection,
                 false,
                 local_sent,
                 Some("no_transport"),
@@ -343,9 +432,15 @@ impl Tool for PushNotificationTool {
         }
 
         // PARITY: success.
-        telemetry::emit_push_notification_send(message.len(), true, local_sent, is_remote, "");
+        telemetry::emit_push_notification_send(message_len, true, local_sent, is_remote, "");
         Ok(result(
-            &message, true, local_sent, None, None, None, &sent_at,
+            &message_projection,
+            true,
+            local_sent,
+            None,
+            None,
+            None,
+            &sent_at,
         ))
     }
 }
@@ -353,7 +448,7 @@ impl Tool for PushNotificationTool {
 /// Build the `ToolCallResult` (binary `{data:{…}}`) + the model-facing render.
 #[allow(clippy::too_many_arguments)]
 fn result(
-    message: &str,
+    message: &Utf16JsonProjection,
     push_sent: bool,
     local_sent: bool,
     disabled_reason: Option<&str>,
@@ -361,30 +456,48 @@ fn result(
     has_focus: Option<bool>,
     sent_at: &str,
 ) -> ToolCallResult {
-    let mut data = serde_json::Map::new();
-    data.insert("message".into(), json!(message));
-    data.insert("pushSent".into(), json!(push_sent));
-    data.insert("localSent".into(), json!(local_sent));
+    let mut data = vec![
+        ("message".to_owned(), message.clone()),
+        (
+            "pushSent".to_owned(),
+            generated_builtin_result(&json!(push_sent)),
+        ),
+        (
+            "localSent".to_owned(),
+            generated_builtin_result(&json!(local_sent)),
+        ),
+    ];
     if let Some(r) = disabled_reason {
-        data.insert("disabledReason".into(), json!(r));
+        data.push(("disabledReason".to_owned(), source_text_projection(r)));
     }
     if let Some(s) = idle_sec {
-        data.insert("idleSec".into(), json!(s));
+        data.push(("idleSec".to_owned(), generated_builtin_result(&json!(s))));
     }
     if let Some(f) = has_focus {
-        data.insert("hasFocus".into(), json!(f));
+        data.push(("hasFocus".to_owned(), generated_builtin_result(&json!(f))));
     }
-    data.insert("sentAt".into(), json!(sent_at));
+    data.push(("sentAt".to_owned(), source_text_projection(sent_at)));
 
     ToolCallResult {
-        data: Value::Object(data),
+        data: Utf16JsonProjection::object(data).expect("PushNotification result is valid JSON"),
         // The faithful model-facing render (binary mapToolResultToToolResultBlockParam).
-        model_content: Some(render(disabled_reason, local_sent, has_focus, idle_sec)),
+        model_content: Some(source_text_projection(&render(
+            disabled_reason,
+            local_sent,
+            has_focus,
+            idle_sec,
+        ))),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(source_text_projection(&message))
 }
 
 /// `new Date().toISOString()` — UTC ISO-8601 with millisecond precision + `Z`.
@@ -425,6 +538,28 @@ mod tests {
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
+    fn fixture(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn output_parser_retains_unpaired_message_units() {
+        let units = vec![b'm' as u16, 0xD800];
+        let output = Utf16JsonProjection::object(vec![(
+            "message".into(),
+            tool_api::tool_trait::source_text_projection_units(&units),
+        )])
+        .unwrap();
+        let tool = PushNotificationTool::new(shell_test_ctx(dummy_out()));
+
+        let parsed = tool.parse_output(&output).await.expect("string message");
+        assert_eq!(parsed.string_units("/message"), Some(units));
+    }
+
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
             stdout: String::new(),
@@ -450,13 +585,14 @@ mod tests {
         let t = PushNotificationTool::new(shell_test_ctx(dummy_out()));
         assert_eq!(t.name(), "PushNotification");
         assert_eq!(
-            t.search_hint(),
+            t.search_hint().as_ref().and_then(|hint| hint.string_at("")),
             Some("send a host notification to the user and optionally a remote push")
         );
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 1000);
-        assert!(t.is_read_only(&json!({})));
-        assert!(t.is_concurrency_safe(&json!({})));
+        let input = fixture(json!({}));
+        assert!(t.is_read_only(&input));
+        assert!(t.is_concurrency_safe(&input));
     }
 
     #[test]
@@ -477,20 +613,23 @@ mod tests {
         let t = PushNotificationTool::new(shell_test_ctx(dummy_out()));
         let out = t
             .call(
-                json!({"message": "build failed: 2 auth tests", "status": "proactive"}),
+                fixture(json!({"message": "build failed: 2 auth tests", "status": "proactive"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
         // No remote + no mobile transport → no_transport; interactive → localSent.
-        assert_eq!(out.data["pushSent"], json!(false));
-        assert_eq!(out.data["localSent"], json!(true));
-        assert_eq!(out.data["disabledReason"], json!("no_transport"));
-        assert_eq!(out.data["message"], json!("build failed: 2 auth tests"));
-        assert!(out.data["sentAt"].as_str().unwrap().ends_with('Z'));
+        let data = test_value(&out.data);
+        assert_eq!(data["pushSent"], json!(false));
+        assert_eq!(data["localSent"], json!(true));
+        assert_eq!(data["disabledReason"], json!("no_transport"));
+        assert_eq!(data["message"], json!("build failed: 2 auth tests"));
+        assert!(data["sentAt"].as_str().unwrap().ends_with('Z'));
         assert_eq!(
-            out.model_content.as_deref(),
+            out.model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
             Some("Host notification sent. Remote push not sent (Remote Control inactive).")
         );
     }
@@ -502,7 +641,7 @@ mod tests {
         let t = PushNotificationTool::new(shell_test_ctx(dummy_out()));
         let out = t
             .call(
-                json!({"message": "done", "status": "proactive"}),
+                fixture(json!({"message": "done", "status": "proactive"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -510,8 +649,9 @@ mod tests {
             .expect("ok");
         // Remote → has transport, not config_off (is_remote), not user_present →
         // success.
-        assert_eq!(out.data["pushSent"], json!(true));
-        assert!(out.data.get("disabledReason").is_none());
+        let data = test_value(&out.data);
+        assert_eq!(data["pushSent"], json!(true));
+        assert!(data.get("disabledReason").is_none());
         std::env::remove_var("LINGXI_REMOTE");
     }
 
@@ -562,12 +702,18 @@ mod tests {
         let t = PushNotificationTool::new(shell_test_ctx(dummy_out()));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let opts = PromptOptions::default();
-        let base = rt.block_on(t.prompt(&opts));
+        let base_source = rt.block_on(t.prompt(&opts));
+        let base = base_source
+            .string_at("")
+            .expect("generated prompt is a root string");
         assert!(base.starts_with("This tool sends a host notification"));
         assert!(!base.contains("terminal"));
         assert!(!base.contains("scheduled routine"));
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "remote_trigger");
-        let routine = rt.block_on(t.prompt(&opts));
+        let routine_source = rt.block_on(t.prompt(&opts));
+        let routine = routine_source
+            .string_at("")
+            .expect("generated prompt is a root string");
         assert!(routine.contains("This is a scheduled routine"));
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
     }

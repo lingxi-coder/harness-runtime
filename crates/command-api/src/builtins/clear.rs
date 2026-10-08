@@ -38,14 +38,14 @@ impl BuiltinCommandHandler for ClearHandler {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::CLEAR_COMPLETED, "");
                 CommandResult::Done {
-                    display: Some("Conversation cleared.".to_string()),
+                    display: Some(("Conversation cleared.".to_string()).into()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::CLEAR_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not clear conversation: {msg}")),
+                    display: Some((format!("Could not clear conversation: {msg}")).into()),
                 }
             }
         }
@@ -67,8 +67,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "clear".to_string(),
-            raw_args: String::new(),
+            name: "clear".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

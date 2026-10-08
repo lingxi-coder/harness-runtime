@@ -11,6 +11,7 @@
 //! `LlmError::RateLimited`.
 
 use lingxi_core::session::{TodoItem, TodoState};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use session::{
     clear_last_checkpoint_result, last_checkpoint_result, perform_rate_limit_checkpoint,
     CheckpointGates, CheckpointRequest, CheckpointResult, CheckpointSkipReason, CheckpointTrigger,
@@ -21,6 +22,11 @@ use std::process::Command;
 use tempfile::TempDir;
 
 const SESSION_ID: &str = "abcd1234-5678-4abc-9def-000000000000";
+
+fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display is derived from the exact UTF-16 source")
+}
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
@@ -53,6 +59,21 @@ fn todos() -> Vec<TodoItem> {
             content: "write the test".into(),
             status: TodoState::Pending,
             active_form: "Writing the test".into(),
+        },
+        TodoItem {
+            id: "4".into(),
+            content: source_string({
+                let mut units = "source ".encode_utf16().collect::<Vec<_>>();
+                units.push(0xd800);
+                units.extend(" scalar ".encode_utf16());
+                units.extend([0xd83d, 0xde00]);
+                units.extend(" low ".encode_utf16());
+                units.push(0xdc00);
+                units.extend(" end".encode_utf16());
+                units
+            }),
+            status: TodoState::Completed,
+            active_form: "unused".into(),
         },
     ]
 }
@@ -196,12 +217,23 @@ fn rate_limit_checkpoint_snapshots_the_working_tree() {
     assert!(doc.contains("- [x] port the executor"));
     assert!(doc.contains("- [>] Wiring the trigger    \u{2190} current step"));
     assert!(doc.contains("- [ ] write the test"));
+    assert!(doc.contains("- [x] source � scalar 😀 low � end"));
     assert!(
         doc.contains("## What's next\n\nwrite the test"),
         "the first PENDING content is the answer: {doc}"
     );
-    let on_disk =
-        std::fs::read_to_string(repo.path().join(RESUME_MD_REPO_PATH)).expect("RESUME.md on disk");
+    let on_disk_bytes =
+        std::fs::read(repo.path().join(RESUME_MD_REPO_PATH)).expect("RESUME.md on disk");
+    let committed_bytes = git(
+        repo.path(),
+        &["show", &format!("{ref_name}:{RESUME_MD_REPO_PATH}")],
+    )
+    .stdout;
+    assert_eq!(
+        on_disk_bytes, committed_bytes,
+        "the written and hashed body use identical UTF-8 bytes"
+    );
+    let on_disk = String::from_utf8(on_disk_bytes).expect("RESUME.md is UTF-8");
     assert_eq!(
         on_disk, doc,
         "disk copy and snapshot copy are the same bytes"

@@ -1,0 +1,11 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "session_id": "00000000-0000-4000-8000-000000000016",
+  "first_prompt": "Create the fixed assistant session-append row.",
+  "resume_prompt": "Continue this fixed session and report the result.",
+  "first_model_text": "Native seed answer",
+  "resume_model_text": "Native resume complete",
+  "assistant_rewrite_prefix": "accepted Mod text ",
+  "assistant_rewrite_units": [55296, 937, 56320]
+}

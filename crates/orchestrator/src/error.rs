@@ -149,9 +149,16 @@ pub enum OrchestratorError {
 /// (errors.ts:166).  All other variants wrap as [`OrchestratorError::ApiCall`].
 impl From<LlmError> for OrchestratorError {
     fn from(e: LlmError) -> Self {
-        match e {
-            LlmError::Overloaded { repeated: true } => OrchestratorError::RepeatedOverloaded,
-            other => OrchestratorError::ApiCall(other),
+        if matches!(
+            e.classification_source(),
+            LlmError::Overloaded { repeated: true }
+        ) {
+            // This terminal surface has its own byte-locked copy and deliberately
+            // does not render provider details. Other classifications retain the
+            // original error value so ProviderErrorText stays available downstream.
+            OrchestratorError::RepeatedOverloaded
+        } else {
+            OrchestratorError::ApiCall(e)
         }
     }
 }
@@ -311,6 +318,24 @@ mod tests {
             matches!(e, OrchestratorError::ApiCall(_)),
             "Overloaded {{ repeated: false }} must convert to ApiCall, got {e:?}"
         );
+    }
+
+    #[test]
+    fn source_wrapped_overloads_keep_classification_and_preserve_nonterminal_source() {
+        let wrapped = |repeated| LlmError::ProviderErrorText {
+            source: Box::new(LlmError::Overloaded { repeated }),
+            text: lingxi_llm_client::protocol::ProviderErrorText::from("529 overloaded"),
+            native_anthropic_facts: None,
+        };
+
+        let terminal: OrchestratorError = wrapped(true).into();
+        assert!(matches!(terminal, OrchestratorError::RepeatedOverloaded));
+
+        let retryable: OrchestratorError = wrapped(false).into();
+        assert!(matches!(
+            retryable,
+            OrchestratorError::ApiCall(LlmError::ProviderErrorText { .. })
+        ));
     }
 
     /// All non-overloaded `LlmError` variants must convert to `ApiCall`.

@@ -11,12 +11,19 @@
 
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::{
     InteractivePromptingGate, PermissionDecision, PermissionGate, PermissionMode, PermissionPolicy,
     PolicyPermissionGate,
 };
 use tokio::io::{duplex, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+    };
+}
 
 /// Empty-rules, Default-mode policy: read-only tools auto-allow, mutating
 /// tools fall through to the injected inner gate as an unresolved `Ask`.
@@ -46,9 +53,7 @@ async fn unresolved_write_ask_with_y_allows() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared);
 
-    let decision = gate
-        .check("Write", &serde_json::json!({"file_path": "/tmp/x"}))
-        .await;
+    let decision = gate.check("Write", &json!({"file_path": "/tmp/x"})).await;
     assert_eq!(
         decision,
         PermissionDecision::Allow,
@@ -65,10 +70,7 @@ async fn unresolved_write_ask_with_n_denies() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared);
 
-    match gate
-        .check("Write", &serde_json::json!({"file_path": "/tmp/x"}))
-        .await
-    {
+    match gate.check("Write", &json!({"file_path": "/tmp/x"})).await {
         PermissionDecision::Deny { .. } => {}
         PermissionDecision::Allow => panic!("expected Deny on `n`, got Allow"),
     }
@@ -83,9 +85,7 @@ async fn read_only_tool_auto_allows_consuming_no_byte() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared.clone());
 
-    let decision = gate
-        .check("Read", &serde_json::json!({"file_path": "/tmp/x"}))
-        .await;
+    let decision = gate.check("Read", &json!({"file_path": "/tmp/x"})).await;
     assert_eq!(
         decision,
         PermissionDecision::Allow,

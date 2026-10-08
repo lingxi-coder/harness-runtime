@@ -42,9 +42,11 @@ mod tests {
             save(dir.path(), enabled).unwrap();
             assert_eq!(load(dir.path()), Some(enabled));
         }
-        assert!(std::fs::read_to_string(dir.path().join("settings.json"))
-            .unwrap()
-            .contains("defaultSelection"));
+        assert!(
+            std::fs::read_to_string(dir.path().join("settings.json"))
+                .unwrap()
+                .contains("defaultSelection")
+        );
     }
 
     #[test]

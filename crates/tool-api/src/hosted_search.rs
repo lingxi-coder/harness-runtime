@@ -1,5 +1,7 @@
 //! Semantic session services. Tools never construct provider HTTP requests.
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 pub use lingxi_llm_client::hosted_search::{parse_response_content, SearchResultEntry};
+pub use lingxi_llm_client::protocol::JsonPayload;
 /// Exact MCP token counting supplied by the active provider route.
 #[async_trait::async_trait]
 pub trait McpTokenCounter: Send + Sync {
@@ -8,7 +10,7 @@ pub trait McpTokenCounter: Send + Sync {
     async fn count_mcp_content_tokens(
         &self,
         model: &str,
-        content: &serde_json::Value,
+        content: &Utf16JsonProjection,
     ) -> Result<Option<u64>, String>;
 }
 #[derive(Clone, Debug)]
@@ -19,11 +21,11 @@ pub struct HostedSearchRequest {
     /// Explicit provider profile, when selected.
     pub profile: Option<String>,
     /// Search query.
-    pub query: String,
+    pub query: Utf16JsonProjection,
     /// Domain allowlist supplied by the caller.
-    pub allowed_domains: Vec<String>,
+    pub allowed_domains: Vec<Utf16JsonProjection>,
     /// Domain denylist supplied by the caller.
-    pub blocked_domains: Vec<String>,
+    pub blocked_domains: Vec<Utf16JsonProjection>,
 }
 /// Search results and provider-reported usage.
 pub struct HostedSearchOutput {
@@ -38,10 +40,10 @@ pub struct HostedSearchOutput {
 }
 /// Provider-neutral failure information retained for tool telemetry.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("{message}")]
+#[error("{}", .message.string_at("").unwrap_or_default())]
 pub struct HostedSearchError {
     /// Safe caller-facing diagnostic.
-    pub message: String,
+    pub message: Utf16JsonProjection,
     /// Provider response status when known.
     pub http_status: Option<u16>,
     /// Whether a host or transport deadline expired.

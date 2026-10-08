@@ -370,7 +370,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
     use lingxi_llm_client::protocol::{
         InferenceReport, ServiceTier, Submission, UsageReport, UsageState,
     };
-    use llm_runtime::{client::ModelRuntime, ClientConfig, CredentialConfig, LlmRequest};
+    use llm_runtime::{ClientConfig, CredentialConfig, LlmRequest, client::ModelRuntime};
 
     let mut profile = llm_runtime::builtin_presets()
         .providers
@@ -455,11 +455,11 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
 #[tokio::test]
 async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
     use llm_runtime::{
-        client::ModelRuntime, parse_provider_profiles_strict, pricing_provider_id_for_profile,
         ApiService, BoxFuture, ClientConfig, ProviderParseOptions, ProviderRequest,
-        ProviderResponse, StreamingResponse,
+        ProviderResponse, StreamingResponse, client::ModelRuntime, parse_provider_profiles_strict,
+        pricing_provider_id_for_profile,
     };
-    use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 
     struct ResponseTransport(AtomicUsize);
     impl llm_runtime::test_support::FixtureTransport for ResponseTransport {
@@ -544,7 +544,13 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
             ))),
         );
         let response = service
-            .messages_create("custom", Some("reasoning-test"), None, vec![], vec![])
+            .messages_create(llm_runtime::MessagesCreateRequest::new(
+                "custom",
+                Some("reasoning-test"),
+                None,
+                vec![],
+                vec![],
+            ))
             .await
             .expect("decoded response with SDK quote");
         assert_eq!(response.usage.counts().output_tokens, 40_000);

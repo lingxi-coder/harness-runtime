@@ -1,0 +1,8007 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "actual profile-scope predicate",
+      "start": 182094986,
+      "end": 182095059,
+      "sha256": "6b2d4cdf76c3e44d20bd6c77c0e49f688ab4f764195f66b90d7b7f7663484545"
+    },
+    {
+      "label": "actual td/s2e status OAuth eligibility",
+      "start": 181680211,
+      "end": 181680311,
+      "sha256": "ac84f4f6d1378b74fe8323dd858e7304a7ab63fb0ae39f949b6ae12c85064c02"
+    },
+    {
+      "label": "actual independent global OAuth status auth",
+      "start": 181690916,
+      "end": 181691064,
+      "sha256": "fd425617b20f673362cfed0796bba2d0f022aaf6e1cb0a2baecb671d292ebd78"
+    }
+  ],
+  "scope": "Actual Qp/td/s2e and status g over the independent global mn OAuth snapshot and previously captured alternate API key. First-party/global admission, session identity and scope sources supplied. Model credentials do not occur in these helpers. Source acquisition, cache lifecycle and full native dispatch excluded.",
+  "cases": [
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": null,
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": null
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "apiKey": "key"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": null,
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    },
+    {
+      "input": {
+        "token": "token",
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "key": "key",
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "accessToken": "token"
+      }
+    }
+  ]
+}

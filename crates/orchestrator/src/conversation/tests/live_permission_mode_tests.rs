@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, StaticMemoryProvider, noop_hook_executor,
 };
 
 struct LivePermissionGate(std::sync::RwLock<String>);

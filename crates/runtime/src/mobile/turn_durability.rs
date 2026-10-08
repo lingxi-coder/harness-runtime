@@ -8,6 +8,7 @@
 
 use client::protocol::commands::{ImageRefDto, PromptModeDto};
 use client::protocol::events::{TurnRecoverySnapshotDto, TurnRecoveryStateDto};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -20,6 +21,10 @@ use std::sync::Mutex;
 const MAX_RETAINED_EVENTS: usize = 8_192;
 const JOURNAL_COMPACTION_SLACK: usize = 256;
 
+fn empty_source_prompt() -> Utf16JsonProjection {
+    Utf16JsonProjection::from("")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DurableTurnEvent {
     pub(crate) sequence: u64,
@@ -30,7 +35,7 @@ pub(crate) struct DurableTurnEvent {
 pub(crate) struct DurableTurnCheckpoint {
     pub(crate) session_id: String,
     pub(crate) turn_id: u64,
-    pub(crate) prompt: String,
+    pub(crate) prompt: Utf16JsonProjection,
     pub(crate) prompt_mode: Option<PromptModeDto>,
     pub(crate) images: Vec<ImageRefDto>,
     pub(crate) revision: u64,
@@ -46,8 +51,11 @@ pub(crate) struct DurableTurnCheckpoint {
 struct StoredTurnMetadata {
     session_id: String,
     turn_id: u64,
-    #[serde(default)]
-    prompt: String,
+    #[serde(
+        default = "empty_source_prompt",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    prompt: Utf16JsonProjection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_mode: Option<PromptModeDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -324,7 +332,7 @@ impl DurableTurnStore {
         &self,
         session_id: &str,
         turn_id: u64,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         prompt_mode: Option<PromptModeDto>,
         images: Vec<ImageRefDto>,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
@@ -513,6 +521,30 @@ impl DurableTurnStore {
         })
     }
 
+    /// Live observers cannot undo a pause or terminal checkpoint. Compare and
+    /// mutate under the same store lock as explicit pause/resume transitions.
+    pub(crate) fn transition_if_live(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        state: TurnRecoveryStateDto,
+        safe_to_resume: bool,
+        reason: Option<String>,
+    ) -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
+        self.update_if(session_id, turn_id, |checkpoint| {
+            if !matches!(
+                checkpoint.state,
+                TurnRecoveryStateDto::Running | TurnRecoveryStateDto::WaitingForUser
+            ) {
+                return Ok(None);
+            }
+            checkpoint.state = state;
+            checkpoint.safe_to_resume = safe_to_resume && !checkpoint.state.is_terminal();
+            checkpoint.reason = reason;
+            Ok(Some(checkpoint.snapshot()))
+        })
+    }
+
     pub(crate) fn cancel(
         &self,
         session_id: &str,
@@ -594,6 +626,18 @@ impl DurableTurnStore {
         turn_id: u64,
         mutate: impl FnOnce(&mut DurableTurnCheckpoint) -> Result<T, DurableTurnStoreError>,
     ) -> Result<T, DurableTurnStoreError> {
+        self.update_if(session_id, turn_id, |checkpoint| {
+            mutate(checkpoint).map(Some)
+        })
+        .map(|value| value.expect("unconditional mutation returns a value"))
+    }
+
+    fn update_if<T>(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        mutate: impl FnOnce(&mut DurableTurnCheckpoint) -> Result<Option<T>, DurableTurnStoreError>,
+    ) -> Result<Option<T>, DurableTurnStoreError> {
         let mut cache = self
             .lock
             .lock()
@@ -613,7 +657,9 @@ impl DurableTurnStore {
 
         let cached = self.load_cached_turn(&mut cache, &relative)?.clone();
         let mut checkpoint = cached.checkpoint.clone();
-        let value = mutate(&mut checkpoint)?;
+        let Some(value) = mutate(&mut checkpoint)? else {
+            return Ok(None);
+        };
         checkpoint.reconcile_sequences();
         checkpoint.revision = checkpoint.revision.saturating_add(1);
         self.sync_journal_relative(&relative)?;
@@ -625,7 +671,7 @@ impl DurableTurnStore {
                 journal_event_count: cached.journal_event_count,
             },
         );
-        Ok(value)
+        Ok(Some(value))
     }
 
     fn sync_journal_relative(&self, relative: &Path) -> Result<(), DurableTurnStoreError> {
@@ -853,11 +899,113 @@ mod tests {
     }
 
     #[test]
+    fn cold_restart_replays_the_exact_durable_prompt_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("turns");
+        let prompt_units = "recover "
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let prompt = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&prompt_units),
+            prompt_units.clone(),
+        )
+        .expect("source prompt units are valid");
+        let store = DurableTurnStore::new(root.clone());
+        store
+            .begin("session", 42, prompt, None, Vec::new())
+            .expect("begin turn before invoking the model");
+
+        let metadata_path = root.join("session/42.json");
+        let metadata = std::fs::read_to_string(&metadata_path).expect("read durable metadata");
+        assert!(
+            metadata.contains(r#""prompt": "recover \ud800""#),
+            "the prompt must be written as its original JSON string value: {metadata}"
+        );
+        assert!(
+            !metadata.contains("Utf16JsonProjection"),
+            "the storage envelope must not serialize the carrier implementation"
+        );
+
+        drop(store);
+        let restarted = DurableTurnStore::new(root);
+        let checkpoint = restarted.load("session", 42).expect("cold-load checkpoint");
+        assert_eq!(
+            checkpoint.prompt.string_units(""),
+            Some(prompt_units.clone())
+        );
+        assert_eq!(
+            checkpoint.prompt.string_at(""),
+            Some("recover �".to_owned())
+        );
+
+        let (disposition, snapshot) = restarted
+            .resume("session", 42)
+            .expect("resume exact checkpoint");
+        assert_eq!(disposition, ResumeDisposition::Ready);
+        assert_eq!(snapshot.state, TurnRecoveryStateDto::Running);
+        let resumed = restarted
+            .load("session", 42)
+            .expect("load resumed checkpoint");
+        assert_eq!(resumed.prompt.string_units(""), Some(prompt_units));
+    }
+
+    #[test]
+    fn live_observers_preserve_a_paused_checkpoint_until_explicit_resume() {
+        let (_temp, store) = store();
+        store
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        store
+            .transition(
+                "session",
+                1,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("background_time_expired".into()),
+            )
+            .unwrap();
+        let paused = store.load("session", 1).unwrap();
+        for state in [
+            TurnRecoveryStateDto::WaitingForUser,
+            TurnRecoveryStateDto::Running,
+            TurnRecoveryStateDto::Completed,
+        ] {
+            assert!(store
+                .transition_if_live("session", 1, state, false, Some("late observer".into()))
+                .unwrap()
+                .is_none());
+            let unchanged = store.load("session", 1).unwrap();
+            assert_eq!(unchanged.state, paused.state);
+            assert_eq!(unchanged.revision, paused.revision);
+            assert_eq!(unchanged.reason, paused.reason);
+            assert_eq!(unchanged.safe_to_resume, paused.safe_to_resume);
+        }
+        store
+            .transition("session", 1, TurnRecoveryStateDto::Running, true, None)
+            .unwrap();
+        assert_eq!(
+            store
+                .transition_if_live(
+                    "session",
+                    1,
+                    TurnRecoveryStateDto::WaitingForUser,
+                    false,
+                    None
+                )
+                .unwrap()
+                .unwrap()
+                .state,
+            TurnRecoveryStateDto::WaitingForUser
+        );
+    }
+
+    #[test]
     fn recovery_merges_legacy_metadata_prefix_with_journal_suffix() {
         let metadata = StoredTurnMetadata {
             session_id: "session-a".to_string(),
             turn_id: 6,
-            prompt: "hello".to_string(),
+            prompt: Utf16JsonProjection::from("hello"),
             prompt_mode: None,
             images: Vec::new(),
             revision: 2,
@@ -895,7 +1043,13 @@ mod tests {
     fn checkpoint_is_atomic_and_replays_strictly_after_cursor() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 7, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                7,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -922,7 +1076,13 @@ mod tests {
     fn normal_appends_leave_metadata_unchanged_until_a_transition() {
         let (temp, store) = store();
         store
-            .begin("session-a", 71, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                71,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -975,7 +1135,13 @@ mod tests {
     fn metadata_transition_syncs_journal_after_unsynced_deltas() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 711, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                711,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1002,7 +1168,13 @@ mod tests {
     fn cold_recovery_derives_terminal_state_from_journal_before_metadata_transition() {
         let (temp, store) = store();
         store
-            .begin("session-a", 72, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                72,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         // Simulate a process dying after the terminal event was committed but
         // before TurnLifecycleListener could persist its metadata transition.
@@ -1031,7 +1203,13 @@ mod tests {
     fn cold_recovery_derives_failed_state_and_reason_from_error_event() {
         let (temp, store) = store();
         store
-            .begin("session-a", 721, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                721,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1054,7 +1232,13 @@ mod tests {
     fn explicit_cancel_is_terminal_and_cannot_resume_or_append() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 8, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                8,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         let cancelled = store.cancel("session-a", 8).expect("cancel");
         assert_eq!(cancelled.state, TurnRecoveryStateDto::Cancelled);
@@ -1073,7 +1257,13 @@ mod tests {
     fn unsafe_checkpoint_waits_for_user_instead_of_replaying() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 9, "deploy".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                9,
+                Utf16JsonProjection::from("deploy"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .transition(
@@ -1095,7 +1285,13 @@ mod tests {
     fn safe_checkpoint_resumes_running() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 10, "read".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                10,
+                Utf16JsonProjection::from("read"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .transition(
@@ -1118,7 +1314,13 @@ mod tests {
     fn replayed_output_requires_user_instead_of_rerunning_the_prompt() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 11, "write".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                11,
+                Utf16JsonProjection::from("write"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1147,7 +1349,13 @@ mod tests {
     fn turn_started_checkpoint_still_resumes_running() {
         let (_temp, store) = store();
         store
-            .begin("session-a", 12, "read".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                12,
+                Utf16JsonProjection::from("read"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1185,7 +1393,7 @@ mod tests {
         let checkpoint = DurableTurnCheckpoint {
             session_id: "session-a".to_string(),
             turn_id: 13,
-            prompt: "gap".to_string(),
+            prompt: Utf16JsonProjection::from("gap"),
             prompt_mode: None,
             images: Vec::new(),
             revision: 1,
@@ -1214,7 +1422,13 @@ mod tests {
     fn load_ignores_a_torn_journal_tail() {
         let (temp, store) = store();
         store
-            .begin("session-a", 14, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                14,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1246,7 +1460,13 @@ mod tests {
     fn append_after_recovery_discards_torn_tail_and_keeps_order() {
         let (temp, store) = store();
         store
-            .begin("session-a", 141, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                141,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
         store
             .append_event(
@@ -1292,7 +1512,13 @@ mod tests {
     fn compaction_bounds_the_journal_and_keeps_metadata_small() {
         let (temp, store) = store();
         store
-            .begin("session-a", 15, "hello".to_string(), None, Vec::new())
+            .begin(
+                "session-a",
+                15,
+                Utf16JsonProjection::from("hello"),
+                None,
+                Vec::new(),
+            )
             .expect("begin");
 
         let total_events = max_journal_events_before_compaction() + 1;

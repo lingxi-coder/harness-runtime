@@ -1,5 +1,9 @@
 //! Regression tests for transport stream test.
 
+#[path = "common/json_payload.rs"]
+mod json_payload_test;
+use json_payload_test::value as json_payload_value;
+
 use lingxi_llm_client::protocol::{LlmError as SdkError, StopReason, StreamEvent};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -233,7 +237,7 @@ impl ResponsesWebSocketTransportSession for ScriptedWsSession {
         self.sent_bodies
             .lock()
             .expect("sent_bodies")
-            .push(request.body_json.clone());
+            .push(json_payload_value(&request.body_json));
         let frames = self
             .responses
             .lock()
@@ -409,12 +413,16 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected error: {error:?}");
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, StreamEvent::Start { .. })));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "hi")));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Start { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "hi"))
+    );
     assert!(matches!(
         events.last(),
         Some(StreamEvent::End {
@@ -453,14 +461,18 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected stream error: {error:?}");
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, StreamEvent::Start { .. })));
-    for (name, expected) in &headers {
-        assert!(stream
-            .headers()
+    assert!(
+        events
             .iter()
-            .any(|(key, value)| key == name && value == expected));
+            .any(|event| matches!(event, StreamEvent::Start { .. }))
+    );
+    for (name, expected) in &headers {
+        assert!(
+            stream
+                .headers()
+                .iter()
+                .any(|(key, value)| key == name && value == expected)
+        );
     }
 }
 
@@ -571,6 +583,7 @@ async fn websocket_session_second_compatible_request_uses_previous_response_delt
             lingxi_llm_client::protocol::ContentBlock::Text {
                 text: "answer".into(),
                 thought_signature: None,
+                citations: None,
             },
         ]),
     );
@@ -788,9 +801,11 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
         .expect("stream");
 
     let (events, error) = collect_events(&mut stream).await;
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, StreamEvent::Start { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Start { .. }))
+    );
     assert!(
         matches!(error, Some(SdkError::StreamInterrupted { message }) if message.contains("connection reset"))
     );
@@ -884,7 +899,7 @@ async fn responses_stream_exposes_continuation_only_after_completion() {
         .await
         .expect("same-account follow-up");
     assert_eq!(
-        prepared.provider_request.body_json["previous_response_id"],
+        json_payload_value(&prepared.provider_request.body_json)["previous_response_id"],
         "resp_scoped"
     );
     request.execution.account_scope = Some("account-b".into());
@@ -993,7 +1008,7 @@ async fn responses_websocket_preserves_explicit_continuation() {
         .await
         .expect("valid explicit continuation");
     assert_eq!(
-        prepared.provider_request.body_json["previous_response_id"],
+        json_payload_value(&prepared.provider_request.body_json)["previous_response_id"],
         "resp_external_branch"
     );
     let mut second_stream = client
@@ -1004,8 +1019,7 @@ async fn responses_websocket_preserves_explicit_continuation() {
     let sent = transport.sent_bodies();
     assert_eq!(sent.len(), 2);
     assert_eq!(
-        sent[1]["previous_response_id"],
-        "resp_external_branch",
+        sent[1]["previous_response_id"], "resp_external_branch",
         "WebSocket session compression must preserve the explicitly selected and validated continuation",
     );
 }

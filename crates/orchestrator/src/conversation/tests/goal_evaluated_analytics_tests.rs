@@ -18,13 +18,13 @@
 //! branch; and `iterations` is bumped only by the three verdict outcomes, so a
 //! deferred or cancelled dispatch must report the count unchanged.
 
-use crate::conversation::hooks_impl::GoalEvalOutcome;
-use crate::conversation::MessageId;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
+use crate::conversation::MessageId;
+use crate::conversation::hooks_impl::GoalEvalOutcome;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -408,17 +408,34 @@ struct CancelsThenAnswers(tokio_util::sync::CancellationToken);
 impl crate::OrchestratorApiClient for CancelsThenAnswers {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _msgs: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: crate::OrchestratorApiRequest,
     ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+        let (request_model, request_profile, request_system, _msgs, _tools) = match request {
+            crate::OrchestratorApiRequest::Main(request) => (
+                request.model,
+                request.profile,
+                request.system.map(|system| system.display_text()),
+                request.messages,
+                request.tools,
+            ),
+            crate::OrchestratorApiRequest::HookPrompt(request) => (
+                request.model,
+                request.profile,
+                Some(request.system),
+                request.messages,
+                Vec::new(),
+            ),
+        };
+        let _model = request_model.as_str();
+        let _profile = request_profile.as_deref();
+        let _system = request_system.as_deref();
+
         self.0.cancel();
         Ok(crate::test_support::mock_message_response(
             vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ))
@@ -477,6 +494,7 @@ async fn the_two_batched_entries_supply_different_parent_aborted_flags() {
                 vec![llm_runtime::ContentBlock::Text {
                     text: "done".into(),
                     cache_control: None,
+                    citations: None,
                 }],
                 Some("end_turn"),
             ),

@@ -13,10 +13,12 @@ realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
 
 [dependencies]
 core = { path = "../core" }
+branding.workspace = true
 lingxi-llm-client.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid = { version = "1.10", features = ["v4"] }
 thiserror.workspace = true
 url = "2"
 base64 = "0.22"

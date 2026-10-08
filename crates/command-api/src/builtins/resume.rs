@@ -37,9 +37,14 @@ impl ResumeHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ResumeHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        let Some(search) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some("Session search text must be valid Unicode text.".into()),
+            };
+        };
         let sessions = self.handle.list_resumable_sessions().await;
         CommandResult::Done {
-            display: Some(render_sessions(&sessions, args.raw_args.trim())),
+            display: Some((render_sessions(&sessions, search.trim())).into()),
         }
     }
     fn name(&self) -> &str {
@@ -96,9 +101,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "resume".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "resume".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

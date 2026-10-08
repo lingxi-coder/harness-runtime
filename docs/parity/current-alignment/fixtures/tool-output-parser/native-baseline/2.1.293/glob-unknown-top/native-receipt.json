@@ -1,0 +1,157 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "case": "unknown-top",
+  "runner_sha256": "e89b5cc70f1c7db79bc291dce4df65bbc8dec47097f26e72951d85e59d85ce5e",
+  "hook_sha256": "b8f3c3a7bef99934342dd62deefd5e7943995a84f3f62700bc1af70c6f39a5d4",
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default,Glob",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f01",
+    "Find the file matching *.fixture and report its path."
+  ],
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "tools_setting": "default,Glob",
+  "run_name": "glob-unknown-top",
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 43840,
+      "request_sha256": "84b44b8a4bfcb2eeb2530d0f6d7379e635dc40b51410d990955e874acfbc9acb",
+      "raw_request": "request-01.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 44207,
+      "request_sha256": "a666cf004116b97cfb0a3140c0c34decc937e7f9c7b9479979b342cd264867ca",
+      "raw_request": "request-02.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    }
+  ],
+  "stub_responses": [
+    {
+      "path": "response-01.raw.sse",
+      "bytes": 872,
+      "sha256": "c00ea5503b99ce33ffe9f6361de101464db1a7998d41b227c50c2f2bef2bcae1"
+    },
+    {
+      "path": "response-02.raw.sse",
+      "bytes": 796,
+      "sha256": "3018f80436c2641d80b4794aaf0b178f7cd4b9abc7d6adb3e25637d2a4097e5d"
+    }
+  ],
+  "tool_catalog_raw": {
+    "path": "tool-catalog.raw.json",
+    "bytes": 983,
+    "sha256": "5d7dcbce7d830bc7d62de5f728e39b6ec51413528b7f0851bd211f224418a383"
+  },
+  "tool_use_result_session_rows": {
+    "path": "tool-use-result-session-rows.raw.jsonl",
+    "rows": 1,
+    "sha256": "478e7b955830c5ec83820f8fac54fb81669d3cd263c9908d47c0b718958f55e3"
+  },
+  "hook_marker_stdout_or_stderr": [],
+  "hook_marker_debug_log": [
+    "2026-10-08T13:42:07.853Z [DEBUG] [native-builtin-glob-output-probe] console.log: NATIVE_GLOB_TOOL_CALL_HOOK={\"tool\":\"Glob\",\"tool_use_id\":\"toolu_native_glob_output_probe_293\",\"nativeResult\":{\"ref\":1,\"result\":{\"filenames\":[\"probe.fixture\"],\"durationMs\":6,\"numFiles\":1,\"truncated\":false,\"totalMatches\":1,\"countIsComplete\":true},\"text\":\"probe.fixture\",\"isReadOnly\":true},\"result\":{\"durationMs\":1,\"numFiles\":1,\"filenames\":[\"hook-return.fixture\"],\"truncated\":false,\"totalMatches\":1,\"countIsComplete\":true,\"unknownTop\":{\"nestedUnknown\":\"discard-at-top\"}},\"durationMsIsFinite\":true,\"durationMsString\":\"1\"}"
+  ],
+  "model_tool_result_content": "hook-return.fixture\n\n<system-reminder>\n<total_tokens>14999994 tokens left</total_tokens>\n</system-reminder>",
+  "parsed_tool_use_results": [
+    {
+      "durationMs": 1,
+      "numFiles": 1,
+      "filenames": [
+        "hook-return.fixture"
+      ],
+      "truncated": false,
+      "totalMatches": 1,
+      "countIsComplete": true
+    }
+  ],
+  "checks": {
+    "catalog_glob_availability_matches_cli_profile": true,
+    "hook_marker_matches_tool_availability": true,
+    "two_loopback_requests": true,
+    "native_parsed_hook_wrapper_result": true,
+    "native_strips_unknown_top_level_key": true
+  },
+  "expected_return_object": {
+    "durationMs": 1,
+    "numFiles": 1,
+    "filenames": [
+      "hook-return.fixture"
+    ],
+    "truncated": false,
+    "totalMatches": 1,
+    "countIsComplete": true,
+    "unknownTop": {
+      "nestedUnknown": "discard-at-top"
+    }
+  },
+  "model_tool_result_content_utf8": {
+    "path": "model-tool-result-content.raw.txt",
+    "bytes": 107,
+    "sha256": "3d92f45cb02b557c801bfb802420f09d09b9540f60d49c2716b529c2948e4a2b"
+  },
+  "hook_marker_raw": {
+    "path": "hook-marker.raw.txt",
+    "bytes": 598,
+    "sha256": "b6d0586efbe169b988d4d5572924e4cbabc1a66fa9c7175f4440bfa5fcbef690"
+  },
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 14,
+    "sha256": "78fe71bbc60474c0bbb454a1a2f6e3e7a14a096d3513ada72f6d5475f4e61382"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "run_output_dir": "run-output/glob-unknown-top",
+  "scope": "Native 2.1.293 public CLI tool.call continuation-wrapper output parser probe for built-in Glob; all model and file inputs are local and fixed",
+  "tool_use_result_raw_json": {
+    "path": "tool-use-result.raw.json",
+    "bytes": 123,
+    "sha256": "48bbaa719ba785b5d12474b38eae0ccdacae6bcf2fa50183baaf9b44156042a3",
+    "top_level_key_order": [
+      "durationMs",
+      "numFiles",
+      "filenames",
+      "truncated",
+      "totalMatches",
+      "countIsComplete"
+    ],
+    "extracted_from": "tool-use-result-session-rows.raw.jsonl / toolUseResult; raw JSON value bytes preserved"
+  }
+}

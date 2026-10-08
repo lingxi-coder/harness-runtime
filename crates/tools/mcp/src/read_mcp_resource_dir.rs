@@ -51,15 +51,18 @@
 //! diverging; it moves zero wire bytes today.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+#[cfg(test)]
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -111,42 +114,19 @@ Only usable against a server that has declared support for directory listing; ot
 /// NOTE the key is `server`, not the `server_name` the port's two sibling
 /// resource tools use — that divergence is pre-existing on those two and is not
 /// replicated onto a tool being added fresh against the oracle.
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "server": { "type": "string", "description": "The MCP server name" },
-            "uri":    { "type": "string", "description": "The directory resource URI to list" }
-        },
-        "required": ["server", "uri"]
-    })
+static INPUT_SCHEMA: Lazy<UJP> = Lazy::new(|| {
+    UJP::parse(
+        r#"{"type":"object","properties":{"server":{"type":"string","description":"The MCP server name"},"uri":{"type":"string","description":"The directory resource URI to list"}},"required":["server","uri"]}"#,
+    )
+    .expect("generated directory tool schema is valid JSON")
 });
 
 /// Oracle `B6S` (`cc-238.js @224766934`).
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "resources": {
-                "type": "array",
-                "description": "Direct children of the directory resource. Subdirectories appear with mimeType \"inode/directory\".",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "uri":      { "type": "string", "description": "Child resource URI" },
-                        "name":     { "type": "string", "description": "Child resource name" },
-                        "mimeType": { "type": "string", "description": "Child MIME type" }
-                    },
-                    "required": ["uri", "name"]
-                }
-            },
-            "error": {
-                "type": "string",
-                "description": "Human-readable error when the server could not list the directory"
-            }
-        },
-        "required": ["resources"]
-    })
+static OUTPUT_SCHEMA: Lazy<UJP> = Lazy::new(|| {
+    UJP::parse(
+        r#"{"type":"object","properties":{"resources":{"type":"array","description":"Direct children of the directory resource. Subdirectories appear with mimeType \"inode/directory\".","items":{"type":"object","properties":{"uri":{"type":"string","description":"Child resource URI"},"name":{"type":"string","description":"Child resource name"},"mimeType":{"type":"string","description":"Child MIME type"}},"required":["uri","name"]}},"error":{"type":"string","description":"Human-readable error when the server could not list the directory"}},"required":["resources"]}"#,
+    )
+    .expect("generated directory output schema is valid JSON")
 });
 
 /// `ReadMcpResourceDirTool` tool.
@@ -193,15 +173,15 @@ async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<
                 McpConnectionState::Connected { capabilities, .. }
                 | McpConnectionState::Cached { capabilities, .. } => capabilities,
                 _ => {
-                    return Err(ToolError::InvalidInput(format!(
-                        "Server \"{name}\" is not connected"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("Server \"{name}\" is not connected").into(),
+                    ));
                 }
             };
             if !capabilities.resources {
-                return Err(ToolError::InvalidInput(format!(
-                    "Server \"{name}\" does not support resources"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("Server \"{name}\" does not support resources").into(),
+                ));
             }
             return Ok(name);
         }
@@ -225,15 +205,18 @@ async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<
         0 => None,
         1 => matched.pop(),
         _ => {
-            return Err(ToolError::InvalidInput(ambiguous_server_message(
-                requested, &matched,
-            )));
+            return Err(ToolError::InvalidInput(
+                ambiguous_server_message(requested, &matched).into(),
+            ));
         }
     }) else {
-        return Err(ToolError::InvalidInput(format!(
-            "Server \"{requested}\" not found. Available servers: {}",
-            names.join(", ")
-        )));
+        return Err(ToolError::InvalidInput(
+            format!(
+                "Server \"{requested}\" not found. Available servers: {}",
+                names.join(", ")
+            )
+            .into(),
+        ));
     };
     let state = conns
         .get(&name)
@@ -242,15 +225,15 @@ async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<
         McpConnectionState::Connected { capabilities, .. }
         | McpConnectionState::Cached { capabilities, .. } => capabilities,
         _ => {
-            return Err(ToolError::InvalidInput(format!(
-                "Server \"{name}\" is not connected"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("Server \"{name}\" is not connected").into(),
+            ));
         }
     };
     if !capabilities.resources {
-        return Err(ToolError::InvalidInput(format!(
-            "Server \"{name}\" does not support resources"
-        )));
+        return Err(ToolError::InvalidInput(
+            format!("Server \"{name}\" does not support resources").into(),
+        ));
     }
     Ok(name)
 }
@@ -262,14 +245,14 @@ async fn live_resource_directory_capabilities(
     use mcp::McpConnectionState;
     let conns = registry.connections.read().await;
     let Some(state) = conns.get(requested_raw) else {
-        return Err(ToolError::InvalidInput(format!(
-            "Server \"{requested_raw}\" not found"
-        )));
+        return Err(ToolError::InvalidInput(
+            format!("Server \"{requested_raw}\" not found").into(),
+        ));
     };
     if !is_shared_registry_entry(requested_raw, state) {
-        return Err(ToolError::InvalidInput(format!(
-            "Server \"{requested_raw}\" not found"
-        )));
+        return Err(ToolError::InvalidInput(
+            format!("Server \"{requested_raw}\" not found").into(),
+        ));
     }
     match state {
         McpConnectionState::Connected {
@@ -281,10 +264,9 @@ async fn live_resource_directory_capabilities(
             capabilities.resources,
             capabilities.directory_read,
         )),
-        _ => Err(ToolError::InvalidInput(format!(
-            "Server \"{}\" is not connected",
-            requested_raw
-        ))),
+        _ => Err(ToolError::InvalidInput(
+            format!("Server \"{}\" is not connected", requested_raw).into(),
+        )),
     }
 }
 
@@ -299,20 +281,28 @@ impl Tool for ReadMcpResourceDirTool {
     }
 
     /// Oracle `searchHint:"list the children of an MCP directory resource"`.
-    fn search_hint(&self) -> Option<&str> {
-        Some("list the children of an MCP directory resource")
+    fn search_hint(&self) -> Option<UJP> {
+        Some("list the children of an MCP directory resource".into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
         Some("readMcpResourceDir")
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn output_schema(&self) -> Option<&UJP> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     /// Oracle `maxResultSizeChars:1e5`.
@@ -334,16 +324,16 @@ impl Tool for ReadMcpResourceDirTool {
     }
 
     /// Oracle `isReadOnly(){return!0}`.
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         true
     }
 
     /// Oracle `isConcurrencySafe(){return!0}`.
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _: &UJP, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "list MCP directory resource".into(),
@@ -354,38 +344,37 @@ impl Tool for ReadMcpResourceDirTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
         PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let server = input
-            .get("server")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "ReadMcpResourceDirTool: missing or non-string server".into(),
-                )
-            })?
-            .to_string();
+        let server = String::from_utf16(&input.string_units("/server").ok_or_else(|| {
+            ToolError::InvalidInput("ReadMcpResourceDirTool: missing or non-string server".into())
+        })?)
+        .map_err(|_| {
+            ToolError::InvalidInput(
+                "ReadMcpResourceDirTool: server must be a valid UTF-8 registry name".into(),
+            )
+        })?;
         // `uri` is destructured alongside `server` in the oracle; validated here
         // so a malformed call fails before the gate branch.
         let uri = input
-            .get("uri")
-            .and_then(Value::as_str)
+            .subprojection("/uri")
+            .ok()
+            .filter(|uri| uri.string_units("").is_some())
             .ok_or_else(|| {
                 ToolError::InvalidInput("ReadMcpResourceDirTool: missing or non-string uri".into())
-            })?
-            .to_string();
+            })?;
 
         let Some(registry) = self.ctx.mcp_registry.as_ref() else {
             return Err(ToolError::Io(
@@ -399,26 +388,28 @@ impl Tool for ReadMcpResourceDirTool {
         // Leg 2 — oracle `if(!eA())return{data:{resources:[],error:…}}`.
         // `tengu_mcp_skills` is default-false, so this is the shipped default.
         if !telemetry::flag_bool(MCP_SKILLS_GATE, false) {
-            return Ok(dir_error(NOT_ENABLED_ERROR.to_string()));
+            return Ok(dir_error(NOT_ENABLED_ERROR.into()));
         }
 
         // Leg 3 — oracle
         // `if(!kJp().serverDeclaresDirectoryRead(i.capabilities))return{data:{resources:[],error:…}}`.
-        let client = registry
-            .ensure_connected_client(&name)
-            .await
-            .map_err(|e| ToolError::Io(e.to_string()))?;
+        let client = registry.ensure_connected_client(&name).await.map_err(|e| {
+            ToolError::Io(
+                e.source_diagnostic()
+                    .unwrap_or_else(|| e.to_string().into()),
+            )
+        })?;
         let (live_name, resources, directory_read) =
             live_resource_directory_capabilities(registry, &name).await?;
         if !resources {
-            return Ok(dir_error(format!(
-                "Server \"{live_name}\" does not support resources"
-            )));
+            return Ok(dir_error(
+                format!("Server \"{live_name}\" does not support resources").into(),
+            ));
         }
         if !directory_read {
-            return Ok(dir_error(format!(
-                "Server \"{live_name}\" does not support directory listing."
-            )));
+            return Ok(dir_error(
+                format!("Server \"{live_name}\" does not support directory listing.").into(),
+            ));
         }
 
         // Leg 4 — oracle `a=await kJp().readMcpDirectory(s,o)`, wrapped in the
@@ -436,14 +427,19 @@ impl Tool for ReadMcpResourceDirTool {
         let entries = match client.read_mcp_directory(&uri).await {
             Ok(entries) => entries,
             Err(e) => {
-                let text = e.to_string();
-                if text.contains(&format!("code={JSONRPC_INVALID_PARAMS}")) {
-                    return Ok(dir_error(format!(
-                        "Not a directory resource: {uri}. If it is a file resource, use \
-                         {READ_MCP_RESOURCE_TOOL_NAME} instead."
-                    )));
+                let source = e.source_diagnostic();
+                if source.as_ref().is_some_and(|source| {
+                    source_contains_ascii(source, &format!("code={JSONRPC_INVALID_PARAMS}"))
+                }) {
+                    return Ok(dir_error(concat_source_text(&[
+                        &"Not a directory resource: ".into(),
+                        &uri,
+                        &format!(". If it is a file resource, use {READ_MCP_RESOURCE_TOOL_NAME} instead.").into(),
+                    ])));
                 }
-                return Err(ToolError::Io(text));
+                return Err(ToolError::Io(
+                    source.unwrap_or_else(|| e.to_string().into()),
+                ));
             }
         };
 
@@ -471,13 +467,12 @@ const READ_MCP_RESOURCE_TOOL_NAME: &str = "ReadMcpResourceTool";
 /// must CARRY the `directoryRead` key, and that key must be exactly `true` —
 /// a truthy non-boolean does not qualify.
 #[must_use]
-pub fn server_declares_directory_read(raw_capabilities: Option<&Value>) -> bool {
+pub fn server_declares_directory_read_source(raw_capabilities: Option<&UJP>) -> bool {
     raw_capabilities
-        .and_then(|c| c.get("extensions"))
-        .and_then(|e| e.get(MCP_SKILLS_EXTENSION_KEY))
-        .and_then(Value::as_object)
-        .and_then(|ext| ext.get("directoryRead"))
-        .is_some_and(|v| v.as_bool() == Some(true))
+        .and_then(|capabilities| {
+            capabilities.at_pointer("/extensions/io.modelcontextprotocol~1skills/directoryRead")
+        })
+        .is_some_and(|value| value.as_bool() == Some(true))
 }
 
 /// Oracle `Eqn` (cc-238.js @288269596) — the capability-extensions key the
@@ -497,23 +492,25 @@ pub const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
 /// model text is the human listing, a blank line, then the compact JSON of the
 /// whole result object.
 fn dir_listing(entries: Vec<mcp::McpDirectoryEntry>) -> ToolCallResult {
-    let rendered = entries
+    let rows = entries
         .iter()
-        .map(|e| {
-            let slash = if e.mime_type.as_deref() == Some(DIRECTORY_MIME_TYPE) {
-                "/"
+        .map(|entry| {
+            let slash = entry.mime_type.as_ref().and_then(|mime| mime.string_at(""))
+                == Some(DIRECTORY_MIME_TYPE);
+            if slash {
+                let slash: UJP = "/".into();
+                concat_source_text(&[&entry.name, &slash])
             } else {
-                ""
-            };
-            format!("{}{slash}", e.name)
+                entry.name.clone()
+            }
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    let rendered = concat_source_join(&rows, "\n");
     let header = if entries.is_empty() {
-        "Directory is empty.".to_string()
+        "Directory is empty.".into()
     } else {
-        format!(
-            "Directory listing ({} {}):\n{rendered}",
+        let prefix: UJP = format!(
+            "Directory listing ({} {}):\n",
             entries.len(),
             if entries.len() == 1 {
                 "entry"
@@ -521,30 +518,107 @@ fn dir_listing(entries: Vec<mcp::McpDirectoryEntry>) -> ToolCallResult {
                 "entries"
             },
         )
+        .into();
+        concat_source_text(&[&prefix, &rendered])
     };
-    let data = json!({ "resources": entries });
-    let json_tail = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
+    let raw_entries = entries
+        .iter()
+        .map(directory_entry_source)
+        .collect::<Vec<_>>();
+    let data = source_object(vec![(
+        "resources".into(),
+        UJP::array(raw_entries).expect("directory resource entries form an array"),
+    )]);
+    let json_tail = data
+        .to_json_string()
+        .expect("directory result source is valid JSON");
+    let spacing: UJP = "\n\n".into();
+    let json_tail: UJP = json_tail.into();
+    let model_content = concat_source_text(&[&header, &spacing, &json_tail]);
     ToolCallResult {
         data,
-        model_content: Some(format!("{header}\n\n{json_tail}")),
+        model_content: Some(model_content),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
 /// Oracle `mapToolResultToToolResultBlockParam`: when `error` is set the model
 /// sees the error text alone.
-fn dir_error(error: String) -> ToolCallResult {
+fn dir_error(error: UJP) -> ToolCallResult {
     ToolCallResult {
-        data: json!({ "resources": [], "error": error }),
+        data: source_object(vec![
+            (
+                "resources".into(),
+                UJP::array(Vec::new()).expect("empty array is valid"),
+            ),
+            ("error".into(), error.clone()),
+        ]),
         model_content: Some(error),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
+}
+
+fn directory_entry_source(entry: &mcp::McpDirectoryEntry) -> UJP {
+    let mut fields = vec![
+        ("uri".into(), entry.uri.clone()),
+        ("name".into(), entry.name.clone()),
+    ];
+    if let Some(mime_type) = &entry.mime_type {
+        fields.push(("mimeType".into(), mime_type.clone()));
+    }
+    source_object(fields)
+}
+
+fn source_object(fields: Vec<(String, UJP)>) -> UJP {
+    UJP::object(fields).expect("generated directory result keys are unique")
+}
+
+fn concat_source_text(parts: &[&UJP]) -> UJP {
+    let units = parts
+        .iter()
+        .flat_map(|part| part.string_units("").unwrap_or_default())
+        .collect::<Vec<_>>();
+    UJP::root_string(String::from_utf16_lossy(&units), units)
+        .expect("concatenated directory text is valid UTF-16")
+}
+
+fn concat_source_join(parts: &[UJP], separator: &str) -> UJP {
+    let separator: UJP = separator.into();
+    let mut refs = Vec::with_capacity(parts.len().saturating_mul(2));
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            refs.push(&separator);
+        }
+        refs.push(part);
+    }
+    concat_source_text(&refs)
+}
+
+fn source_contains_ascii(source: &UJP, needle: &str) -> bool {
+    let Some(units) = source.string_units("") else {
+        return false;
+    };
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    units
+        .windows(needle.len())
+        .any(|window| window == needle.as_slice())
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn server_declares_directory_read(raw_capabilities: Option<&Value>) -> bool {
+    raw_capabilities
+        .and_then(|value| UJP::parse(&value.to_string()).ok())
+        .as_ref()
+        .is_some_and(|value| server_declares_directory_read_source(Some(value)))
 }
 
 #[cfg(test)]
@@ -556,6 +630,15 @@ mod tests {
     };
     use once_cell::sync::Lazy;
     use std::sync::{Mutex, MutexGuard};
+
+    fn source_value(value: &Value) -> UJP {
+        UJP::parse(&value.to_string()).expect("test JSON is valid")
+    }
+
+    fn json_value(value: &UJP) -> Value {
+        serde_json::from_str(&value.to_json_string().expect("source serializes"))
+            .expect("source JSON is valid")
+    }
 
     static MCP_SKILLS_FLAG_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -633,12 +716,14 @@ mod tests {
             NOT_ENABLED_ERROR,
             "Directory listing is not enabled in this build."
         );
-        let r = dir_error(NOT_ENABLED_ERROR.to_string());
+        let r = dir_error(NOT_ENABLED_ERROR.into());
         assert_eq!(
-            r.model_content.as_deref(),
+            r.model_content
+                .as_ref()
+                .and_then(|value| value.string_at("")),
             Some("Directory listing is not enabled in this build.")
         );
-        assert_eq!(r.data["resources"], json!([]));
+        assert_eq!(json_value(&r.data)["resources"], json!([]));
         assert!(!r.is_error);
     }
 
@@ -691,7 +776,7 @@ mod tests {
             },
         ];
         let r = dir_listing(entries);
-        let mc = r.model_content.as_deref().unwrap();
+        let mc = r.model_content.as_ref().unwrap().string_at("").unwrap();
         assert!(
             mc.starts_with("Directory listing (2 entries):\na.md\nsub/\n\n{"),
             "got {mc}"
@@ -712,13 +797,17 @@ mod tests {
         }]);
         assert!(one
             .model_content
-            .as_deref()
+            .as_ref()
+            .unwrap()
+            .string_at("")
             .unwrap()
             .starts_with("Directory listing (1 entry):\na.md\n\n{"));
         let empty = dir_listing(Vec::new());
         assert!(empty
             .model_content
-            .as_deref()
+            .as_ref()
+            .unwrap()
+            .string_at("")
             .unwrap()
             .starts_with("Directory is empty.\n\n{"));
     }
@@ -726,11 +815,14 @@ mod tests {
     /// The input schema uses the ORACLE's `server`/`uri` keys.
     #[test]
     fn input_schema_uses_the_oracle_key_names() {
-        let props = &INPUT_SCHEMA["properties"];
-        assert!(props.get("server").is_some(), "oracle key is `server`");
-        assert!(props.get("uri").is_some());
+        assert!(INPUT_SCHEMA.contains_property("properties"));
         assert!(
-            props.get("server_name").is_none(),
+            INPUT_SCHEMA.at_pointer("/properties/server").is_some(),
+            "oracle key is `server`"
+        );
+        assert!(INPUT_SCHEMA.at_pointer("/properties/uri").is_some());
+        assert!(
+            INPUT_SCHEMA.at_pointer("/properties/server_name").is_none(),
             "`server_name` is the port's pre-existing divergence on the two sibling tools; \
              a freshly ported tool matches the oracle"
         );
@@ -761,6 +853,7 @@ mod tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: crate::mcp_tool::cached_resource_test_support::cached_server_config(
                     "cached",
                 ),
@@ -810,7 +903,7 @@ mod tests {
         let tool = ReadMcpResourceDirTool::new(ctx_with_registry(registry));
         let result = tool
             .call(
-                json!({ "server": "cached", "uri": "cached://docs" }),
+                source_value(&json!({ "server": "cached", "uri": "cached://docs" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -818,7 +911,7 @@ mod tests {
             .expect("cached directory read succeeds");
 
         assert_eq!(
-            result.data["resources"],
+            json_value(&result.data)["resources"],
             json!([{
                 "uri": "cached://docs/readme.md",
                 "name": "readme.md",
@@ -875,7 +968,7 @@ mod tests {
 
         let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
             .call(
-                json!({ "server": "my.server", "uri": "cached://dot" }),
+                source_value(&json!({ "server": "my.server", "uri": "cached://dot" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -883,7 +976,7 @@ mod tests {
             .expect("exact raw dot name should keep dot server across dial and RPC");
 
         assert_eq!(
-            result.data["resources"],
+            json_value(&result.data)["resources"],
             json!([{
                 "uri": "cached://dot/readme.md",
                 "name": "readme.md",
@@ -923,7 +1016,7 @@ mod tests {
 
         let err = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
             .call(
-                json!({ "server": "my/server", "uri": "cached://ambiguous" }),
+                source_value(&json!({ "server": "my/server", "uri": "cached://ambiguous" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -969,7 +1062,7 @@ mod tests {
 
         let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
             .call(
-                json!({ "server": "cached", "uri": "cached://docs" }),
+                source_value(&json!({ "server": "cached", "uri": "cached://docs" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -1018,7 +1111,7 @@ mod tests {
 
         let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
             .call(
-                json!({ "server": "cached", "uri": "cached://docs" }),
+                source_value(&json!({ "server": "cached", "uri": "cached://docs" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )

@@ -1,0 +1,1250 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "native user-visible reason predicate",
+      "start": 188771236,
+      "end": 188771287,
+      "sha256": "50c5e21185656be13a096ff6f12a1f9f6f05ee8cf3b6e72dc7c492a6630b1222"
+    },
+    {
+      "label": "native accepted fallback control decision",
+      "start": 188776094,
+      "end": 188776673,
+      "sha256": "fe3d984856b29d721998e809a584b364cda4a0c86dc3aed66b3c09ed06f72b34"
+    },
+    {
+      "label": "native context-tag model identity",
+      "start": 179326720,
+      "end": 179326771,
+      "sha256": "a4d795f092297c1da48837e8342f8a6b308a4fc1b4cd8b34f2ed7bbcdd775ac3"
+    },
+    {
+      "label": "native declared and received model preference",
+      "start": 188774585,
+      "end": 188774640,
+      "sha256": "b3dcbb17cf27fd634e7eb6986ae5d2b642b492b1d8fa24388017ea6533fea742"
+    },
+    {
+      "label": "native H$r local text stitching helper",
+      "start": 185910515,
+      "end": 185911841,
+      "sha256": "1f66d3d83e22294da89b7cfe336702c671c7d3e7293ddd1e8bffecb155fe5b48"
+    },
+    {
+      "label": "native accepted server-fallback seam and notice branch",
+      "start": 195142316,
+      "end": 195143107,
+      "sha256": "40c8da035ae85a663f03f19d6270bcb6c385b99584b0fe296886eaa562ec1c67"
+    },
+    {
+      "label": "native server-fallback user-visible outer gate",
+      "start": 195138675,
+      "end": 195139436,
+      "sha256": "ffe0922ff8ea37f41209daa9d45ff3675394450407f2f650af326b8eb041dd9e"
+    },
+    {
+      "label": "native server-fallback J seed assignment",
+      "start": 195142316,
+      "end": 195142622,
+      "sha256": "c78f392c2f59f13c8bdc302588fd2809ea8b9cb237cac5ce3b742cb8af1da221"
+    },
+    {
+      "label": "native accepted assistant stitch and message identity branch",
+      "start": 195151560,
+      "end": 195152857,
+      "sha256": "01dd32ff41ba44e4302b9dd50430c48be30ae927d008bb4d19eca44e7578fe89"
+    },
+    {
+      "label": "native current assistant candidate assignment",
+      "start": 195151123,
+      "end": 195151144,
+      "sha256": "8ee766906725d5a770879575a5f807737ec1dfa4b85370aad17b50c2e200c377"
+    },
+    {
+      "label": "native queued fallback notice flush helper",
+      "start": 195131688,
+      "end": 195131873,
+      "sha256": "7bfcf77600666fb3f821509b15fd8724375bbfca7df46a255f8688a7cdbe88cb"
+    },
+    {
+      "label": "native refusal-decline queued notice flush",
+      "start": 195143117,
+      "end": 195143722,
+      "sha256": "c71a7935b8832f25962391b3843e1429e34da560d389f7bc8245eaf955480b95"
+    },
+    {
+      "label": "native local fallback stitch occupancy",
+      "start": 195148929,
+      "end": 195149004,
+      "sha256": "c4b6ba2372d54e75a70b38e8ed4e1249523e3a5a84c45b161b9fcd68685ea7ed"
+    },
+    {
+      "label": "native main-query Je source predicate",
+      "start": 195111227,
+      "end": 195111307,
+      "sha256": "b575f2de81c32e2d919fcedd29502cace8d3664870ef8e4471c3d6b52d60736b"
+    },
+    {
+      "label": "native Je assignment",
+      "start": 195114046,
+      "end": 195114059,
+      "sha256": "d6118461c2812d8a55211d55bc0a005fa24b0d58bccee30d9cefa0f077a16bab"
+    },
+    {
+      "label": "native supersedes row eligibility filter",
+      "start": 191003155,
+      "end": 191003557,
+      "sha256": "f1d6f8c3d8306b6fcf60fa10fec8f291f0a1ce14edd0f2c29fbb98b38a238ff1"
+    },
+    {
+      "label": "native per-content-block UUID derivation helpers",
+      "start": 191003567,
+      "end": 191003988,
+      "sha256": "538c49f5999db15c7893c9e74767f9352d692549eb2ddcd5293d1d80ffefc4b6"
+    },
+    {
+      "label": "native original-message row expansion dispatcher",
+      "start": 191004136,
+      "end": 191004853,
+      "sha256": "a0895f56f66ddab05fe749d98568c41209592865f4772487b2dfae79f632473e"
+    },
+    {
+      "label": "native assistant per-content-block row expansion",
+      "start": 191004853,
+      "end": 191006748,
+      "sha256": "1a8f36033830479517ccdffc70ca7a9d2732f68afcad8daf5c6dedea2037c632"
+    },
+    {
+      "label": "native normal-terminal queued notice flush",
+      "start": 195154256,
+      "end": 195154410,
+      "sha256": "4b6883293a40d31350b4fdba48d2b97a7f4d7b2420ca7a94fb7306a9135fbe07"
+    },
+    {
+      "label": "native query-error queued notice flush",
+      "start": 195155271,
+      "end": 195155607,
+      "sha256": "0079a4912886703e1eac8a7f1ff52db65514eba1d620cf7a4d10f00709e6faae"
+    },
+    {
+      "label": "native engine fallback-event dispatch",
+      "start": 209302790,
+      "end": 209302872,
+      "sha256": "aa21bb2a27a49cef35709a62e477c162900876bc83f03f4e2bb3451620487f4d"
+    },
+    {
+      "label": "native fallback-event to transcript-row mapping",
+      "start": 194373060,
+      "end": 194373748,
+      "sha256": "318170614bd73606ee5aa838eb9aba88edf2f0963adb75048419863ee1e4fd93"
+    },
+    {
+      "label": "native event-to-message callback adapter",
+      "start": 191051477,
+      "end": 191052869,
+      "sha256": "8aae8dc2c1d3430f138647b9575df0dcbc28d1a00e1c14a8fe7c4041d68cbe38"
+    },
+    {
+      "label": "native query-event transcript application",
+      "start": 209338045,
+      "end": 209340734,
+      "sha256": "335264224e49e36c8a0a4124ae8674f713ccae788d49ad3045479ab6f7fb51f8"
+    },
+    {
+      "label": "native message append to live transcript",
+      "start": 209335574,
+      "end": 209338044,
+      "sha256": "a18a423ca8d9624a21ee762806975a543e240ca67c466f5a76d789b735efc883"
+    },
+    {
+      "label": "native engine callback applies query events",
+      "start": 209349591,
+      "end": 209350241,
+      "sha256": "46fa521a6da63863b4fbdb331e522b1100d0324b0e0af08c9bb605dec139991f"
+    },
+    {
+      "label": "native transcript-entry persistence filter",
+      "start": 191330353,
+      "end": 191330748,
+      "sha256": "204ff1cb7c1c451c7b128fe9d9df1810b6a3c6f916c7f74b76dbfb30442f1697"
+    },
+    {
+      "label": "native transcript-to-JSONL row projection",
+      "start": 191332104,
+      "end": 191332430,
+      "sha256": "b51610ad4ff2d74738728576a53d42b093497bdac6371fe3bb164cb44bd9c4ff"
+    },
+    {
+      "label": "native JSONL transcript row writer",
+      "start": 180885684,
+      "end": 180886396,
+      "sha256": "9dcc99e14bf21ebacb8f27f67d233cba01d83efc90f55a41178a6bc1e9ae2dba"
+    },
+    {
+      "label": "native transcript projection export name",
+      "start": 198852409,
+      "end": 198852466,
+      "sha256": "3ad8ed4b089538c6112879090a4f4b4ef5295c830864ba035385cfce0b53b364"
+    },
+    {
+      "label": "native JSONL writer export name",
+      "start": 210259840,
+      "end": 210259870,
+      "sha256": "818c7821bdfd3608ddcd710e94eb607f1b06851b428888599b6ce8785a99166f"
+    }
+  ],
+  "scope": "Executes native Tle/oHo/Mn/Ucn/H$r, the exact native midstream J-seed clause, accepted J assistant-row merge, native Je source selection, and native Ff/pre supersedes expansion. The accepted consumer projection receives admittedByServerModelPolicy as an explicit fact because organization policy acquisition is outside this pure fixture. Row tests use a synthetic current assistant envelope with parentUuid already populated; they prove the merge preserves populated outer fields, not that upstream producers always provide a parent. Native accepted local notice queue/yield, engine dispatch, live transcript append, entry filter, and JSONL writer are source-checked here; UI display/JSONL file I/O itself and full host policy remain outside.",
+  "consumerSourceFacts": {
+    "noticeOnlyWhenShowBannerAndRouteChanged": "if(X.showBanner&&!Tt)Q=sHo(...)",
+    "queuedNoticeFlush": "function*He() yields the query-local Q and clears it; no scope check is present",
+    "noticeFlushBranches": [
+      "refusal_no_fallback",
+      "normal terminal",
+      "query catch/error"
+    ],
+    "nativeSupersedesGate": "Je=fe; fe is true exactly when querySource starts with repl_main_thread or equals sdk",
+    "outerVisibilityGate": "server_fallback runs the decline/swap/tombstone/reset/J/notice body only under X.userVisible from oHo/Tle; non-visible reasons are observation-only",
+    "eventDispatch": "FZe forwards every system/model_refusal_fallback through QZt without testing scope",
+    "liveTranscriptAppend": "applyEvent -> m9e(onMessage) -> _applyMessage -> transcript.keep append; local scope is not tested on this path",
+    "transcriptJsonlFilter": "RS excludes progress, selected empty attachments, and system persist:false; it has no scope exclusion, so an emitted local fallback row passes",
+    "jsonlWriter": "writeEntriesToJsonlFile JSON.stringify-serializes each passed row and writes a newline",
+    "localPersistenceProjection": "native toTranscriptEntries executed over a synthetic scope:local fallback system row retains it and its uuid after RS filtering",
+    "retainedTextSeedGate": "inside M.midStream: ke!==void 0&&ke.length>0&&io===void 0",
+    "repeatedServerHopSeed": "there is no J===void 0 guard; a later visible hop replaces pending J.text and J.originals with that event retainedText/retainedMessages",
+    "retainedTextHostReachability": "Native source has an undefined retainedText branch, but current Rust ServerFallbackEvent.retained_text is String; undefined is a source-only case here, while empty string and empty retained_blocks are host-reachable",
+    "pendingLocalStitchSource": "io is the pending local/silent refusal continuation text; when non-undefined, a server retainedText does not seed J and logs the native silent-stitch warning",
+    "retainedMessageDefault": "M.retainedMessages??[]",
+    "beginEventJoin": "join:\"exact\"",
+    "nextAssistantTextJoin": "J.text+Tt.text",
+    "currentAssistantCandidate": "let Me=M before the merge guard; X=Me.type===\"assistant\"?Me:M",
+    "nextAssistantIdentity": "We spreads X outer fields (uuid/parentUuid when populated) and spreads X.message (provider message.id/envelope); no id is minted from J.originals",
+    "firstTextEligibility": "first text block only; it must have text.trim().length>0 and M must not be isApiErrorMessage",
+    "transientApiIndices": "apiBlockIndex and apiBlockIndices are removed when We is spread; numeric block-index equality is not used to pair across hops",
+    "supersedesExpression": "inside Je only: At.flatMap(original => Ff([original]).filter(pre).map(row => row.uuid)); fixture executes the exact Ff/pre helpers for one Je=true multi-block case and confirms retained order",
+    "sourceNote": "J.originals UUIDs are removed from K and populate begin.replacesUuids; only Je=true writes the filtered/flattened supersedesUuids. Per-block assistant UUIDs derive from the original row UUID plus the block index; single-block rows keep their UUID. No original UUID inheritance branch appears for the new We row. The synthetic parentUuid case tests preservation only when supplied; real upstream parent assignment remains separate."
+  },
+  "consumerCases": [
+    {
+      "input": {
+        "name": "accepted-main-refusal-changes-session-route",
+        "admittedByServerModelPolicy": true,
+        "reason": "refusal",
+        "midStream": false,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "undefined",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "direction": "retry",
+        "scope": "session",
+        "content": "Origin's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate coding and cybersecurity tasks. Switched to Fallback. You can learn more: https://support.claude.com/en/articles/8106465\n\nDetails: `[cyber]`",
+        "level": "warning",
+        "trigger": "refusal",
+        "originalModel": "origin",
+        "fallbackModel": "fallback",
+        "requestId": "req-main",
+        "apiRefusalCategory": "cyber",
+        "apiRefusalExplanation": null,
+        "isMeta": false,
+        "timestamp": "2026-10-03T12:34:56.000Z",
+        "uuid": "uuid-fixed"
+      },
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "accepted-local-sticky-midstream",
+        "admittedByServerModelPolicy": true,
+        "reason": "sticky",
+        "midStream": true,
+        "isMainThread": false,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "nonempty",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": false,
+        "showBanner": true,
+        "bannerScope": "local"
+      },
+      "notice": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "direction": "retry",
+        "scope": "local",
+        "content": "Origin's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. This response was completed by Fallback. Your session model is unchanged. You can learn more: https://support.claude.com/en/articles/8106465\n\nDetails: `[bio]`",
+        "level": "warning",
+        "trigger": "refusal",
+        "originalModel": "origin",
+        "fallbackModel": "fallback",
+        "requestId": "req-local",
+        "apiRefusalCategory": "bio",
+        "apiRefusalExplanation": null,
+        "isMeta": false,
+        "timestamp": "2026-10-03T12:34:56.000Z",
+        "uuid": "uuid-fixed"
+      },
+      "stitch": {
+        "phase": "begin",
+        "salvageText": "saved prefix",
+        "join": "exact",
+        "replacesUuids": [
+          "old-1",
+          "old-2"
+        ],
+        "merge": {
+          "assistantUuid": "next-assistant",
+          "messageId": "next-assistant",
+          "text": "saved prefixanswer",
+          "separator": "",
+          "removedOriginalUuids": [
+            "old-1",
+            "old-2"
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "name": "same-session-model-suppresses-banner",
+        "admittedByServerModelPolicy": true,
+        "reason": "refusal",
+        "midStream": false,
+        "isMainThread": true,
+        "sessionModel": "fallback",
+        "selectedRouteModel": "fallback",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": true,
+        "retainedTextState": "undefined",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": null,
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "other-reason-is-outside-visible-consumer",
+        "admittedByServerModelPolicy": true,
+        "reason": "other",
+        "midStream": true,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "nonempty",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      },
+      "notice": null,
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "denied-target-has-no-accepted-notice-or-stitch",
+        "admittedByServerModelPolicy": false,
+        "reason": "refusal",
+        "midStream": true,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "denied",
+        "resolvedModel": "denied",
+        "sameModel": false,
+        "retainedTextState": "nonempty",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": null,
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "undefined-retained-text-does-not-start-server-seam",
+        "admittedByServerModelPolicy": true,
+        "reason": "sticky",
+        "midStream": true,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "undefined",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "direction": "retry",
+        "scope": "session",
+        "content": "Origin's safeguards flagged this message. This sometimes happens with safe, normal conversations. Switched to Fallback. You can learn more: https://support.claude.com/en/articles/8106465",
+        "level": "warning",
+        "trigger": "refusal",
+        "originalModel": "origin",
+        "fallbackModel": "fallback",
+        "requestId": "req-no-retained",
+        "apiRefusalCategory": null,
+        "apiRefusalExplanation": null,
+        "isMeta": false,
+        "timestamp": "2026-10-03T12:34:56.000Z",
+        "uuid": "uuid-fixed"
+      },
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "empty-retained-text-does-not-start-server-seam",
+        "admittedByServerModelPolicy": true,
+        "reason": "sticky",
+        "midStream": true,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "empty",
+        "localStitchAlreadyExists": false
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "direction": "retry",
+        "scope": "session",
+        "content": "Origin's safeguards flagged this message. This sometimes happens with safe, normal conversations. Switched to Fallback. You can learn more: https://support.claude.com/en/articles/8106465",
+        "level": "warning",
+        "trigger": "refusal",
+        "originalModel": "origin",
+        "fallbackModel": "fallback",
+        "requestId": "req-empty-retained",
+        "apiRefusalCategory": null,
+        "apiRefusalExplanation": null,
+        "isMeta": false,
+        "timestamp": "2026-10-03T12:34:56.000Z",
+        "uuid": "uuid-fixed"
+      },
+      "stitch": null
+    },
+    {
+      "input": {
+        "name": "pending-local-silent-stitch-skips-server-seed",
+        "admittedByServerModelPolicy": true,
+        "reason": "sticky",
+        "midStream": true,
+        "isMainThread": true,
+        "sessionModel": "origin",
+        "selectedRouteModel": "origin",
+        "receivedModel": "fallback",
+        "resolvedModel": "fallback",
+        "sameModel": false,
+        "retainedTextState": "nonempty",
+        "localStitchAlreadyExists": true
+      },
+      "control": {
+        "userVisible": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      },
+      "notice": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "direction": "retry",
+        "scope": "session",
+        "content": "Origin's safeguards flagged this message. This sometimes happens with safe, normal conversations. Switched to Fallback. You can learn more: https://support.claude.com/en/articles/8106465",
+        "level": "warning",
+        "trigger": "refusal",
+        "originalModel": "origin",
+        "fallbackModel": "fallback",
+        "requestId": "req-pending",
+        "apiRefusalCategory": null,
+        "apiRefusalExplanation": null,
+        "isMeta": false,
+        "timestamp": "2026-10-03T12:34:56.000Z",
+        "uuid": "uuid-fixed"
+      },
+      "stitch": {
+        "skipped": "a local silent stitch is already pending"
+      }
+    }
+  ],
+  "nativeServerFallbackSeedCases": [
+    {
+      "name": "first-visible-midstream-event-seeds-J",
+      "input": {
+        "midStream": true,
+        "retainedText": "first prefix",
+        "retainedTextState": "nonempty",
+        "retainedMessages": [
+          {
+            "uuid": "first-row"
+          }
+        ],
+        "localStitchPending": false
+      },
+      "output": {
+        "J": {
+          "text": "first prefix",
+          "originals": [
+            {
+              "uuid": "first-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    },
+    {
+      "name": "later-visible-midstream-event-replaces-pending-J",
+      "input": {
+        "midStream": true,
+        "retainedText": "latest prefix",
+        "retainedTextState": "nonempty",
+        "retainedMessages": [
+          {
+            "uuid": "latest-row"
+          }
+        ],
+        "initialJ": {
+          "text": "first prefix",
+          "originals": [
+            {
+              "uuid": "first-row"
+            }
+          ]
+        },
+        "localStitchPending": false
+      },
+      "output": {
+        "J": {
+          "text": "latest prefix",
+          "originals": [
+            {
+              "uuid": "latest-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    },
+    {
+      "name": "missing-retained-text-keeps-existing-J",
+      "input": {
+        "midStream": true,
+        "retainedTextState": "undefined",
+        "initialJ": {
+          "text": "prior prefix",
+          "originals": [
+            {
+              "uuid": "prior-row"
+            }
+          ]
+        },
+        "localStitchPending": false
+      },
+      "output": {
+        "J": {
+          "text": "prior prefix",
+          "originals": [
+            {
+              "uuid": "prior-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    },
+    {
+      "name": "empty-retained-text-keeps-existing-J",
+      "input": {
+        "midStream": true,
+        "retainedText": "",
+        "retainedTextState": "empty",
+        "retainedMessages": [],
+        "initialJ": {
+          "text": "prior prefix",
+          "originals": [
+            {
+              "uuid": "prior-row"
+            }
+          ]
+        },
+        "localStitchPending": false
+      },
+      "output": {
+        "J": {
+          "text": "prior prefix",
+          "originals": [
+            {
+              "uuid": "prior-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    },
+    {
+      "name": "local-silent-stitch-blocks-server-J-seed",
+      "input": {
+        "midStream": true,
+        "retainedText": "server prefix",
+        "retainedTextState": "nonempty",
+        "retainedMessages": [
+          {
+            "uuid": "server-row"
+          }
+        ],
+        "localStitchPending": true
+      },
+      "output": {
+        "J": null,
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": [
+          [
+            "server_fallback: silent stitch already pending — skipping seam merge",
+            {
+              "level": "warn"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "missing-retained-messages-defaults-to-empty-array",
+      "input": {
+        "midStream": true,
+        "retainedText": "prefix",
+        "retainedTextState": "nonempty",
+        "localStitchPending": false
+      },
+      "output": {
+        "J": {
+          "text": "prefix",
+          "originals": []
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    }
+  ],
+  "nativeSequentialServerFallbackHops": [
+    {
+      "hop": 1,
+      "event": {
+        "midStream": true,
+        "retainedText": "A retained text",
+        "retainedMessages": [
+          {
+            "uuid": "A-row"
+          }
+        ]
+      },
+      "output": {
+        "J": {
+          "text": "A retained text",
+          "originals": [
+            {
+              "uuid": "A-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    },
+    {
+      "hop": 2,
+      "event": {
+        "midStream": true,
+        "retainedText": "B retained text",
+        "retainedMessages": [
+          {
+            "uuid": "B-row"
+          }
+        ]
+      },
+      "output": {
+        "J": {
+          "text": "B retained text",
+          "originals": [
+            {
+              "uuid": "B-row"
+            }
+          ]
+        },
+        "visibleRows": [
+          "current-turn-row"
+        ],
+        "logs": []
+      }
+    }
+  ],
+  "nativeStitchCases": [
+    {
+      "input": {
+        "name": "local-stitch-preserves-distinct-outer-and-provider-ids-envelope-and-content",
+        "prefix": "saved prefix ",
+        "Je": false,
+        "assistantIsApiError": false,
+        "firstContentBlock": {
+          "type": "text",
+          "text": " answer"
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": {
+          "type": "assistant",
+          "isApiErrorMessage": false,
+          "uuid": "next-outer-uuid",
+          "parentUuid": "prior-parent-uuid",
+          "message": {
+            "id": "provider-inner-message-id",
+            "model": "fallback-model",
+            "stop_reason": "end_turn",
+            "providerEnvelope": {
+              "preserved": true
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "saved prefix  answer",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "preserve this block"
+              },
+              {
+                "type": "tool_use",
+                "id": "tool-from-current-row",
+                "name": "Lookup",
+                "input": {
+                  "q": "x"
+                }
+              }
+            ]
+          }
+        },
+        "pendingStitch": null,
+        "rows": [
+          {
+            "type": "assistant",
+            "isApiErrorMessage": false,
+            "uuid": "next-outer-uuid",
+            "parentUuid": "prior-parent-uuid",
+            "message": {
+              "id": "provider-inner-message-id",
+              "model": "fallback-model",
+              "stop_reason": "end_turn",
+              "providerEnvelope": {
+                "preserved": true
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "saved prefix  answer",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                },
+                {
+                  "type": "thinking",
+                  "thinking": "preserve this block"
+                },
+                {
+                  "type": "tool_use",
+                  "id": "tool-from-current-row",
+                  "name": "Lookup",
+                  "input": {
+                    "q": "x"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "stitched": true
+      }
+    },
+    {
+      "input": {
+        "name": "local-stitch-has-zero-inserted-separator-bytes",
+        "prefix": "retained ",
+        "Je": false,
+        "assistantIsApiError": false,
+        "firstContentBlock": {
+          "type": "text",
+          "text": " answer"
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": {
+          "type": "assistant",
+          "isApiErrorMessage": false,
+          "uuid": "next-outer-uuid",
+          "parentUuid": "prior-parent-uuid",
+          "message": {
+            "id": "provider-inner-message-id",
+            "model": "fallback-model",
+            "stop_reason": "end_turn",
+            "providerEnvelope": {
+              "preserved": true
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "retained  answer",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "preserve this block"
+              },
+              {
+                "type": "tool_use",
+                "id": "tool-from-current-row",
+                "name": "Lookup",
+                "input": {
+                  "q": "x"
+                }
+              }
+            ]
+          }
+        },
+        "pendingStitch": null,
+        "rows": [
+          {
+            "type": "assistant",
+            "isApiErrorMessage": false,
+            "uuid": "next-outer-uuid",
+            "parentUuid": "prior-parent-uuid",
+            "message": {
+              "id": "provider-inner-message-id",
+              "model": "fallback-model",
+              "stop_reason": "end_turn",
+              "providerEnvelope": {
+                "preserved": true
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "retained  answer",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                },
+                {
+                  "type": "thinking",
+                  "thinking": "preserve this block"
+                },
+                {
+                  "type": "tool_use",
+                  "id": "tool-from-current-row",
+                  "name": "Lookup",
+                  "input": {
+                    "q": "x"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "stitched": true
+      }
+    },
+    {
+      "input": {
+        "name": "api-error-assistant-does-not-consume-pending-stitch",
+        "prefix": "saved prefix",
+        "Je": false,
+        "assistantIsApiError": true,
+        "firstContentBlock": {
+          "type": "text",
+          "text": " error"
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": null,
+        "pendingStitch": {
+          "text": "saved prefix",
+          "originals": [
+            {
+              "uuid": "old-row-1"
+            },
+            {
+              "uuid": "old-row-2"
+            }
+          ]
+        },
+        "rows": [
+          {
+            "uuid": "old-row-1"
+          },
+          {
+            "uuid": "old-row-2"
+          }
+        ],
+        "stitched": false
+      }
+    },
+    {
+      "input": {
+        "name": "whitespace-only-first-text-does-not-consume-pending-stitch",
+        "prefix": "saved prefix",
+        "Je": false,
+        "assistantIsApiError": false,
+        "firstContentBlock": {
+          "type": "text",
+          "text": "  \n  "
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": null,
+        "pendingStitch": {
+          "text": "saved prefix",
+          "originals": [
+            {
+              "uuid": "old-row-1"
+            },
+            {
+              "uuid": "old-row-2"
+            }
+          ]
+        },
+        "rows": [
+          {
+            "uuid": "old-row-1"
+          },
+          {
+            "uuid": "old-row-2"
+          }
+        ],
+        "stitched": false
+      }
+    },
+    {
+      "input": {
+        "name": "assistant-without-text-does-not-consume-pending-stitch",
+        "prefix": "saved prefix",
+        "Je": false,
+        "assistantIsApiError": false,
+        "firstContentBlock": {
+          "type": "thinking",
+          "thinking": "no text block"
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": null,
+        "pendingStitch": {
+          "text": "saved prefix",
+          "originals": [
+            {
+              "uuid": "old-row-1"
+            },
+            {
+              "uuid": "old-row-2"
+            }
+          ]
+        },
+        "rows": [
+          {
+            "uuid": "old-row-1"
+          },
+          {
+            "uuid": "old-row-2"
+          }
+        ],
+        "stitched": false
+      }
+    },
+    {
+      "input": {
+        "name": "native-main-je-flattens-and-filters-superseded-rows-in-order",
+        "prefix": "saved prefix",
+        "Je": true,
+        "assistantIsApiError": false,
+        "firstContentBlock": {
+          "type": "text",
+          "text": " answer"
+        },
+        "inputOuterUuid": "next-outer-uuid",
+        "inputProviderMessageId": "provider-inner-message-id",
+        "inputParentUuid": "prior-parent-uuid"
+      },
+      "output": {
+        "row": {
+          "type": "assistant",
+          "isApiErrorMessage": false,
+          "uuid": "next-outer-uuid",
+          "parentUuid": "prior-parent-uuid",
+          "message": {
+            "id": "provider-inner-message-id",
+            "model": "fallback-model",
+            "stop_reason": "end_turn",
+            "providerEnvelope": {
+              "preserved": true
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "saved prefix answer",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "thinking",
+                "thinking": "preserve this block"
+              },
+              {
+                "type": "tool_use",
+                "id": "tool-from-current-row",
+                "name": "Lookup",
+                "input": {
+                  "q": "x"
+                }
+              }
+            ]
+          },
+          "supersedesUuids": [
+            "aaaaaaaaaaaaaaaaaaaaaaaa000000000000",
+            "aaaaaaaaaaaaaaaaaaaaaaaa000000000001",
+            "aaaaaaaaaaaaaaaaaaaaaaaa000000000002",
+            "bbbbbbbbbbbbbbbbbbbbbbbb"
+          ]
+        },
+        "pendingStitch": null,
+        "rows": [
+          {
+            "type": "assistant",
+            "isApiErrorMessage": false,
+            "uuid": "next-outer-uuid",
+            "parentUuid": "prior-parent-uuid",
+            "message": {
+              "id": "provider-inner-message-id",
+              "model": "fallback-model",
+              "stop_reason": "end_turn",
+              "providerEnvelope": {
+                "preserved": true
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "saved prefix answer",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                },
+                {
+                  "type": "thinking",
+                  "thinking": "preserve this block"
+                },
+                {
+                  "type": "tool_use",
+                  "id": "tool-from-current-row",
+                  "name": "Lookup",
+                  "input": {
+                    "q": "x"
+                  }
+                }
+              ]
+            },
+            "supersedesUuids": [
+              "aaaaaaaaaaaaaaaaaaaaaaaa000000000000",
+              "aaaaaaaaaaaaaaaaaaaaaaaa000000000001",
+              "aaaaaaaaaaaaaaaaaaaaaaaa000000000002",
+              "bbbbbbbbbbbbbbbbbbbbbbbb"
+            ]
+          }
+        ],
+        "stitched": true
+      }
+    }
+  ],
+  "jeCases": [
+    {
+      "querySource": "repl_main_thread",
+      "Je": true
+    },
+    {
+      "querySource": "repl_main_thread_tool",
+      "Je": true
+    },
+    {
+      "querySource": "sdk",
+      "Je": true
+    },
+    {
+      "querySource": "subagent",
+      "Je": false
+    },
+    {
+      "querySource": "side_question",
+      "Je": false
+    },
+    {
+      "querySource": "",
+      "Je": false
+    }
+  ],
+  "nativeLocalPersistenceProjection": [
+    {
+      "type": "system",
+      "subtype": "model_refusal_fallback",
+      "scope": "local",
+      "content": "local fallback notice",
+      "level": "warning",
+      "trigger": "refusal",
+      "direction": "retry",
+      "originalModel": "origin",
+      "fallbackModel": "fallback",
+      "requestId": "req-local-persist",
+      "uuid": "local-notice-uuid",
+      "timestamp": "2026-10-03T12:34:56.000Z",
+      "cwd": "/native-fixture-cwd",
+      "userType": "ant",
+      "sessionId": "session-id",
+      "version": "2.1.288",
+      "parentUuid": null,
+      "isSidechain": false
+    }
+  ],
+  "hDollarRCases": [
+    {
+      "name": "overlap-identical",
+      "oldText": "The answer",
+      "nextText": "The answer",
+      "result": "The answer"
+    },
+    {
+      "name": "overlap-with-continuation",
+      "oldText": "The answer",
+      "nextText": "The answer continues",
+      "result": "The answer continues"
+    },
+    {
+      "name": "punctuation-word-seam",
+      "oldText": "Done.",
+      "nextText": "Next",
+      "result": "Done. Next"
+    },
+    {
+      "name": "word-word-seam",
+      "oldText": "Draft",
+      "nextText": "answer",
+      "result": "Draft answer"
+    },
+    {
+      "name": "list-seam-adds-newline",
+      "oldText": "Intro",
+      "nextText": "- item",
+      "result": "Intro\n- item"
+    },
+    {
+      "name": "list-seam-keeps-existing-newline",
+      "oldText": "Intro\n",
+      "nextText": "- item",
+      "result": "Intro\n- item"
+    },
+    {
+      "name": "blank-overlap",
+      "oldText": "Kept text",
+      "nextText": "  … Kept text  ",
+      "result": "Kept text"
+    },
+    {
+      "name": "j-server-seam-is-separate-exact-concat",
+      "oldText": "Kept prefix",
+      "nextText": "continued",
+      "result": "Kept prefix continued"
+    }
+  ]
+}

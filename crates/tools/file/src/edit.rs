@@ -8,6 +8,7 @@
 //!   (spec §7; `{N}` is the literal placeholder substituted via `replace`).
 
 use crate::structured_patch::count_patch_lines;
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -26,7 +27,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -208,26 +209,25 @@ pub fn stale_edit_applies(content: &str, old_string: &str, replace_all: bool) ->
 /// `file_path`, `old_str` → `old_string`, `new_str` → `new_string`,
 /// `replace_name` → `replace_all` (truthy when the value is `true` or `"true"`).
 /// Only fills a canonical key when it is ABSENT, so an explicit canonical wins.
-fn normalize_edit_aliases(input: &mut Value) {
-    let Some(obj) = input.as_object_mut() else {
-        return;
-    };
+fn normalize_edit_aliases(input: &mut Utf16JsonProjection) {
     for (alias, canonical) in [
         ("path", "file_path"),
         ("old_str", "old_string"),
         ("new_str", "new_string"),
     ] {
-        if !obj.contains_key(canonical) {
-            if let Some(v) = obj.get(alias).cloned() {
-                obj.insert(canonical.to_string(), v);
+        if !input.contains_property(canonical) {
+            if let Ok(value) = input.subprojection(&format!("/{alias}")) {
+                let _ = input.set_field(canonical, value);
             }
         }
     }
-    if !obj.contains_key("replace_all") {
-        if let Some(v) = obj.get("replace_name") {
-            let truthy = v.as_bool() == Some(true) || v.as_str() == Some("true");
-            obj.insert("replace_all".to_string(), Value::Bool(truthy));
-        }
+    if !input.contains_property("replace_all") && input.contains_property("replace_name") {
+        let truthy = input
+            .get_property("replace_name")
+            .is_some_and(|value| value.as_bool() == Some(true) || value.as_str() == Some("true"));
+        let value = Utf16JsonProjection::parse(if truthy { "true" } else { "false" })
+            .expect("static boolean JSON is valid");
+        let _ = input.set_field("replace_all", value);
     }
 }
 
@@ -259,11 +259,11 @@ fn edit_resolution_error(
     match error {
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
-        )),
+        ).into()),
         lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
-            ))
+            ).into())
         }
         lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
@@ -272,17 +272,17 @@ fn edit_resolution_error(
             {
                 ToolError::InvalidInput(format!(
                     "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
-                ))
+                ).into())
             } else {
                 ToolError::InvalidInput(format!(
                     "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
-                ))
+                ).into())
             }
         }
         lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile => {
-            ToolError::Io(format!("File {path} is not a regular file"))
+            ToolError::Io(format!("File {path} is not a regular file").into())
         }
-        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string().into()),
     }
 }
 
@@ -372,8 +372,8 @@ impl FileEditTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["file_path", "old_string", "new_string"],
@@ -383,7 +383,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "new_string":  { "type": "string", "description": "The text to replace it with (must be different from old_string)" },
             "replace_all": { "type": "boolean", "default": false, "description": "Replace all occurrences of old_string (default false)" }
         }
-    })
+    }))
 });
 
 #[async_trait]
@@ -393,11 +393,14 @@ impl Tool for FileEditTool {
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("modify file contents in place")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("modify file contents in place".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -405,17 +408,21 @@ impl Tool for FileEditTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -426,7 +433,11 @@ impl Tool for FileEditTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // R-EditDesc: claude-code's Edit `description()` is the short display label
         // `"A tool for editing files"` (binary), NOT the long body — the long body
         // lives in `prompt()`. The model-facing wire uses `prompt()` (wire.rs:140),
@@ -434,7 +445,7 @@ impl Tool for FileEditTool {
         "A tool for editing files".to_string()
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // Model-gated, mirroring claude-code `prompt({model:e}){return RBp(e)}`
         // where `RBp(e){if(Dh(e))return SHORT; return LONG}` (binary offset
         // 202614289). Predicate shared with TodoWrite via `tool_api`.
@@ -443,23 +454,21 @@ impl Tool for FileEditTool {
         // EDIT_DESCRIPTION there — a pre-existing divergence left untouched
         // (out of scope for this prompt-gate fix).
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            EDIT_PROMPT_SHORT.to_string()
+            EDIT_PROMPT_SHORT.into()
         } else {
-            EDIT_DESCRIPTION.to_string()
+            EDIT_DESCRIPTION.into()
         }
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
-        input
-            .get("file_path")
-            .or_else(|| input.get("path"))
-            .and_then(Value::as_str)
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
+        crate::input_string(input, "file_path")
+            .or_else(|| crate::input_string(input, "path"))
             .map(PathBuf::from)
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -468,22 +477,13 @@ impl Tool for FileEditTool {
         let mut input = input;
         normalize_edit_aliases(&mut input);
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
-        let file_path = input
-            .get("file_path")
-            .and_then(Value::as_str)
+        let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
-        let old_string = input
-            .get("old_string")
-            .and_then(Value::as_str)
+        let old_string = crate::input_string(&input, "old_string")
             .ok_or_else(|| ToolError::InvalidInput("old_string is required".into()))?;
-        let new_string = input
-            .get("new_string")
-            .and_then(Value::as_str)
+        let new_string = crate::input_string(&input, "new_string")
             .ok_or_else(|| ToolError::InvalidInput("new_string is required".into()))?;
-        let replace_all = input
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let replace_all = crate::input_bool(&input, "replace_all").unwrap_or(false);
 
         // No-op edit: identical strings (claude-code validateInput, errorCode 1).
         if old_string == new_string {
@@ -530,16 +530,16 @@ impl Tool for FileEditTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::InvalidInput(message));
+                return Err(ToolError::InvalidInput(message.into()));
             }
         };
         let started = Instant::now();
@@ -584,11 +584,14 @@ impl Tool for FileEditTool {
             if let Some(snapshot) = initial_snapshot.as_ref() {
                 if snapshot.size > MAX_EDIT_FILE_SIZE {
                     self.emit_failed(&invocation_id, "file_too_large").await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "File is too large to edit ({}). Maximum editable file size is {}.",
-                        crate::read::format_file_size(snapshot.size),
-                        crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!(
+                            "File is too large to edit ({}). Maximum editable file size is {}.",
+                            crate::read::format_file_size(snapshot.size),
+                            crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
+                        )
+                        .into(),
+                    ));
                 }
                 if is_perforce_read_only(snapshot.mode) {
                     self.emit_failed(&invocation_id, "perforce_read_only").await;
@@ -672,7 +675,7 @@ impl Tool for FileEditTool {
                     // `" Did you mean {x}?"` suffix (corrected-path suggestion
                     // preferred over the same-stem sibling).
                     return Err(ToolError::InvalidInput(
-                        crate::read::file_not_found_message(&canon, &self.ctx.cwd()),
+                        crate::read::file_not_found_message(&canon, &self.ctx.cwd()).into(),
                     ));
                 }
                 // Empty `old_string` on a nonexistent file → create it.
@@ -690,7 +693,7 @@ impl Tool for FileEditTool {
                 // full-read content-equality fallback.
                 if let Err(e) = crate::check_read_before_write(
                     &self.ctx.read_file_state,
-                    &canon,
+                    &requested_path,
                     guard_mtime_ms,
                     &guard_raw_content,
                     crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
@@ -712,7 +715,7 @@ impl Tool for FileEditTool {
                     let is_stale_error = matches!(
                         &e,
                         tool_api::tool_trait::ToolError::InvalidInput(m)
-                            if m == crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR
+                            if m.string_at("") == Some(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR)
                     );
                     // `Mjs`: `GKe(...)==="applies" && !readNotAutoAllowed()`.
                     // `kq` asks whether the model could ever have READ this
@@ -798,9 +801,12 @@ impl Tool for FileEditTool {
                         } else {
                             ""
                         };
-                        return Err(ToolError::InvalidInput(format!(
-                            "String to replace not found in file.\nString: {old_string}{note}"
-                        )));
+                        return Err(ToolError::InvalidInput(
+                            format!(
+                                "String to replace not found in file.\nString: {old_string}{note}"
+                            )
+                            .into(),
+                        ));
                     }
                     if !replace_all && count > 1 {
                         self.emit_failed(&invocation_id, "ambiguous_match").await;
@@ -809,7 +815,7 @@ impl Tool for FileEditTool {
                         // ORIGINAL `old_string` input (TS `${old_string}`).
                         return Err(ToolError::InvalidInput(format!(
                             "Found {count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: {old_string}"
-                        )));
+                        ).into()));
                     }
                     // Apply the replacement, byte-faithful to claude-code
                     // `AUa` (binary offset 201328322):
@@ -873,9 +879,9 @@ impl Tool for FileEditTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: after.clone(),
                 mtime_ms: new_mtime_ms,
@@ -886,6 +892,8 @@ impl Tool for FileEditTool {
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         // Keep an installed language server synchronized immediately after a
@@ -939,12 +947,13 @@ impl Tool for FileEditTool {
             data["staleRecovered"] = json!(true);
         }
         Ok(ToolCallResult {
-            data,
-            model_content: Some(content),
+            data: crate::generated_result(&data),
+            model_content: Some(content.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

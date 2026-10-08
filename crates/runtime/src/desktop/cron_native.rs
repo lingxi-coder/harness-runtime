@@ -246,27 +246,31 @@ where
 struct QuietOutput;
 #[async_trait]
 impl lingxi_core::host::OutputStream for QuietOutput {
-    async fn emit_text(&self, _: &str) {}
+    async fn emit_text(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
     async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     async fn emit_tool_call(
         &self,
         _: &lingxi_core::types::ToolUseId,
         _: &str,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
     async fn emit_tool_result(
         &self,
         _: &lingxi_core::types::ToolUseId,
         _: &str,
-        _: &str,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 }
 #[async_trait]
 impl cron::CronJobFirer for NativeCronFirer {
-    async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+    async fn fire(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<String, String> {
         Err("Versioned execution settings required".into())
     }
     async fn fire_automation(
@@ -358,7 +362,7 @@ impl NativeCronFirer {
                 let (outcome, captured_session, summary) = owner
                     .run_scheduled_turn_in_session(
                         expected,
-                        &request.task.prompt,
+                        request.task.prompt.clone(),
                         &automation.model,
                         reasoning,
                         cancel.clone(),
@@ -430,7 +434,7 @@ impl NativeCronFirer {
             let outcome = runtime
                 .orchestrator
                 .run_scheduled_turn(
-                    &request.task.prompt,
+                    request.task.prompt.clone(),
                     &automation.model,
                     reasoning,
                     cancel.clone(),

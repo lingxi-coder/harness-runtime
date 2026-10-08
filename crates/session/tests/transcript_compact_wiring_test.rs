@@ -15,6 +15,7 @@
 //! `Skipped` whether or not it was reached).
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::JsonlMessage;
@@ -65,7 +66,7 @@ fn boundary_line() -> JsonlMessage {
         timestamp: "2026-08-20T15:08:27.000Z".into(),
         cwd: "/tmp/proj".into(),
         version: "0.12.0".into(),
-        message: serde_json::Value::Null,
+        message: Utf16JsonProjection::parse("null").unwrap(),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -73,7 +74,15 @@ fn boundary_line() -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(extra)).unwrap(),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     }
 }
 

@@ -24,16 +24,18 @@ use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use uuid::Uuid;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    generated_builtin_schema, source_text_projection, source_text_projection_units,
 };
 
 use crate::mailbox::{MessageSender, TeammateMessage};
@@ -53,16 +55,16 @@ const MAX_RESULT_SIZE_CHARS: usize = 100_000;
 /// `std::sync::OnceLock` is used instead of `once_cell::sync::Lazy` so the
 /// coordinator crate does not take a new dependency on `once_cell` (mirrors the
 /// sibling coordinator tools `tool_team_create.rs` / `tool_send_message.rs`).
-static SYNTHETIC_OUTPUT_SCHEMA: OnceLock<Value> = OnceLock::new();
+static SYNTHETIC_OUTPUT_SCHEMA: OnceLock<Utf16JsonProjection> = OnceLock::new();
 
 /// Base input schema. The TS base tool uses `z.object({}).passthrough()` —
 /// i.e. it accepts any object and the *real* per-call schema is supplied
 /// dynamically by `createSyntheticOutputTool(jsonSchema)`. The coordinator port
 /// keeps the permissive base shape and threads through a `structured_output`
 /// payload plus an optional `agent_id` identifying the originating worker.
-fn synthetic_output_schema() -> &'static Value {
+fn synthetic_output_schema() -> &'static Utf16JsonProjection {
     SYNTHETIC_OUTPUT_SCHEMA.get_or_init(|| {
-        json!({
+        generated_builtin_schema(&json!({
             "type": "object",
             "additionalProperties": true,
             "properties": {
@@ -74,7 +76,7 @@ fn synthetic_output_schema() -> &'static Value {
                     "description": "The structured output payload to return. If omitted, the whole input object is treated as the payload."
                 }
             }
-        })
+        }))
     })
 }
 
@@ -100,18 +102,38 @@ impl SyntheticOutputTool {
     /// structured output. If the caller nested the payload under an explicit
     /// `structured_output` key we surface that; otherwise the whole input
     /// object is the payload (sans the coordinator routing-only `agent_id`).
-    fn extract_payload(input: &Value) -> Value {
-        if let Some(payload) = input.get("structured_output") {
-            return payload.clone();
+    fn extract_payload(input: &Utf16JsonProjection) -> Result<Utf16JsonProjection, ToolError> {
+        if input.contains_property("structured_output") {
+            return input.subprojection("/structured_output").map_err(|_| {
+                ToolError::InvalidInput(source_text_projection(
+                    "StructuredOutput: invalid structured_output payload",
+                ))
+            });
         }
-        match input {
-            Value::Object(map) => {
-                let mut cleaned = map.clone();
-                cleaned.remove("agent_id");
-                Value::Object(cleaned)
+        let entries = input.object_entries().ok_or_else(|| {
+            ToolError::InvalidInput(source_text_projection(
+                "StructuredOutput: input must be a JSON object",
+            ))
+        })?;
+        let mut fields = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if entry.code_units == "agent_id".encode_utf16().collect::<Vec<_>>() {
+                continue;
             }
-            other => other.clone(),
+            let value = input
+                .subprojection_property_units(entry.code_units)
+                .map_err(|_| {
+                    ToolError::InvalidInput(source_text_projection(
+                        "StructuredOutput: invalid input object",
+                    ))
+                })?;
+            fields.push((entry.code_units.to_vec(), value));
         }
+        Utf16JsonProjection::object_units(fields).map_err(|_| {
+            ToolError::InvalidInput(source_text_projection(
+                "StructuredOutput: invalid input object",
+            ))
+        })
     }
 }
 
@@ -121,8 +143,16 @@ impl Tool for SyntheticOutputTool {
         SYNTHETIC_OUTPUT_TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         synthetic_output_schema()
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -135,30 +165,34 @@ impl Tool for SyntheticOutputTool {
         MAX_RESULT_SIZE_CHARS
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         // TS: `isConcurrencySafe() => true`.
         true
     }
 
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         // TS: `isReadOnly() => true`.
         true
     }
 
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         // TS: `isOpenWorld() => false`.
         false
     }
 
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // TS: `checkPermissions` always allows — it just returns data.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -170,18 +204,20 @@ impl Tool for SyntheticOutputTool {
         }
     }
 
-    fn search_hint(&self) -> Option<&str> {
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
         // Binary StructuredOutput: `searchHint:"return the final response as
         // structured JSON"`.
-        Some("return the final response as structured JSON")
+        Some(source_text_projection(
+            "return the final response as structured JSON",
+        ))
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // TS: `description()` => 'Return structured output in the requested format'.
         "Return structured output in the requested format".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // TS: `prompt()` byte-for-byte.
         "Use this tool to return your final response in the requested structured format. You MUST \
          call this tool exactly once at the end of your response to provide the structured output."
@@ -190,34 +226,36 @@ impl Tool for SyntheticOutputTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // The TS base tool accepts any object. Reject non-object input so we
         // map a malformed call to the trait's error variant rather than
         // silently echoing a scalar.
-        if !input.is_object() {
-            return Err(ToolError::InvalidInput(
-                "StructuredOutput: input must be a JSON object".into(),
-            ));
+        if input.object_entries().is_none() {
+            return Err(ToolError::InvalidInput(source_text_projection(
+                "StructuredOutput: input must be a JSON object",
+            )));
         }
 
-        let payload = Self::extract_payload(&input);
+        let payload = Self::extract_payload(&input)?;
 
         // Coordinator adaptation: if the caller names the originating worker,
         // inject the serialized payload into that worker's mailbox so the
         // synthetic output surfaces in the coordinator transcript.
-        if let Some(agent_id_str) = input.get("agent_id").and_then(Value::as_str) {
+        if let Some(agent_id_str) = input.string_at("/agent_id") {
             let uuid = Uuid::parse_str(agent_id_str).map_err(|_| {
-                ToolError::InvalidInput(format!(
-                    "StructuredOutput: 'agent_id' is not a valid UUID: {agent_id_str}"
-                ))
+                let mut units = "StructuredOutput: 'agent_id' is not a valid UUID: "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                units.extend(input.string_units("/agent_id").unwrap_or_default());
+                ToolError::InvalidInput(source_text_projection_units(&units))
             })?;
             let worker_id = lingxi_core::types::AgentId::from_uuid(uuid);
 
             // Serialize the structured payload as the message content.
-            let content = serde_json::to_string(&payload).map_err(|e| {
+            let content = payload.to_json_string().map_err(|e| {
                 ToolError::Internal(format!(
                     "StructuredOutput: failed to serialize payload: {e}"
                 ))
@@ -230,7 +268,7 @@ impl Tool for SyntheticOutputTool {
                     .find_by_agent_id(&worker_id)
                     .await
                     .map_or_else(|| worker_id.to_string(), |worker| worker.name),
-                content,
+                content: source_text_projection(&content),
                 summary: None,
                 message_id: tool_api::util::ids::ulid_or_uuid(),
                 timestamp: SystemTime::now(),
@@ -242,25 +280,25 @@ impl Tool for SyntheticOutputTool {
                 .route(&worker_id, msg)
                 .await
                 .map_err(|e| match e {
-                    crate::mailbox::MailboxError::NotFound(id) => ToolError::InvalidInput(format!(
-                        "StructuredOutput: unknown worker agent id: {id}"
-                    )),
+                    crate::mailbox::MailboxError::NotFound(id) => {
+                        ToolError::InvalidInput(source_text_projection(&format!(
+                            "StructuredOutput: unknown worker agent id: {id}"
+                        )))
+                    }
                     other => ToolError::Internal(format!("StructuredOutput: {other}")),
                 })?;
         }
 
         // Model-facing return value is identical to the TS tool.
-        Ok(ToolCallResult {
-            data: json!({
-                "data": STRUCTURED_OUTPUT_SUCCESS_DATA,
-                "structured_output": payload,
-            }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        let data = Utf16JsonProjection::object(vec![
+            (
+                "data".into(),
+                source_text_projection(STRUCTURED_OUTPUT_SUCCESS_DATA),
+            ),
+            ("structured_output".into(), payload),
+        ])
+        .expect("locally generated StructuredOutput result has unique fields");
+        Ok(ToolCallResult::from_data(data))
     }
 }
 
@@ -268,12 +306,15 @@ impl Tool for SyntheticOutputTool {
 mod tests {
     use super::*;
     use lingxi_core::types::AgentId;
+    use serde_json::Value;
     use tool_api::context::ToolUseOptions;
+    use tool_api::tool_trait::generated_builtin_result;
 
     /// Build a minimal [`ToolUseContext`] without depending on the optional
     /// `tool-api/test-support` feature (not enabled for the coordinator crate).
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -288,13 +329,19 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: std::sync::Arc::default(),
             agent_name: None,
             observer: None,
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
+            instruction_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -309,6 +356,14 @@ mod tests {
     fn fresh_tx() -> ToolProgressSender {
         let (tx, _rx) = tool_api::progress::progress_channel();
         tx
+    }
+
+    fn input(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn output_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
     }
 
     fn registry() -> Arc<TeamRegistry> {
@@ -327,15 +382,16 @@ mod tests {
         let tool = SyntheticOutputTool::new(registry());
         let out = tool
             .call(
-                json!({ "bugs": ["a", "b"], "count": 2 }),
+                input(json!({ "bugs": ["a", "b"], "count": 2 })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("call should succeed");
-        assert_eq!(out.data["data"], json!(STRUCTURED_OUTPUT_SUCCESS_DATA));
+        let out_data = output_value(&out.data);
+        assert_eq!(out_data["data"], json!(STRUCTURED_OUTPUT_SUCCESS_DATA));
         assert_eq!(
-            out.data["structured_output"],
+            out_data["structured_output"],
             json!({ "bugs": ["a", "b"], "count": 2 })
         );
     }
@@ -345,13 +401,16 @@ mod tests {
         let tool = SyntheticOutputTool::new(registry());
         let out = tool
             .call(
-                json!({ "structured_output": { "result": "ok" } }),
+                input(json!({ "structured_output": { "result": "ok" } })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("call should succeed");
-        assert_eq!(out.data["structured_output"], json!({ "result": "ok" }));
+        assert_eq!(
+            output_value(&out.data)["structured_output"],
+            json!({ "result": "ok" })
+        );
     }
 
     #[tokio::test]
@@ -371,10 +430,10 @@ mod tests {
         let tool = SyntheticOutputTool::new(team.clone());
         let out = tool
             .call(
-                json!({
+                input(json!({
                     "agent_id": worker_id.as_uuid().to_string(),
                     "structured_output": { "summary": "done" }
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -382,8 +441,9 @@ mod tests {
             .expect("call should succeed");
 
         // Model-facing payload excludes the routing-only agent_id.
-        assert_eq!(out.data["data"], json!(STRUCTURED_OUTPUT_SUCCESS_DATA));
-        assert_eq!(out.data["structured_output"], json!({ "summary": "done" }));
+        let out_data = output_value(&out.data);
+        assert_eq!(out_data["data"], json!(STRUCTURED_OUTPUT_SUCCESS_DATA));
+        assert_eq!(out_data["structured_output"], json!({ "summary": "done" }));
 
         // Effect: the worker's mailbox now holds exactly the injected output.
         let delivered = mailbox.drain();
@@ -393,7 +453,18 @@ mod tests {
             "exactly one synthetic message delivered"
         );
         assert!(matches!(delivered[0].from, MessageSender::Teammate(id) if id == worker_id));
-        assert_eq!(delivered[0].content, r#"{"summary":"done"}"#);
+        assert_eq!(
+            delivered[0].content.string_at(""),
+            Some(r#"{"summary":"done"}"#)
+        );
+
+        let lone =
+            Utf16JsonProjection::parse(r#"{"structured_output":{"text":"\ud800"}}"#).unwrap();
+        let out = tool.call(lone, fresh_ctx(), fresh_tx()).await.unwrap();
+        assert_eq!(
+            out.data.to_json_string().unwrap(),
+            r#"{"data":"Structured output provided successfully","structured_output":{"text":"\ud800"}}"#
+        );
     }
 
     #[tokio::test]
@@ -401,14 +472,19 @@ mod tests {
         let tool = SyntheticOutputTool::new(registry());
         let err = tool
             .call(
-                json!({ "agent_id": "not-a-uuid", "structured_output": {} }),
+                input(json!({ "agent_id": "not-a-uuid", "structured_output": {} })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect_err("invalid agent_id must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(format!("{err}").contains("not a valid UUID"));
+        assert!(
+            err.model_facing_message()
+                .string_at("")
+                .unwrap()
+                .contains("not a valid UUID")
+        );
     }
 
     #[tokio::test]
@@ -417,24 +493,29 @@ mod tests {
         let orphan = AgentId::new();
         let err = tool
             .call(
-                json!({
+                input(json!({
                     "agent_id": orphan.as_uuid().to_string(),
                     "structured_output": {}
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect_err("unknown worker must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(format!("{err}").contains("unknown worker agent id"));
+        assert!(
+            err.model_facing_message()
+                .string_at("")
+                .unwrap()
+                .contains("unknown worker agent id")
+        );
     }
 
     #[tokio::test]
     async fn rejects_non_object_input() {
         let tool = SyntheticOutputTool::new(registry());
         let err = tool
-            .call(json!("scalar"), fresh_ctx(), fresh_tx())
+            .call(input(json!("scalar")), fresh_ctx(), fresh_tx())
             .await
             .expect_err("scalar input must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));

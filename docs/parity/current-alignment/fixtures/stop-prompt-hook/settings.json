@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "FIXED_STOP_PROMPT_HOOK_INSTRUCTION: Evaluate the completed response for this fixture. Return only the JSON object {\"ok\":true}; do not ask for another turn.",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

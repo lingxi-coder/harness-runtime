@@ -13,17 +13,19 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{CRON_LIST_COMPLETED, CRON_LIST_STARTED};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 use crate::schedule_cron::cron_to_human;
@@ -35,20 +37,21 @@ pub const CRON_LIST_TOOL_NAME: &str = "CronList";
 const CRON_LIST_DESCRIPTION: &str = "List scheduled cron jobs";
 
 /// Empty `strictObject({})` schema — CronList takes no input.
-static SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
         "properties": {},
         "required": []
-    })
+    }))
 });
 
 /// Truncate `s` to `max_width` columns, appending `…` if it was longer.
 ///
 /// Port of claude-code `utils/truncate.ts` `truncateToWidth`.
 ///
+#[cfg(test)]
 fn truncate_to_width(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
@@ -73,6 +76,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 
 /// Port of claude-code `utils/truncate.ts` `truncate(str, maxWidth, true)`
 /// (single-line mode): cut at the first newline, else width-truncate.
+#[cfg(test)]
 fn truncate_single_line(s: &str, max_width: usize) -> String {
     if let Some(idx) = s.find('\n') {
         let head = &s[..idx];
@@ -93,30 +97,35 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 /// definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
 /// separate in-memory session tasks) is never emitted here.
+struct CronListJob {
+    id: String,
+    cron: String,
+    human_schedule: String,
+    prompt: Utf16JsonProjection,
+    recurring: bool,
+    durable: Option<bool>,
+}
+
 async fn read_durable_jobs(
     fs: &dyn lingxi_core::host::FileSystem,
     project_root: &Path,
-) -> Vec<Value> {
+) -> Vec<CronListJob> {
     let body = match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(b) => b,
         Err(_) => return Vec::new(), // file absent → no jobs
     };
     let doc = cron::tasks_file::parse_tasks(&body);
 
-    let jobs: Vec<Value> = doc
+    let jobs: Vec<CronListJob> = doc
         .tasks
         .into_iter()
-        .map(|t| {
-            let mut obj = Map::new();
-            obj.insert("id".into(), json!(t.id));
-            obj.insert("cron".into(), json!(t.cron));
-            obj.insert("humanSchedule".into(), json!(cron_to_human(&t.cron)));
-            obj.insert("prompt".into(), json!(t.prompt));
-            // Conditional spread (CronListTool.ts): `recurring` only when truthy.
-            if t.recurring == Some(true) {
-                obj.insert("recurring".into(), json!(true));
-            }
-            Value::Object(obj)
+        .map(|task| CronListJob {
+            id: task.id,
+            human_schedule: cron_to_human(&task.cron),
+            cron: task.cron,
+            prompt: task.prompt,
+            recurring: task.recurring == Some(true),
+            durable: None,
         })
         .collect();
     // Oracle `bFe` preserves the tasks file's order — NO id sort (the model-
@@ -134,7 +143,7 @@ fn teammate_owner(ctx: &ToolUseContext) -> Option<String> {
 async fn read_all_jobs(
     tool_ctx: &tool_api::BuiltinToolContext,
     call_ctx: &ToolUseContext,
-) -> Vec<Value> {
+) -> Vec<CronListJob> {
     let owner = teammate_owner(call_ctx);
     let mut jobs = if owner.is_none() {
         read_durable_jobs(tool_ctx.fs.as_ref(), &tool_ctx.session_cwd.project_root()).await
@@ -160,17 +169,13 @@ async fn read_all_jobs(
                     .cmp(&b.created_at)
                     .then_with(|| a.id.cmp(&b.id))
             });
-            jobs.extend(session.into_iter().map(|task| {
-                let mut obj = Map::new();
-                obj.insert("id".into(), json!(task.id));
-                obj.insert("cron".into(), json!(task.cron));
-                obj.insert("humanSchedule".into(), json!(cron_to_human(&task.cron)));
-                obj.insert("prompt".into(), json!(task.prompt));
-                if task.recurring {
-                    obj.insert("recurring".into(), json!(true));
-                }
-                obj.insert("durable".into(), json!(false));
-                Value::Object(obj)
+            jobs.extend(session.into_iter().map(|task| CronListJob {
+                id: task.id,
+                human_schedule: cron_to_human(&task.cron),
+                cron: task.cron,
+                prompt: task.prompt,
+                recurring: task.recurring,
+                durable: Some(false),
             }));
         }
     }
@@ -180,33 +185,117 @@ async fn read_all_jobs(
 
 /// Flatten the `jobs` array to the model-facing result text
 /// (CronListTool.ts `mapToolResultToToolResultBlockParam`).
-fn render_result(jobs: &[Value]) -> String {
-    if jobs.is_empty() {
-        return "No scheduled jobs.".to_string();
+fn root_text(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("CronList model text is valid source JSON")
+}
+
+fn truncate_to_width_source(value: &Utf16JsonProjection, max_width: usize) -> Utf16JsonProjection {
+    let units = value.string_units("").unwrap_or_default();
+    let display = String::from_utf16_lossy(&units);
+    if UnicodeWidthStr::width(display.as_str()) <= max_width {
+        return value.clone();
     }
-    jobs.iter()
-        .map(|j| {
-            let id = j.get("id").and_then(Value::as_str).unwrap_or("");
-            let human = j.get("humanSchedule").and_then(Value::as_str).unwrap_or("");
-            let prompt = j.get("prompt").and_then(Value::as_str).unwrap_or("");
-            let recurring_label = if j.get("recurring").and_then(Value::as_bool) == Some(true) {
-                " (recurring)"
-            } else {
-                " (one-shot)"
-            };
-            let durable_label = if j.get("durable").and_then(Value::as_bool) == Some(false) {
-                " [session-only]"
-            } else {
-                ""
-            };
-            // U+2014 EM DASH separator, matching the TS template literal " — ".
-            format!(
-                "{id} \u{2014} {human}{recurring_label}{durable_label}: {}",
-                truncate_single_line(prompt, 80)
-            )
+    if max_width <= 1 {
+        return source_text_projection("…");
+    }
+    let available = max_width - 1;
+    let mut used_width = 0;
+    let mut used_units = 0;
+    for grapheme in display.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if used_width + width > available {
+            break;
+        }
+        used_width += width;
+        used_units += grapheme.encode_utf16().count();
+    }
+    let mut output = units[..used_units].to_vec();
+    output.extend("…".encode_utf16());
+    root_text(output)
+}
+
+fn truncate_single_line_source(
+    value: &Utf16JsonProjection,
+    max_width: usize,
+) -> Utf16JsonProjection {
+    let units = value.string_units("").unwrap_or_default();
+    if let Some(newline) = units.iter().position(|unit| *unit == u16::from(b'\n')) {
+        let head = root_text(units[..newline].to_vec());
+        if UnicodeWidthStr::width(head.string_at("").unwrap_or_default()) + 1 > max_width {
+            return truncate_to_width_source(&head, max_width);
+        }
+        let mut output = head.string_units("").unwrap_or_default();
+        output.extend("…".encode_utf16());
+        return root_text(output);
+    }
+    truncate_to_width_source(value, max_width)
+}
+
+fn jobs_projection(jobs: &[CronListJob]) -> Utf16JsonProjection {
+    let jobs = jobs
+        .iter()
+        .map(|job| {
+            let mut fields = vec![
+                ("id".to_owned(), source_text_projection(&job.id)),
+                ("cron".to_owned(), source_text_projection(&job.cron)),
+                (
+                    "humanSchedule".to_owned(),
+                    source_text_projection(&job.human_schedule),
+                ),
+                ("prompt".to_owned(), job.prompt.clone()),
+            ];
+            if job.recurring {
+                fields.push((
+                    "recurring".to_owned(),
+                    generated_builtin_result(&json!(true)),
+                ));
+            }
+            if job.durable == Some(false) {
+                fields.push((
+                    "durable".to_owned(),
+                    generated_builtin_result(&json!(false)),
+                ));
+            }
+            Utf16JsonProjection::object(fields).expect("CronList job is valid JSON")
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    Utf16JsonProjection::array(jobs).expect("CronList jobs is valid JSON")
+}
+
+fn render_result(jobs: &[CronListJob]) -> Utf16JsonProjection {
+    if jobs.is_empty() {
+        return source_text_projection("No scheduled jobs.");
+    }
+    let mut output = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        if index > 0 {
+            output.extend("\n".encode_utf16());
+        }
+        let recurring_label = if job.recurring {
+            " (recurring)"
+        } else {
+            " (one-shot)"
+        };
+        let durable_label = if job.durable == Some(false) {
+            " [session-only]"
+        } else {
+            ""
+        };
+        output.extend(
+            format!(
+                "{} \u{2014} {}{recurring_label}{durable_label}: ",
+                job.id, job.human_schedule
+            )
+            .encode_utf16(),
+        );
+        output.extend(
+            truncate_single_line_source(&job.prompt, 80)
+                .string_units("")
+                .unwrap_or_default(),
+        );
+    }
+    root_text(output)
 }
 
 /// `CronListTool` — list scheduled cron jobs.
@@ -228,14 +317,21 @@ impl Tool for CronListTool {
         CRON_LIST_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("list active cron jobs")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some(("list active cron jobs").into())
     }
     fn native_input_validation(&self) -> bool {
         true
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // PARITY 2.1.263 `EC()`: `!CLAUDE_CODE_DISABLE_CRON && gate(tengu_kairos_cron, true)`
@@ -248,23 +344,27 @@ impl Tool for CronListTool {
     fn should_defer(&self) -> bool {
         true
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "CronList reads .claude/scheduled_tasks.json".into(),
@@ -275,11 +375,11 @@ impl Tool for CronListTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         CRON_LIST_DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         if !crate::schedule_cron::durable_enabled() {
             return "List all cron jobs scheduled via CronCreate in this session.".into();
         }
@@ -289,7 +389,7 @@ impl Tool for CronListTool {
 
     async fn validate_input(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
@@ -297,7 +397,7 @@ impl Tool for CronListTool {
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         call_ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -318,15 +418,17 @@ impl Tool for CronListTool {
         bus.log_event(CRON_LIST_COMPLETED, md).await;
 
         Ok(ToolCallResult {
-            data: json!({
-                "jobs": jobs,
-                "content": content,
-            }),
+            data: Utf16JsonProjection::object(vec![
+                ("jobs".to_owned(), jobs_projection(&jobs)),
+                ("content".to_owned(), content),
+            ])
+            .expect("CronList result is valid JSON"),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -336,6 +438,14 @@ mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
+
+    fn fixture(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -370,7 +480,7 @@ mod tests {
             automation: None,
             id: id.into(),
             cron: cron.into(),
-            prompt: prompt.into(),
+            prompt: source_text_projection(prompt),
             created_at: 0,
             last_fired_at: None,
             recurring: Some(recurring),
@@ -425,11 +535,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(json!({})), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["jobs"], json!([]));
-        assert_eq!(out.data["content"], json!("No scheduled jobs."));
+        let data = test_value(&out.data);
+        assert_eq!(data["jobs"], json!([]));
+        assert_eq!(data["content"], json!("No scheduled jobs."));
     }
 
     #[tokio::test]
@@ -448,10 +559,11 @@ mod tests {
 
         let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(json!({})), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let jobs = out.data["jobs"].as_array().unwrap();
+        let data = test_value(&out.data);
+        let jobs = data["jobs"].as_array().unwrap();
         assert_eq!(jobs.len(), 2);
         // File order (NOT id-sorted): dbbbb1111 was written first.
         assert_eq!(jobs[0]["id"], json!("dbbbb1111"));
@@ -480,11 +592,12 @@ mod tests {
         call_ctx.agent_name = Some("researcher".into());
 
         let out = tool
-            .call(json!({}), call_ctx, fresh_tx())
+            .call(fixture(json!({})), call_ctx, fresh_tx())
             .await
             .expect("list");
-        assert_eq!(out.data["jobs"], json!([]));
-        assert_eq!(out.data["content"], json!("No scheduled jobs."));
+        let data = test_value(&out.data);
+        assert_eq!(data["jobs"], json!([]));
+        assert_eq!(data["content"], json!("No scheduled jobs."));
     }
 
     #[tokio::test]
@@ -502,10 +615,11 @@ mod tests {
 
         let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(json!({})), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let content = out.data["content"].as_str().unwrap();
+        let data = test_value(&out.data);
+        let content = data["content"].as_str().unwrap();
         let lines: Vec<&str> = content.split('\n').collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(
@@ -530,10 +644,11 @@ mod tests {
 
         let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(json!({})), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let content = out.data["content"].as_str().unwrap();
+        let data = test_value(&out.data);
+        let content = data["content"].as_str().unwrap();
         // 79 'x' + ellipsis.
         assert!(content.ends_with(&format!("{}\u{2026}", "x".repeat(79))));
         assert!(!content.contains(&"x".repeat(80)));

@@ -1,0 +1,579 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "h7t consumer",
+      "start": 189141581,
+      "end": 189142019,
+      "sha256": "9c918ece975e3138c2c3b16cf4f3553e7681bd4053fccb9dc7aed3ebbdaa85d7"
+    },
+    {
+      "label": "readFor enqueue",
+      "start": 186666675,
+      "end": 186666751,
+      "sha256": "827906f8ec05adc8b0cada7b5331535a8299ef938e2b1a5e291e5f152e087225"
+    },
+    {
+      "label": "notebook enqueue",
+      "start": 186670344,
+      "end": 186670418,
+      "sha256": "b7d643658b21a5eccfd836a0402a81f95285d26a03a81ee4bc634df0d4a65bff"
+    },
+    {
+      "label": "image enqueue",
+      "start": 186670886,
+      "end": 186670956,
+      "sha256": "3d8ac55d61c3825c0374e71109ab2af733e688210417b3238162146e01cae96f"
+    },
+    {
+      "label": "text enqueue",
+      "start": 186677711,
+      "end": 186677785,
+      "sha256": "c8b996f5f38a01d23697821eb50ebe3685d9fc986579e82e83c337661e75109e"
+    }
+  ],
+  "scope": "Exact initialized h7t arrays, root/agent pending transfer, disable, live iteration and failure retention; exact four Read/readFor enqueue snippets. Missing-context arrays, D7t filesystem semantics, worker attachment pipeline and coordinator/rewind producers are separate.",
+  "cases": [
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [
+          "a",
+          "c"
+        ],
+        "attachments": [
+          {
+            "path": "a"
+          },
+          {
+            "path": "c"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [
+          "b",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [
+          "b",
+          "a",
+          "c"
+        ],
+        "attachments": [
+          {
+            "path": "b"
+          },
+          {
+            "path": "a"
+          },
+          {
+            "path": "c"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [
+          "a",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [
+          "a",
+          "a",
+          "c"
+        ],
+        "attachments": [
+          {
+            "path": "a"
+          },
+          {
+            "path": "a"
+          },
+          {
+            "path": "c"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": true,
+        "triggers": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": true,
+        "triggers": [
+          "b",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": true,
+        "triggers": [
+          "a",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c",
+          "a"
+        ],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": false,
+        "triggers": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": false,
+        "triggers": [
+          "b",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [
+          "b",
+          "a"
+        ],
+        "attachments": [
+          {
+            "path": "b"
+          },
+          {
+            "path": "a"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": false,
+        "triggers": [
+          "a",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [
+          "a",
+          "a"
+        ],
+        "attachments": [
+          {
+            "path": "a"
+          },
+          {
+            "path": "a"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": true,
+        "triggers": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": true,
+        "triggers": [
+          "b",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": true,
+        "disabled": true,
+        "triggers": [
+          "a",
+          "a"
+        ],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "appendDuring": null,
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [
+          "a",
+          "c",
+          "a"
+        ],
+        "consumed": [],
+        "calls": [],
+        "attachments": [],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [
+          "a",
+          "b"
+        ],
+        "pending": [
+          "a",
+          "c"
+        ],
+        "appendDuring": "late",
+        "throwOn": null
+      },
+      "expected": {
+        "queued": [],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c"
+        ],
+        "calls": [
+          "a",
+          "b",
+          "c",
+          "late"
+        ],
+        "attachments": [
+          {
+            "path": "a"
+          },
+          {
+            "path": "b"
+          },
+          {
+            "path": "c"
+          },
+          {
+            "path": "late"
+          }
+        ],
+        "failed": false
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [
+          "a",
+          "b"
+        ],
+        "pending": [
+          "a",
+          "c"
+        ],
+        "appendDuring": null,
+        "throwOn": "b"
+      },
+      "expected": {
+        "queued": [
+          "a",
+          "b",
+          "c"
+        ],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c"
+        ],
+        "calls": [
+          "a",
+          "b"
+        ],
+        "attachments": null,
+        "failed": true
+      }
+    },
+    {
+      "input": {
+        "agent": false,
+        "disabled": false,
+        "triggers": [
+          "a",
+          "b"
+        ],
+        "pending": [
+          "a",
+          "c"
+        ],
+        "appendDuring": "late",
+        "throwOn": "late"
+      },
+      "expected": {
+        "queued": [
+          "a",
+          "b",
+          "c",
+          "late"
+        ],
+        "pending": [],
+        "consumed": [
+          "a",
+          "c"
+        ],
+        "calls": [
+          "a",
+          "b",
+          "c",
+          "late"
+        ],
+        "attachments": null,
+        "failed": true
+      }
+    }
+  ],
+  "producerCases": [
+    {
+      "name": "readFor",
+      "expected": [
+        "existing",
+        "new"
+      ]
+    },
+    {
+      "name": "notebook",
+      "expected": [
+        "existing",
+        "new"
+      ]
+    },
+    {
+      "name": "image",
+      "expected": [
+        "existing",
+        "new"
+      ]
+    },
+    {
+      "name": "text",
+      "expected": [
+        "existing",
+        "new"
+      ]
+    }
+  ]
+}

@@ -27,6 +27,7 @@ pub mod plugin_admin;
 pub mod plugin_download;
 pub mod plugin_install;
 pub mod plugin_marketplace;
+mod plugin_npm;
 pub mod plugin_policy;
 pub mod plugin_prune;
 pub mod plugin_settings;

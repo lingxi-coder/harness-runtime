@@ -1,22 +1,70 @@
-//! Byte-faithful port of claude-code's `Uq` diagnostics formatter
-//! (binary v2.1.185 @199005171): `formatDiagnosticsBlock` /
-//! `formatDiagnosticsSummary` / `getSeveritySymbol`.
+//! Source-preserving formatter for the passive `<new-diagnostics>` reminder.
 //!
-//! This is the passive `<new-diagnostics>` reminder the model receives after a
-//! tool/edit cycle introduces new LSP diagnostics. The block text is produced
-//! here; the per-uri "already-sent" dedup that decides *which* diagnostics are
-//! new lives on [`crate::diagnostic_registry::LspDiagnosticRegistry`].
+//! Diagnostic text arrives from an LSP server and may contain arbitrary
+//! JavaScript UTF-16 strings. Keep those fields in `Utf16JsonProjection`
+//! through formatting so an unpaired surrogate survives to the model.
 
-use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lsp_types::{DiagnosticSeverity, Range};
 
 /// `kra` — the summary character cap before truncation (binary @199005xxx).
 const MAX_SUMMARY_CHARS: usize = 4000;
 
+/// A diagnostic code whose string alternative remains exact UTF-16 source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticCodeSource {
+    /// Numeric LSP diagnostic code.
+    Number(i32),
+    /// String LSP diagnostic code, retained as an exact root string.
+    String(Utf16JsonProjection),
+}
+
+/// Diagnostic fields used by the passive model-facing formatter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnostic {
+    /// Source range, represented by the protocol's typed integer positions.
+    pub range: Range,
+    /// Optional severity from the LSP notification.
+    pub severity: Option<DiagnosticSeverity>,
+    /// Required diagnostic message, retained as exact UTF-16 source.
+    pub message: Utf16JsonProjection,
+    /// Optional diagnostic source label, retained as exact UTF-16 source.
+    pub source: Option<Utf16JsonProjection>,
+    /// Optional numeric or exact string diagnostic code.
+    pub code: Option<DiagnosticCodeSource>,
+}
+
+impl SourceDiagnostic {
+    /// Build a generated diagnostic with no optional source or code fields.
+    #[must_use]
+    pub fn new(
+        range: Range,
+        severity: Option<DiagnosticSeverity>,
+        message: Utf16JsonProjection,
+    ) -> Self {
+        Self {
+            range,
+            severity,
+            message,
+            source: None,
+            code: None,
+        }
+    }
+}
+
+/// One file's diagnostics, in the `{uri, diagnostics}` shape consumed by the
+/// TypeScript-compatible summary formatter. The URI has crossed `Url::parse`
+/// at the protocol boundary and is therefore valid Rust text.
+#[derive(Debug, Clone)]
+pub struct DiagnosticFile {
+    /// Document URI; the summary shows its final slash-separated component.
+    pub uri: String,
+    /// New diagnostics for this file, in server order.
+    pub diagnostics: Vec<SourceDiagnostic>,
+}
+
 /// `getSeveritySymbol(severity)` (binary @199005171): `{Error:cross, Warning,
-/// Info, Hint:star}[severity] || bullet`, using the MAIN `figures` glyph set
-/// (NOT the ASCII fallback — the block is injected into model-facing text, not
-/// rendered to a terminal). Error=`✘`(U+2718), Warning=`⚠`(U+26A0),
-/// Info=`ℹ`(U+2139), Hint=`★`(U+2605), anything else=`●`(U+25CF).
+/// Info, Hint:star}[severity] || bullet`, using the main figure glyph set.
 #[must_use]
 fn severity_symbol(severity: Option<DiagnosticSeverity>) -> char {
     match severity {
@@ -28,121 +76,142 @@ fn severity_symbol(severity: Option<DiagnosticSeverity>) -> char {
     }
 }
 
-/// `code` rendered as the binary's `${i.code}` would: a number prints its
-/// digits, a string prints verbatim.
-fn code_to_string(code: &NumberOrString) -> String {
+fn append_text(output: &mut Vec<u16>, text: &str) {
+    output.extend(text.encode_utf16());
+}
+
+fn append_exact_string(output: &mut Vec<u16>, value: &Utf16JsonProjection) {
+    if let Some(units) = value.string_units("") {
+        output.extend(units);
+    }
+}
+
+fn diagnostic_code_json(code: &DiagnosticCodeSource) -> String {
     match code {
-        NumberOrString::Number(n) => n.to_string(),
-        NumberOrString::String(s) => s.clone(),
+        DiagnosticCodeSource::Number(number) => number.to_string(),
+        DiagnosticCodeSource::String(value) => value
+            .to_json_string()
+            .expect("validated diagnostic code projection stringifies"),
     }
 }
 
-/// One file's diagnostics, in the `{uri, diagnostics}` shape
-/// `formatDiagnosticsSummary` consumes.
-#[derive(Debug, Clone)]
-pub struct DiagnosticFile {
-    /// Document URI (the full `file://…` form; the summary shows its basename).
-    pub uri: String,
-    /// The NEW diagnostics for this file (post-dedup), in server order.
-    pub diagnostics: Vec<Diagnostic>,
-}
+fn format_one_diagnostic(diagnostic: &SourceDiagnostic, output: &mut Vec<u16>) {
+    let symbol = severity_symbol(diagnostic.severity);
+    let line = diagnostic.range.start.line + 1;
+    let character = diagnostic.range.start.character + 1;
 
-/// `formatDiagnosticsSummary(files)` (binary @199005171).
-///
-/// Per file: basename (`uri.split('/').pop() || uri`) then a `:` line, then one
-/// indented line per diagnostic:
-/// `  {symbol} [Line {line+1}:{char+1}] {message}{ [code]}{ (source)}`.
-/// Diagnostic lines join with `\n`; files join with `\n\n`. If the result
-/// exceeds [`MAX_SUMMARY_CHARS`] it is truncated to `cap-12` chars plus the
-/// `…[truncated]` marker (12 chars → total `cap`).
-#[must_use]
-pub fn format_diagnostics_summary(files: &[DiagnosticFile]) -> String {
-    let summary = files
-        .iter()
-        .map(|file| {
-            // `uri.split("/").pop() || uri`: last "/"-segment; a trailing slash
-            // yields "" → fall back to the whole uri.
-            let basename = file
-                .uri
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&file.uri);
-            let lines = file
-                .diagnostics
-                .iter()
-                .map(format_one_diagnostic)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("{basename}:\n{lines}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // JS `.length` is UTF-16 code units; `.chars().count()` matches for the BMP
-    // glyphs/content here and avoids slicing on a byte boundary.
-    if summary.chars().count() > MAX_SUMMARY_CHARS {
-        let kept: String = summary.chars().take(MAX_SUMMARY_CHARS - 12).collect();
-        format!("{kept}\u{2026}[truncated]")
-    } else {
-        summary
+    append_text(output, "  ");
+    append_text(output, &symbol.to_string());
+    append_text(output, &format!(" [Line {line}:{character}] "));
+    append_exact_string(output, &diagnostic.message);
+    if let Some(code) = &diagnostic.code {
+        append_text(output, " [");
+        match code {
+            DiagnosticCodeSource::Number(number) => append_text(output, &number.to_string()),
+            DiagnosticCodeSource::String(value) => append_exact_string(output, value),
+        }
+        append_text(output, "]");
+    }
+    if let Some(source) = &diagnostic.source {
+        append_text(output, " (");
+        append_exact_string(output, source);
+        append_text(output, ")");
     }
 }
 
-/// One diagnostic line:
-/// `  {symbol} [Line {line+1}:{char+1}] {message}{ [code]}{ (source)}`.
-fn format_one_diagnostic(d: &Diagnostic) -> String {
-    let symbol = severity_symbol(d.severity);
-    let line = d.range.start.line + 1;
-    let character = d.range.start.character + 1;
-    let code = d
-        .code
-        .as_ref()
-        .map(|c| format!(" [{}]", code_to_string(c)))
-        .unwrap_or_default();
-    let source = d
-        .source
-        .as_ref()
-        .map(|s| format!(" ({s})"))
-        .unwrap_or_default();
-    format!(
-        "  {symbol} [Line {line}:{character}] {message}{code}{source}",
-        message = d.message
-    )
+fn diagnostics_summary_units(files: &[DiagnosticFile]) -> Vec<u16> {
+    let mut output = Vec::new();
+    for (file_index, file) in files.iter().enumerate() {
+        if file_index > 0 {
+            append_text(&mut output, "\n\n");
+        }
+        let basename = file
+            .uri
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(&file.uri);
+        append_text(&mut output, basename);
+        append_text(&mut output, ":\n");
+        for (diagnostic_index, diagnostic) in file.diagnostics.iter().enumerate() {
+            if diagnostic_index > 0 {
+                append_text(&mut output, "\n");
+            }
+            format_one_diagnostic(diagnostic, &mut output);
+        }
+    }
+
+    // JavaScript String.length and slice count UTF-16 code units. Keep this
+    // truncation at the same boundary, including a possible split surrogate.
+    if output.len() > MAX_SUMMARY_CHARS {
+        output.truncate(MAX_SUMMARY_CHARS - 12);
+        append_text(&mut output, "\u{2026}[truncated]");
+    }
+    output
 }
 
-/// `formatDiagnosticsBlock(files)` (binary @199005171): wrap the summary in the
-/// `<new-diagnostics>` envelope.
-#[must_use]
-pub fn format_diagnostics_block(files: &[DiagnosticFile]) -> String {
-    format!(
-        "<new-diagnostics>The following new diagnostic issues were detected:\n\n{}</new-diagnostics>",
-        format_diagnostics_summary(files)
-    )
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display form is derived from the exact UTF-16 units")
 }
 
-/// `Lra(diagnostic)` (binary @199005171): the per-diagnostic dedup key —
-/// `JSON.stringify({message, severity, range, source||null, code||null})`.
-/// Only used internally to decide which diagnostics are NEW, so the exact
-/// serialization need only be stable, not byte-identical to the binary's JSON.
+/// Format a diagnostic summary as an exact root string.
 #[must_use]
-pub fn dedup_key(d: &Diagnostic) -> String {
-    let severity = match d.severity {
+pub fn format_diagnostics_summary(files: &[DiagnosticFile]) -> Utf16JsonProjection {
+    projection_from_units(diagnostics_summary_units(files))
+}
+
+/// `formatDiagnosticsBlock(files)` (binary @199005171), preserving diagnostic
+/// strings in exact UTF-16 units.
+#[must_use]
+pub fn format_diagnostics_block(files: &[DiagnosticFile]) -> Utf16JsonProjection {
+    let mut output = Vec::new();
+    append_text(
+        &mut output,
+        "<new-diagnostics>The following new diagnostic issues were detected:\n\n",
+    );
+    output.extend(diagnostics_summary_units(files));
+    append_text(&mut output, "</new-diagnostics>");
+    projection_from_units(output)
+}
+
+/// Stable exact deduplication key for the model-visible diagnostic fields.
+/// JSON stringification escapes unpaired UTF-16 units, so the resulting key is
+/// valid Rust text without replacing the source value.
+#[must_use]
+pub fn dedup_key(diagnostic: &SourceDiagnostic) -> String {
+    let severity = match diagnostic.severity {
         Some(DiagnosticSeverity::ERROR) => 1,
         Some(DiagnosticSeverity::WARNING) => 2,
         Some(DiagnosticSeverity::INFORMATION) => 3,
         Some(DiagnosticSeverity::HINT) => 4,
         _ => 0,
     };
-    let source = d.source.as_deref().unwrap_or("");
-    let code = d.code.as_ref().map(code_to_string).unwrap_or_default();
+    let source = diagnostic
+        .source
+        .as_ref()
+        .filter(|value| {
+            value
+                .string_units("")
+                .is_some_and(|units| !units.is_empty())
+        })
+        .map(|value| value.to_json_string().expect("validated source string"))
+        .unwrap_or_else(|| "null".to_string());
+    let code = diagnostic
+        .code
+        .as_ref()
+        .map(diagnostic_code_json)
+        .unwrap_or_else(|| "null".to_string());
+    let message = diagnostic
+        .message
+        .to_json_string()
+        .expect("validated diagnostic message stringifies");
     format!(
         "{severity}\u{1f}{sl}:{sc}-{el}:{ec}\u{1f}{source}\u{1f}{code}\u{1f}{message}",
-        sl = d.range.start.line,
-        sc = d.range.start.character,
-        el = d.range.end.line,
-        ec = d.range.end.character,
-        message = d.message,
+        sl = diagnostic.range.start.line,
+        sc = diagnostic.range.start.character,
+        el = diagnostic.range.end.line,
+        ec = diagnostic.range.end.character,
     )
 }
 
@@ -151,29 +220,61 @@ mod tests {
     use super::*;
     use lsp_types::{Position, Range};
 
-    fn diag(line: u32, ch: u32, sev: DiagnosticSeverity, msg: &str) -> Diagnostic {
-        Diagnostic {
-            range: Range::new(Position::new(line, ch), Position::new(line, ch + 1)),
-            severity: Some(sev),
-            message: msg.to_string(),
-            ..Default::default()
-        }
+    fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap()
+    }
+
+    fn diag(line: u32, ch: u32, sev: DiagnosticSeverity, msg: &str) -> SourceDiagnostic {
+        SourceDiagnostic::new(
+            Range::new(Position::new(line, ch), Position::new(line, ch + 1)),
+            Some(sev),
+            msg.into(),
+        )
     }
 
     #[test]
     fn block_envelope_and_summary_byte_exact() {
         let mut d = diag(9, 4, DiagnosticSeverity::ERROR, "cannot find name 'x'");
-        d.code = Some(NumberOrString::Number(2304));
-        d.source = Some("ts".to_string());
+        d.code = Some(DiagnosticCodeSource::Number(2304));
+        d.source = Some("ts".into());
         let files = vec![DiagnosticFile {
             uri: "file:///repo/src/main.ts".to_string(),
             diagnostics: vec![d],
         }];
         let block = format_diagnostics_block(&files);
         assert_eq!(
-            block,
-            "<new-diagnostics>The following new diagnostic issues were detected:\n\n\
+            block.string_at(""),
+            Some(
+                "<new-diagnostics>The following new diagnostic issues were detected:\n\n\
              main.ts:\n  \u{2718} [Line 10:5] cannot find name 'x' [2304] (ts)</new-diagnostics>"
+            )
+        );
+    }
+
+    #[test]
+    fn exact_utf16_message_source_and_code_reach_model_block() {
+        let mut diagnostic = diag(0, 0, DiagnosticSeverity::ERROR, "safe");
+        diagnostic.message = source_string(vec![b'x' as u16, 0xd800]);
+        diagnostic.source = Some(source_string(vec![b'l' as u16, 0xdc00]));
+        diagnostic.code = Some(DiagnosticCodeSource::String(source_string(vec![0xdfff])));
+        let block = format_diagnostics_block(&[DiagnosticFile {
+            uri: "file:///workspace/a.ts".into(),
+            diagnostics: vec![diagnostic],
+        }]);
+        assert_eq!(
+            block.string_units(""),
+            Some(
+                "<new-diagnostics>The following new diagnostic issues were detected:\n\n\
+                 a.ts:\n  \u{2718} [Line 1:1] x"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" [".encode_utf16())
+                    .chain([0xdfff])
+                    .chain("] (l".encode_utf16())
+                    .chain([0xdc00])
+                    .chain(")</new-diagnostics>".encode_utf16())
+                    .collect::<Vec<_>>(),
+            )
         );
     }
 
@@ -187,10 +288,9 @@ mod tests {
                 diag(2, 0, DiagnosticSeverity::HINT, "hint"),
             ],
         }];
-        let s = format_diagnostics_summary(&files);
         assert_eq!(
-            s,
-            "b.rs:\n  \u{26a0} [Line 1:1] unused\n  \u{2139} [Line 2:3] info\n  \u{2605} [Line 3:1] hint"
+            format_diagnostics_summary(&files).string_at(""),
+            Some("b.rs:\n  \u{26a0} [Line 1:1] unused\n  \u{2139} [Line 2:3] info\n  \u{2605} [Line 3:1] hint")
         );
     }
 
@@ -206,10 +306,9 @@ mod tests {
                 diagnostics: vec![diag(0, 0, DiagnosticSeverity::ERROR, "e2")],
             },
         ];
-        let s = format_diagnostics_summary(&files);
         assert_eq!(
-            s,
-            "x.ts:\n  \u{2718} [Line 1:1] e1\n\ny.ts:\n  \u{2718} [Line 1:1] e2"
+            format_diagnostics_summary(&files).string_at(""),
+            Some("x.ts:\n  \u{2718} [Line 1:1] e1\n\ny.ts:\n  \u{2718} [Line 1:1] e2")
         );
     }
 
@@ -219,14 +318,15 @@ mod tests {
             uri: "file:///dir/".to_string(),
             diagnostics: vec![diag(0, 0, DiagnosticSeverity::ERROR, "e")],
         }];
-        let s = format_diagnostics_summary(&files);
-        assert!(s.starts_with("file:///dir/:\n"), "got: {s}");
+        assert!(format_diagnostics_summary(&files)
+            .string_at("")
+            .unwrap()
+            .starts_with("file:///dir/:\n"));
     }
 
     #[test]
-    fn summary_truncates_at_cap() {
-        // Build enough diagnostics to exceed 4000 chars.
-        let many: Vec<Diagnostic> = (0..400)
+    fn summary_truncates_at_utf16_unit_cap() {
+        let many: Vec<SourceDiagnostic> = (0..400)
             .map(|i| {
                 diag(
                     i,
@@ -236,17 +336,19 @@ mod tests {
                 )
             })
             .collect();
-        let files = vec![DiagnosticFile {
+        let summary = format_diagnostics_summary(&[DiagnosticFile {
             uri: "file:///big.ts".to_string(),
             diagnostics: many,
-        }];
-        let s = format_diagnostics_summary(&files);
-        assert_eq!(s.chars().count(), MAX_SUMMARY_CHARS);
-        assert!(s.ends_with("\u{2026}[truncated]"));
+        }]);
+        assert_eq!(summary.string_units("").unwrap().len(), MAX_SUMMARY_CHARS);
+        assert!(summary
+            .string_at("")
+            .unwrap()
+            .ends_with("\u{2026}[truncated]"));
     }
 
     #[test]
-    fn dedup_key_distinguishes_message_and_range() {
+    fn dedup_key_distinguishes_exact_message_and_range() {
         let a = diag(0, 0, DiagnosticSeverity::ERROR, "x");
         let b = diag(0, 0, DiagnosticSeverity::ERROR, "y");
         let c = diag(1, 0, DiagnosticSeverity::ERROR, "x");
@@ -255,6 +357,16 @@ mod tests {
         assert_eq!(
             dedup_key(&a),
             dedup_key(&diag(0, 0, DiagnosticSeverity::ERROR, "x"))
+        );
+        assert_ne!(
+            dedup_key(&SourceDiagnostic {
+                message: source_string(vec![0xd800]),
+                ..a.clone()
+            }),
+            dedup_key(&SourceDiagnostic {
+                message: source_string(vec![0xd801]),
+                ..a
+            })
         );
     }
 }

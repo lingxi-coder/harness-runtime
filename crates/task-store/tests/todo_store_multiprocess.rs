@@ -15,7 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{json, Map};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::json;
 use task_store::todo_store::{ClaimOptions, ClaimResult, TodoStore, TodoTask};
 
 const ROLE_ENV: &str = "LINGXI_TODO_MP_ROLE";
@@ -27,6 +28,11 @@ const N: usize = 4;
 const PER_PROC: usize = 25;
 /// The single shared task every update-worker races on.
 const SHARED_ID: &str = "1";
+
+fn generated_source_text(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+        .expect("generated test string is valid")
+}
 
 #[test]
 fn multiprocess_create_and_update_is_race_free() {
@@ -91,8 +97,9 @@ fn multiprocess_create_and_update_is_race_free() {
     let shared = read_task(&dir, SHARED_ID);
     let counter = shared
         .metadata
-        .get("counter")
-        .and_then(serde_json::Value::as_i64)
+        .as_ref()
+        .and_then(|metadata| metadata.number_at("/counter"))
+        .map(|number| number as i64)
         .unwrap_or(0);
     assert_eq!(
         counter, total as i64,
@@ -110,10 +117,10 @@ fn multiprocess_create_and_update_is_race_free() {
         let store = TodoStore::in_dir(dir.clone());
         store
             .create(TodoTask::new(
-                "contended".into(),
-                "d".into(),
+                generated_source_text("contended"),
+                generated_source_text("d"),
                 None,
-                Map::new(),
+                None,
             ))
             .await
             .expect("create claim target")
@@ -139,10 +146,10 @@ async fn child_create(dir: &Path) -> i32 {
     let store = TodoStore::in_dir(dir.to_path_buf());
     for i in 0..PER_PROC {
         let task = TodoTask::new(
-            format!("proc-{}-{i}", std::process::id()),
-            "d".into(),
+            generated_source_text(&format!("proc-{}-{i}", std::process::id())),
+            generated_source_text("d"),
             None,
-            Map::new(),
+            None,
         );
         if store.create(task).await.is_err() {
             return 1;
@@ -156,12 +163,24 @@ async fn child_update(dir: &Path) -> i32 {
     for _ in 0..PER_PROC {
         let updated = store
             .update(SHARED_ID, |t| {
-                let c = t
-                    .metadata
-                    .get("counter")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0);
-                t.metadata.insert("counter".into(), json!(c + 1));
+                let mut metadata = t.metadata.clone().unwrap_or_else(|| {
+                    Utf16JsonProjection::parse("{}").expect("empty metadata object")
+                });
+                let c = metadata.number_at("/counter").unwrap_or(0.0) as i64;
+                let next = Utf16JsonProjection::from_serde_value(&json!(c + 1))
+                    .expect("generated test counter is valid JSON");
+                if metadata.get_property("counter").is_some() {
+                    metadata
+                        .replace_pointer_projection("/counter", next)
+                        .expect("counter is replaceable");
+                } else {
+                    let counter = Utf16JsonProjection::object(vec![("counter".into(), next)])
+                        .expect("counter metadata is valid JSON");
+                    metadata
+                        .merge_object_projection(&counter)
+                        .expect("metadata object can be extended");
+                }
+                t.metadata = Some(metadata);
             })
             .await;
         if updated.is_none() {

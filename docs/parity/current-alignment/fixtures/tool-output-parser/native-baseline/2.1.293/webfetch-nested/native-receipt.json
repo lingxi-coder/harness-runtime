@@ -1,0 +1,533 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "12ab62e309806ff16c65100d91bab6791d40cf63da7a9db4928f4f2938adbca3",
+  "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+  "fixed_resource": {
+    "host": "127.0.0.1",
+    "port": 41237,
+    "body": "fixed loopback WebFetch document\\n"
+  },
+  "dummy_model_key_only": true,
+  "no_external_model_or_webfetch_destination": true,
+  "selected_cases": [
+    "valid-unknown-keys",
+    "seeded-true",
+    "seeded-string",
+    "slug-wrong-type",
+    "slug-missing"
+  ],
+  "cases": [
+    {
+      "case": "valid-unknown-keys",
+      "session_id": "00000000-0000-4000-8000-000000012081",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/valid-unknown-keys",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012081",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/valid-unknown-keys"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43608,
+          "sha256": "91d61980a2e7353f4d00c032e1028d98f9e25578a045f947abe466cf4ccc9c19",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44073,
+          "sha256": "ef1129aaa03519eb8f427fd7f98ba71dce888e0bb20cd6ad6a6886ab2eacc829",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 963,
+          "sha256": "fd4e463148699f24de5608d081e14ca5c87caeaed0b469b8354bab1380ee3f39"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:10:06.948Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"valid-unknown-keys\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/valid-unknown-keys\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/valid-unknown-keys\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":false,\"futureArtifactField\":\"strip-this\",\"nestedUnknown\":{\"future\":\"strip-this-too\"}},\"unknownTopLevel\":{\"ignored\":true}},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/valid-unknown-keys\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":false,\"futureArtifactField\":\"strip-this\",\"nestedUnknown\":{\"future\":\"strip-this-too\"}},\"unknownTopLevel\":{\"ignored\":true}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 124,
+        "sha256": "5041b287e35f9809e68c0f4692da2deac8fe8bd699e35c6299bbec2d85d7fff2"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "7a4a0db255329c5195a8b93a5f261af5545737597e1c63a88fbe6d422f821098"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 227,
+        "sha256": "de4d3644433f265fc954239276fb9ebefdfc07f7d495a5cee29bed9d0577d63e"
+      },
+      "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    },
+    {
+      "case": "seeded-true",
+      "session_id": "00000000-0000-4000-8000-000000012082",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/seeded-true",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012082",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/seeded-true"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43587,
+          "sha256": "ea5d2306a980b1c97525d809a3d1ad925272a03a62971c5f4b5ac9c0f0706bee",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44357,
+          "sha256": "a322ab8eddc0360cd40d99b06740ea835a48607c6acc6162e0aed7a1e9b106ac",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 956,
+          "sha256": "f58b35f49518fe60ad52a6fc9a1a6adf0b6fd12ce8fe7a6e61f9f75bb00031d3"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:10:08.484Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"seeded-true\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/seeded-true\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/seeded-true\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":true}},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/seeded-true\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":true}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 420,
+        "sha256": "3370668f90f3a6ea95fc0927810da7c5f169483daaf3430198cd2b736f2d1a46"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "83e686cfae611929a7bda2f188dcb3d31c8316ef9c5ea866d28591b6cd6a5443"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 302,
+        "sha256": "5bdeca650e9399959852745fc301497454bdf4fc30fc1fab644ef3ef0824fb42"
+      },
+      "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    },
+    {
+      "case": "seeded-string",
+      "session_id": "00000000-0000-4000-8000-000000012083",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/seeded-string",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012083",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/seeded-string"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43593,
+          "sha256": "a83b3dd2eb88ce7bb2843dd055f5f195423c070ffd2fdc1792acf73051d4a3fa",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44365,
+          "sha256": "6a69d1eac8dfed927090801af0d027a9c409d2fbfc7c1d19cb4f7f29e97d0ad3",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 958,
+          "sha256": "9375a656b068c0ee9d1eefc36f4a2157969c3bee1cc03e6f12bd6553ddd2a98a"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:10:13.373Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"seeded-string\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/seeded-string\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/seeded-string\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":\"false\"}},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/seeded-string\",\"artifactRead\":{\"slug\":\"fixture-artifact\",\"ver\":\"v1\",\"seeded\":\"false\"}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 420,
+        "sha256": "3370668f90f3a6ea95fc0927810da7c5f169483daaf3430198cd2b736f2d1a46"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "bb3d75b4f72c942038fffa093757d9b8be742633323aed2085e49978060020bf"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 302,
+        "sha256": "5bdeca650e9399959852745fc301497454bdf4fc30fc1fab644ef3ef0824fb42"
+      },
+      "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    },
+    {
+      "case": "slug-wrong-type",
+      "session_id": "00000000-0000-4000-8000-000000012084",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/slug-wrong-type",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012084",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/slug-wrong-type"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43599,
+          "sha256": "5733ccc55bed96231188770d3fa453a71e08287643c2b2a56238071a95171bc4",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44379,
+          "sha256": "69965890744854185707a6cf076fb7ab9dc2ea80d77eac145082875aa63b708c",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 960,
+          "sha256": "835f87921ad8a72bcc528ff0a23b8dace3c19da84d79cc4b2b5070ebee5c94eb"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:10:15.885Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"slug-wrong-type\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/slug-wrong-type\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/slug-wrong-type\",\"artifactRead\":{\"slug\":13,\"ver\":\"v1\",\"seeded\":false}},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/slug-wrong-type\",\"artifactRead\":{\"slug\":13,\"ver\":\"v1\",\"seeded\":false}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 426,
+        "sha256": "8e739f4d15862fba43beed5eab3500c53e10cf674cadba91352130280d4db9a8"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "85f4e43518f160b3751d9595343d37fbdcf1e7029b3589919831d7ccf05cb1b0"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 308,
+        "sha256": "a58672808e3b6d8d7ec1ad7dd6e4987f1d6ca86297b37b6c08d49df9ee3f2ac5"
+      },
+      "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    },
+    {
+      "case": "slug-missing",
+      "session_id": "00000000-0000-4000-8000-000000012085",
+      "fixed_tool_url": "http://127.0.0.1:41237/fixture/slug-missing",
+      "argv": [
+        "$CLAUDE_NATIVE_BINARY",
+        "--plugin-dir",
+        "<fixture-plugin>",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "default,WebFetch",
+        "--dangerously-skip-permissions",
+        "--debug",
+        "hooks",
+        "--max-turns",
+        "2",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000012085",
+        "Fetch the fixed loopback page and report its result. http://127.0.0.1:41237/fixture/slug-missing"
+      ],
+      "timed_out": false,
+      "exit_code": 0,
+      "requests": [
+        {
+          "index": 1,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 43590,
+          "sha256": "959cc53468f92ec6cfb6cef60283f01b9b65a2aaeba006f2a8692c953f808062",
+          "raw_file": "request-01.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        },
+        {
+          "index": 2,
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 44370,
+          "sha256": "75a73aacd329ba92ce7ac0889bc5d72acdc2c90eaf57d2a0cfad0088bd9d78ed",
+          "raw_file": "request-02.raw.json",
+          "tools": [
+            "WebFetch"
+          ]
+        }
+      ],
+      "responses": [
+        {
+          "path": "response-01.raw.sse",
+          "bytes": 957,
+          "sha256": "20f7286d5596aefb3d0a4b3c9f4baeda254c1a985324b1f24dfc55f382d7aec1"
+        },
+        {
+          "path": "response-02.raw.sse",
+          "bytes": 828,
+          "sha256": "3f106e5cba5d35173e40fa154f7502fc0878c9a689a22bd47c218b18ef497c1c"
+        }
+      ],
+      "webfetch_catalog_item": {
+        "path": "tool-catalog-webfetch.raw.json",
+        "bytes": 2234,
+        "sha256": "e8e50c063c066a11c28fe82641457bbedaaf4625bea0b3d1f9699d8942e3216c"
+      },
+      "hook_marker_lines": [
+        "2026-10-08T15:10:17.629Z [DEBUG] [native-webfetch-output-parser-probe] console.log: NATIVE_WEBFETCH_OUTPUT={\"caseId\":\"slug-missing\",\"tool\":\"WebFetch\",\"tool_use_id\":\"toolu_native_webfetch_nested_293\",\"eventKeys\":[\"url\",\"prompt\",\"tool\",\"tool_use_id\"],\"url\":\"http://127.0.0.1:41237/fixture/slug-missing\",\"prompt\":\"Return the fixed loopback page content.\",\"nativeResult\":{\"ref\":1,\"result\":\"Error: error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"text\":\"error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER\",\"isError\":true,\"isReadOnly\":true},\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/slug-missing\",\"artifactRead\":{\"ver\":\"v1\",\"seeded\":false}},\"replacement\":{\"ref\":1,\"result\":{\"bytes\":24,\"code\":200,\"codeText\":\"200 OK\",\"result\":\"fixed loopback WebFetch result\",\"durationMs\":1,\"url\":\"http://127.0.0.1:41237/fixture/slug-missing\",\"artifactRead\":{\"ver\":\"v1\",\"seeded\":false}},\"text\":\"fixed loopback WebFetch result\",\"isError\":true,\"isReadOnly\":true}}"
+      ],
+      "model_tool_result_content_raw": {
+        "path": "model-tool-result-content.raw.json",
+        "bytes": 429,
+        "sha256": "59fdfdc9c6d74c318fd9e2b7cffc5060bf5f4ead4dbb97ecb62db2226b8e0abf"
+      },
+      "tool_use_result_session_rows": {
+        "path": "tool-use-result-session-rows.raw.jsonl",
+        "rows": 1,
+        "sha256": "d1795d61276a41abe977e0facda1358bc0f62ea886192eec411bb344da6315b0"
+      },
+      "tool_use_result_raw": {
+        "path": "tool-use-result.raw.json",
+        "bytes": 311,
+        "sha256": "22d750adee56479c13d145f8ee398d38503127f27f2a635ed1885b4b3aa6b76c"
+      },
+      "hook_sha256": "e548bedb1aef96d077c7f7c7f452c72d96d92075270b9755100599aacc6aabfe",
+      "native_stdout": {
+        "path": "native.stdout.raw",
+        "bytes": 31,
+        "sha256": "310b26d4061204a6fa22890877a59e4434dc4afd37c70144cb08c45dc89a3ddd"
+      },
+      "native_stderr": {
+        "path": "native.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "resource_requests": [],
+      "notes": "tool.call awaits Native next(event), then returns a fixed parser input; only the fixed loopback resource and model stubs are configured"
+    }
+  ],
+  "scope": "Native 2.1.293 public WebFetch tool.call continuation-wrapper output parser observations; not a candidate Harness pass"
+}

@@ -1,0 +1,2988 @@
+{
+  "version": "2.1.286",
+  "sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sourceByteRanges": [
+    {
+      "signature": "pure schema dependency chunk",
+      "start": 176381936,
+      "end": 176393578
+    },
+    {
+      "signature": "pure schema dependency chunk",
+      "start": 176393579,
+      "end": 176484073
+    },
+    {
+      "signature": "pure schema dependency chunk",
+      "start": 177781187,
+      "end": 177781946
+    },
+    {
+      "signature": "var Hr=Symbol.for(",
+      "start": 209704183,
+      "end": 209707894
+    },
+    {
+      "signature": "var Js=\"2026-07-28\"",
+      "start": 209708352,
+      "end": 209708495
+    },
+    {
+      "signature": "function Ao(){",
+      "start": 209730062,
+      "end": 209745762
+    },
+    {
+      "signature": "var Hs=function(",
+      "start": 209746166,
+      "end": 209748959
+    },
+    {
+      "signature": "function Vt(",
+      "start": 209751706,
+      "end": 209751879
+    },
+    {
+      "signature": "var Jc=-32022",
+      "start": 209965246,
+      "end": 209968259
+    },
+    {
+      "signature": "function al(",
+      "start": 209971456,
+      "end": 209974219
+    },
+    {
+      "signature": "function ao(",
+      "start": 209975039,
+      "end": 209975112
+    },
+    {
+      "signature": "outboundEnvelope(e){",
+      "start": 209753051,
+      "end": 209753192
+    },
+    {
+      "signature": "decodeResult(e,t){if(!Ht(t))",
+      "start": 209753611,
+      "end": 209755156
+    },
+    {
+      "signature": "_applyBodyDerivedHeaders(e,t){",
+      "start": 210009371,
+      "end": 210009836
+    },
+    {
+      "signature": "var a=\"2.0\";",
+      "start": 209673503,
+      "end": 209674106
+    },
+    {
+      "signature": "var fa=\"=?base64?\"",
+      "start": 209764036,
+      "end": 209764660
+    },
+    {
+      "signature": "async _connectNegotiated(",
+      "start": 209984540,
+      "end": 209986451
+    },
+    {
+      "signature": "async discover(",
+      "start": 209990312,
+      "end": 209990432
+    },
+    {
+      "signature": "function So(e,n,r){",
+      "start": 210553245,
+      "end": 210554653
+    },
+    {
+      "signature": "function zvt(",
+      "start": 185184292,
+      "end": 185185982
+    },
+    {
+      "signature": "function ws(",
+      "start": 176567778,
+      "end": 176567840
+    },
+    {
+      "signature": "function mi(",
+      "start": 176231092,
+      "end": 176231215
+    },
+    {
+      "signature": "function ol(e){",
+      "start": 187722134,
+      "end": 187722175
+    },
+    {
+      "signature": "function Yi(",
+      "start": 187724701,
+      "end": 187725032
+    },
+    {
+      "signature": "var Jx=",
+      "start": 187782865,
+      "end": 187782996
+    },
+    {
+      "signature": "var kO=",
+      "start": 176222855,
+      "end": 176223007
+    },
+    {
+      "signature": "case\"mcp_instructions_delta\":",
+      "start": 187777291,
+      "end": 187777777
+    }
+  ],
+  "scope": "Actual Wc/Bc/rl/al/ol/_o and Claude So functions, bundled Zod/Ao discovery schema, _connectNegotiated/discover methods, modern decodeResult, body-derived HTTP headers, and zvt/Gxe instruction delta producer/renderer. Exchange transport, timers, configuration lookup, cache enablement, telemetry and connection state storage are deterministic stubs. No live provider, process transport or network execution. Post-connect discovery request/validation is stubbed; only adoption behavior is captured. Instruction user-row construction omits nondeterministic transcript metadata.",
+  "discoveryCases": [
+    {
+      "name": "minimal-modern",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "explicit-complete",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": "complete"
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "resultType": "complete"
+        }
+      }
+    },
+    {
+      "name": "partial-result-type-passthrough",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": "partial"
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "resultType": "partial"
+        }
+      }
+    },
+    {
+      "name": "numeric-result-type-passthrough",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": 42
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "resultType": 42
+        }
+      }
+    },
+    {
+      "name": "missing-supported-versions",
+      "result": {
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "missing-capabilities",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ]
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "empty-versions-falls-back",
+      "result": {
+        "supportedVersions": [],
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "mixed-version-types-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28",
+          42
+        ],
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "null-capabilities-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": null
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "array-capabilities-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": []
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "invalid-instructions-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "instructions": 42
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "invalid-capability-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {
+          "tools": {
+            "listChanged": "yes"
+          }
+        }
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "unknown-capabilities-stripped",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {
+          "tasks": {
+            "list": {}
+          },
+          "custom": {},
+          "tools": {
+            "listChanged": true,
+            "custom": 3
+          },
+          "extensions": {
+            "vendor": {
+              "enabled": true
+            }
+          }
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            },
+            "extensions": {
+              "vendor": {
+                "enabled": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "valid-cache-hints",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "ttlMs": 1200,
+        "cacheScope": "public"
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 1200,
+          "cacheScope": "public",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "invalid-cache-hints-default",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "ttlMs": -1,
+        "cacheScope": "bogus"
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "fractional-cache-hint-default",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "ttlMs": 1.5
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "valid-server-info-meta",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "instructions": "initial instructions",
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "initial-server",
+            "version": "1"
+          }
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "initial-server",
+              "version": "1"
+            }
+          },
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            }
+          },
+          "instructions": "initial instructions"
+        }
+      }
+    },
+    {
+      "name": "missing-server-info-version-dropped",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "broken"
+          },
+          "vendor": true
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "_meta": {
+            "vendor": true
+          },
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "null-server-info-dropped",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": null
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "_meta": {},
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "null-meta-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "_meta": null
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "top-level-server-info-passthrough",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "serverInfo": {
+          "name": "top-level",
+          "version": "1"
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "serverInfo": {
+            "name": "top-level",
+            "version": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown-result-field-preserved",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "custom": {
+          "value": 1
+        }
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2026-07-28",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "custom": {
+            "value": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "client-order-selects-version",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28",
+          "2027-01-01"
+        ],
+        "capabilities": {}
+      },
+      "context": {
+        "clientModernVersions": [
+          "2027-01-01",
+          "2026-07-28"
+        ]
+      },
+      "expected": {
+        "kind": "modern",
+        "version": "2027-01-01",
+        "discover": {
+          "ttlMs": 0,
+          "cacheScope": "private",
+          "supportedVersions": [
+            "2026-07-28",
+            "2027-01-01"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "modern-no-overlap-falls-back",
+      "result": {
+        "supportedVersions": [
+          "2027-01-01"
+        ],
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "modern-no-overlap-without-fallback-errors",
+      "result": {
+        "supportedVersions": [
+          "2027-01-01"
+        ],
+        "capabilities": {}
+      },
+      "context": {
+        "fallbackAvailable": false
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "Unsupported protocol version: 2026-07-28",
+          "data": {
+            "supported": [
+              "2027-01-01"
+            ],
+            "requested": "2026-07-28"
+          }
+        }
+      }
+    }
+  ],
+  "decisionCases": [
+    {
+      "name": "unsupported-mutual-modern-corrects",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            "2026-07-28"
+          ]
+        }
+      },
+      "expected": {
+        "kind": "corrective",
+        "version": "2026-07-28",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2026-07-28"
+            ],
+            "requested": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "unsupported-modern-no-overlap-errors",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            "2027-01-01"
+          ]
+        }
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2027-01-01"
+            ],
+            "requested": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "unsupported-only-legacy-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            "2025-11-25"
+          ]
+        }
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "unsupported-only-legacy-without-fallback-errors",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            "2025-11-25"
+          ]
+        }
+      },
+      "context": {
+        "fallbackAvailable": false
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2025-11-25"
+            ],
+            "requested": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "unsupported-empty-list-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": []
+        }
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "unsupported-malformed-list-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            42
+          ]
+        }
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "unsupported-requested-value-adopted",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32022,
+        "message": "unsupported",
+        "data": {
+          "supported": [
+            "2027-01-01"
+          ],
+          "requested": "server-reported"
+        }
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2027-01-01"
+            ],
+            "requested": "server-reported"
+          }
+        }
+      }
+    },
+    {
+      "name": "rpc--32601-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32601,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "rpc--32602-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32602,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "rpc--32001-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32001,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "rpc--32020-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32020,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "rpc--32021-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32021,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "rpc--32099-falls-back",
+      "event": {
+        "kind": "rpc-error",
+        "code": -32099,
+        "message": "rejected"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "http-json-error-corrects",
+      "event": {
+        "kind": "http-error",
+        "status": 400,
+        "body": "{\"error\":{\"kind\":\"rpc-error\",\"code\":-32022,\"message\":\"unsupported\",\"data\":{\"supported\":[\"2026-07-28\"]}}}"
+      },
+      "expected": {
+        "kind": "corrective",
+        "version": "2026-07-28",
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2026-07-28"
+            ],
+            "requested": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "http-invalid-json-falls-back",
+      "event": {
+        "kind": "http-error",
+        "status": 500,
+        "body": "oops"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "http-timeout-errors",
+      "event": {
+        "kind": "timeout",
+        "timeoutMs": 5000
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "SdkError",
+          "code": "REQUEST_TIMEOUT",
+          "message": "Version negotiation probe timed out after 5000ms",
+          "data": {
+            "timeout": 5000
+          }
+        }
+      }
+    },
+    {
+      "name": "stdio-timeout-falls-back",
+      "event": {
+        "kind": "timeout",
+        "timeoutMs": 3000
+      },
+      "context": {
+        "transportKind": "stdio"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "http-close-errors",
+      "event": {
+        "kind": "closed"
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "SdkError",
+          "code": "ERA_NEGOTIATION_FAILED",
+          "message": "Version negotiation probe failed: Connection closed during the version negotiation probe",
+          "data": {
+            "cause": {
+              "name": "Error",
+              "message": "Connection closed during the version negotiation probe"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "stdio-close-falls-back",
+      "event": {
+        "kind": "closed"
+      },
+      "context": {
+        "transportKind": "stdio"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "node-network-error-terminal",
+      "event": {
+        "kind": "network-error",
+        "message": "offline"
+      },
+      "expected": {
+        "kind": "error",
+        "error": {
+          "name": "SdkError",
+          "code": "ERA_NEGOTIATION_FAILED",
+          "message": "Version negotiation probe failed: offline",
+          "data": {
+            "cause": {
+              "name": "Error",
+              "message": "offline"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "browser-type-error-falls-back",
+      "event": {
+        "kind": "network-error",
+        "typeError": true,
+        "message": "fetch failed"
+      },
+      "context": {
+        "environment": "browser"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "id-mismatch-falls-back",
+      "event": {
+        "kind": "id-mismatch"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "malformed-falls-back",
+      "event": {
+        "kind": "malformed"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    },
+    {
+      "name": "stream-end-falls-back",
+      "event": {
+        "kind": "stream-end"
+      },
+      "expected": {
+        "kind": "legacy"
+      }
+    }
+  ],
+  "probeCases": [
+    {
+      "name": "modern-single-probe",
+      "exchanges": [
+        {
+          "kind": "response",
+          "result": {
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "modern",
+          "version": "2026-07-28",
+          "discover": {
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "timeout-retry-then-modern",
+      "negotiation": {
+        "mode": "auto",
+        "probe": {
+          "timeoutMs": 123,
+          "maxRetries": 1
+        }
+      },
+      "exchanges": [
+        {
+          "kind": "timeout"
+        },
+        {
+          "kind": "response",
+          "result": {
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "modern",
+          "version": "2026-07-28",
+          "discover": {
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 123
+          },
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-1",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 123
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "http-timeout-exhausted-errors",
+      "negotiation": {
+        "mode": "auto",
+        "probe": {
+          "timeoutMs": 123,
+          "maxRetries": 1
+        }
+      },
+      "exchanges": [
+        {
+          "kind": "timeout"
+        },
+        {
+          "kind": "timeout"
+        }
+      ],
+      "expected": {
+        "error": {
+          "name": "SdkError",
+          "code": "REQUEST_TIMEOUT",
+          "message": "Version negotiation probe timed out after 123ms",
+          "data": {
+            "timeout": 123
+          }
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 123
+          },
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-1",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 123
+          }
+        ],
+        "lifecycle": [
+          "detach"
+        ],
+        "transport": {
+          "_anthropicProbeTimedOut": true
+        }
+      }
+    },
+    {
+      "name": "stdio-timeout-exhausted-falls-back",
+      "transportKind": "stdio",
+      "exchanges": [
+        {
+          "kind": "timeout"
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "legacy"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {
+          "_anthropicProbeTimedOut": true
+        }
+      }
+    },
+    {
+      "name": "corrective-retry-only-once",
+      "exchanges": [
+        {
+          "kind": "response",
+          "error": {
+            "code": -32022,
+            "message": "unsupported",
+            "data": {
+              "supported": [
+                "2026-07-28"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "response",
+          "error": {
+            "code": -32022,
+            "message": "unsupported",
+            "data": {
+              "supported": [
+                "2026-07-28"
+              ]
+            }
+          }
+        }
+      ],
+      "expected": {
+        "error": {
+          "name": "ProtocolError",
+          "code": -32022,
+          "message": "unsupported",
+          "data": {
+            "supported": [
+              "2026-07-28"
+            ],
+            "requested": "2026-07-28"
+          }
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          },
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-1",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "detach"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "corrective-version-adopted",
+      "supportedProtocolVersions": [
+        "2027-01-01",
+        "2026-07-28",
+        "2025-11-25"
+      ],
+      "exchanges": [
+        {
+          "kind": "response",
+          "error": {
+            "code": -32022,
+            "message": "unsupported",
+            "data": {
+              "supported": [
+                "2026-07-28"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "response",
+          "result": {
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "modern",
+          "version": "2026-07-28",
+          "discover": {
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          }
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2027-01-01",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          },
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-1",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "ordinary-rpc-error-not-retried",
+      "negotiation": {
+        "mode": "auto",
+        "probe": {
+          "maxRetries": 2
+        }
+      },
+      "exchanges": [
+        {
+          "kind": "response",
+          "error": {
+            "code": -32601,
+            "message": "unknown"
+          }
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "legacy"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "malformed-pin-fails-without-initialize",
+      "negotiation": {
+        "mode": {
+          "pin": "2026-07-28"
+        }
+      },
+      "exchanges": [
+        {
+          "kind": "malformed"
+        }
+      ],
+      "expected": {
+        "error": {
+          "name": "SdkError",
+          "code": "ERA_NEGOTIATION_FAILED",
+          "message": "Version negotiation failed: the server did not offer pinned protocol version 2026-07-28 via server/discover (no fallback in pin mode)"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "detach"
+        ],
+        "transport": {
+          "_anthropicProbeLegacyEvidence": "malformed"
+        }
+      }
+    },
+    {
+      "name": "malformed-without-legacy-version-fails",
+      "supportedProtocolVersions": [
+        "2026-07-28"
+      ],
+      "exchanges": [
+        {
+          "kind": "malformed"
+        }
+      ],
+      "expected": {
+        "error": {
+          "name": "SdkError",
+          "code": "ERA_NEGOTIATION_FAILED",
+          "message": "Version negotiation failed: the server gave no modern evidence and this client supports no pre-2026-07-28 protocol version to fall back to"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "detach"
+        ],
+        "transport": {
+          "_anthropicProbeLegacyEvidence": "malformed"
+        }
+      }
+    },
+    {
+      "name": "stdio-in-place-close-fails",
+      "transportKind": "stdio",
+      "exchanges": [
+        {
+          "kind": "closed"
+        }
+      ],
+      "expected": {
+        "error": {
+          "name": "SdkError",
+          "code": "ERA_NEGOTIATION_FAILED",
+          "message": "Version negotiation failed: the connection closed during the server/discover probe (this transport probed in place — the disposable sibling probe requires the SDK's base StdioClientTransport)"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "detach"
+        ],
+        "transport": {}
+      }
+    },
+    {
+      "name": "stdio-disposable-close-falls-back",
+      "transportKind": "stdio",
+      "disposableProbe": true,
+      "exchanges": [
+        {
+          "kind": "closed"
+        }
+      ],
+      "expected": {
+        "verdict": {
+          "era": "legacy"
+        },
+        "requests": [
+          {
+            "request": {
+              "jsonrpc": "2.0",
+              "id": "probe-0",
+              "method": "server/discover",
+              "params": {
+                "_meta": {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": {
+                    "name": "oracle-client",
+                    "version": "1"
+                  },
+                  "io.modelcontextprotocol/clientCapabilities": {
+                    "roots": {
+                      "listChanged": true
+                    }
+                  }
+                }
+              }
+            },
+            "timeout": 60000
+          }
+        ],
+        "lifecycle": [
+          "release"
+        ],
+        "transport": {}
+      }
+    }
+  ],
+  "policyCases": [
+    {
+      "name": "default-http",
+      "transport": "http",
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 5000
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-stdio",
+      "transport": "stdio",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-claudeai-proxy",
+      "transport": "claudeai-proxy",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-ccr-proxy",
+      "transport": "ccr-proxy",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-sse",
+      "transport": "sse",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-ws",
+      "transport": "ws",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-ide",
+      "transport": "ide",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-in-process",
+      "transport": "in-process",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "default-sdk-control",
+      "transport": "sdk-control",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "http-disabled-by-flag",
+      "transport": "http",
+      "flags": {
+        "tengu_mcp_protocol_negotiation_http": false
+      },
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "stdio-enabled-by-flag",
+      "transport": "stdio",
+      "flags": {
+        "tengu_mcp_protocol_negotiation_stdio": true
+      },
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 3000
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-auto-enables-stdio",
+      "transport": "stdio",
+      "environment": "auto",
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 3000
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-auto-cannot-enable-sse",
+      "transport": "sse",
+      "environment": "auto",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-legacy-disables-http",
+      "transport": "http",
+      "environment": "legacy",
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-invalid-warns-and-keeps-default",
+      "transport": "http",
+      "environment": "invalid",
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 5000
+          }
+        },
+        "warnings": [
+          "MCP_PROTOCOL_NEGOTIATION=invalid is invalid; expected 'legacy' or 'auto' — ignoring"
+        ]
+      }
+    },
+    {
+      "name": "http-timeout-budget-third",
+      "transport": "http",
+      "timeout": 9001,
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 3000
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "stdio-timeout-budget-third",
+      "transport": "stdio",
+      "environment": "auto",
+      "timeout": 6000,
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 2000
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "denylist-forces-legacy",
+      "transport": "http",
+      "server": {
+        "url": "https://example.com/mcp"
+      },
+      "denylisted": true,
+      "expected": {
+        "policy": {
+          "mode": "legacy"
+        },
+        "warnings": [
+          "MCP era negotiation denylist matched example.com; the legacy handshake applies"
+        ]
+      }
+    },
+    {
+      "name": "auto-override-bypasses-denylist",
+      "transport": "http",
+      "environment": "auto",
+      "server": {
+        "url": "https://example.com/mcp"
+      },
+      "denylisted": true,
+      "expected": {
+        "policy": {
+          "mode": "auto",
+          "probe": {
+            "timeoutMs": 5000
+          }
+        },
+        "warnings": []
+      }
+    }
+  ],
+  "metadataCases": [
+    {
+      "name": "post-discover-retains-connected-metadata",
+      "initial": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "instructions": "initial instructions",
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "initial-server",
+            "version": "1"
+          }
+        }
+      },
+      "next": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {
+          "resources": {
+            "listChanged": true
+          }
+        },
+        "instructions": "updated instructions",
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "updated-server",
+            "version": "2"
+          }
+        }
+      },
+      "expected": {
+        "connected": {
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            }
+          },
+          "serverInfo": {
+            "name": "initial-server",
+            "version": "1"
+          },
+          "instructions": "initial instructions",
+          "discover": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "initial-server",
+                "version": "1"
+              }
+            },
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              }
+            },
+            "instructions": "initial instructions"
+          },
+          "protocolVersion": "2026-07-28",
+          "identity": "initial-server@1"
+        },
+        "afterDiscover": {
+          "capabilities": {
+            "tools": {
+              "listChanged": true
+            }
+          },
+          "serverInfo": {
+            "name": "initial-server",
+            "version": "1"
+          },
+          "instructions": "initial instructions",
+          "discover": {
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "instructions": "updated instructions",
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "updated-server",
+                "version": "2"
+              }
+            }
+          },
+          "protocolVersion": "2026-07-28",
+          "identity": "initial-server@1"
+        },
+        "returned": {
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {
+            "resources": {
+              "listChanged": true
+            }
+          },
+          "instructions": "updated instructions",
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "updated-server",
+              "version": "2"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "top-level-server-info-does-not-set-identity",
+      "initial": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "serverInfo": {
+          "name": "ignored-top-level",
+          "version": "1"
+        }
+      },
+      "next": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {}
+      },
+      "expected": {
+        "connected": {
+          "capabilities": {},
+          "discover": {
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {},
+            "serverInfo": {
+              "name": "ignored-top-level",
+              "version": "1"
+            }
+          },
+          "protocolVersion": "2026-07-28",
+          "identity": "anonymous"
+        },
+        "afterDiscover": {
+          "capabilities": {},
+          "discover": {
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {}
+          },
+          "protocolVersion": "2026-07-28",
+          "identity": "anonymous"
+        },
+        "returned": {
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    }
+  ],
+  "decodeCases": [
+    {
+      "name": "connected-modern-missing-result-type-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {}
+      },
+      "expected": {
+        "kind": "invalid",
+        "error": {
+          "name": "SdkError",
+          "code": "INVALID_RESULT",
+          "message": "Invalid result for server/discover: missing required resultType — servers implementing protocol revision 2026-07-28 MUST include it (the absent-means-complete bridge applies only to earlier-revision servers)",
+          "data": {
+            "method": "server/discover",
+            "violation": "missing-resultType"
+          }
+        }
+      }
+    },
+    {
+      "name": "connected-modern-complete-accepted-and-marker-removed",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": "complete"
+      },
+      "expected": {
+        "kind": "complete",
+        "result": {
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {}
+        }
+      }
+    },
+    {
+      "name": "connected-modern-partial-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": "partial"
+      },
+      "expected": {
+        "kind": "invalid",
+        "error": {
+          "name": "SdkError",
+          "code": "UNSUPPORTED_RESULT_TYPE",
+          "message": "Unsupported result type 'partial' for server/discover",
+          "data": {
+            "resultType": "partial",
+            "method": "server/discover"
+          }
+        }
+      }
+    },
+    {
+      "name": "connected-modern-numeric-result-type-rejected",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": 42
+      },
+      "expected": {
+        "kind": "invalid",
+        "error": {
+          "name": "SdkError",
+          "code": "INVALID_RESULT",
+          "message": "Invalid result for server/discover: non-string resultType",
+          "data": {
+            "method": "server/discover",
+            "resultType": 42
+          }
+        }
+      }
+    },
+    {
+      "name": "connected-modern-task-dispatched-separately",
+      "result": {
+        "supportedVersions": [
+          "2026-07-28"
+        ],
+        "capabilities": {},
+        "resultType": "task"
+      },
+      "expected": {
+        "kind": "task",
+        "result": {
+          "supportedVersions": [
+            "2026-07-28"
+          ],
+          "capabilities": {},
+          "resultType": "task"
+        }
+      }
+    },
+    {
+      "name": "connected-modern-input-required-empty-rejected",
+      "result": {
+        "resultType": "input_required"
+      },
+      "expected": {
+        "kind": "invalid",
+        "error": {
+          "name": "SdkError",
+          "code": "INVALID_RESULT",
+          "message": "Invalid result for server/discover: input_required carries neither inputRequests nor requestState (every input_required result must include at least one of the two)",
+          "data": {
+            "method": "server/discover",
+            "violation": "input-required-missing-both"
+          }
+        }
+      }
+    },
+    {
+      "name": "connected-modern-input-required-state-accepted",
+      "result": {
+        "resultType": "input_required",
+        "requestState": "opaque"
+      },
+      "expected": {
+        "kind": "input_required",
+        "inputRequests": {},
+        "requestState": "opaque"
+      }
+    }
+  ],
+  "headerCases": [
+    {
+      "name": "initial-probe-protocol-and-method-headers",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "server/discover",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    },
+    {
+      "name": "initial-legacy-request-no-derived-headers",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "expected": {}
+    },
+    {
+      "name": "body-protocol-overrides-common-header",
+      "initialHeaders": {
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "server/discover",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    },
+    {
+      "name": "tool-call-includes-name",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "test-tool",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "tools/call",
+        "mcp-name": "test-tool",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    },
+    {
+      "name": "resource-read-includes-uri",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/read",
+        "params": {
+          "uri": "file:///test",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "resources/read",
+        "mcp-name": "file:///test",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    },
+    {
+      "name": "unicode-name-base64-encoded",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "工具",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      },
+      "expected": {
+        "mcp-method": "tools/call",
+        "mcp-name": "=?base64?5bel5YW3?=",
+        "mcp-protocol-version": "2026-07-28"
+      }
+    }
+  ],
+  "instructionCases": [
+    {
+      "name": "initial-instructions-ordered-by-server-name",
+      "clients": [
+        {
+          "name": "zeta",
+          "instructions": "last",
+          "type": "connected"
+        },
+        {
+          "name": "alpha",
+          "instructions": "first",
+          "type": "connected"
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha",
+            "zeta"
+          ],
+          "addedBlocks": [
+            "## alpha\nfirst",
+            "## zeta\nlast"
+          ],
+          "addedServerInstructions": [
+            "first",
+            "last"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nfirst\n\n## zeta\nlast\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "cached-client-eligible-failed-client-omitted",
+      "clients": [
+        {
+          "name": "cached",
+          "instructions": "cached instructions",
+          "type": "cached"
+        },
+        {
+          "name": "failed",
+          "instructions": "stale instructions",
+          "type": "failed"
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "cached"
+          ],
+          "addedBlocks": [
+            "## cached\ncached instructions"
+          ],
+          "addedServerInstructions": [
+            "cached instructions"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## cached\ncached instructions\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "unchanged-instructions-silent",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "same",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nsame"
+            ],
+            "addedServerInstructions": [
+              "same"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": null,
+        "rendered": []
+      }
+    },
+    {
+      "name": "changed-instructions-reannounced-with-cache",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "new",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "addedServerInstructions": [
+              "old"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha"
+          ],
+          "addedBlocks": [
+            "## alpha\nnew"
+          ],
+          "addedServerInstructions": [
+            "new"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nnew\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "changed-instructions-silent-without-cache",
+      "cacheEnabled": false,
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "new",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "addedServerInstructions": [
+              "old"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": null,
+        "rendered": []
+      }
+    },
+    {
+      "name": "old-transcript-without-raw-baseline-suppresses-update",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "new",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": null,
+        "rendered": []
+      }
+    },
+    {
+      "name": "clearing-instructions-while-connected-silent",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "addedServerInstructions": [
+              "old"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": null,
+        "rendered": []
+      }
+    },
+    {
+      "name": "disconnect-emits-removal",
+      "clients": [],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "addedServerInstructions": [
+              "old"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [],
+          "addedBlocks": [],
+          "addedServerInstructions": [],
+          "removedNames": [
+            "alpha"
+          ]
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\nThe following MCP servers have disconnected. Their instructions above no longer apply:\nalpha\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "pending-client-counts-as-disconnected",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "old",
+          "type": "pending"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nold"
+            ],
+            "addedServerInstructions": [
+              "old"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [],
+          "addedBlocks": [],
+          "addedServerInstructions": [],
+          "removedNames": [
+            "alpha"
+          ]
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\nThe following MCP servers have disconnected. Their instructions above no longer apply:\nalpha\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "client-side-block-appended-to-server-instructions",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "server",
+          "type": "connected"
+        }
+      ],
+      "clientBlocks": [
+        {
+          "serverName": "alpha",
+          "block": "client"
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha"
+          ],
+          "addedBlocks": [
+            "## alpha\nserver\n\nclient"
+          ],
+          "addedServerInstructions": [
+            "server"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nserver\n\nclient\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "cached-placeholder-can-receive-client-side-only-block",
+      "clients": [
+        {
+          "name": "alpha",
+          "type": "cached"
+        }
+      ],
+      "clientBlocks": [
+        {
+          "serverName": "alpha",
+          "block": "client"
+        },
+        {
+          "serverName": "missing",
+          "block": "ignored"
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha"
+          ],
+          "addedBlocks": [
+            "## alpha\nclient"
+          ],
+          "addedServerInstructions": [
+            ""
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nclient\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "removal-then-reconnect-reannounces",
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "same",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "alpha"
+            ],
+            "addedBlocks": [
+              "## alpha\nsame"
+            ],
+            "addedServerInstructions": [
+              "same"
+            ],
+            "removedNames": []
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [],
+            "addedBlocks": [],
+            "removedNames": [
+              "alpha"
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha"
+          ],
+          "addedBlocks": [
+            "## alpha\nsame"
+          ],
+          "addedServerInstructions": [
+            "same"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nsame\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "additions-and-removals-render-in-one-message",
+      "clients": [
+        {
+          "name": "new",
+          "instructions": "new instruction",
+          "type": "connected"
+        }
+      ],
+      "history": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "mcp_instructions_delta",
+            "addedNames": [
+              "old"
+            ],
+            "addedBlocks": [
+              "## old\nold instruction"
+            ],
+            "addedServerInstructions": [
+              "old instruction"
+            ],
+            "removedNames": []
+          }
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "new"
+          ],
+          "addedBlocks": [
+            "## new\nnew instruction"
+          ],
+          "addedServerInstructions": [
+            "new instruction"
+          ],
+          "removedNames": [
+            "old"
+          ]
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## new\nnew instruction\n\nThe following MCP servers have disconnected. Their instructions above no longer apply:\nold\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "initial-without-cache-omits-raw-baseline",
+      "cacheEnabled": false,
+      "clients": [
+        {
+          "name": "alpha",
+          "instructions": "first",
+          "type": "connected"
+        }
+      ],
+      "expected": {
+        "delta": {
+          "addedNames": [
+            "alpha"
+          ],
+          "addedBlocks": [
+            "## alpha\nfirst"
+          ],
+          "removedNames": []
+        },
+        "rendered": [
+          {
+            "type": "user",
+            "isMeta": true,
+            "message": {
+              "content": "<system-reminder>\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n## alpha\nfirst\n</system-reminder>"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

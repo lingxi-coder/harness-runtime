@@ -47,7 +47,9 @@ impl BuiltinCommandHandler for WorkflowsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let Some(tasks) = &self.tasks else {
             return CommandResult::Done {
-                display: Some("/workflows is unavailable (no engine handle wired)".to_string()),
+                display: Some(
+                    ("/workflows is unavailable (no engine handle wired)".to_string()).into(),
+                ),
             };
         };
 
@@ -65,11 +67,7 @@ impl BuiltinCommandHandler for WorkflowsHandler {
         }
 
         CommandResult::Done {
-            display: Some(render_workflows(
-                &records,
-                &agent_counts,
-                now_epoch_millis(),
-            )),
+            display: Some((render_workflows(&records, &agent_counts, now_epoch_millis())).into()),
         }
     }
 
@@ -224,7 +222,7 @@ mod tests {
     ) -> WorkflowRecord {
         WorkflowRecord {
             task_id: task_id.to_string(),
-            name: name.to_string(),
+            name: name.into(),
             status: status.to_string(),
             started_at_ms: Some(started_at_ms),
             ended_at_ms,
@@ -287,8 +285,8 @@ mod tests {
     async fn unwired_handler_returns_the_tui_unavailable_message() {
         let result = WorkflowsHandler::new()
             .handle(&ParsedSlashCommand {
-                name: "workflows".to_string(),
-                raw_args: String::new(),
+                name: "workflows".into(),
+                raw_args: String::new().into(),
                 positional_args: Vec::new(),
             })
             .await;

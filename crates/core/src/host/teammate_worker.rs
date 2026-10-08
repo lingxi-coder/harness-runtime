@@ -2,7 +2,7 @@
 //! Prompt/context travel over a private manifest, never shell arguments.
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use crate::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,8 @@ pub enum WorkerToParent {
     },
     SendMessage {
         id: u64,
-        input: Value,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        input: Utf16JsonProjection,
     },
     State {
         status: String,
@@ -35,10 +36,12 @@ pub enum WorkerToParent {
         awaiting_plan_approval: bool,
     },
     Output {
-        text: String,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        text: Utf16JsonProjection,
     },
     CoordinatorMessage {
-        message: Value,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        message: Utf16JsonProjection,
     },
 }
 
@@ -46,14 +49,16 @@ pub enum WorkerToParent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParentToWorker {
     Message {
-        text: String,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        text: Utf16JsonProjection,
     },
     PlanApprovalResponse {
         response: crate::host::teammate_plan::PlanApprovalResponse,
     },
     SendMessageResult {
         id: u64,
-        result: Value,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        result: Utf16JsonProjection,
         is_error: bool,
     },
     Shutdown,
@@ -61,12 +66,12 @@ pub enum ParentToWorker {
 
 #[derive(Debug, Clone)]
 pub struct PaneMessageResult {
-    pub result: Value,
+    pub result: Utf16JsonProjection,
     pub is_error: bool,
 }
 
 /// Forward the complete SendMessage operation to its owning session.
 #[async_trait]
 pub trait PaneMessageForwarder: Send + Sync {
-    async fn send_message(&self, input: Value) -> Result<PaneMessageResult, String>;
+    async fn send_message(&self, input: Utf16JsonProjection) -> Result<PaneMessageResult, String>;
 }

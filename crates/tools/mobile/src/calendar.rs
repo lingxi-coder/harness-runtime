@@ -2,19 +2,23 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::calendar::{CalendarError, CalendarQuery};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::PermissionResult;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::BuiltinToolContext;
 
-use crate::device_support::{ask, bound_text, bounded_records, execute, failure, invalid, parse};
+use crate::device_support::{
+    ask, bound_text, bounded_records, execute, failure, generated_projection,
+    generated_schema_repair, invalid, parse,
+};
 
 /// Canonical model-facing tool name.
 pub const TOOL_NAME: &str = "calendar";
@@ -36,7 +40,7 @@ struct Input {
     limit: u32,
 }
 
-fn query(input: &Value) -> Result<CalendarQuery, ValidationError> {
+fn query(input: &Utf16JsonProjection) -> Result<CalendarQuery, ValidationError> {
     let input: Input = parse(input)?;
     if input.end_ms > MAX_TIMESTAMP_MS
         || input.end_ms <= input.start_ms
@@ -70,14 +74,14 @@ impl CalendarTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object", "properties": {
             "start_ms": { "type": "integer", "minimum": 0, "maximum": MAX_TIMESTAMP_MS, "description": "Inclusive start in Unix epoch milliseconds." },
             "end_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMESTAMP_MS, "description": "Exclusive end in Unix epoch milliseconds; later than start_ms and at most 366 days after it." },
             "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 50 }
         }, "required": ["start_ms", "end_ms"], "additionalProperties": false
-    })
+    }))
 });
 
 #[async_trait]
@@ -85,43 +89,54 @@ impl Tool for CalendarTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.calendar.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         65536
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("Read calendar events, appointments, meeting times and schedule")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("Read calendar events, appointments, meeting times and schedule".into())
     }
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        ask(TOOL_NAME, "Read calendar events in the requested time range. Native calendar permission may also be required.")
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
+        ask(
+            TOOL_NAME,
+            "Read calendar events in the requested time range. Native calendar permission may also be required.",
+        )
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Reading calendar events in a time range".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Read native calendar events intersecting [start_ms, end_ms), expressed in Unix epoch milliseconds. The range is at most 366 days and limit is 1..100 (default 50). Returns events with id, title, start_ms, end_ms, all_day and optional location, notes, calendar. A true truncated flag means the native result reached the requested limit (more events may exist), or returned data was shortened or omitted. It does not prove that more events exist. Use a narrow range for the user's request; this tool cannot create or modify events.".into()
     }
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         query(input).map(|_| ())
     }
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {

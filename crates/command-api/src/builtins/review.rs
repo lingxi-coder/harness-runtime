@@ -23,9 +23,12 @@
 //! its tests) as the source for a future skill port; nothing registers it.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{
+    source_concat, source_from_units, BuiltinCommandHandler, CommandResult, PromptPart,
+};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// `/review` handler — returns the code-review prompt as `InjectMessage`.
 ///
@@ -66,45 +69,71 @@ const LIST_PROMPT: &str = "Run `gh pr list` to show the open pull requests, then
 /// Build the injected prompt (claude-code 2.1.205 `getPromptForCommand`):
 /// first whitespace token (stripped of backticks and a leading `#`) is the PR
 /// number; the rest join as extra instructions.
-fn build_prompt(args: &str) -> String {
-    let mut tokens = args.split_whitespace();
-    let first = tokens.next().unwrap_or("");
-    let number = first.replace('`', "");
-    let number = number.strip_prefix('#').unwrap_or(&number);
-    if number.is_empty() {
-        return LIST_PROMPT.to_string();
+fn build_prompt(args: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = args.string_units("").unwrap_or_default();
+    let mut tokens = Vec::<Vec<u16>>::new();
+    let mut current = Vec::new();
+    for unit in &units {
+        let whitespace = char::from_u32(u32::from(*unit))
+            .is_some_and(lingxi_core::host::effort::javascript_whitespace);
+        if whitespace {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(*unit);
+        }
     }
-    let instructions = tokens.collect::<Vec<_>>().join(" ");
-    format!(
-        "Review target: GitHub pull request `{number}`.\n\
-         Gather this target's diff with (instead of any local `git diff`):\n\
-         1. `gh pr view {number} --json title,body,author,baseRefName,headRefName,state,additions,deletions,changedFiles,labels` for context\n\
-         2. `gh pr diff {number}` for the unified diff\n\
-         The PR's diff is the only review scope \u{2014} local working-tree changes are out of scope. When you need surrounding code, Read the files in this checkout if it matches the PR's branch, otherwise fetch file contents via `gh`.\n\
-         Additional instructions from the user: {instructions}\n\
-         Analyze the changes and provide a thorough code review that includes:\n\
-         - An overview of what the PR does\n\
-         - Analysis of code quality and style\n\
-         - Specific suggestions for improvements\n\
-         - Any potential issues or risks\n\
-         Keep your review concise but thorough. Focus on:\n\
-         - Code correctness\n\
-         - Following project conventions\n\
-         - Performance implications\n\
-         - Test coverage\n\
-         - Security considerations\n\
-         Format your review with clear sections and bullet points."
-    )
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    let mut number = tokens.first().cloned().unwrap_or_default();
+    number.retain(|unit| *unit != b'`' as u16);
+    if number.first().copied() == Some(b'#' as u16) {
+        number.remove(0);
+    }
+    if number.is_empty() {
+        return LIST_PROMPT.into();
+    }
+    let mut instructions = Vec::new();
+    for token in tokens.iter().skip(1) {
+        if !instructions.is_empty() {
+            instructions.push(b' ' as u16);
+        }
+        instructions.extend_from_slice(token);
+    }
+    let number = source_from_units(number);
+    let instructions = source_from_units(instructions);
+    source_concat([
+        PromptPart::Text("Review target: GitHub pull request `"),
+        PromptPart::Source(&number),
+        PromptPart::Text(
+            "`.\nGather this target's diff with (instead of any local `git diff`):\n1. `gh pr view ",
+        ),
+        PromptPart::Source(&number),
+        PromptPart::Text(
+            " --json title,body,author,baseRefName,headRefName,state,additions,deletions,changedFiles,labels` for context\n2. `gh pr diff ",
+        ),
+        PromptPart::Source(&number),
+        PromptPart::Text(
+            "` for the unified diff\nThe PR's diff is the only review scope — local working-tree changes are out of scope. When you need surrounding code, Read the files in this checkout if it matches the PR's branch, otherwise fetch file contents via `gh`.\nAdditional instructions from the user: ",
+        ),
+        PromptPart::Source(&instructions),
+        PromptPart::Text(
+            "\nAnalyze the changes and provide a thorough code review that includes:\n- An overview of what the PR does\n- Analysis of code quality and style\n- Specific suggestions for improvements\n- Any potential issues or risks\nKeep your review concise but thorough. Focus on:\n- Code correctness\n- Following project conventions\n- Performance implications\n- Test coverage\n- Security considerations\nFormat your review with clear sections and bullet points.",
+        ),
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "review".to_string(),
-            raw_args: raw.to_string(),
+            name: "review".into(),
+            raw_args: raw.into(),
             positional_args: vec![],
         }
     }
@@ -115,7 +144,7 @@ mod tests {
         match h.handle(&args("")).await {
             CommandResult::InjectMessage { content } => {
                 assert_eq!(
-                    content,
+                    content.string_at("").unwrap(),
                     "Run `gh pr list` to show the open pull requests, then ask the user \
                      which one to review (`/review <number>`)."
                 );
@@ -129,6 +158,7 @@ mod tests {
         let h = ReviewHandler::new();
         match h.handle(&args("123")).await {
             CommandResult::InjectMessage { content } => {
+                let content = content.string_at("").unwrap();
                 assert!(content.starts_with("Review target: GitHub pull request `123`.\n"));
                 assert!(content.contains("1. `gh pr view 123 --json title,body,author,baseRefName,headRefName,state,additions,deletions,changedFiles,labels` for context\n"));
                 assert!(content.contains("2. `gh pr diff 123` for the unified diff\n"));

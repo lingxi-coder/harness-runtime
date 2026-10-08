@@ -75,9 +75,9 @@ pub(super) async fn preserve_pending_compaction_tail(
                     blocks(message).iter().any(|block| matches!(block,
                 ContentBlock::ProviderContent {protocol, value}
                     if protocol == &receipt.binding.protocol
-                    && value["type"] == "lingxi_computer_binding"
-                    && value["provider_response_id"] == record.identity.provider_response_id
-                    && value["call"]["context"]["call_id"] == record.identity.provider_call_id
+                    && value.string_at("/type") == Some("lingxi_computer_binding")
+                    && value.string_at("/provider_response_id") == Some(record.identity.provider_response_id.as_str())
+                    && value.string_at("/call/context/call_id") == Some(record.identity.provider_call_id.as_str())
             ))
                 })
                 .ok_or_else(|| {
@@ -157,9 +157,8 @@ async fn restore_execution_bindings(
 ) -> Result<Option<NativeContinuationBinding>, OrchestratorError> {
     let mut fallback = None;
     for record in records.values() {
-        let saved: StoredExecutionBinding =
-            serde_json::from_value(load_payload(&record.recovery_binding).await?)
-                .map_err(internal)?;
+        let bytes = load_payload(&record.recovery_binding).await?;
+        let saved: StoredExecutionBinding = serde_json::from_slice(&bytes).map_err(internal)?;
         let index = usize::try_from(record.identity.member_index).map_err(internal)?;
         if saved.provider_response_id != record.identity.provider_response_id
             || saved.call.context.call_id != record.identity.provider_call_id
@@ -236,7 +235,7 @@ async fn finish_prepared_responses(
             .ok_or_else(|| internal("prepared response has no provider identity"))?;
         if stored.row.session_id != session_id.as_uuid().to_string()
             || stored.row.message_type != "assistant"
-            || stored.row.message["id"] != response_id
+            || stored.row.message.string_at("/id") != Some(response_id)
             || !matches!(stored.message, ConversationMessage::Assistant { .. })
         {
             return Err(internal(
@@ -247,8 +246,8 @@ async fn finish_prepared_responses(
             .iter()
             .filter_map(|b| match b {
                 ContentBlock::ProviderContent { protocol, value }
-                    if value["type"] == "lingxi_computer_receipt_ack"
-                        && value["provider_response_id"] == response_id
+                    if value.string_at("/type") == Some("lingxi_computer_receipt_ack")
+                        && value.string_at("/provider_response_id") == Some(response_id)
                         && *protocol == proof.binding.protocol =>
                 {
                     Some(value)
@@ -261,8 +260,7 @@ async fn finish_prepared_responses(
                 "prepared successor has no exact receipt acknowledgement",
             ));
         }
-        let associations: Vec<ReceiptAcknowledgement> =
-            serde_json::from_value(ack[0]["receipts"].clone()).map_err(internal)?;
+        let associations: Vec<ReceiptAcknowledgement> = decode_payload_field(ack[0], "/receipts")?;
         if associations.is_empty()
             || !associations.contains(&ReceiptAcknowledgement::from_record(&proof))
         {
@@ -307,7 +305,7 @@ async fn finish_prepared_responses(
             }
         }
         let call_ids: std::collections::BTreeSet<String> =
-            serde_json::from_value(ack[0]["call_ids"].clone()).map_err(internal)?;
+            decode_payload_field(ack[0], "/call_ids")?;
         if call_ids != acknowledged_calls {
             return Err(internal("successor acknowledged different computer calls"));
         }
@@ -357,10 +355,9 @@ fn add_binding(
 ) -> Result<(), OrchestratorError> {
     if saved.tool_use_ids.len() != saved.call.operations.len()
         || saved.original_blocks.is_empty()
-        || saved
-            .original_blocks
-            .iter()
-            .any(|block| computer_call_id(block) != Some(saved.call.context.call_id.as_str()))
+        || saved.original_blocks.iter().any(|block| {
+            computer_call_id(block).as_deref() != Some(saved.call.context.call_id.as_str())
+        })
         || saved.provider_response_id.trim().is_empty()
         || saved.binding.protocol != protocol_name(saved.call.context.provider)
     {
@@ -485,6 +482,7 @@ async fn restore_marker(
     if let Some(reason) = reason {
         value["reason"] = json!(reason);
     }
+    let value = source_payload(&value)?;
     let mut content = vec![ContentBlock::ProviderContent {
         protocol: protocol.into(),
         value,
@@ -504,6 +502,10 @@ async fn restore_marker(
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         },
     )
     .await;
@@ -642,12 +644,13 @@ fn validate_receipt_row(
     record: &NativeReceiptRecord,
     session_id: SessionId,
 ) -> Result<(), OrchestratorError> {
+    let expected_block = serde_json::to_string(&stored.block).map_err(internal)?;
     if stored.row.session_id != session_id.as_uuid().to_string()
         || !blocks(&stored.message).iter().any(|block| matches!(block,
-            ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_computer_receipt"
-                && value["receipt_id"] == record.receipt_id
-                && value["call_id"] == stored.call.context.call_id
-                && value["block"] == serde_json::to_value(&stored.block).expect("stored block serializes")))
+            ContentBlock::ProviderContent { value, .. } if value.string_at("/type") == Some("lingxi_computer_receipt")
+                && value.string_at("/receipt_id") == Some(record.receipt_id.as_str())
+                && value.string_at("/call_id") == Some(stored.call.context.call_id.as_str())
+                && value.subprojection("/block").ok().and_then(|block| block.to_json_string().ok()).as_deref() == Some(expected_block.as_str())))
     {
         return Err(internal("saved receipt row does not match its durable association"));
     }
@@ -677,12 +680,10 @@ fn restrict_completed_recovery(
         .flat_map(blocks)
         .filter_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value["type"] == "lingxi_computer_binding" =>
+                if value.string_at("/type") == Some("lingxi_computer_binding") =>
             {
-                let call = value
-                    .pointer("/call/context/call_id")
-                    .and_then(Value::as_str)?;
-                let response = value["provider_response_id"].as_str()?;
+                let call = value.string_at("/call/context/call_id")?;
+                let response = value.string_at("/provider_response_id")?;
                 Some((response.to_owned(), call.to_owned()))
             }
             _ => None,
@@ -719,17 +720,15 @@ fn restrict_completed_recovery(
                 let ContentBlock::ProviderContent { value, .. } = block else {
                     return false;
                 };
-                (value["type"] == "lingxi_computer_continuation"
-                    && value
-                        .pointer("/continuation/response_id")
-                        .and_then(Value::as_str)
-                        == Some(response_id))
-                    || (value["type"] == "lingxi_computer_receipt_ack"
-                        && value["provider_response_id"].as_str() == Some(response_id)
-                        && value["call_ids"].as_array().is_some_and(|ids| {
-                            ids.iter().any(|id| {
-                                id.as_str()
-                                    .is_some_and(|id| calls.iter().any(|(_, call)| call == id))
+                (value.string_at("/type") == Some("lingxi_computer_continuation")
+                    && value.string_at("/continuation/response_id") == Some(response_id))
+                    || (value.string_at("/type") == Some("lingxi_computer_receipt_ack")
+                        && value.string_at("/provider_response_id") == Some(response_id)
+                        && value.array_len("/call_ids").is_some_and(|len| {
+                            (0..len).any(|index| {
+                                value.string_at(&format!("/call_ids/{index}")).is_some_and(
+                                    |call_id| calls.iter().any(|(_, call)| call == call_id),
+                                )
                             })
                         }))
             })
@@ -795,15 +794,14 @@ fn validate_received_boundaries(
             .flat_map(blocks)
             .filter_map(|block| match block {
                 ContentBlock::ProviderContent { value, .. }
-                    if value["type"] == "lingxi_computer_continuation" =>
+                    if value.string_at("/type") == Some("lingxi_computer_continuation") =>
                 {
                     Some(value)
                 }
                 _ => None,
             })
         {
-            let reference: wire::ContinuationRef =
-                serde_json::from_value(value["continuation"].clone()).map_err(internal)?;
+            let reference: wire::ContinuationRef = decode_payload_field(value, "/continuation")?;
             if reference.response_id.as_str() == response_id {
                 let mut expected = origin.clone();
                 expected.response_id = wire::ResponseId::new(response_id);
@@ -1032,7 +1030,7 @@ pub(super) async fn rehydrate(
         .collect::<Vec<_>>();
     let has_saved_binding = markers
         .iter()
-        .any(|value| value["type"] == "lingxi_computer_binding");
+        .any(|value| value.string_at("/type") == Some("lingxi_computer_binding"));
     let Some(journal) = &orch.tool_execution_journal else {
         if has_saved_binding {
             return Err(internal("native recovery has no durable journal"));
@@ -1078,10 +1076,9 @@ pub(super) async fn rehydrate(
     let mut continuation = None;
     let mut continuation_binding = None;
     for value in &markers {
-        match value["type"].as_str() {
+        match value.string_at("/type") {
             Some("lingxi_computer_binding") => {
-                let saved: SavedBinding =
-                    serde_json::from_value((*value).clone()).map_err(internal)?;
+                let saved: SavedBinding = decode_payload(value)?;
                 continuation_binding = Some(saved.binding.clone());
                 add_binding(
                     saved,
@@ -1091,8 +1088,7 @@ pub(super) async fn rehydrate(
                 )?;
             }
             Some("lingxi_computer_continuation") => {
-                let saved: wire::ContinuationRef =
-                    serde_json::from_value(value["continuation"].clone()).map_err(internal)?;
+                let saved: wire::ContinuationRef = decode_payload_field(value, "/continuation")?;
                 continuation_binding = Some(NativeContinuationBinding {
                     account: saved.account_scope.clone(),
                     profile: saved.profile_name.clone(),

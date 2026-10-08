@@ -174,8 +174,11 @@ impl Tool for CancelBlockingTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "cancel-tool".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -292,7 +295,7 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
             match &content[0] {
                 ContentBlock::ToolResult {
                     content, is_error, ..
-                } => Some((content.clone(), *is_error)),
+                } => Some((content.clone(), is_error.unwrap_or(false))),
                 _ => None,
             }
         }

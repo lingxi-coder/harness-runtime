@@ -31,12 +31,15 @@ use telemetry::tengu::tool::{
 };
 use telemetry::AnalyticsBus;
 
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{HttpMethod, HttpRequest};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 /// Tool name byte-lock. Asserted by `parity_registry.rs`.
@@ -106,7 +109,7 @@ impl RemoteTriggerTool {
 
 /// Input schema (2.1.263 `de`): eight actions, `trigger_id` / `session_id`
 /// constrained to `^[\w-]+$`, `cursor` at most 1024 chars, `body` an object.
-static SCHEMA: Lazy<Value> = Lazy::new(|| {
+static SCHEMA_VALUE: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -138,6 +141,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["action"]
     })
 });
+static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA_VALUE));
 
 const ACTIONS: [&str; 8] = [
     "list",
@@ -195,20 +199,27 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(REMOTE_TRIGGER_FAILED, md).await;
 }
 
-/// `JSON.stringify(res.data)` — the parsed JSON body re-serialised compactly;
-/// a non-JSON body is stringified as a JSON string.
+/// `JSON.stringify(res.data)` over the flat Source carrier. JSON response
+/// strings retain their UTF-16 code units; malformed response bodies follow
+/// the native JSON-string fallback.
 fn json_stringify_body(body: &str) -> String {
-    match serde_json::from_str::<Value>(body) {
-        Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| body.to_string()),
-        Err(_) => serde_json::to_string(&Value::String(body.to_string()))
-            .unwrap_or_else(|_| body.to_string()),
-    }
+    Utf16JsonProjection::parse(body)
+        .and_then(|value| value.to_json_string())
+        .or_else(|_| source_text_projection(body).to_json_string())
+        .unwrap_or_else(|_| body.to_string())
 }
 
 fn is_id(s: &str) -> bool {
     !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+fn is_id_units(units: &[u16]) -> bool {
+    !units.is_empty()
+        && units
+            .iter()
+            .all(|unit| matches!(*unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x5f | 0x2d))
 }
 
 /// `w(text, max)` — truncate to `max` chars with an ellipsis.
@@ -227,55 +238,296 @@ fn clip(text: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+#[derive(Clone, Default)]
+struct ExactText(Vec<u16>);
+
+impl ExactText {
+    fn from_str(text: &str) -> Self {
+        Self(text.encode_utf16().collect())
+    }
+
+    fn push_str(&mut self, text: &str) {
+        self.0.extend(text.encode_utf16());
+    }
+
+    fn push_units(&mut self, units: &[u16]) {
+        self.0.extend_from_slice(units);
+    }
+
+    fn push_clipped_units(&mut self, units: &[u16], max_chars: usize) {
+        let Some(prefix_end) = utf16_prefix_for_chars(units, max_chars) else {
+            self.push_units(units);
+            return;
+        };
+        let prefix_end = if prefix_end == units.len() {
+            prefix_end
+        } else {
+            utf16_prefix_for_chars(units, max_chars.saturating_sub(1)).unwrap_or(0)
+        };
+        self.push_units(&units[..prefix_end]);
+        if prefix_end < units.len() {
+            self.push_str("…");
+        }
+    }
+
+    fn push_view(&mut self, value: JsonValueView<'_>, max_chars: usize) -> bool {
+        let Some(units) = value.code_units() else {
+            return false;
+        };
+        self.push_clipped_units(units, max_chars);
+        true
+    }
+
+    fn push_json(&mut self, projection: &Utf16JsonProjection, pointer: &str) -> bool {
+        let Ok(value) = projection.subprojection(pointer) else {
+            return false;
+        };
+        let Ok(json) = value.to_json_string() else {
+            return false;
+        };
+        self.push_str(&json);
+        true
+    }
+
+    fn push_optional_view(
+        &mut self,
+        value: Option<JsonValueView<'_>>,
+        max_chars: usize,
+        fallback: &str,
+    ) {
+        if !value.is_some_and(|value| self.push_view(value, max_chars)) {
+            self.push_str(fallback);
+        }
+    }
+
+    fn push_optional_json(
+        &mut self,
+        projection: &Utf16JsonProjection,
+        pointer: &str,
+        fallback: &str,
+    ) {
+        if !self.push_json(projection, pointer) {
+            self.push_str(fallback);
+        }
+    }
+
+    fn char_count(&self) -> usize {
+        utf16_prefix_for_chars(&self.0, usize::MAX)
+            .map(|_| utf16_char_count(&self.0))
+            .unwrap_or(0)
+    }
+
+    fn clipped(mut self, max_chars: usize) -> Self {
+        let units = std::mem::take(&mut self.0);
+        self.push_clipped_units(&units, max_chars);
+        self
+    }
+
+    fn join(lines: &[Self], separator: &str) -> Self {
+        let mut output = Self::default();
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                output.push_str(separator);
+            }
+            output.push_units(&line.0);
+        }
+        output
+    }
+
+    fn to_projection(&self) -> Utf16JsonProjection {
+        source_text_projection_units(&self.0)
+    }
+}
+
+fn utf16_prefix_for_chars(units: &[u16], limit: usize) -> Option<usize> {
+    let mut index = 0;
+    let mut count = 0;
+    while index < units.len() && count < limit {
+        if (0xd800..=0xdbff).contains(&units[index])
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            index += 2;
+        } else {
+            index += 1;
+        }
+        count += 1;
+    }
+    (index < units.len())
+        .then_some(index)
+        .or_else(|| (count <= limit).then_some(index))
+}
+
+fn utf16_char_count(units: &[u16]) -> usize {
+    let mut index = 0;
+    let mut count = 0;
+    while index < units.len() {
+        if (0xd800..=0xdbff).contains(&units[index])
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            index += 2;
+        } else {
+            index += 1;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn source_null() -> Utf16JsonProjection {
+    generated_builtin_result(&json!(null))
+}
+
+fn source_wrapped_text(prefix: &str, value_units: &[u16], suffix: &str) -> Utf16JsonProjection {
+    let mut text = ExactText::from_str(prefix);
+    text.push_units(value_units);
+    text.push_str(suffix);
+    text.to_projection()
+}
+
+fn source_bool(value: bool) -> Utf16JsonProjection {
+    generated_builtin_result(&json!(value))
+}
+
+fn source_object(fields: Vec<(&str, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("local Source result object is valid")
+}
+
+fn source_array(values: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(values).expect("local Source result array is valid")
+}
+
+fn source_string_field(
+    projection: &Utf16JsonProjection,
+    pointer: &str,
+    cap: Option<usize>,
+) -> Utf16JsonProjection {
+    match projection
+        .at_pointer(pointer)
+        .and_then(JsonValueView::code_units)
+    {
+        Some(units) => {
+            let mut text = ExactText::default();
+            text.push_clipped_units(units, cap.unwrap_or(usize::MAX));
+            text.to_projection()
+        }
+        None => source_null(),
+    }
+}
+
+fn source_serialize(projection: &Utf16JsonProjection) -> String {
+    projection
+        .to_json_string()
+        .unwrap_or_else(|_| "null".to_owned())
+}
+
+fn clipped_view(value: Option<JsonValueView<'_>>, max_chars: usize) -> Option<ExactText> {
+    let units = value?.code_units()?;
+    let mut text = ExactText::default();
+    text.push_clipped_units(units, max_chars);
+    Some(text)
+}
+
+fn json_at(projection: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    let value = projection.subprojection(pointer).ok()?;
+    value.to_json_string().ok()
+}
+
+fn push_json_at_or(
+    text: &mut ExactText,
+    projection: &Utf16JsonProjection,
+    pointer: &str,
+    cap: Option<usize>,
+    fallback: &str,
+) {
+    if let Some(json) = json_at(projection, pointer) {
+        let clipped = cap.map_or(json.clone(), |cap| clip(&json, cap));
+        text.push_str(&clipped);
+    } else {
+        text.push_str(fallback);
+    }
+}
+
 /// `H(body)` — fill `type: "user"` / `message.role: "user"` on every
 /// `job_config.ccr.events[]` entry that names neither, so a bare `{message:
 /// {content}}` event is accepted by the server. Returns the body unchanged when
 /// nothing was filled.
-fn normalise_event_fields(body: &Value) -> Value {
-    let Some(events) = body
-        .get("job_config")
-        .and_then(|c| c.get("ccr"))
-        .and_then(|c| c.get("events"))
-        .and_then(Value::as_array)
-    else {
+fn normalise_event_fields(body: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(event_count) = body.array_len("/job_config/ccr/events") else {
         return body.clone();
     };
     let mut changed = false;
-    let filled: Vec<Value> = events
-        .iter()
-        .map(|event| {
-            let Some(data) = event.get("data").and_then(Value::as_object) else {
-                return event.clone();
-            };
-            let Some(message) = data.get("message").and_then(Value::as_object) else {
-                return event.clone();
-            };
-            let type_ok = data.get("type").is_none_or(|t| t.is_null() || t == "user");
-            let role_ok = message
-                .get("role")
-                .is_none_or(|r| r.is_null() || r == "user");
-            let already = data.get("type") == Some(&json!("user"))
-                && message.get("role") == Some(&json!("user"));
-            if !type_ok || !message.contains_key("content") || !role_ok || already {
-                return event.clone();
+    let mut output = body.clone();
+    for index in 0..event_count {
+        let event_path = format!("/job_config/ccr/events/{index}");
+        if output
+            .at_pointer(&event_path)
+            .and_then(JsonValueView::object_entries)
+            .is_none()
+        {
+            continue;
+        }
+        let data_path = format!("{event_path}/data");
+        let Some(mut data) = output.subprojection(&data_path).ok() else {
+            continue;
+        };
+        let Some(mut message) = data.subprojection("/message").ok() else {
+            continue;
+        };
+        if message
+            .at_pointer("")
+            .and_then(JsonValueView::object_entries)
+            .is_none()
+            || message.at_pointer("/content").is_none()
+        {
+            continue;
+        }
+        let data_type = data.at_pointer("/type");
+        let role = message.at_pointer("/role");
+        let type_ok =
+            data_type.is_none_or(|value| value.is_null() || value.as_str() == Some("user"));
+        let role_ok = role.is_none_or(|value| value.is_null() || value.as_str() == Some("user"));
+        let already = data_type.is_some_and(|value| value.as_str() == Some("user"))
+            && role.is_some_and(|value| value.as_str() == Some("user"));
+        if !type_ok || !role_ok || already {
+            continue;
+        }
+        if !already {
+            if !data_type.is_some_and(|value| value.as_str() == Some("user")) {
+                data.set_field("type", source_text_projection("user"))
+                    .expect("event data is an object");
             }
+            if !role.is_some_and(|value| value.as_str() == Some("user")) {
+                message
+                    .set_field("role", source_text_projection("user"))
+                    .expect("event message is an object");
+            }
+            data.set_field("message", message)
+                .expect("event data is an object");
+            let mut event = output
+                .subprojection(&event_path)
+                .expect("event array item exists");
+            event.set_field("data", data).expect("event is an object");
+            output
+                .replace_pointer_projection(&event_path, event)
+                .expect("event array item exists");
             changed = true;
-            let mut data = data.clone();
-            let mut message = message.clone();
-            message.insert("role".into(), json!("user"));
-            data.insert("type".into(), json!("user"));
-            data.insert("message".into(), Value::Object(message));
-            let mut event = event.as_object().cloned().unwrap_or_default();
-            event.insert("data".into(), Value::Object(data));
-            Value::Object(event)
-        })
-        .collect();
-    if !changed {
-        return body.clone();
+        }
     }
-    let mut out = body.clone();
-    out["job_config"]["ccr"]["events"] = Value::Array(filled);
-    out
+    if changed {
+        output
+    } else {
+        body.clone()
+    }
 }
 
 /// `I1(date, {now})` — a coarse relative time ("in 2 hours" / "3 days ago").
@@ -394,284 +646,416 @@ fn iso_seconds(ms: i64) -> String {
 }
 
 /// `pe(trigger)` — the scheduled-summary lines for create/update.
-fn trigger_summary(data: &Value, now_ms: i64) -> Option<String> {
-    let enabled = data.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-    let mut lines = Vec::new();
-    let non_empty = |k: &str| {
-        data.get(k)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+fn trigger_summary(data: &Utf16JsonProjection, now_ms: i64) -> Option<ExactText> {
+    let enabled = data
+        .at_pointer("/enabled")
+        .and_then(JsonValueView::as_bool)
+        .unwrap_or(true);
+    let non_empty = |pointer: &str| {
+        data.at_pointer(pointer)
+            .filter(|value| value.code_units().is_some_and(|units| !units.is_empty()))
     };
-    if let Some(at) = non_empty("next_run_at").and_then(|s| parse_rfc3339_ms(&s)) {
+    let next_run = non_empty("/next_run_at");
+    let run_once = non_empty("/run_once_at");
+    let cron = non_empty("/cron_expression");
+    let mut lines = Vec::new();
+    if let Some(at) = next_run
+        .and_then(JsonValueView::as_str)
+        .and_then(parse_rfc3339_ms)
+    {
         let rel = relative_time(at, now_ms);
         let iso = iso_seconds(at);
-        let what = if non_empty("run_once_at").is_some() {
-            "runs once".to_string()
-        } else if let Some(cron) = non_empty("cron_expression") {
-            format!("next run (cron {cron})")
+        let mut what = ExactText::default();
+        if run_once.is_some() {
+            what.push_str("runs once");
+        } else if let Some(cron) = cron {
+            what.push_str("next run (cron ");
+            what.push_units(cron.code_units().expect("non-empty string").as_ref());
+            what.push_str(")");
         } else {
-            "next run".to_string()
-        };
+            what.push_str("next run");
+        }
+        let mut line = ExactText::default();
         if enabled {
-            lines.push(format!("→ Scheduled: {what} {rel} ({iso} UTC)"));
-            if non_empty("run_once_at").is_some() && at < now_ms {
-                lines.push(
-                    "⚠ next_run_at is in the past — confirm the date/timezone is intended.".into(),
-                );
+            line.push_str("→ Scheduled: ");
+            line.push_units(&what.0);
+            line.push_str(&format!(" {rel} ({iso} UTC)"));
+            lines.push(line);
+            if run_once.is_some() && at < now_ms {
+                lines.push(ExactText::from_str(
+                    "⚠ next_run_at is in the past — confirm the date/timezone is intended.",
+                ));
             }
         } else {
-            lines.push(format!("→ Disabled (next run would be {rel}, {iso} UTC)"));
+            line.push_str(&format!("→ Disabled (next run would be {rel}, {iso} UTC)"));
+            lines.push(line);
         }
     }
-    if let Some(id) = data.get("id").and_then(Value::as_str).filter(|s| is_id(s)) {
-        lines.push(format!(
-            "→ View/manage: {CLAUDE_AI_ORIGIN}/code/routines/{id}"
-        ));
+    if let Some(id) = data
+        .at_pointer("/id")
+        .and_then(JsonValueView::code_units)
+        .filter(|units| is_id_units(units))
+    {
+        let mut line =
+            ExactText::from_str(&format!("→ View/manage: {CLAUDE_AI_ORIGIN}/code/routines/"));
+        line.push_units(id);
+        lines.push(line);
     }
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    (!lines.is_empty()).then(|| ExactText::join(&lines, "\n"))
 }
 
 /// `we(page, trigger_id, cursor)` — trim a `list_runs` page.
-fn summarise_runs(page: &Value, trigger_id: &str, had_cursor: bool) -> (String, Option<String>) {
-    let Some(rows) = page.get("data").and_then(Value::as_array) else {
-        return (
-            json!({"trigger_id": trigger_id, "unreadable_page": true}).to_string(),
-            Some(format!(
-                "{RUNS_NOTE}\n(unexpected runs page shape; the start of the body follows)\n{}",
-                clip(&page.to_string(), 2000)
-            )),
-        );
+fn summarise_runs(
+    page: &Utf16JsonProjection,
+    trigger_id: &str,
+    had_cursor: bool,
+) -> (String, Option<ExactText>) {
+    let Some(row_count) = page.at_pointer("/data").and_then(JsonValueView::array_len) else {
+        let result = source_object(vec![
+            ("trigger_id", source_text_projection(trigger_id)),
+            ("unreadable_page", source_bool(true)),
+        ]);
+        let mut summary = ExactText::from_str(&format!(
+            "{RUNS_NOTE}\n(unexpected runs page shape; the start of the body follows)\n"
+        ));
+        summary.push_str(&clip(&source_serialize(page), 2000));
+        return (source_serialize(&result), Some(summary));
     };
-    let trimmed: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            let Some(id) = row.get("id").and_then(Value::as_str) else {
-                return json!({"unreadable_row": true});
-            };
-            let field = |k: &str| row.get(k).and_then(Value::as_str).map(str::to_string);
-            json!({
-                "id": id,
-                "title": field("title").map(|t| clip(&t, 300)),
-                "status": field("status"),
-                "worker_status": field("worker_status"),
-                "created_at": field("created_at"),
-                "last_event_at": field("last_event_at"),
-            })
-        })
-        .collect();
-    let next_cursor = page.get("next_cursor").cloned().unwrap_or(Value::Null);
+    let mut trimmed = Vec::with_capacity(row_count);
+    for index in 0..row_count {
+        let row_path = format!("/data/{index}");
+        let Some(id_units) = page
+            .at_pointer(&format!("{row_path}/id"))
+            .and_then(JsonValueView::code_units)
+        else {
+            trimmed.push(source_object(vec![("unreadable_row", source_bool(true))]));
+            continue;
+        };
+        trimmed.push(source_object(vec![
+            ("id", source_text_projection_units(id_units)),
+            (
+                "title",
+                source_string_field(page, &format!("{row_path}/title"), Some(300)),
+            ),
+            (
+                "status",
+                source_string_field(page, &format!("{row_path}/status"), None),
+            ),
+            (
+                "worker_status",
+                source_string_field(page, &format!("{row_path}/worker_status"), None),
+            ),
+            (
+                "created_at",
+                source_string_field(page, &format!("{row_path}/created_at"), None),
+            ),
+            (
+                "last_event_at",
+                source_string_field(page, &format!("{row_path}/last_event_at"), None),
+            ),
+        ]));
+    }
+    let next_cursor = page
+        .subprojection("/next_cursor")
+        .unwrap_or_else(|_| source_null());
+    let has_next_cursor = page
+        .at_pointer("/next_cursor")
+        .is_some_and(|cursor| !cursor.is_null());
     let mut lines = Vec::new();
     if trimmed.is_empty() {
-        lines.push(if had_cursor || !next_cursor.is_null() {
-            "→ no run sessions on this page".to_string()
+        lines.push(ExactText::from_str(if had_cursor || has_next_cursor {
+            "→ no run sessions on this page"
         } else {
-            "→ no run sessions recorded for this routine (a fire skipped, refused or failed before a session existed leaves no run; check the routine with get)".to_string()
-        });
+            "→ no run sessions recorded for this routine (a fire skipped, refused or failed before a session existed leaves no run; check the routine with get)"
+        }));
     }
-    if !next_cursor.is_null() {
-        lines.push(format!("→ older runs exist: pass cursor={next_cursor}"));
+    if has_next_cursor {
+        let cursor_json = source_serialize(&next_cursor);
+        lines.push(ExactText::from_str(&format!(
+            "→ older runs exist: pass cursor={cursor_json}"
+        )));
     }
+    let result = source_object(vec![
+        ("note", source_text_projection(RUNS_NOTE)),
+        ("trigger_id", source_text_projection(trigger_id)),
+        ("data", source_array(trimmed)),
+        ("next_cursor", next_cursor),
+    ]);
     (
-        json!({"note": RUNS_NOTE, "trigger_id": trigger_id, "data": trimmed, "next_cursor": next_cursor}).to_string(),
-        (!lines.is_empty()).then(|| lines.join("\n")),
+        source_serialize(&result),
+        (!lines.is_empty()).then(|| ExactText::join(&lines, "\n")),
     )
 }
 
-/// `ie(type, subtype, payload)` — one event → zero or more log lines.
-fn describe_event(payload: &Value) -> Vec<String> {
-    let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    let subtype = payload.get("subtype").and_then(Value::as_str);
-    let s = |v: Option<&Value>, max: usize| v.and_then(Value::as_str).map(|t| clip(t, max));
+/// `ie(type, subtype, payload)` — one Source event → zero or more exact text lines.
+fn describe_event(payload: &Utf16JsonProjection) -> Vec<ExactText> {
+    let kind = payload.string_at("/type").unwrap_or("");
+    let subtype = payload.string_at("/subtype");
     match kind {
         "assistant" | "user" => {
             let cap = if kind == "assistant" { 2000 } else { 1000 };
-            let Some(content) = payload.get("message").and_then(|m| m.get("content")) else {
+            let Some(content) = payload.at_pointer("/message/content") else {
                 return vec![];
             };
-            if let Some(text) = content.as_str() {
-                return vec![format!("{kind}: {}", clip(text, cap))];
+            if let Some(units) = content.code_units() {
+                let mut line = ExactText::from_str(&format!("{kind}: "));
+                line.push_clipped_units(units, cap);
+                return vec![line];
             }
+            let Some(count) = content.array_len() else {
+                return vec![];
+            };
             let mut out = Vec::new();
             let mut thinking = false;
-            for block in content.as_array().map(Vec::as_slice).unwrap_or(&[]) {
-                match block.get("type").and_then(Value::as_str) {
+            for index in 0..count {
+                let path = format!("/message/content/{index}");
+                match payload.string_at(&format!("{path}/type")) {
                     Some("text") => {
-                        if let Some(t) = block.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                out.push(format!("{kind}: {}", clip(t, cap)));
+                        if let Some(value) = payload.at_pointer(&format!("{path}/text")) {
+                            if value.code_units().is_some_and(|units| !units.is_empty()) {
+                                let mut line = ExactText::from_str(&format!("{kind}: "));
+                                line.push_view(value, cap);
+                                out.push(line);
                             }
                         }
                     }
                     Some("thinking" | "redacted_thinking") => thinking = true,
-                    Some("image") => out.push(format!("{kind}: [image]")),
-                    Some("tool_use") => out.push(format!(
-                        "tool_use {}: {}",
-                        block.get("name").and_then(Value::as_str).unwrap_or("?"),
-                        clip(
-                            &block.get("input").cloned().unwrap_or(json!({})).to_string(),
-                            300
-                        )
-                    )),
-                    Some("tool_result") => {
-                        let body = match block.get("content") {
-                            Some(Value::String(t)) => t.clone(),
-                            Some(Value::Array(parts)) => parts
-                                .iter()
-                                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            _ => String::new(),
-                        };
-                        if block.get("is_error") == Some(&json!(true)) {
-                            out.push(format!("tool_result ERROR: {}", clip(&body, 1500)));
-                        } else {
-                            out.push(format!("tool_result: {}", clip(&body, 400)));
-                        }
+                    Some("image") => out.push(ExactText::from_str(&format!("{kind}: [image]"))),
+                    Some("tool_use") => {
+                        let mut line = ExactText::from_str("tool_use ");
+                        line.push_optional_view(
+                            payload.at_pointer(&format!("{path}/name")),
+                            usize::MAX,
+                            "?",
+                        );
+                        line.push_str(": ");
+                        let input = json_at(payload, &format!("{path}/input"))
+                            .unwrap_or_else(|| "{}".to_owned());
+                        line.push_str(&clip(&input, 300));
+                        out.push(line);
                     }
-                    _ => out.push(format!("{kind}: [unreadable content block]")),
+                    Some("tool_result") => {
+                        let content_path = format!("{path}/content");
+                        let mut body = ExactText::default();
+                        if let Some(content) = payload.at_pointer(&content_path) {
+                            if let Some(units) = content.code_units() {
+                                body.push_units(units);
+                            } else if let Some(parts) = content.array_len() {
+                                let mut has_text = false;
+                                for part in 0..parts {
+                                    if let Some(text) =
+                                        payload.at_pointer(&format!("{content_path}/{part}/text"))
+                                    {
+                                        if let Some(units) = text.code_units() {
+                                            if has_text {
+                                                body.push_str("\n");
+                                            }
+                                            body.push_units(units);
+                                            has_text = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let is_error = payload
+                            .at_pointer(&format!("{path}/is_error"))
+                            .and_then(JsonValueView::as_bool)
+                            == Some(true);
+                        let mut line = ExactText::from_str(if is_error {
+                            "tool_result ERROR: "
+                        } else {
+                            "tool_result: "
+                        });
+                        line.push_clipped_units(&body.0, if is_error { 1500 } else { 400 });
+                        out.push(line);
+                    }
+                    _ => out.push(ExactText::from_str(&format!(
+                        "{kind}: [unreadable content block]"
+                    ))),
                 }
             }
             if out.is_empty() && thinking {
-                out.push(format!("{kind}: [thinking]"));
+                out.push(ExactText::from_str(&format!("{kind}: [thinking]")));
             }
             out
         }
         "system" => match subtype {
-            Some("init") => vec![format!(
-                "init: model={} cwd={}",
-                s(payload.get("model"), 80).unwrap_or_else(|| "?".into()),
-                s(payload.get("cwd"), 200).unwrap_or_else(|| "?".into())
-            )],
-            Some("compact_boundary") => vec!["— conversation compacted —".into()],
-            Some("permission_denied") => vec![format!(
-                "permission_denied {}{}: {}",
-                s(payload.get("tool_name"), 100).unwrap_or_else(|| "?".into()),
-                s(payload.get("decision_reason_type"), 40)
-                    .map_or(String::new(), |d| format!(" [{d}]")),
-                s(payload.get("decision_reason"), 500)
-                    .or_else(|| s(payload.get("message"), 500))
-                    .unwrap_or_else(|| "?".into())
-            )],
-            Some("api_error") => vec![format!(
-                "api_error: status={} {}",
-                payload
-                    .get("error")
-                    .and_then(|e| e.get("status"))
-                    .map_or("none".to_string(), Value::to_string),
-                s(payload.get("error").and_then(|e| e.get("formatted")), 500)
-                    .or_else(|| s(payload.get("error").and_then(|e| e.get("message")), 500))
-                    .unwrap_or_else(|| "?".into())
-            )],
-            Some("api_retry") => vec![format!(
-                "api_retry {}/{}: status={} error={} retry_in={}",
-                payload.get("attempt").map_or("?".into(), Value::to_string),
-                payload
-                    .get("max_retries")
-                    .map_or("?".into(), Value::to_string),
-                payload
-                    .get("error_status")
-                    .map_or("none".into(), Value::to_string),
-                s(payload.get("error"), 200).unwrap_or_else(|| clip(
-                    &payload.get("error").map_or("?".into(), Value::to_string),
-                    200
-                )),
-                payload
-                    .get("retry_delay_ms")
-                    .and_then(Value::as_f64)
-                    .map_or("?".to_string(), |ms| format!("{}s", (ms / 1000.0).round()))
-            )],
-            _ => s(payload.get("content"), 300)
-                .or_else(|| s(payload.get("message"), 300))
-                .or_else(|| s(payload.get("text"), 300))
-                .or_else(|| s(payload.get("reason"), 300))
-                .map(|t| {
-                    vec![format!(
-                        "system{}: {t}",
-                        subtype.map_or(String::new(), |st| format!("/{st}"))
-                    )]
+            Some("init") => {
+                let mut line = ExactText::from_str("init: model=");
+                line.push_optional_view(payload.at_pointer("/model"), 80, "?");
+                line.push_str(" cwd=");
+                line.push_optional_view(payload.at_pointer("/cwd"), 200, "?");
+                vec![line]
+            }
+            Some("compact_boundary") => vec![ExactText::from_str("— conversation compacted —")],
+            Some("permission_denied") => {
+                let mut line = ExactText::from_str("permission_denied ");
+                line.push_optional_view(payload.at_pointer("/tool_name"), 100, "?");
+                if let Some(decision_type) =
+                    clipped_view(payload.at_pointer("/decision_reason_type"), 40)
+                {
+                    line.push_str(" [");
+                    line.push_units(&decision_type.0);
+                    line.push_str("]");
+                }
+                line.push_str(": ");
+                let reason = clipped_view(payload.at_pointer("/decision_reason"), 500)
+                    .or_else(|| clipped_view(payload.at_pointer("/message"), 500));
+                if let Some(reason) = reason {
+                    line.push_units(&reason.0);
+                } else {
+                    line.push_str("?");
+                }
+                vec![line]
+            }
+            Some("api_error") => {
+                let mut line = ExactText::from_str("api_error: status=");
+                line.push_optional_json(payload, "/error/status", "none");
+                line.push_str(" ");
+                if let Some(message) = clipped_view(payload.at_pointer("/error/formatted"), 500)
+                    .or_else(|| clipped_view(payload.at_pointer("/error/message"), 500))
+                {
+                    line.push_units(&message.0);
+                } else {
+                    line.push_str("?");
+                }
+                vec![line]
+            }
+            Some("api_retry") => {
+                let mut line = ExactText::from_str("api_retry ");
+                line.push_optional_json(payload, "/attempt", "?");
+                line.push_str("/");
+                line.push_optional_json(payload, "/max_retries", "?");
+                line.push_str(": status=");
+                line.push_optional_json(payload, "/error_status", "none");
+                line.push_str(" error=");
+                if let Some(error) = clipped_view(payload.at_pointer("/error"), 200) {
+                    line.push_units(&error.0);
+                } else if let Some(error) = json_at(payload, "/error") {
+                    line.push_str(&clip(&error, 200));
+                } else {
+                    line.push_str("?");
+                }
+                line.push_str(" retry_in=");
+                if let Some(ms) = payload
+                    .at_pointer("/retry_delay_ms")
+                    .and_then(JsonValueView::as_number)
+                {
+                    line.push_str(&format!("{}s", (ms / 1000.0).round()));
+                } else {
+                    line.push_str("?");
+                }
+                vec![line]
+            }
+            _ => {
+                let value = ["/content", "/message", "/text", "/reason"]
+                    .iter()
+                    .find_map(|pointer| clipped_view(payload.at_pointer(pointer), 300));
+                value.map_or_else(Vec::new, |value| {
+                    let mut line = ExactText::from_str("system");
+                    if let Some(subtype) = clipped_view(payload.at_pointer("/subtype"), usize::MAX)
+                    {
+                        line.push_str("/");
+                        line.push_units(&subtype.0);
+                    }
+                    line.push_str(": ");
+                    line.push_units(&value.0);
+                    vec![line]
                 })
-                .unwrap_or_default(),
+            }
         },
         "result" => {
             let duration = payload
-                .get("duration_ms")
-                .and_then(Value::as_f64)
-                .map_or("?".to_string(), |ms| format!("{}s", (ms / 1000.0).round()));
+                .at_pointer("/duration_ms")
+                .and_then(JsonValueView::as_number)
+                .map(|ms| format!("{}s", (ms / 1000.0).round()))
+                .unwrap_or_else(|| "?".to_owned());
             let denials = payload
-                .get("permission_denials")
-                .and_then(Value::as_array)
-                .filter(|d| !d.is_empty())
-                .map_or(String::new(), |d| {
-                    format!(" permission_denials={}", d.len())
-                });
+                .at_pointer("/permission_denials")
+                .and_then(JsonValueView::array_len)
+                .filter(|count| *count > 0)
+                .map(|count| format!(" permission_denials={count}"))
+                .unwrap_or_default();
             let errors = payload
-                .get("errors")
-                .and_then(Value::as_array)
-                .filter(|e| !e.is_empty())
-                .map_or(String::new(), |e| {
-                    format!(
-                        " errors={}",
-                        clip(&Value::Array(e.clone()).to_string(), 1500)
-                    )
-                });
-            let result =
-                s(payload.get("result"), 1000).map_or(String::new(), |r| format!(" — {r}"));
-            vec![format!(
-                "result: {} is_error={} turns={} duration={duration}{denials}{errors}{result}",
-                subtype.unwrap_or("?"),
-                payload.get("is_error").map_or("?".into(), Value::to_string),
-                payload
-                    .get("num_turns")
-                    .map_or("?".into(), Value::to_string),
-            )]
+                .array_len("/errors")
+                .filter(|count| *count > 0)
+                .and_then(|_| json_at(payload, "/errors"))
+                .map(|errors| format!(" errors={}", clip(&errors, 1500)))
+                .unwrap_or_default();
+            let mut line = ExactText::from_str("result: ");
+            line.push_optional_view(payload.at_pointer("/subtype"), usize::MAX, "?");
+            line.push_str(" is_error=");
+            line.push_optional_json(payload, "/is_error", "?");
+            line.push_str(" turns=");
+            line.push_optional_json(payload, "/num_turns", "?");
+            line.push_str(&format!(" duration={duration}{denials}{errors}"));
+            if let Some(result) = clipped_view(payload.at_pointer("/result"), 1000) {
+                line.push_str(" — ");
+                line.push_units(&result.0);
+            }
+            vec![line]
         }
         "env_manager_log" => {
-            let data = payload.get("data").and_then(|d| d.get("data"));
-            s(data.and_then(|d| d.get("content")), 500)
-                .map(|c| {
-                    vec![format!(
-                        "env[{}]: {c}",
-                        s(data.and_then(|d| d.get("level")), 20).unwrap_or_else(|| "info".into())
-                    )]
-                })
-                .unwrap_or_default()
-        }
-        "control_request" => {
-            let req = payload.get("request");
-            match req.and_then(|r| r.get("subtype")).and_then(Value::as_str) {
-                Some("can_use_tool") => vec![format!(
-                    "permission prompt {}: {}",
-                    s(req.and_then(|r| r.get("tool_name")), 100).unwrap_or_else(|| "?".into()),
-                    s(req.and_then(|r| r.get("decision_reason")), 300).unwrap_or_else(|| {
-                        req.and_then(|r| r.get("input"))
-                            .map_or("?".into(), |i| clip(&i.to_string(), 300))
-                    })
-                )],
-                Some("request_user_dialog") => vec![format!(
-                    "dialog prompt: {}",
-                    s(req.and_then(|r| r.get("dialog_kind")), 100).unwrap_or_else(|| "?".into())
-                )],
-                Some("elicitation") => vec![format!(
-                    "MCP prompt {}: {}",
-                    s(req.and_then(|r| r.get("mcp_server_name")), 60).unwrap_or_else(|| "?".into()),
-                    s(req.and_then(|r| r.get("message")), 300).unwrap_or_else(|| "?".into())
-                )],
-                _ => vec![],
-            }
-        }
-        "rate_limit_event" => {
-            let info = payload.get("rate_limit_info");
-            if info.and_then(|i| i.get("status")).and_then(Value::as_str) == Some("rejected") {
-                vec![format!(
-                    "rate_limit: rejected ({}){}",
-                    s(info.and_then(|i| i.get("rateLimitType")), 40).unwrap_or_else(|| "?".into()),
-                    info.and_then(|i| i.get("resetsAt"))
-                        .map_or(String::new(), |r| format!(" resets_at={r}"))
-                )]
+            let Some(content) = clipped_view(payload.at_pointer("/data/data/content"), 500) else {
+                return vec![];
+            };
+            let level = clipped_view(payload.at_pointer("/data/data/level"), 20);
+            let mut line = ExactText::from_str("env[");
+            if let Some(level) = level {
+                line.push_units(&level.0);
             } else {
-                vec![]
+                line.push_str("info");
             }
+            line.push_str("]: ");
+            line.push_units(&content.0);
+            vec![line]
+        }
+        "control_request" => match payload.string_at("/request/subtype") {
+            Some("can_use_tool") => {
+                let mut line = ExactText::from_str("permission prompt ");
+                line.push_optional_view(payload.at_pointer("/request/tool_name"), 100, "?");
+                line.push_str(": ");
+                if let Some(reason) =
+                    clipped_view(payload.at_pointer("/request/decision_reason"), 300)
+                {
+                    line.push_units(&reason.0);
+                } else {
+                    push_json_at_or(&mut line, payload, "/request/input", Some(300), "?");
+                }
+                vec![line]
+            }
+            Some("request_user_dialog") => {
+                let mut line = ExactText::from_str("dialog prompt: ");
+                line.push_optional_view(payload.at_pointer("/request/dialog_kind"), 100, "?");
+                vec![line]
+            }
+            Some("elicitation") => {
+                let mut line = ExactText::from_str("MCP prompt ");
+                line.push_optional_view(payload.at_pointer("/request/mcp_server_name"), 60, "?");
+                line.push_str(": ");
+                line.push_optional_view(payload.at_pointer("/request/message"), 300, "?");
+                vec![line]
+            }
+            _ => vec![],
+        },
+        "rate_limit_event" => {
+            if payload.string_at("/rate_limit_info/status") != Some("rejected") {
+                return vec![];
+            }
+            let mut line = ExactText::from_str("rate_limit: rejected (");
+            line.push_optional_view(
+                payload.at_pointer("/rate_limit_info/rateLimitType"),
+                40,
+                "?",
+            );
+            line.push_str(")");
+            if let Some(reset) =
+                clipped_view(payload.at_pointer("/rate_limit_info/resetsAt"), usize::MAX)
+            {
+                line.push_str(" resets_at=");
+                line.push_units(&reset.0);
+            }
+            vec![line]
         }
         _ => vec![],
     }
@@ -679,66 +1063,107 @@ fn describe_event(payload: &Value) -> Vec<String> {
 
 /// `F(page, budget)` + `ke()` — the condensed run log (newest-first page,
 /// rendered oldest-first, under a size budget).
-fn summarise_run_log(page: &Value, session_id: &str, budget: usize) -> (String, Option<String>) {
-    let Some(rows) = page.get("data").and_then(Value::as_array) else {
-        return (
-            json!({"session_id": session_id, "events_fetched": 0}).to_string(),
-            Some(format!(
-                "{RUNS_NOTE}\n(unexpected events page shape; the start of the body follows)\n{}",
-                clip(&page.to_string(), 2000)
-            )),
-        );
+fn summarise_run_log(
+    page: &Utf16JsonProjection,
+    session_id: &str,
+    budget: usize,
+) -> (String, Option<ExactText>) {
+    let Some(row_count) = page.at_pointer("/data").and_then(JsonValueView::array_len) else {
+        let result = source_object(vec![
+            ("session_id", source_text_projection(session_id)),
+            ("events_fetched", generated_builtin_result(&json!(0))),
+        ]);
+        let mut summary = ExactText::from_str(&format!(
+            "{RUNS_NOTE}\n(unexpected events page shape; the start of the body follows)\n"
+        ));
+        summary.push_str(&clip(&source_serialize(page), 2000));
+        return (source_serialize(&result), Some(summary));
     };
-    let next_cursor = page.get("next_cursor").cloned().unwrap_or(Value::Null);
+    let next_cursor = page
+        .subprojection("/next_cursor")
+        .unwrap_or_else(|_| source_null());
+    let has_next_cursor = page
+        .at_pointer("/next_cursor")
+        .is_some_and(|cursor| !cursor.is_null());
     // `F(page, n - next_cursor.length)` — the caller already reserved `ye` and
     // the session id, so only the cursor is subtracted here.
-    let limit = budget.saturating_sub(next_cursor.to_string().len());
-    let mut kept: Vec<String> = Vec::new();
-    let mut skipped: HashMap<String, usize> = HashMap::new();
+    let limit = budget.saturating_sub(source_serialize(&next_cursor).len());
+    let mut kept: Vec<ExactText> = Vec::new();
+    let mut skipped: HashMap<Vec<u16>, usize> = HashMap::new();
     let mut used = 0usize;
     let mut overflow = 0usize;
-    for row in rows {
-        let payload = row.get("payload").cloned().unwrap_or(Value::Null);
-        let lines = if payload.is_object() {
-            let lines = describe_event(&payload);
-            if lines.is_empty() {
-                let kind = payload
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("untyped");
-                let key = match payload.get("subtype").and_then(Value::as_str) {
-                    Some(st) => format!("{kind}/{st}"),
-                    None => kind.to_string(),
-                };
-                *skipped.entry(key).or_default() += 1;
+    for index in 0..row_count {
+        let row_path = format!("/data/{index}");
+        let payload_path = format!("{row_path}/payload");
+        let Some(payload) = page.subprojection(&payload_path).ok() else {
+            let lines = vec![ExactText::from_str("[unreadable malformed event]")];
+            let block = ExactText::join(&lines, "\n").clipped(RUN_LOG_LINE_CAP);
+            if overflow > 0 || used + block.char_count() + 1 > limit {
+                overflow += 1;
                 continue;
             }
-            lines
-        } else {
-            vec!["[unreadable malformed event]".to_string()]
+            used += block.char_count() + 1;
+            kept.push(block);
+            continue;
         };
+        if payload
+            .at_pointer("")
+            .and_then(JsonValueView::object_entries)
+            .is_none()
+        {
+            let block =
+                ExactText::from_str("[unreadable malformed event]").clipped(RUN_LOG_LINE_CAP);
+            if overflow > 0 || used + block.char_count() + 1 > limit {
+                overflow += 1;
+                continue;
+            }
+            used += block.char_count() + 1;
+            kept.push(block);
+            continue;
+        }
+        let lines = describe_event(&payload);
+        if lines.is_empty() {
+            let kind = payload
+                .at_pointer("/type")
+                .and_then(JsonValueView::code_units)
+                .map(<[u16]>::to_vec)
+                .unwrap_or_else(|| "untyped".encode_utf16().collect());
+            let key = if let Some(subtype) = payload
+                .at_pointer("/subtype")
+                .and_then(JsonValueView::code_units)
+            {
+                let mut key = kind;
+                key.push(u16::from(b'/'));
+                key.extend_from_slice(subtype);
+                key
+            } else {
+                kind
+            };
+            *skipped.entry(key).or_default() += 1;
+            continue;
+        }
         if overflow > 0 {
             overflow += 1;
             continue;
         }
-        let stamp = row
-            .get("created_at")
-            .and_then(Value::as_str)
-            .map_or(String::new(), |t| format!("[{t}] "));
-        let block = clip(
-            &lines
-                .iter()
-                .map(|l| format!("{stamp}{l}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            RUN_LOG_LINE_CAP,
-        );
-        // CHARS, not bytes: `clip` truncates in chars and the ceiling this
-        // budget serves is `max_result_size_chars`. Measuring the gate in bytes
-        // dropped non-ASCII events up to ~3x earlier than intended, while the
-        // final `clip` below overshot the cap by the same factor — the two
-        // errors ran in opposite directions, so neither showed on ASCII.
-        let block_chars = block.chars().count();
+        let mut stamped = Vec::with_capacity(lines.len());
+        for line in lines {
+            let mut block = ExactText::default();
+            if let Some(stamp) = clipped_view(
+                page.at_pointer(&format!("{row_path}/created_at")),
+                usize::MAX,
+            ) {
+                block.push_str("[");
+                block.push_units(&stamp.0);
+                block.push_str("] ");
+            }
+            block.push_units(&line.0);
+            stamped.push(block);
+        }
+        let block = ExactText::join(&stamped, "\n").clipped(RUN_LOG_LINE_CAP);
+        // CHARS, not bytes: the exact UTF-16 carrier counts surrogate pairs as
+        // one displayed character while keeping lone units intact.
+        let block_chars = block.char_count();
         if used + block_chars + 1 > limit {
             overflow += 1;
             continue;
@@ -747,55 +1172,67 @@ fn summarise_run_log(page: &Value, session_id: &str, budget: usize) -> (String, 
         kept.push(block);
     }
     kept.reverse();
-    let mut head = vec![RUNS_NOTE.to_string()];
+    let mut head = vec![ExactText::from_str(RUNS_NOTE)];
     if overflow > 0 {
-        let more = if next_cursor.is_null() {
-            ""
-        } else {
+        let more = if has_next_cursor {
             " — next_cursor continues with events older than this page"
+        } else {
+            ""
         };
-        head.push(if kept.is_empty() {
+        head.push(ExactText::from_str(&if kept.is_empty() {
             format!("(the newest transcript event on this page does not fit the size budget, so none of the page's {overflow} transcript event(s) are shown{more})")
         } else {
             format!("(showing the newest {} transcript event(s) on this page; the {overflow} older one(s) did not fit and are not shown{more})", kept.len())
-        });
+        }));
     }
-    if !next_cursor.is_null() {
-        head.push("(older events exist: pass next_cursor as cursor)".into());
+    if has_next_cursor {
+        head.push(ExactText::from_str(
+            "(older events exist: pass next_cursor as cursor)",
+        ));
     }
     let total_skipped: usize = skipped.values().sum();
     if total_skipped > 0 {
         let mut kinds: Vec<_> = skipped.into_iter().collect();
         kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let shown: Vec<String> = kinds
-            .iter()
-            .take(8)
-            .map(|(k, n)| format!("{} ×{n}", clip(k, 40)))
-            .collect();
-        let mut parts = shown;
-        if kinds.len() > 8 {
-            parts.push(format!("{} other kind(s)", kinds.len() - 8));
+        let mut parts = Vec::new();
+        for (kind, count) in kinds.iter().take(8) {
+            let mut part = ExactText::default();
+            part.push_clipped_units(kind, 40);
+            part.push_str(&format!(" ×{count}"));
+            parts.push(part);
         }
-        head.push(format!(
-            "({total_skipped} non-transcript event(s) on this page skipped: {})",
-            parts.join(", ")
+        if kinds.len() > 8 {
+            parts.push(ExactText::from_str(&format!(
+                "{} other kind(s)",
+                kinds.len() - 8
+            )));
+        }
+        let mut line = ExactText::from_str(&format!(
+            "({total_skipped} non-transcript event(s) on this page skipped: "
         ));
+        line.push_units(&ExactText::join(&parts, ", ").0);
+        line.push_str(")");
+        head.push(line);
     }
     if kept.is_empty() && overflow == 0 {
-        head.push("(no transcript events on this page)".into());
+        head.push(ExactText::from_str("(no transcript events on this page)"));
     }
-    let mut text = head
-        .into_iter()
-        .chain(kept.iter().cloned())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.chars().count() > budget {
-        text = format!("{}…[truncated]", clip(&text, budget.saturating_sub(20)));
+    head.extend(kept.iter().cloned());
+    let mut text = ExactText::join(&head, "\n");
+    if text.char_count() > budget {
+        text = text.clipped(budget.saturating_sub(20));
+        text.push_str("…[truncated]");
     }
-    (
-        json!({"session_id": session_id, "events_fetched": rows.len(), "events_shown": kept.len(), "next_cursor": next_cursor}).to_string(),
-        Some(text),
-    )
+    let result = source_object(vec![
+        ("session_id", source_text_projection(session_id)),
+        (
+            "events_fetched",
+            generated_builtin_result(&json!(row_count)),
+        ),
+        ("events_shown", generated_builtin_result(&json!(kept.len()))),
+        ("next_cursor", next_cursor),
+    ]);
+    (source_serialize(&result), Some(text))
 }
 
 #[async_trait]
@@ -804,12 +1241,20 @@ impl Tool for RemoteTriggerTool {
         REMOTE_TRIGGER_TOOL_NAME
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("manage scheduled cloud agent routines; inspect their run history and logs")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some(("manage scheduled cloud agent routines; inspect their run history and logs").into())
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -827,30 +1272,34 @@ impl Tool for RemoteTriggerTool {
         100_000
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         matches!(
-            input.get("action").and_then(Value::as_str),
+            input.string_at("/action"),
             Some("list" | "get" | "list_runs" | "get_run_log")
         )
     }
 
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "RemoteTrigger drives the claude.ai CCR API in-process".into(),
@@ -861,43 +1310,55 @@ impl Tool for RemoteTriggerTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         PROMPT.into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
+        let action_units = input
+            .string_units("/action")
             .ok_or_else(|| ValidationError("RemoteTrigger: missing or non-string action".into()))?;
-        if !ACTIONS.contains(&action) {
-            return Err(ValidationError(format!(
-                "RemoteTrigger: invalid action '{action}'"
+        let action = match String::from_utf16(&action_units) {
+            Ok(action) => action,
+            Err(_) => {
+                return Err(ValidationError(source_wrapped_text(
+                    "RemoteTrigger: invalid action '",
+                    &action_units,
+                    "'",
+                )));
+            }
+        };
+        if !ACTIONS.contains(&action.as_str()) {
+            return Err(ValidationError(source_wrapped_text(
+                "RemoteTrigger: invalid action '",
+                &action_units,
+                "'",
             )));
         }
         for key in ["trigger_id", "session_id"] {
-            if let Some(v) = input.get(key) {
-                let v = v.as_str().ok_or_else(|| {
-                    ValidationError(format!("RemoteTrigger: {key} must be a string"))
+            let pointer = format!("/{key}");
+            if input.at_pointer(&pointer).is_some() {
+                let v = input.string_at(&pointer).ok_or_else(|| {
+                    ValidationError(format!("RemoteTrigger: {key} must be a string").into())
                 })?;
                 if !is_id(v) {
-                    return Err(ValidationError(format!(
-                        "RemoteTrigger: {key} must match /^[\\w-]+$/"
-                    )));
+                    return Err(ValidationError(
+                        format!("RemoteTrigger: {key} must match /^[\\w-]+$/").into(),
+                    ));
                 }
             }
         }
-        if let Some(cursor) = input.get("cursor") {
-            let cursor = cursor
-                .as_str()
+        if input.at_pointer("/cursor").is_some() {
+            let cursor = input
+                .string_at("/cursor")
                 .ok_or_else(|| ValidationError("RemoteTrigger: cursor must be a string".into()))?;
             if cursor.chars().count() > 1024 {
                 return Err(ValidationError(
@@ -905,8 +1366,12 @@ impl Tool for RemoteTriggerTool {
                 ));
             }
         }
-        if let Some(body) = input.get("body") {
-            if !body.is_object() {
+        if input.at_pointer("/body").is_some() {
+            if input
+                .at_pointer("/body")
+                .and_then(JsonValueView::object_entries)
+                .is_none()
+            {
                 return Err(ValidationError(
                     "RemoteTrigger: body must be a JSON object".into(),
                 ));
@@ -917,35 +1382,26 @@ impl Tool for RemoteTriggerTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let action = match input.get("action").and_then(Value::as_str) {
+        let action = match input.string_at("/action") {
             Some(a) if ACTIONS.contains(&a) => a.to_string(),
             _ => {
                 emit_failed(&bus, "invalid_action", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "RemoteTrigger: missing or invalid action".into(),
+                return Err(invalid_tool_input(
+                    "RemoteTrigger: missing or invalid action",
                 ));
             }
         };
-        let trigger_id = input
-            .get("trigger_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let session_id = input
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let cursor = input
-            .get("cursor")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let body = input.get("body").cloned();
+        let trigger_id = input.string_at("/trigger_id").map(str::to_string);
+        let session_id = input.string_at("/session_id").map(str::to_string);
+        let cursor = input.string_at("/cursor").map(str::to_string);
+        let body = input.subprojection("/body").ok();
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("action".into(), verified_str(&action));
@@ -980,7 +1436,7 @@ impl Tool for RemoteTriggerTool {
             let bus = bus.clone();
             async move {
                 emit_failed(&bus, kind, started.elapsed().as_millis() as u64).await;
-                ToolError::InvalidInput(message.into())
+                invalid_tool_input(message)
             }
         };
         let query = |pairs: Vec<(&str, String)>| -> String {
@@ -993,7 +1449,9 @@ impl Tool for RemoteTriggerTool {
 
         // ===== Method / URL / body dispatch (oracle `switch(o)`) =====
         let mut filled_event_fields = false;
-        let (method, url, data): (HttpMethod, String, Option<Value>) = match action.as_str() {
+        let (method, url, data): (HttpMethod, String, Option<Utf16JsonProjection>) = match action
+            .as_str()
+        {
             "list" => (HttpMethod::Get, base.clone(), None),
             "get" => {
                 let Some(id) = trigger_id.as_deref() else {
@@ -1081,23 +1539,24 @@ impl Tool for RemoteTriggerTool {
                     return Err(fail("run_no_trigger_id", "run requires trigger_id").await);
                 };
                 // `let {trigger_id, ...rest} = body ?? {}` — the body minus trigger_id.
-                let mut rest = body
-                    .clone()
-                    .and_then(|b| b.as_object().cloned())
-                    .unwrap_or_default();
-                rest.remove("trigger_id");
-                (
-                    HttpMethod::Post,
-                    format!("{base}/{id}/run"),
-                    Some(Value::Object(rest)),
-                )
+                let mut rest = body.clone().unwrap_or_else(|| {
+                    Utf16JsonProjection::object(Vec::new()).expect("empty object is valid")
+                });
+                if rest
+                    .at_pointer("")
+                    .and_then(JsonValueView::object_entries)
+                    .is_none()
+                {
+                    rest = Utf16JsonProjection::object(Vec::new()).expect("empty object is valid");
+                }
+                rest.remove_field("trigger_id")
+                    .expect("run body is a Source object");
+                (HttpMethod::Post, format!("{base}/{id}/run"), Some(rest))
             }
             _ => unreachable!("action validated"),
         };
 
-        let request_body = data
-            .as_ref()
-            .map(|d| serde_json::to_string(d).unwrap_or_else(|_| "{}".into()));
+        let request_body = data.as_ref().map(|d| source_serialize(d));
 
         let req = HttpRequest {
             method,
@@ -1127,15 +1586,17 @@ impl Tool for RemoteTriggerTool {
             }
             Err(e) => {
                 emit_failed(&bus, "transport", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!("Remote triggers unavailable: {e}")));
+                return Err(ToolError::Io(
+                    format!("Remote triggers unavailable: {e}").into(),
+                ));
             }
         };
 
         let status = resp.status;
         let success = (200..300).contains(&status);
-        let parsed = serde_json::from_str::<Value>(&resp.body).ok();
+        let parsed = Utf16JsonProjection::parse(&resp.body).ok();
         let mut json = json_stringify_body(&resp.body);
-        let mut summary: Option<String> = None;
+        let mut summary: Option<ExactText> = None;
         if success {
             if let Some(page) = &parsed {
                 if action == "list_runs" {
@@ -1162,21 +1623,19 @@ impl Tool for RemoteTriggerTool {
             let created_id = match action.as_str() {
                 "create" => parsed
                     .as_ref()
-                    .and_then(|p| p.get("id"))
-                    .and_then(Value::as_str)
+                    .and_then(|p| p.string_at("/id"))
                     .map(str::to_string),
                 "create_webhook_trigger" => body
                     .as_ref()
-                    .and_then(|b| b.get("routine_trigger_id"))
-                    .and_then(Value::as_str)
+                    .and_then(|b| b.string_at("/routine_trigger_id"))
                     .map(str::to_string),
                 _ => trigger_id.clone(),
             };
             let has = |k: &str| {
                 body.as_ref()
-                    .and_then(|b| b.get(k))
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.is_empty())
+                    .and_then(|b| b.at_pointer(&format!("/{k}")))
+                    .and_then(JsonValueView::code_units)
+                    .is_some_and(|units| !units.is_empty())
             };
             tracing::info!(
                 event = "tengu_remote_trigger",
@@ -1195,9 +1654,11 @@ impl Tool for RemoteTriggerTool {
                 summary = parsed.as_ref().and_then(|p| trigger_summary(p, now_ms));
             }
             if success && action == "create_webhook_trigger" {
-                summary = created_id
-                    .filter(|id| is_id(id))
-                    .map(|id| format!("→ Fires routine: {CLAUDE_AI_ORIGIN}/code/routines/{id}"));
+                summary = created_id.filter(|id| is_id(id)).map(|id| {
+                    ExactText::from_str(&format!(
+                        "→ Fires routine: {CLAUDE_AI_ORIGIN}/code/routines/{id}"
+                    ))
+                });
             }
         }
 
@@ -1211,24 +1672,36 @@ impl Tool for RemoteTriggerTool {
 
         // `mapToolResultToToolResultBlockParam`: `HTTP ${status}\n${json}` plus
         // `\n\n${summary}` when present.
-        let model_content = match &summary {
-            Some(s) => format!("HTTP {status}\n{json}\n\n{s}"),
-            None => format!("HTTP {status}\n{json}"),
-        };
+        let mut model_content = ExactText::from_str(&format!("HTTP {status}\n{json}"));
+        if let Some(summary) = &summary {
+            model_content.push_str("\n\n");
+            model_content.push_units(&summary.0);
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "status": status,
-                "json": json,
-                "summary": summary,
-                "model_content": model_content,
-            }),
+            data: source_object(vec![
+                ("status", generated_builtin_result(&json!(status))),
+                ("json", source_text_projection(&json)),
+                (
+                    "summary",
+                    summary
+                        .as_ref()
+                        .map_or_else(source_null, ExactText::to_projection),
+                ),
+                ("model_content", model_content.to_projection()),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -1238,6 +1711,10 @@ mod tests {
     use mobile_linux_api::ProcessOutput;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    fn source_json(source: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(source).expect("valid test JSON source")
+    }
 
     /// The run-log size budget must be counted in the SAME unit `clip`
     /// truncates in, and the unit `max_result_size_chars` names: chars.
@@ -1251,30 +1728,42 @@ mod tests {
     #[test]
     fn the_run_log_budget_counts_chars_not_bytes() {
         let event = |text: &str| {
-            json!({
-                "created_at": "2026-09-08T00:00:00Z",
-                "payload": {"type": "user", "message": {"role": "user", "content": text}},
-            })
+            let message = source_object(vec![
+                ("role", source_text_projection("user")),
+                ("content", source_text_projection(text)),
+            ]);
+            let payload = source_object(vec![
+                ("type", source_text_projection("user")),
+                ("message", message),
+            ]);
+            source_object(vec![
+                ("created_at", source_text_projection("2026-09-08T00:00:00Z")),
+                ("payload", payload),
+            ])
         };
         // 37 CJK chars = 111 bytes.
         let wide = "计划任务的转录事件文本内容用于验证预算单位是否正确计算字符数而不是字节数目";
         assert_eq!(wide.chars().count(), 37, "fixture width is load-bearing");
-        let page = json!({"data": [event(wide), event(wide), event(wide), event(wide)]});
+        let page = Utf16JsonProjection::object(vec![(
+            "data".into(),
+            Utf16JsonProjection::array(vec![event(wide), event(wide), event(wide), event(wide)])
+                .expect("event array"),
+        )])
+        .expect("page object");
 
         let budget = 500;
         let (data, summary) = summarise_run_log(&page, "s1", budget);
-        let shown = serde_json::from_str::<Value>(&data).expect("json")["events_shown"]
-            .as_u64()
-            .expect("events_shown");
+        let result = source_json(&data);
+        let shown = result.number_at("/events_shown").expect("events_shown") as u64;
         assert_eq!(
             shown, 4,
             "all four fit in chars; a byte-counted gate drops the tail",
         );
         let summary = summary.expect("a summary");
         assert!(
-            summary.chars().count() <= budget,
+            summary.char_count() <= budget,
             "the summary must respect the budget in chars ({} > {budget})",
-            summary.chars().count(),
+            summary.char_count(),
         );
     }
 
@@ -1374,12 +1863,13 @@ mod tests {
     #[test]
     fn name_and_schema_locked() {
         assert_eq!(REMOTE_TRIGGER_TOOL_NAME, "RemoteTrigger");
-        assert_eq!(SCHEMA["properties"]["action"]["enum"][0], json!("list"));
+        assert_eq!(SCHEMA.string_at("/properties/action/enum/0"), Some("list"));
         assert_eq!(
-            SCHEMA["properties"]["trigger_id"]["pattern"],
-            json!("^[\\w-]+$")
+            SCHEMA.string_at("/properties/trigger_id/pattern"),
+            Some("^[\\w-]+$")
         );
-        assert_eq!(SCHEMA["required"], json!(["action"]));
+        assert_eq!(SCHEMA.string_at("/required/0"), Some("action"));
+        assert_eq!(SCHEMA.array_len("/required"), Some(1));
     }
 
     #[test]
@@ -1387,13 +1877,66 @@ mod tests {
         let tool = tool_with(RecordingHttp::new(200, "{}"), None);
         assert!(tool.should_defer());
         assert_eq!(tool.max_result_size_chars(), 100_000);
-        assert!(tool.is_concurrency_safe(&json!({})));
-        assert!(tool.is_read_only(&json!({"action": "list"})));
-        assert!(tool.is_read_only(&json!({"action": "get"})));
-        assert!(!tool.is_read_only(&json!({"action": "create"})));
-        assert!(!tool.is_read_only(&json!({"action": "update"})));
-        assert!(!tool.is_read_only(&json!({"action": "run"})));
-        assert!(tool.is_open_world(&json!({})));
+        assert!(tool.is_concurrency_safe(&source_json("{}")));
+        assert!(tool.is_read_only(&source_json(r#"{"action":"list"}"#)));
+        assert!(tool.is_read_only(&source_json(r#"{"action":"get"}"#)));
+        assert!(!tool.is_read_only(&source_json(r#"{"action":"create"}"#)));
+        assert!(!tool.is_read_only(&source_json(r#"{"action":"update"}"#)));
+        assert!(!tool.is_read_only(&source_json(r#"{"action":"run"}"#)));
+        assert!(tool.is_open_world(&source_json("{}")));
+    }
+
+    #[tokio::test]
+    async fn invalid_action_diagnostic_keeps_lone_utf16_units() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), None);
+        let error = tool
+            .validate_input(&source_json(r#"{"action":"\ud800"}"#), &fresh_ctx())
+            .await
+            .expect_err("a lone-surrogate action is not a supported action");
+        let expected =
+            Utf16JsonProjection::parse(r#""RemoteTrigger: invalid action '\ud800'""#).unwrap();
+        assert_eq!(error.0, expected);
+    }
+
+    #[test]
+    fn event_normalization_keeps_opaque_lone_surrogates() {
+        let body = source_json(
+            r#"{"job_config":{"ccr":{"events":[{"data":{"message":{"content":"\ud800"}}}]}}}"#,
+        );
+        let normalized = normalise_event_fields(&body);
+        assert_eq!(
+            normalized.string_units("/job_config/ccr/events/0/data/message/content"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            normalized.string_at("/job_config/ccr/events/0/data/type"),
+            Some("user")
+        );
+        assert_eq!(
+            normalized.string_at("/job_config/ccr/events/0/data/message/role"),
+            Some("user")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_body_and_response_keep_escaped_lone_surrogates() {
+        let http = RecordingHttp::new(200, r#"{"payload":"\ud800"}"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
+        let out = tool
+            .call(
+                source_json(r#"{"action":"create","body":{"payload":"\ud800"}}"#),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("opaque Source fields are accepted");
+        let request = http.take();
+        assert_eq!(request.body.as_deref(), Some(r#"{"payload":"\ud800"}"#));
+        assert_eq!(out.data.string_at("/json"), Some(r#"{"payload":"\ud800"}"#));
+        assert_eq!(
+            out.data.string_units("/json"),
+            Some(r#"{"payload":"\ud800"}"#.encode_utf16().collect())
+        );
     }
 
     #[tokio::test]
@@ -1401,7 +1944,7 @@ mod tests {
         let http = RecordingHttp::new(200, r#"[{"id":"t1"}]"#);
         let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         let out = tool
-            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"list"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         let req = http.take();
@@ -1418,8 +1961,8 @@ mod tests {
         assert_eq!(header(&req, "x-organization-uuid"), Some("org-123"));
         assert_eq!(req.timeout, Some(Duration::from_secs(20)));
         // Output { status, json } and compact re-serialization.
-        assert_eq!(out.data["status"], json!(200));
-        assert_eq!(out.data["json"], json!(r#"[{"id":"t1"}]"#));
+        assert_eq!(out.data.number_at("/status"), Some(200.0));
+        assert_eq!(out.data.string_at("/json"), Some(r#"[{"id":"t1"}]"#));
     }
 
     #[tokio::test]
@@ -1427,7 +1970,7 @@ mod tests {
         let http = RecordingHttp::new(200, r#"{"id":"t1"}"#);
         let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         tool.call(
-            json!({"action": "get", "trigger_id": "t1"}),
+            source_json(r#"{"action":"get","trigger_id":"t1"}"#),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1444,7 +1987,7 @@ mod tests {
         let http = RecordingHttp::new(201, r#"{"id":"new"}"#);
         let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         tool.call(
-            json!({"action": "create", "body": {"name": "deploy"}}),
+            source_json(r#"{"action":"create","body":{"name":"deploy"}}"#),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1461,7 +2004,7 @@ mod tests {
         let http = RecordingHttp::new(200, r#"{"id":"t1"}"#);
         let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         tool.call(
-            json!({"action": "update", "trigger_id": "t1", "body": {"schedule": "0 9 * * *"}}),
+            source_json(r#"{"action":"update","trigger_id":"t1","body":{"schedule":"0 9 * * *"}}"#),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1479,7 +2022,7 @@ mod tests {
         let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         let out = tool
             .call(
-                json!({"action": "run", "trigger_id": "t1"}),
+                source_json(r#"{"action":"run","trigger_id":"t1"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1489,8 +2032,8 @@ mod tests {
         assert_eq!(req.method, HttpMethod::Post);
         assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers/t1/run");
         assert_eq!(req.body.as_deref(), Some("{}"));
-        assert_eq!(out.data["status"], json!(202));
-        assert_eq!(out.data["json"], json!(r#"{"queued":true}"#));
+        assert_eq!(out.data.number_at("/status"), Some(202.0));
+        assert_eq!(out.data.string_at("/json"), Some(r#"{"queued":true}"#));
     }
 
     #[tokio::test]
@@ -1500,14 +2043,17 @@ mod tests {
         let tool = tool_with(http, Some(Arc::new(MockAuth::full())));
         let out = tool
             .call(
-                json!({"action": "get", "trigger_id": "missing"}),
+                source_json(r#"{"action":"get","trigger_id":"missing"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("404 is a result, not an error");
-        assert_eq!(out.data["status"], json!(404));
-        assert_eq!(out.data["json"], json!(r#"{"error":"not found"}"#));
+        assert_eq!(out.data.number_at("/status"), Some(404.0));
+        assert_eq!(
+            out.data.string_at("/json"),
+            Some(r#"{"error":"not found"}"#)
+        );
     }
 
     #[tokio::test]
@@ -1517,7 +2063,7 @@ mod tests {
             Some(Arc::new(MockAuth::full())),
         );
         let err = tool
-            .call(json!({"action": "get"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"get"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing trigger_id");
         assert!(format!("{err}").contains("get requires trigger_id"));
@@ -1530,7 +2076,11 @@ mod tests {
             Some(Arc::new(MockAuth::full())),
         );
         let err = tool
-            .call(json!({"action": "create"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_json(r#"{"action":"create"}"#),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("missing body");
         assert!(format!("{err}").contains("create requires body"));
@@ -1544,7 +2094,7 @@ mod tests {
         );
         let err = tool
             .call(
-                json!({"action": "update", "body": {}}),
+                source_json(r#"{"action":"update","body":{}}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1553,7 +2103,7 @@ mod tests {
         assert!(format!("{err}").contains("update requires trigger_id"));
         let err = tool
             .call(
-                json!({"action": "update", "trigger_id": "t1"}),
+                source_json(r#"{"action":"update","trigger_id":"t1"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1569,7 +2119,7 @@ mod tests {
             Some(Arc::new(MockAuth::full())),
         );
         let err = tool
-            .call(json!({"action": "run"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"run"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing trigger_id");
         assert!(format!("{err}").contains("run requires trigger_id"));
@@ -1580,7 +2130,7 @@ mod tests {
         // No auth provider at all.
         let tool = tool_with(RecordingHttp::new(200, "{}"), None);
         let err = tool
-            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"list"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("no token");
         assert_eq!(
@@ -1596,7 +2146,7 @@ mod tests {
         });
         let tool = tool_with(RecordingHttp::new(200, "{}"), Some(auth));
         let err = tool
-            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"list"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("no token");
         assert!(format!("{err}")
@@ -1612,7 +2162,7 @@ mod tests {
         });
         let tool = tool_with(RecordingHttp::new(200, "{}"), Some(auth));
         let err = tool
-            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"list"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect_err("no org");
         assert_eq!(
@@ -1627,9 +2177,9 @@ mod tests {
         let http = RecordingHttp::new(200, "plain text");
         let tool = tool_with(http, Some(Arc::new(MockAuth::full())));
         let out = tool
-            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .call(source_json(r#"{"action":"list"}"#), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["json"], json!("\"plain text\""));
+        assert_eq!(out.data.string_at("/json"), Some("\"plain text\""));
     }
 }

@@ -7,7 +7,59 @@ mod tests {
     use super::*;
     use lingxi_core::types::{MediaAnalysis, MediaObservation, MessageId, ToolUseId};
 
+    fn projection(value: serde_json::Value) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&value)
+            .expect("test JSON is valid")
+    }
+
+    fn raw_projection(source: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
+            .expect("test source is valid JSON")
+    }
+
+    fn projected_value(
+        projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> serde_json::Value {
+        serde_json::from_str(&projection.to_json_string().expect("valid test projection"))
+            .expect("projection is valid JSON")
+    }
+
     // ── to_llm_messages ───────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_content_and_tool_input_keep_exact_utf16_source_at_sdk_boundary() {
+        let provider_source = r#"{"type":"future_block","payload":"\ud800"}"#;
+        let tool_input_source = r#"{"query":"\udfff","nested":{"n":1}}"#;
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ProtoBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: raw_projection(provider_source),
+                },
+                ProtoBlock::ToolUse {
+                    id: ToolUseId::from("toolu_source"),
+                    name: "Lookup".into(),
+                    input: raw_projection(tool_input_source),
+                    provider_id: None,
+                },
+            ],
+            stop_reason: None,
+            resumable: None,
+        };
+
+        let converted = to_llm_messages(vec![message]).unwrap();
+        assert!(matches!(
+            &converted[0].content[0],
+            LlmBlock::ProviderContent { value, .. }
+                if value.as_json_source() == provider_source
+        ));
+        assert!(matches!(
+            &converted[0].content[1],
+            LlmBlock::ToolCall { input, .. }
+                if input.as_json_source() == tool_input_source
+        ));
+    }
 
     #[test]
     fn text_block_maps_to_llm_text_with_no_cache_control() {
@@ -15,17 +67,22 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::Text { text, cache_control: None } if text == "hello"
+            LlmBlock::Text { text, cache_control: None, ..} if text == "hello"
         ));
     }
 
@@ -38,17 +95,18 @@ mod tests {
             content: vec![ProtoBlock::ToolUse {
                 id,
                 name: "Read".to_string(),
-                input: serde_json::json!({"path": "/tmp/x"}),
+                input: projection(serde_json::json!({"path": "/tmp/x"})),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert_eq!(result[0].role, "assistant");
         assert!(matches!(
             &result[0].content[0],
             LlmBlock::ToolCall { id, name, input }
-                if id == &id_str && name == "Read" && input["path"] == "/tmp/x"
+                if id == &id_str && name == "Read" && input.string_at("/path").as_deref() == Some("/tmp/x")
         ));
     }
 
@@ -61,10 +119,11 @@ mod tests {
             content: vec![ProtoBlock::ToolUse {
                 id: ToolUseId::from("toolu_01ABCDEF"),
                 name: "Read".to_string(),
-                input: serde_json::json!({"path": "/tmp/x"}),
+                input: projection(serde_json::json!({"path": "/tmp/x"})),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -80,14 +139,18 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
-                content: "file content".to_string(),
-                is_error: false,
+                content: "file content".into(),
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -104,20 +167,24 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id,
-                content: "file content".to_string(),
-                is_error: false,
+                content: "file content".into(),
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { tool_call_id, output, is_error: false, cache_control: None, cache_reference: None }
-                if tool_call_id == &tool_call_id_str && output == &Value::String("file content".to_string())
+            LlmBlock::ToolResult { tool_call_id, output, is_error: Some(false), cache_control: None, cache_reference: None }
+                if tool_call_id == &tool_call_id_str && output.as_json_source() == r#""file content""#
         ));
     }
 
@@ -127,19 +194,26 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
-                content: "boom".to_string(),
-                is_error: true,
+                content: "boom".into(),
+                is_error: Some(true),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { is_error: true, .. }
+            LlmBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
         ));
     }
 
@@ -152,6 +226,7 @@ mod tests {
                 signature: Some("sig_abc".to_string()),
             }],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -177,6 +252,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -198,6 +277,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -233,11 +316,16 @@ mod tests {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         let LlmBlock::Text {
             text,
             cache_control,
+            ..
         } = &result[0].content[0]
         else {
             panic!("media analysis should become text");
@@ -258,6 +346,7 @@ mod tests {
                 data: "enc==".to_string(),
             }],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -273,15 +362,16 @@ mod tests {
             content: vec![ProtoBlock::ServerToolUse {
                 id: "srvtoolu_01".to_string(),
                 name: "web_search".to_string(),
-                input: serde_json::json!({"query": "rust"}),
+                input: projection(serde_json::json!({"query": "rust"})),
             }],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
             LlmBlock::ServerToolUse { id, name, input }
-                if id == "srvtoolu_01" && name == "web_search" && input["query"] == "rust"
+                if id == "srvtoolu_01" && name == "web_search" && input.string_at("/query").as_deref() == Some("rust")
         ));
     }
 
@@ -296,11 +386,12 @@ mod tests {
                 },
                 ProtoBlock::AdvisorToolResult {
                     tool_use_id: "srvtoolu_01".to_string(),
-                    content: serde_json::json!("ok"),
+                    content: projection(serde_json::json!("ok")),
                     is_error: true,
                 },
             ],
             stop_reason: None,
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -311,7 +402,7 @@ mod tests {
         assert!(matches!(
             &result[0].content[1],
             LlmBlock::AdvisorToolResult { tool_use_id, content, is_error }
-                if tool_use_id == "srvtoolu_01" && content == "ok" && *is_error
+                if tool_use_id == "srvtoolu_01" && content.string_at("").as_deref() == Some("ok") && *is_error
         ));
     }
 
@@ -324,15 +415,17 @@ mod tests {
             content: vec![
                 ProtoBlock::Text {
                     text: "sure".to_string(),
+                    citations: None,
                 },
                 ProtoBlock::ToolUse {
                     id,
                     name: "Read".to_string(),
-                    input: serde_json::json!({"path": "/x"}),
+                    input: projection(serde_json::json!({"path": "/x"})),
                     provider_id: None,
                 },
             ],
             stop_reason: Some("tool_use".to_string()),
+            resumable: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert_eq!(result.len(), 1);
@@ -366,6 +459,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -379,9 +476,10 @@ mod tests {
     fn system_message_rejected_with_invalid_request() {
         let msg = ConversationMessage::System {
             id: MessageId::new(),
-            content: "you are a helpful assistant".to_string(),
+            content: "you are a helpful assistant".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
@@ -394,17 +492,24 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hi".to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         };
         let result = to_llm_messages(vec![user, assistant]).unwrap();
         assert_eq!(result[0].role, "user");
@@ -413,64 +518,44 @@ mod tests {
 
     // ── to_tool_declarations ─────────────────────────────────────────────────
 
+    fn source_tool(
+        description: &str,
+        input_schema: &str,
+    ) -> lingxi_core::host::SourceToolWireDefinition {
+        lingxi_core::host::SourceToolWireDefinition {
+            name: "Read".into(),
+            description: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(description)
+                .unwrap(),
+            input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(input_schema)
+                .unwrap(),
+            strict: true,
+            defer_loading: true,
+        }
+    }
+
     #[test]
-    fn valid_tool_declaration_converts_successfully() {
-        let tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file",
-            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
-        })];
+    fn source_tool_declaration_preserves_exact_string_and_schema_json() {
+        let description = r#""Read \ud800 a file""#;
+        let schema = r#"{"type":"object","properties":{"path":{"type":"string"}}}"#;
+        let tools = vec![source_tool(description, schema)];
         let result = to_tool_declarations(tools).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "Read");
-        assert_eq!(result[0].description, "Read a file");
-        assert_eq!(result[0].input_schema["type"], "object");
+        assert_eq!(result[0].description.as_json_source(), description);
+        assert_eq!(result[0].input_schema.as_json_source(), schema);
+        assert!(result[0].strict);
+        assert!(result[0].defer_loading);
     }
 
     #[test]
-    fn tool_declaration_missing_name_returns_error() {
-        let tools = vec![serde_json::json!({
-            "description": "Read a file",
-            "input_schema": {"type": "object"}
-        })];
-        let err = to_tool_declarations(tools).unwrap_err();
-        assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("name")));
-    }
-
-    #[test]
-    fn tool_declaration_missing_description_returns_error() {
-        let tools = vec![serde_json::json!({
-            "name": "Read",
-            "input_schema": {"type": "object"}
-        })];
+    fn source_tool_declaration_rejects_non_string_description() {
+        let mut tool = source_tool(r#""Read a file""#, r#"{"type":"object"}"#);
+        tool.description =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap();
+        let tools = vec![tool];
         let err = to_tool_declarations(tools).unwrap_err();
         assert!(
             matches!(err, LlmError::InvalidRequest { message } if message.contains("description"))
-        );
-    }
-
-    #[test]
-    fn tool_declaration_missing_input_schema_returns_error() {
-        let tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file"
-        })];
-        let err = to_tool_declarations(tools).unwrap_err();
-        assert!(
-            matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
-        );
-    }
-
-    #[test]
-    fn tool_declaration_null_input_schema_returns_error() {
-        let tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file",
-            "input_schema": null
-        })];
-        let err = to_tool_declarations(tools).unwrap_err();
-        assert!(
-            matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
         );
     }
 
@@ -487,6 +572,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("base64")));
@@ -499,10 +588,15 @@ mod tests {
             id,
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -511,8 +605,10 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -520,7 +616,7 @@ mod tests {
         blocks
             .iter()
             .map(|b| match b {
-                ProtoBlock::Text { text } => text.as_str(),
+                ProtoBlock::Text { text, .. } => text.as_str(),
                 _ => panic!("expected text block"),
             })
             .collect()
@@ -562,9 +658,10 @@ mod tests {
             user(MessageId::new(), "old"),
             ConversationMessage::System {
                 id: MessageId::new(),
-                content: "Conversation compacted".to_string(),
-                subtype: None,
+                content: "Conversation compacted".into(),
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(post_boundary_id, "summary"),
@@ -576,6 +673,41 @@ mod tests {
                 assert_eq!(text_of(content), vec!["summary"]);
             }
             other => panic!("expected post-boundary User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_system_compaction_text_does_not_truncate_model_history() {
+        for notice in [
+            "Conversation compacted",
+            "Conversation compacted: ordinary system notice",
+        ] {
+            let before = MessageId::new();
+            let after = MessageId::new();
+            let normalized = normalize_messages_for_api(vec![
+                user(before, "before notice"),
+                assistant("answer before notice"),
+                ConversationMessage::System {
+                    id: MessageId::new(),
+                    content: notice.into(),
+                    subtype: None,
+                    compact_metadata: None,
+                    model_fallback: None,
+                    refusal_fallback: None,
+                },
+                user(after, "after notice"),
+            ]);
+            assert_eq!(normalized.len(), 3, "ordinary text is not a boundary");
+            assert_eq!(normalized[0].id(), before);
+            assert_eq!(normalized[2].id(), after);
+            let wire = serde_json::to_string(&to_llm_messages(normalized).unwrap()).unwrap();
+            assert!(wire.contains("before notice"));
+            assert!(wire.contains("answer before notice"));
+            assert!(wire.contains("after notice"));
+            assert!(
+                !wire.contains(notice),
+                "system notices remain transcript-only"
+            );
         }
     }
 
@@ -611,17 +743,19 @@ mod tests {
             user(MessageId::new(), "old"),
             ConversationMessage::System {
                 id: MessageId::new(),
-                content: "Conversation compacted".to_string(),
-                subtype: None,
+                content: "Conversation compacted".into(),
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(MessageId::new(), "first summary"),
             ConversationMessage::System {
                 id: MessageId::new(),
-                content: "Conversation compacted".to_string(),
-                subtype: None,
+                content: "Conversation compacted".into(),
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(MessageId::new(), "latest summary"),
@@ -698,14 +832,18 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
     fn tool_result(content: &str) -> ProtoBlock {
         ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
-            content: content.to_string(),
-            is_error: false,
+            content: content.into(),
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }
@@ -754,6 +892,7 @@ mod tests {
                 id,
                 vec![ProtoBlock::Text {
                     text: "hi".to_string(),
+                    citations: None,
                 }],
             ),
             user_blocks(
@@ -762,6 +901,7 @@ mod tests {
                     tool_result("r"),
                     ProtoBlock::Text {
                         text: "after".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -807,6 +947,7 @@ mod tests {
                     tool_result("tr1"),
                     ProtoBlock::Text {
                         text: "X".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -816,6 +957,7 @@ mod tests {
                     tool_result("tr2"),
                     ProtoBlock::Text {
                         text: "Y".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -833,8 +975,8 @@ mod tests {
                         ProtoBlock::ToolResult { content: c0, .. },
                         ProtoBlock::ToolResult { content: c1, .. },
                     ) => {
-                        assert_eq!(c0, "tr1");
-                        assert_eq!(c1, "tr2");
+                        assert_eq!(c0.string_at("").as_deref(), Some("tr1"));
+                        assert_eq!(c1.string_at("").as_deref(), Some("tr2"));
                     }
                     _ => panic!("expected two leading tool_results"),
                 }
@@ -853,6 +995,7 @@ mod tests {
                 id,
                 vec![ProtoBlock::Text {
                     text: "a".to_string(),
+                    citations: None,
                 }],
             ),
             user_blocks(MessageId::new(), vec![tool_result("r")]),
@@ -874,7 +1017,7 @@ mod tests {
         ProtoBlock::ToolUse {
             id: ToolUseId::from(id),
             name: "Read".into(),
-            input: serde_json::json!({}),
+            input: projection(serde_json::json!({})),
             provider_id: None,
         }
     }
@@ -882,7 +1025,7 @@ mod tests {
         ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::from(id),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }
@@ -892,6 +1035,7 @@ mod tests {
             id: MessageId::new(),
             content: blocks,
             stop_reason: None,
+            resumable: None,
         }
     }
     fn usr_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
@@ -901,6 +1045,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -908,7 +1056,10 @@ mod tests {
     #[test]
     fn pairing_clean_turn_is_noop() {
         let out = ensure_tool_result_pairing(vec![
-            usr_blocks(vec![ProtoBlock::Text { text: "go".into() }]),
+            usr_blocks(vec![ProtoBlock::Text {
+                text: "go".into(),
+                citations: None,
+            }]),
             asst_blocks(vec![tu("toolu_a")]),
             usr_blocks(vec![tr("toolu_a")]),
         ]);
@@ -927,6 +1078,7 @@ mod tests {
             asst_blocks(vec![tu("toolu_x")]),
             usr_blocks(vec![ProtoBlock::Text {
                 text: "next".into(),
+                citations: None,
             }]),
         ]);
         let ConversationMessage::User { content, .. } = &out[1] else {
@@ -940,8 +1092,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_use_id.as_str(), "toolu_x");
-                assert!(*is_error);
-                assert_eq!(content, "[Tool result missing due to internal error]");
+                assert!(is_error.unwrap_or(false));
+                assert_eq!(
+                    content.string_at("").as_deref(),
+                    Some("[Tool result missing due to internal error]")
+                );
             }
             other => panic!("expected synthetic tool_result, got {other:?}"),
         }
@@ -976,7 +1131,7 @@ mod tests {
         let ConversationMessage::User { content, .. } = &out[0] else {
             panic!("expected user");
         };
-        assert!(matches!(&content[0], ProtoBlock::Text { text }
+        assert!(matches!(&content[0], ProtoBlock::Text { text, ..}
             if text == "[Orphaned tool result removed due to conversation resume]"));
     }
 
@@ -990,8 +1145,12 @@ mod tests {
         let out = normalize_messages_for_api(vec![
             ConversationMessage::Assistant {
                 id: first,
-                content: vec![ProtoBlock::Text { text: "hi".into() }],
+                content: vec![ProtoBlock::Text {
+                    text: "hi".into(),
+                    citations: None,
+                }],
                 stop_reason: None,
+                resumable: None,
             },
             asst_blocks(vec![tu("toolu_a")]),
         ]);
@@ -1011,9 +1170,15 @@ mod tests {
     #[test]
     fn tool_result_user_separates_assistant_turns_no_merge() {
         let out = normalize_messages_for_api(vec![
-            asst_blocks(vec![ProtoBlock::Text { text: "t1".into() }]),
+            asst_blocks(vec![ProtoBlock::Text {
+                text: "t1".into(),
+                citations: None,
+            }]),
             usr_blocks(vec![tr("toolu_a")]),
-            asst_blocks(vec![ProtoBlock::Text { text: "t2".into() }]),
+            asst_blocks(vec![ProtoBlock::Text {
+                text: "t2".into(),
+                citations: None,
+            }]),
         ]);
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], ConversationMessage::Assistant { .. }));
@@ -1026,12 +1191,15 @@ mod tests {
     #[test]
     fn advisor_and_connector_stripped_redacted_and_server_kept() {
         let out = normalize_messages_for_api(vec![asst_blocks(vec![
-            ProtoBlock::Text { text: "x".into() },
+            ProtoBlock::Text {
+                text: "x".into(),
+                citations: None,
+            },
             ProtoBlock::RedactedThinking { data: "op".into() },
             ProtoBlock::ServerToolUse {
                 id: "s1".into(),
                 name: "web_search".into(),
-                input: serde_json::json!({}),
+                input: projection(serde_json::json!({})),
             },
             ProtoBlock::ConnectorText {
                 connector_text: "c".into(),
@@ -1039,7 +1207,7 @@ mod tests {
             },
             ProtoBlock::AdvisorToolResult {
                 tool_use_id: "s1".into(),
-                content: serde_json::json!({}),
+                content: projection(serde_json::json!({})),
                 is_error: false,
             },
         ])]);
@@ -1055,15 +1223,15 @@ mod tests {
     fn tool_reference_result(names: &[&str]) -> ConversationMessage {
         usr_blocks(vec![ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_search"),
-            content: String::new(),
-            is_error: false,
+            content: String::new().into(),
+            is_error: Some(false),
             provider_tool_use_id: None,
-            content_blocks: Some(
+            content_blocks: Some(projection(serde_json::Value::Array(
                 names
                     .iter()
                     .map(|name| serde_json::json!({"type": "tool_reference", "tool_name": name}))
                     .collect(),
-            ),
+            ))),
         }])
     }
 
@@ -1085,11 +1253,11 @@ mod tests {
             panic!("expected structured tool result");
         };
         assert_eq!(
-            blocks,
-            &[serde_json::json!({
+            projected_value(blocks),
+            serde_json::json!([{
                 "type": "text",
                 "text": "[Tool references removed - tool search not enabled]"
-            })]
+            }])
         );
         assert_eq!(content.len(), 1, "disabled mode adds no turn boundary");
     }
@@ -1113,20 +1281,51 @@ mod tests {
             panic!("expected structured tool result");
         };
         assert_eq!(
-            blocks,
-            &[serde_json::json!({
+            projected_value(blocks),
+            serde_json::json!([{
                 "type": "tool_reference",
                 "tool_name": "mcp__x__read"
-            })]
+            }])
         );
         assert!(matches!(
             &content[1],
-            ProtoBlock::Text { text } if text == "Tool loaded."
+            ProtoBlock::Text { text, ..} if text == "Tool loaded."
         ));
     }
 
     #[test]
-    fn historical_tool_reference_aliases_validate_against_canonical_tools() {
+    fn current_native_tool_aliases_validate_without_old_output_aliases() {
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tool_aliases_2_1_287.json"))
+                .unwrap();
+        assert_eq!(oracle["aliases"].as_object().unwrap().len(), 8);
+        let cases = oracle["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 19);
+        for case in cases {
+            let input = case["input"].as_str().unwrap();
+            let expected = case["expected"].as_str().unwrap();
+            let available = std::collections::HashSet::from([expected.to_owned()]);
+            let out = normalize_messages_for_api_with_tool_search(
+                vec![tool_reference_result(&[input])],
+                true,
+                Some(&available),
+            );
+            let ConversationMessage::User { content, .. } = &out[0] else {
+                panic!("expected user")
+            };
+            let ProtoBlock::ToolResult {
+                content_blocks: Some(blocks),
+                ..
+            } = &content[0]
+            else {
+                panic!("expected tool result")
+            };
+            assert_eq!(
+                projected_value(blocks),
+                serde_json::json!([{"type":"tool_reference", "tool_name":input}]),
+                "native mapped {input} to {expected}"
+            );
+        }
         let available = std::collections::HashSet::from([
             "Agent".to_string(),
             "TaskStop".to_string(),
@@ -1153,6 +1352,71 @@ mod tests {
         else {
             panic!("expected structured tool result")
         };
-        assert_eq!(blocks.len(), 4, "legacy references must not be stripped");
+        assert_eq!(
+            projected_value(blocks),
+            serde_json::json!([
+                serde_json::json!({"type":"tool_reference","tool_name":"Task"}),
+                serde_json::json!({"type":"tool_reference","tool_name":"KillShell"}),
+                serde_json::json!({"type":"tool_reference","tool_name":"Brief"}),
+            ]),
+            "the obsolete BashOutputTool mapping must not authorize a TaskOutput reference"
+        );
+    }
+
+    #[test]
+    fn request_sources_exclude_rows_before_compact_boundary() {
+        let discarded_id = MessageId::new();
+        let current_id = MessageId::new();
+        let messages = ConversationMessagesWithSources::new(vec![
+            user(discarded_id, "discarded before compaction"),
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".into(),
+                subtype: Some("compact_boundary".to_string()),
+                compact_metadata: None,
+                model_fallback: None,
+                refusal_fallback: None,
+            },
+            user(current_id, "current summary"),
+        ]);
+        let normalized =
+            normalize_messages_for_api_with_tool_search_and_sources(messages, true, None);
+        let paired = ensure_tool_result_pairing_with_sources(normalized);
+        let sources = paired.contributing_message_ids();
+        assert!(!sources.contains(&discarded_id));
+        assert!(sources.contains(&current_id));
+    }
+
+    #[test]
+    fn request_sources_follow_blocks_removed_after_user_merge() {
+        let discarded_id = MessageId::new();
+        let retained_id = MessageId::new();
+        let merged = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![
+                ConversationMessage::User {
+                    id: discarded_id,
+                    content: vec![tr("toolu_orphan")],
+                    is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
+                },
+                user(retained_id, "ordinary user content"),
+            ]),
+            true,
+            None,
+        );
+        let paired = ensure_tool_result_pairing_with_sources(merged);
+        let sources = paired.contributing_message_ids();
+        assert!(!sources.contains(&discarded_id));
+        assert!(sources.contains(&retained_id));
+        assert!(matches!(
+            &paired.messages[0],
+            ConversationMessage::User { content, .. }
+                if text_of(content).contains(&"ordinary user content")
+        ));
     }
 }

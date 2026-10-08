@@ -32,7 +32,9 @@ impl BuiltinCommandHandler for HelpHandler {
         let s = render_help_screen();
         let details = format!("{{\"lines\":{}}}", s.matches('\n').count());
         telemetry::emit_command_completed(cmd_evt::HELP_COMPLETED, &details);
-        CommandResult::Done { display: Some(s) }
+        CommandResult::Done {
+            display: Some((s).into()),
+        }
     }
 
     fn name(&self) -> &str {
@@ -52,8 +54,8 @@ mod tests {
     async fn returns_done_with_render_help_screen_output() {
         let h = HelpHandler::new();
         let args = ParsedSlashCommand {
-            name: "help".to_string(),
-            raw_args: String::new(),
+            name: "help".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {

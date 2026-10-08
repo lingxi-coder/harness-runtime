@@ -50,7 +50,9 @@ impl RegistryTaskNotifications {
 impl TaskNotificationProvider for RegistryTaskNotifications {
     fn subscribe_task_lifecycle(
         &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+    ) -> Option<
+        tokio::sync::mpsc::UnboundedReceiver<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    > {
         self.registry.subscribe_task_lifecycle()
     }
 
@@ -149,12 +151,24 @@ mod tests {
     #[tokio::test]
     async fn sdk_lifecycle_relay_emits_without_a_model_turn_and_stops_on_drop() {
         use crate::test_support::*;
-        struct Provider(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>>);
+        struct Provider(
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::UnboundedReceiver<
+                        lingxi_core::types::utf16_json::Utf16JsonProjection,
+                    >,
+                >,
+            >,
+        );
         #[async_trait]
         impl TaskNotificationProvider for Provider {
             fn subscribe_task_lifecycle(
                 &self,
-            ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+            ) -> Option<
+                tokio::sync::mpsc::UnboundedReceiver<
+                    lingxi_core::types::utf16_json::Utf16JsonProjection,
+                >,
+            > {
                 self.0.lock().unwrap().take()
             }
             async fn take_pending_task_notifications(&self) -> Vec<TaskNotification> {
@@ -175,8 +189,10 @@ mod tests {
             std::env::temp_dir(),
         )
         .with_task_notifications(Arc::new(Provider(Mutex::new(Some(receiver)))));
-        let event =
-            serde_json::json!({"type":"system", "subtype":"task_started", "task_id":"b12345678"});
+        let event = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"type":"system","subtype":"task_started","task_id":"b12345678","prompt":"\ud800"}"#,
+        )
+        .unwrap();
         sender.send(event.clone()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while output.lifecycle_event_snapshot().await.is_empty() {
@@ -250,7 +266,11 @@ mod tests {
             std::env::temp_dir(),
         )
         .with_task_notifications(Arc::new(RegistryTaskNotifications::new(registry)));
-        (Arc::new(orch), api, output)
+        (
+            crate::ConversationOrchestrator::into_shared(orch),
+            api,
+            output,
+        )
     }
 
     #[tokio::test]
@@ -283,10 +303,46 @@ mod tests {
             .join("\n");
         assert!(content.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
         assert!(!content.contains(lingxi_core::host::task_notification::IN_HUMAN_TURN_HEADER));
-        assert!(calls[0]
-            .messages
+        assert!(calls[0].messages.iter().all(|message| !matches!(
+            message,
+            lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+        ) || !message.text_content().is_empty()));
+        let native_context = orch.context_attachment_history(&calls[0].messages);
+        assert_eq!(
+            native_context,
+            vec![
+                serde_json::json!({"type":"session_context","context":{}}),
+                serde_json::json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}),
+                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        let normalized =
+            llm_runtime::convert::normalize_messages_for_api(calls[0].messages.clone());
+        let wire = serde_json::to_value(
+            llm_runtime::convert::to_llm_messages(normalized).expect("rewake request converts"),
+        )
+        .unwrap();
+        assert!(
+            wire.as_array().unwrap().iter().all(|message| {
+                message["role"] != "user"
+                    || message["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["text"].as_str().is_some_and(|text| !text.is_empty())
+                                || block["type"] != "text"
+                        })
+                    })
+            }),
+            "the converted request must not contain an empty User message"
+        );
+        let wire_text = wire
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|m| m.is_meta() || !m.text_content().is_empty()));
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wire_text.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
     }
 
     #[tokio::test]

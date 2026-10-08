@@ -57,7 +57,8 @@
 //! lexical form, matching claude-code's exception-swallowing resolver.
 
 use crate::rule::PermissionRuleSource;
-use std::collections::HashSet;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 const PERMISSION_PATH_RESOLUTION_MAX_HOPS: usize = 64;
@@ -141,22 +142,51 @@ pub(crate) fn input_path_field_for_tool(tool_name: &str) -> &'static str {
 /// `tool.getPath(input)`). The field comes from
 /// [`input_path_field_for_tool`]; `Glob`/`Grep` default their search root to
 /// `cwd` when `path` is absent, as `GlobTool.getPath`/`GrepTool.getPath` do.
-/// Returns `None` only when a `file_path`/`notebook_path` field is absent or
-/// non-string (the tool itself would already have failed input validation).
+/// Returns `None` when a required path is absent/non-string or when an exact
+/// source string contains UTF-16 units that cannot be represented as an OS
+/// path. Glob/Grep use `cwd` only for an absent or non-string `path`.
 #[must_use]
 pub fn input_path_for_tool<'a>(
     tool_name: &str,
-    input: &'a serde_json::Value,
+    input: &'a Utf16JsonProjection,
     roots: &FsRoots,
 ) -> Option<std::borrow::Cow<'a, str>> {
     let field = input_path_field_for_tool(tool_name);
-    match input.get(field).and_then(serde_json::Value::as_str) {
-        Some(p) => Some(std::borrow::Cow::Borrowed(p)),
-        // Glob/Grep default their search root to cwd when `path` is omitted.
-        None if matches!(tool_name, "Glob" | "Grep") => Some(std::borrow::Cow::Owned(
-            roots.cwd.to_string_lossy().into_owned(),
-        )),
-        None => None,
+    let value = input.at_pointer("")?.get_property(field);
+    match value {
+        Some(value) if value.code_units().is_some() => {
+            crate::source_input::exact_string(value).map(std::borrow::Cow::Borrowed)
+        }
+        Some(_) => {
+            // Preserve the prior non-string behavior. Local tool validation
+            // rejects malformed field types before execution.
+            matches!(tool_name, "Glob" | "Grep")
+                .then(|| std::borrow::Cow::Owned(roots.cwd.to_string_lossy().into_owned()))
+        }
+        None => {
+            // Glob/Grep default their search root to cwd when `path` is omitted.
+            matches!(tool_name, "Glob" | "Grep")
+                .then(|| std::borrow::Cow::Owned(roots.cwd.to_string_lossy().into_owned()))
+        }
+    }
+}
+
+/// Extract the exact path-field units used by permission matchers. This stays
+/// at the JavaScript-string boundary; callers must not display-decode these
+/// units before matching a rule.
+pub(crate) fn input_path_for_tool_units(
+    tool_name: &str,
+    input: &Utf16JsonProjection,
+    roots: &FsRoots,
+) -> Option<Vec<u16>> {
+    let field = input_path_field_for_tool(tool_name);
+    let value = input.at_pointer("")?.get_property(field);
+    match value {
+        Some(value) if value.code_units().is_some() => Some(value.code_units()?.to_vec()),
+        Some(_) | None if matches!(tool_name, "Glob" | "Grep") => {
+            Some(roots.cwd.to_string_lossy().encode_utf16().collect())
+        }
+        Some(_) | None => None,
     }
 }
 
@@ -237,7 +267,7 @@ pub(crate) fn pattern_with_root(
 /// reuse the SAME lexical expansion claude-code's `expandPath` performs before
 /// the danger-segment scan — keeping the two paths byte-identical.
 pub(crate) fn expand_path(raw: &str, roots: &FsRoots) -> PathBuf {
-    let trimmed = raw.trim();
+    let trimmed = raw.trim_matches(crate::source_input::is_js_trim_char);
     let expanded: PathBuf = if trimmed == "~" {
         roots.home.clone().unwrap_or_else(|| PathBuf::from(trimmed))
     } else if let Some(rest) = trimmed.strip_prefix("~/") {
@@ -272,6 +302,191 @@ fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> PermissionPathForm
         }
     }
     PermissionPathForms::Paths(out)
+}
+
+/// Native's synchronous permission-path walk (`Ro` → `Ia` → `Te`) stops
+/// after this many symlink hops. This is separate from the old containment
+/// resolver's 64-step best-effort loops and from the async changed-file `bge`
+/// set-size limit below.
+const NATIVE_PERMISSION_SYMLINK_HOP_LIMIT: usize = 64;
+
+/// Path spellings returned by Native's synchronous `Ro(e)` permission path
+/// resolution. An unresolved result retains the spellings seen before the
+/// resolver stopped; the direct Read-deny walk checks those partial spellings
+/// before Native later converts unresolved paths into an ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PermissionRulePathForms {
+    pub(crate) spellings: Vec<PathBuf>,
+    pub(crate) landing: Option<PathBuf>,
+    pub(crate) unresolved: bool,
+}
+
+/// Match explicit Read denies against Native's synchronous permission
+/// spellings (`Ro` → `Ia` → `Te`): requested spelling first, leaf-symlink
+/// targets as encountered, then the resolved landing. `Te` is hop-limited,
+/// not emitted-form-limited. On a loop or hop limit, Native returns its partial
+/// spelling set with `unresolved`; its `Ro` fallback may append a canonical
+/// target only when that fallback can resolve one.
+pub(crate) fn permission_rule_path_forms(path: &Path, roots: &FsRoots) -> PermissionRulePathForms {
+    let absolute = expand_path(&path.to_string_lossy(), roots);
+    resolve_native_permission_path_forms(&absolute)
+}
+
+fn resolve_native_permission_path_forms(path: &Path) -> PermissionRulePathForms {
+    let requested = normalize_lexically(path);
+    let mut spellings = vec![requested.clone()];
+    let mut seen_spellings = HashSet::from([requested.clone()]);
+    let (mut current, mut pending) = absolute_root_and_components(&requested);
+    let mut seen_links: HashSet<(PathBuf, Vec<std::ffi::OsString>)> = HashSet::new();
+    let mut symlink_hops = 0_usize;
+    let mut unresolved = false;
+    let mut exhausted_hop_budget = false;
+
+    while let Some(component) = pending.pop_front() {
+        if symlink_hops >= NATIVE_PERMISSION_SYMLINK_HOP_LIMIT {
+            unresolved = true;
+            exhausted_hop_budget = true;
+            break;
+        }
+        let candidate = current.join(&component);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let tail = pending.iter().cloned().collect::<Vec<_>>();
+                if !seen_links.insert((candidate.clone(), tail.clone())) {
+                    unresolved = true;
+                    break;
+                }
+                symlink_hops += 1;
+                let target = match std::fs::read_link(&candidate) {
+                    Ok(target) => target,
+                    Err(_) => {
+                        unresolved = true;
+                        break;
+                    }
+                };
+                let is_leaf_link = tail.is_empty();
+                let mut next = if target.is_absolute() {
+                    target
+                } else {
+                    current.join(target)
+                };
+                for part in &tail {
+                    next.push(part);
+                }
+                let next = normalize_lexically(&next);
+                if is_leaf_link && seen_spellings.insert(next.clone()) {
+                    spellings.push(next.clone());
+                }
+                (current, pending) = absolute_root_and_components(&next);
+            }
+            Ok(_) => current.push(component),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let mut landing = candidate;
+                for part in pending.drain(..) {
+                    landing.push(part);
+                }
+                let landing = normalize_lexically(&landing);
+                push_unique_path(&mut spellings, &mut seen_spellings, landing.clone());
+                return PermissionRulePathForms {
+                    spellings,
+                    landing: Some(landing),
+                    unresolved: false,
+                };
+            }
+            Err(_) => {
+                unresolved = true;
+                break;
+            }
+        }
+    }
+
+    if unresolved {
+        // Native `Qlr` only attempts its canonical fallback when the sync walk
+        // returned an unresolved result other than `Te`'s hop-limit sentinel.
+        // The common loop case reaches that fallback; over-budget paths do not.
+        if !exhausted_hop_budget {
+            if let Ok(canonical) = std::fs::canonicalize(&requested) {
+                push_unique_path(&mut spellings, &mut seen_spellings, canonical);
+            }
+        }
+        return PermissionRulePathForms {
+            spellings,
+            landing: None,
+            unresolved: true,
+        };
+    }
+
+    let landing = current;
+    push_unique_path(&mut spellings, &mut seen_spellings, landing.clone());
+    if let Ok(canonical) = std::fs::canonicalize(&requested) {
+        if canonical != landing {
+            push_or_move_path_to_end(&mut spellings, &mut seen_spellings, canonical);
+        }
+    }
+    PermissionRulePathForms {
+        spellings,
+        landing: Some(landing),
+        unresolved: false,
+    }
+}
+
+fn absolute_root_and_components(path: &Path) -> (PathBuf, VecDeque<std::ffi::OsString>) {
+    let mut root = PathBuf::new();
+    let mut pending = VecDeque::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            std::path::Component::RootDir => root.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !root.pop() {
+                    pending.push_back(component.as_os_str().to_os_string());
+                }
+            }
+            std::path::Component::Normal(part) => pending.push_back(part.to_os_string()),
+        }
+    }
+    (root, pending)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn push_or_move_path_to_end(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if let Some(index) = paths.iter().position(|entry| entry == &path) {
+        paths.remove(index);
+    } else {
+        seen.insert(path.clone());
+    }
+    paths.push(path);
+}
+
+/// Native `Vh` containment: every `To(path)` spelling must be inside some
+/// `To(working_dir)` spelling. The reminder calls this on already expanded
+/// route paths while evaluating restricted and outside-read holds.
+pub(crate) fn native_path_spellings_in_allowed_working_dirs(
+    spellings: &[PathBuf],
+    working_dirs: &[PathBuf],
+    roots: &FsRoots,
+) -> bool {
+    let working_spellings = working_dirs
+        .iter()
+        .flat_map(|working| permission_rule_path_forms(working, roots).spellings)
+        .collect::<Vec<_>>();
+    !working_spellings.is_empty()
+        && spellings.iter().all(|path| {
+            working_spellings
+                .iter()
+                .any(|working| path_in_working_path(path, working, roots))
+        })
 }
 
 fn path_resolution_must_fail_closed(path: &Path) -> bool {
@@ -584,7 +799,13 @@ pub fn test_rule_pattern(
     // `Xn` keeps a `/^[!#]/` remainder unanchored for exactly this reason).
     let (stripped, negated) = match stripped.strip_prefix('!') {
         // `Ki`: a bare `!` is "a negation of every path" and is dropped.
-        Some(rest) if rest.trim().is_empty() => return RulePatternMatch::NoMatch,
+        Some(rest)
+            if rest
+                .trim_matches(crate::source_input::is_js_trim_char)
+                .is_empty() =>
+        {
+            return RulePatternMatch::NoMatch;
+        }
         Some(rest) => (rest, true),
         None => (stripped, false),
     };
@@ -605,6 +826,56 @@ pub fn test_rule_pattern(
     } else {
         RulePatternMatch::Match
     }
+}
+
+/// `test_rule_pattern` over exact source UTF-16 path/pattern strings. The
+/// temporary scalar mapping is collision-free across both inputs and the host
+/// roots, and is used only by the in-memory path/glob matcher. No replacement
+/// or lossy display string enters the rule decision.
+#[must_use]
+pub(crate) fn test_rule_pattern_units(
+    input_path: &[u16],
+    pattern: &[u16],
+    source: PermissionRuleSource,
+    behavior: crate::rule::PermissionBehavior,
+    roots: &FsRoots,
+) -> RulePatternMatch {
+    let cwd = roots
+        .cwd
+        .to_string_lossy()
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let home = roots
+        .home
+        .as_deref()
+        .map(|path| path.to_string_lossy().encode_utf16().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let lingxi_home = roots
+        .lingxi_home
+        .to_string_lossy()
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let input_path = crate::source_input::trim_js_units(input_path);
+    // GitignoreBuilder trims right-side whitespace except escaped trailing
+    // ASCII spaces; reproduce that Source-unit boundary before mapping so
+    // FEFF/NEL do not need non-monotone marker exceptions in path globs.
+    let pattern = crate::source_input::trim_gitignore_end_units(pattern);
+    let groups = [
+        input_path,
+        pattern,
+        cwd.as_slice(),
+        home.as_slice(),
+        lingxi_home.as_slice(),
+    ];
+    let Some(mapped) = crate::source_input::exact_operation_strings(&groups) else {
+        return RulePatternMatch::NoMatch;
+    };
+    let mapped_roots = FsRoots {
+        cwd: PathBuf::from(&mapped[2]),
+        home: roots.home.as_ref().map(|_| PathBuf::from(&mapped[3])),
+        lingxi_home: PathBuf::from(&mapped[4]),
+    };
+    test_rule_pattern(&mapped[0], &mapped[1], source, behavior, &mapped_roots)
 }
 
 fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::Gitignore>> {
@@ -801,6 +1072,12 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    macro_rules! source_json {
+        ($($tokens:tt)+) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+        };
+    }
+
     #[cfg(unix)]
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -840,6 +1117,135 @@ mod tests {
         behavior: crate::rule::PermissionBehavior,
     ) -> bool {
         path_matches_rule_pattern(input, pattern, source, behavior, &roots())
+    }
+
+    fn path_units(prefix: &str, middle: &[u16], suffix: &str) -> Vec<u16> {
+        let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+        units.extend_from_slice(middle);
+        units.extend(suffix.encode_utf16());
+        units
+    }
+
+    fn pattern_units(prefix: &str, middle: &[u16], suffix: &str) -> Vec<u16> {
+        path_units(prefix, middle, suffix)
+    }
+
+    #[test]
+    fn source_glob_ranges_preserve_unit_order_across_ascii_and_private_use_gap() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let mut pattern = "src/[A-".encode_utf16().collect::<Vec<_>>();
+        pattern.push(0x0080);
+        pattern.extend("].txt".encode_utf16());
+        let ascii_in_range = "/proj/src/A.txt".encode_utf16().collect::<Vec<_>>();
+        let first_non_ascii = path_units("/proj/src/", &[0x0080], ".txt");
+        let just_above_range = path_units("/proj/src/", &[0x0081], ".txt");
+
+        assert_eq!(
+            test_rule_pattern_units(&ascii_in_range, &pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&first_non_ascii, &pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&just_above_range, &pattern, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
+
+        let literal = "src/A.txt".encode_utf16().collect::<Vec<_>>();
+        let lower_case = "/proj/src/a.txt".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            test_rule_pattern_units(&lower_case, &literal, source, behavior, &roots()),
+            RulePatternMatch::NoMatch,
+            "path globs stay case-sensitive"
+        );
+    }
+
+    #[test]
+    fn source_path_question_wildcard_counts_each_paired_surrogate_unit() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let emoji = "😀".encode_utf16().collect::<Vec<_>>();
+        let path = path_units("/proj/src/", &emoji, ".txt");
+        let two_units = "src/??.txt".encode_utf16().collect::<Vec<_>>();
+        let one_unit = "src/?.txt".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            test_rule_pattern_units(&path, &two_units, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&path, &one_unit, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn source_path_matching_keeps_bmp_and_supplementary_private_use_units_exact() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let bmp_pua = [0xe000u16];
+        let bmp_path = path_units("/proj/src/", &bmp_pua, ".txt");
+        let bmp_pattern = pattern_units("src/", &bmp_pua, ".txt");
+        assert_eq!(
+            test_rule_pattern_units(&bmp_path, &bmp_pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+
+        let supplementary_pua = [0xdb80u16, 0xdc00u16]; // U+F0000
+        let supplementary_path = path_units("/proj/src/", &supplementary_pua, ".txt");
+        let supplementary_pattern = pattern_units("src/", &supplementary_pua, ".txt");
+        let different = path_units("/proj/src/", &[0xdb80u16, 0xdc01u16], ".txt");
+        assert_eq!(
+            test_rule_pattern_units(
+                &supplementary_path,
+                &supplementary_pattern,
+                source,
+                behavior,
+                &roots()
+            ),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(
+                &different,
+                &supplementary_pattern,
+                source,
+                behavior,
+                &roots()
+            ),
+            RulePatternMatch::NoMatch
+        );
+    }
+
+    #[test]
+    fn source_path_trim_removes_feff_but_preserves_nel() {
+        let source = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let behavior = crate::rule::PermissionBehavior::Deny;
+        let pattern = "src/file.txt".encode_utf16().collect::<Vec<_>>();
+        let with_feff = path_units("/proj/src/file.txt", &[0xfeff], "");
+        let with_nel = path_units("/proj/src/file.txt", &[0x0085], "");
+        assert_eq!(
+            test_rule_pattern_units(&with_feff, &pattern, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&with_nel, &pattern, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
+
+        let pattern_feff = path_units("src/file.txt", &[0xfeff], "");
+        let pattern_nel = path_units("src/file.txt", &[0x0085], "");
+        let ordinary_path = "/proj/src/file.txt".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            test_rule_pattern_units(&ordinary_path, &pattern_feff, source, behavior, &roots()),
+            RulePatternMatch::Match
+        );
+        assert_eq!(
+            test_rule_pattern_units(&ordinary_path, &pattern_nel, source, behavior, &roots()),
+            RulePatternMatch::NoMatch
+        );
     }
 
     #[test]
@@ -1113,35 +1519,47 @@ mod tests {
     #[test]
     fn input_path_extraction_per_tool() {
         let r = roots();
-        let notebook = serde_json::json!({ "notebook_path": "/proj/a.ipynb" });
+        let notebook = source_json!({ "notebook_path": "/proj/a.ipynb" });
         assert_eq!(
             input_path_for_tool("NotebookEdit", &notebook, &r).as_deref(),
             Some("/proj/a.ipynb")
         );
-        let edit = serde_json::json!({ "file_path": "/proj/x.rs" });
+        let edit = source_json!({ "file_path": "/proj/x.rs" });
         assert_eq!(
             input_path_for_tool("Edit", &edit, &r).as_deref(),
             Some("/proj/x.rs")
         );
-        let grep = serde_json::json!({ "path": "/proj/sub" });
+        let grep = source_json!({ "path": "/proj/sub" });
         assert_eq!(
             input_path_for_tool("Grep", &grep, &r).as_deref(),
             Some("/proj/sub")
         );
-        let lsp = serde_json::json!({ "filePath": "/proj/src/lib.rs" });
+        let lsp = source_json!({ "filePath": "/proj/src/lib.rs" });
         assert_eq!(
             input_path_for_tool("LSP", &lsp, &r).as_deref(),
             Some("/proj/src/lib.rs")
         );
         // Glob/Grep default to cwd when `path` is absent.
-        let grep_no_path = serde_json::json!({ "pattern": "x" });
+        let grep_no_path = source_json!({ "pattern": "x" });
         assert_eq!(
             input_path_for_tool("Grep", &grep_no_path, &r).as_deref(),
             Some("/proj")
         );
         // Missing required path → None.
-        let empty = serde_json::json!({});
+        let empty = source_json!({});
         assert!(input_path_for_tool("Edit", &empty, &r).is_none());
+    }
+
+    #[test]
+    fn input_path_rejects_unpaired_source_units_without_replacement() {
+        let r = roots();
+        let input = Utf16JsonProjection::parse(r#"{"file_path":"/proj/\ud800.rs"}"#).unwrap();
+        assert!(input.string_units("/file_path").unwrap().contains(&0xd800));
+        assert!(input_path_for_tool("Edit", &input, &r).is_none());
+
+        let grep = Utf16JsonProjection::parse(r#"{"path":"\ud800"}"#).unwrap();
+        assert!(grep.string_units("/path").unwrap().contains(&0xd800));
+        assert!(input_path_for_tool("Grep", &grep, &r).is_none());
     }
 
     // ── Batch 1: working-dir containment ──────────────────────────────────

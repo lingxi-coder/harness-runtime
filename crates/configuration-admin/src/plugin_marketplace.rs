@@ -27,7 +27,10 @@
 
 use std::path::{Path, PathBuf};
 
-use migrations::settings_update::{read_settings_map, update_settings};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use migrations::settings_update::{
+    read_settings_source, update_settings_source_with_before_publish,
+};
 use serde_json::{Map, Value};
 
 use crate::plugin_policy;
@@ -179,21 +182,30 @@ fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), St
     })
 }
 
-/// The `extraKnownMarketplaces` declaration map from a scope's settings file.
-fn read_extra(scope: WritableScope, home: &Path, cwd: &Path) -> Map<String, Value> {
-    read_settings_map(&scope_path(scope, home, cwd))
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty source object is valid")
+}
+
+fn source_object_field(source: &Utf16JsonProjection, field: &str) -> Option<Utf16JsonProjection> {
+    let field_units: Vec<u16> = field.encode_utf16().collect();
+    source
+        .subprojection_property_units(&field_units)
         .ok()
-        .and_then(|m| {
-            let canonical = m.get("extraKnownMarketplaces").and_then(Value::as_object);
-            let alias = m.get("additionalMarketplaces").and_then(Value::as_object);
-            if canonical.is_some() && alias.is_some() {
-                tracing::warn!(
-                    "additionalMarketplaces is ignored because extraKnownMarketplaces is also set"
-                );
-            }
-            canonical.or(alias).cloned()
-        })
-        .unwrap_or_default()
+        .filter(|value| value.object_entries().is_some())
+}
+
+/// The `extraKnownMarketplaces` declaration map from a scope's settings file.
+fn read_extra(scope: WritableScope, home: &Path, cwd: &Path) -> Utf16JsonProjection {
+    let settings = read_settings_source(&scope_path(scope, home, cwd))
+        .unwrap_or_else(|_| empty_source_object());
+    let canonical = source_object_field(&settings, "extraKnownMarketplaces");
+    let alias = source_object_field(&settings, "additionalMarketplaces");
+    if canonical.is_some() && alias.is_some() {
+        tracing::warn!(
+            "additionalMarketplaces is ignored because extraKnownMarketplaces is also set"
+        );
+    }
+    canonical.or(alias).unwrap_or_else(empty_source_object)
 }
 
 /// Read-modify-write a scope's `extraKnownMarketplaces` map.
@@ -201,14 +213,12 @@ fn write_extra(
     scope: WritableScope,
     home: &Path,
     cwd: &Path,
-    map: Map<String, Value>,
+    map: Utf16JsonProjection,
 ) -> Result<(), String> {
-    update_settings(
+    update_settings_source_with_before_publish(
         &scope_path(scope, home, cwd),
-        vec![(
-            "extraKnownMarketplaces".to_string(),
-            Some(Value::Object(map)),
-        )],
+        vec![("extraKnownMarketplaces".to_string(), Some(map))],
+        || {},
     )
 }
 
@@ -222,7 +232,7 @@ fn market_invalid_scope(s: &str) -> String {
 fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<WritableScope> {
     SCOPES
         .into_iter()
-        .filter(|s| read_extra(*s, home, cwd).contains_key(name))
+        .filter(|s| read_extra(*s, home, cwd).get_property(name).is_some())
         .collect()
 }
 
@@ -1219,10 +1229,12 @@ fn write_marketplace_unlocked(
     .map(String::into_bytes);
     // Per-scope declaration (settings.extraKnownMarketplaces[name] = {source}).
     let mut extra = read_extra(target, home, cwd);
-    extra.insert(
-        name.to_string(),
-        serde_json::json!({ "source": source_value.clone() }),
-    );
+    let declaration = serde_json::json!({ "source": source_value.clone() });
+    let declaration = Utf16JsonProjection::from_serde_value(&declaration)
+        .map_err(|error| format!("Failed to serialize marketplace declaration: {error}"))?;
+    extra
+        .set_field(name, declaration)
+        .map_err(|error| format!("Failed to update marketplace declaration: {error}"))?;
     if let Err(error) = write_extra(target, home, cwd, extra) {
         restore_snapshot(&settings_path, previous_settings.as_deref());
         return Err(format!(
@@ -1347,7 +1359,9 @@ pub fn run_remove(
 
     for s in &targets {
         let mut extra = read_extra(*s, home, cwd);
-        extra.remove(name);
+        extra
+            .remove_field(name)
+            .map_err(|error| format!("Failed to remove marketplace declaration: {error}"))?;
         write_extra(*s, home, cwd, extra)?;
     }
 
@@ -1743,10 +1757,8 @@ mod tests {
         )
         .unwrap();
         let extra = read_extra(WritableScope::User, &e.home, &e.cwd);
-        assert_eq!(
-            extra.get("alias"),
-            Some(&json!({ "source": { "source": "directory", "path": "/tmp/alias" } }))
-        );
+        assert_eq!(extra.string_at("/alias/source/source"), Some("directory"));
+        assert_eq!(extra.string_at("/alias/source/path"), Some("/tmp/alias"));
     }
 
     #[test]
@@ -1765,8 +1777,41 @@ mod tests {
         )
         .unwrap();
         let extra = read_extra(WritableScope::User, &e.home, &e.cwd);
-        assert!(extra.get("canonical").is_some());
-        assert!(extra.get("alias").is_none());
+        assert!(extra.get_property("canonical").is_some());
+        assert!(extra.get_property("alias").is_none());
+    }
+
+    #[test]
+    fn source_marketplace_update_preserves_lone_surrogate_siblings() {
+        let e = full_env();
+        let path = e.home.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"additionalMarketplaces":{"alias":{"source":{"source":"directory","path":"/tmp/alias"}}}}"#,
+        )
+        .unwrap();
+
+        let mut extra = read_extra(WritableScope::User, &e.home, &e.cwd);
+        let declaration = Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({ "source": { "source": "directory", "path": "/tmp/new" } }),
+        )
+        .unwrap();
+        extra.set_field("new", declaration).unwrap();
+        write_extra(WritableScope::User, &e.home, &e.cwd, extra).unwrap();
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(
+            source.string_at("/extraKnownMarketplaces/alias/source/path"),
+            Some("/tmp/alias")
+        );
+        assert_eq!(
+            source.string_at("/extraKnownMarketplaces/new/source/path"),
+            Some("/tmp/new")
+        );
     }
 
     #[test]

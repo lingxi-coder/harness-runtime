@@ -13,20 +13,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use telemetry::AnalyticsBus;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED};
-use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
+    ValidationError, generated_builtin_result, generated_builtin_schema, source_text_projection,
 };
 
 /// Tool name byte-lock. The model addresses this tool by its wire name
@@ -88,10 +90,10 @@ impl BriefTool {
     }
 }
 
-static SCHEMA: Lazy<Value> = Lazy::new(|| {
+static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     // TS `z.strictObject({ message, attachments?, status })`
     // (`BriefTool.ts:20-39`). Byte-faithful field descriptions.
-    json!({
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -111,7 +113,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "required": ["message", "status"]
-    })
+    }))
 });
 
 fn pii_str(s: &str) -> AnalyticsValue {
@@ -177,20 +179,25 @@ fn resolve_attachment_path(path: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-fn resolve_attachments(paths: &[String], cwd: &Path) -> Vec<Value> {
-    paths
+fn resolve_attachments(paths: &[String], cwd: &Path) -> Utf16JsonProjection {
+    let attachments = paths
         .iter()
         .map(|p| {
             let resolved = resolve_attachment_path(p, cwd);
             let size = std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
-            let rendered = resolved.to_string_lossy();
-            json!({
-                "path": rendered,
-                "size": size,
-                "isImage": is_image_path(&rendered),
-            })
+            let rendered = resolved.to_string_lossy().into_owned();
+            Utf16JsonProjection::object(vec![
+                ("path".into(), source_text_projection(&rendered)),
+                ("size".into(), generated_builtin_result(&json!(size))),
+                (
+                    "isImage".into(),
+                    generated_builtin_result(&json!(is_image_path(&rendered))),
+                ),
+            ])
+            .expect("attachment metadata is valid JSON")
         })
-        .collect()
+        .collect::<Vec<_>>();
+    Utf16JsonProjection::array(attachments).expect("attachment list is valid JSON")
 }
 
 /// Civil date `(year, month, day)` from days since the Unix epoch — port of
@@ -234,8 +241,15 @@ impl Tool for BriefTool {
         const ALIASES: &[&str] = &[LEGACY_BRIEF_TOOL_NAME];
         ALIASES
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // PARITY: claude-code `isBriefEnabled` (`aKr()`). Default-off — the tool
@@ -246,24 +260,28 @@ impl Tool for BriefTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         // TS `isReadOnly() { return true }` — Brief never writes the filesystem.
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "SendUserMessage delivers a message to the user (no filesystem write)"
@@ -275,105 +293,117 @@ impl Tool for BriefTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         BRIEF_TOOL_PROMPT.into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // TS schema: `message: z.string()` (no minLength). Require a string but
         // accept empty. `MAX_BRIEF_BODY_LEN` is a Rust-side guard.
-        let message = input
-            .get("message")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("Brief: missing or non-string message".into()))?;
-        if message.len() > MAX_BRIEF_BODY_LEN {
-            return Err(ValidationError(format!(
+        let _ = input.string_units("/message").ok_or_else(|| {
+            ValidationError(source_text_projection(
+                "Brief: missing or non-string message",
+            ))
+        })?;
+        let message_len = input
+            .string_units("/message")
+            .map_or(0, |units| units.len());
+        if message_len > MAX_BRIEF_BODY_LEN {
+            return Err(ValidationError(source_text_projection(&format!(
                 "Brief: message length {} exceeds max {}",
-                message.len(),
-                MAX_BRIEF_BODY_LEN
-            )));
+                message_len, MAX_BRIEF_BODY_LEN
+            ))));
         }
         Ok(())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let message = match input.get("message").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
+        let message = match input.subprojection("/message").ok() {
+            Some(value) if value.string_units("").is_some() => value,
+            _ => {
                 emit_failed(
                     &bus,
                     "missing_message",
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "Brief: missing or non-string message".into(),
-                ));
+                return Err(invalid_tool_input("Brief: missing or non-string message"));
             }
         };
-        if message.len() > MAX_BRIEF_BODY_LEN {
+        let message_len = input
+            .string_units("/message")
+            .map_or(0, |units| units.len());
+        if message_len > MAX_BRIEF_BODY_LEN {
             emit_failed(
                 &bus,
                 "message_too_large",
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
+            return Err(invalid_tool_input(format!(
                 "Brief: message length {} exceeds max {MAX_BRIEF_BODY_LEN}",
-                message.len()
+                message_len
             )));
         }
 
         // `status === 'proactive'` flag (TS `logEvent('tengu_brief_send', …)`).
-        let proactive = input.get("status").and_then(Value::as_str) == Some("proactive");
+        let proactive = input.string_at("/status") == Some("proactive");
         // Input attachment paths (optional array of strings).
         let attachment_paths: Vec<String> = input
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
+            .array_len("/attachments")
+            .into_iter()
+            .flat_map(|count| (0..count))
+            .filter_map(|index| {
+                input
+                    .at_pointer("/attachments")?
+                    .get_index(index)?
+                    .code_units()
+                    .map(String::from_utf16_lossy)
             })
-            .unwrap_or_default();
+            .collect();
         let n = attachment_paths.len();
 
-        let preview: String = message.chars().take(80).collect();
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "message_len".into(),
-            AnalyticsValue::Int(message.len() as i64),
+            AnalyticsValue::Int(message_len as i64),
         );
-        md.insert("_PROTO_message_preview".into(), pii_str(&preview));
+        if let Some(message) = message.string_at("") {
+            let preview: String = message.chars().take(80).collect();
+            md.insert("_PROTO_message_preview".into(), pii_str(&preview));
+        }
         bus.log_event(BRIEF_STARTED, md).await;
 
         // TS `const sentAt = new Date().toISOString()` — deterministic clock.
         let sent_at = iso8601_utc(self.ctx.clock.now());
 
         // Output shape mirrors TS `{ data: { message, [attachments], sentAt } }`.
-        let mut data = json!({
-            "message": message,
-            "sentAt": sent_at,
-        });
+        let mut data = vec![
+            ("message".to_owned(), message),
+            ("sentAt".to_owned(), source_text_projection(&sent_at)),
+        ];
         if n > 0 {
             let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
-            data["attachments"] = Value::Array(resolve_attachments(&attachment_paths, &cwd));
+            data.push((
+                "attachments".to_owned(),
+                resolve_attachments(&attachment_paths, &cwd),
+            ));
         }
         // `mapToolResultToToolResultBlockParam`: tool-result content text
         // (`BriefTool.ts:175-181`). We surface it on `data` so hosts can read it.
@@ -382,7 +412,10 @@ impl Tool for BriefTool {
         } else {
             format!(" ({n} {} included)", plural(n, "attachment"))
         };
-        data["content"] = json!(format!("Message delivered to user.{suffix}"));
+        data.push((
+            "content".to_owned(),
+            source_text_projection(&format!("Message delivered to user.{suffix}")),
+        ));
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -394,14 +427,20 @@ impl Tool for BriefTool {
         bus.log_event(BRIEF_COMPLETED, md).await;
 
         Ok(ToolCallResult {
-            data,
+            data: Utf16JsonProjection::object(data).expect("Brief result is valid JSON"),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -409,6 +448,14 @@ mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    fn fixture(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -459,7 +506,7 @@ mod tests {
     fn schema_is_strict_object_with_message_and_status() {
         // TS `z.strictObject({ message, attachments?, status })`.
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
-        let schema = tool.input_schema();
+        let schema = test_value(tool.input_schema());
         assert_eq!(schema["type"], json!("object"));
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(schema["required"], json!(["message", "status"]));
@@ -479,7 +526,7 @@ mod tests {
     #[test]
     fn is_read_only_true() {
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
-        assert!(tool.is_read_only(&json!({})));
+        assert!(tool.is_read_only(&fixture(json!({}))));
     }
 
     /// Serialize the flag-mutating gate tests and reset shared state (the live
@@ -543,22 +590,23 @@ mod tests {
         let message = "# Brief\n\nHello world.";
         let out = tool
             .call(
-                json!({"message": message, "status": "normal"}),
+                fixture(json!({"message": message, "status": "normal"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
         // Output shape: { message, sentAt, content } — no attachments key.
-        assert_eq!(out.data["message"], json!(message));
-        let sent_at = out.data["sentAt"].as_str().expect("sentAt string");
+        let data = test_value(&out.data);
+        assert_eq!(data["message"], json!(message));
+        let sent_at = data["sentAt"].as_str().expect("sentAt string");
         assert!(iso_shape_ok(sent_at), "{sent_at}");
         // Deterministic stub clock is anchored at the Unix epoch.
         assert_eq!(sent_at, "1970-01-01T00:00:00.000Z");
-        let content = out.data["content"].as_str().expect("content string");
+        let content = data["content"].as_str().expect("content string");
         assert!(content.starts_with("Message delivered to user."));
         assert_eq!(content, "Message delivered to user.");
-        assert!(out.data.get("attachments").is_none());
+        assert!(data.get("attachments").is_none());
     }
 
     #[tokio::test]
@@ -569,25 +617,24 @@ mod tests {
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
         let out = tool
             .call(
-                json!({
+                fixture(json!({
                     "message": "see attached",
                     "status": "proactive",
                     "attachments": [img.to_str().unwrap()],
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let atts = out.data["attachments"]
-            .as_array()
-            .expect("attachments array");
+        let data = test_value(&out.data);
+        let atts = data["attachments"].as_array().expect("attachments array");
         assert_eq!(atts.len(), 1);
         assert_eq!(atts[0]["path"].as_str().unwrap(), img.to_str().unwrap());
         assert_eq!(atts[0]["size"], json!(1));
         assert_eq!(atts[0]["isImage"], json!(true)); // .PNG matches case-insensitively
         assert_eq!(
-            out.data["content"].as_str().unwrap(),
+            data["content"].as_str().unwrap(),
             "Message delivered to user. (1 attachment included)"
         );
     }
@@ -603,26 +650,31 @@ mod tests {
 
         let out = tool
             .call(
-                json!({
+                fixture(json!({
                     "message": "see attached",
                     "status": "normal",
                     "attachments": ["notes.log"],
-                }),
+                })),
                 call_ctx,
                 fresh_tx(),
             )
             .await
             .expect("ok");
 
-        assert_eq!(out.data["attachments"][0]["path"].as_str(), file.to_str());
-        assert_eq!(out.data["attachments"][0]["size"], 5);
+        let data = test_value(&out.data);
+        assert_eq!(data["attachments"][0]["path"].as_str(), file.to_str());
+        assert_eq!(data["attachments"][0]["size"], 5);
     }
 
     #[tokio::test]
     async fn rejects_missing_message() {
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(json!({"status": "normal"}), fresh_ctx(), fresh_tx())
+            .call(
+                fixture(json!({"status": "normal"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("missing");
         assert!(format!("{err}").contains("missing or non-string message"));
@@ -632,8 +684,23 @@ mod tests {
     async fn accepts_empty_message() {
         // minLength dropped — an empty message now validates (TS `z.string()`).
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
-        tool.validate_input(&json!({"message": "", "status": "normal"}), &fresh_ctx())
+        tool.validate_input(
+            &fixture(json!({"message": "", "status": "normal"})),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("empty message validates");
+    }
+
+    #[tokio::test]
+    async fn preserves_unpaired_message_units_in_result() {
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        let input = Utf16JsonProjection::parse(r#"{"message":"\ud800","status":"normal"}"#)
+            .expect("brief input is valid JSON");
+        let result = Tool::call(&tool, input, fresh_ctx(), fresh_tx())
             .await
-            .expect("empty message validates");
+            .expect("brief accepts a JavaScript source string");
+
+        assert_eq!(result.data.string_units("/message"), Some(vec![0xD800]));
     }
 }

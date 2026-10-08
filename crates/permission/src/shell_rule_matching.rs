@@ -232,6 +232,150 @@ pub fn match_wildcard_pattern_ex(
     }
 }
 
+/// Match the default (case-sensitive, no whitespace normalization) Native
+/// wildcard form against JavaScript UTF-16 source strings. This is the source
+/// counterpart to [`match_wildcard_pattern`]: `*` spans any code units,
+/// `\\*` and `\\\\` are literals, `/**/` consumes zero or more path
+/// segments, and a sole trailing ` *` makes the space-and-arguments optional.
+/// All other code units are literal. No Unicode decoding or temporary scalar
+/// alphabet is used, so paired and isolated surrogates remain distinct units.
+#[must_use]
+pub fn match_wildcard_pattern_utf16(pattern: &[u16], value: &[u16]) -> bool {
+    let pattern = crate::source_input::trim_js_units(pattern);
+    let mut tokens = Vec::with_capacity(pattern.len());
+    let mut wildcard_count = 0usize;
+    let mut index = 0usize;
+
+    while index < pattern.len() {
+        if pattern[index] == b'/' as u16 {
+            let mut end = index + 1;
+            let mut globstar_runs = 0usize;
+            while end + 2 < pattern.len()
+                && pattern[end] == b'*' as u16
+                && pattern[end + 1] == b'*' as u16
+                && pattern[end + 2] == b'/' as u16
+            {
+                globstar_runs += 1;
+                end += 3;
+            }
+            if globstar_runs > 0 {
+                tokens.push(WildcardToken::Literal(b'/' as u16));
+                tokens.push(WildcardToken::GlobstarSegment);
+                wildcard_count += 2 * globstar_runs;
+                index = end;
+                continue;
+            }
+        }
+
+        if pattern[index] == b'\\' as u16 && index + 1 < pattern.len() {
+            match pattern[index + 1] {
+                star if star == b'*' as u16 => {
+                    tokens.push(WildcardToken::Literal(star));
+                    index += 2;
+                    continue;
+                }
+                slash if slash == b'\\' as u16 => {
+                    tokens.push(WildcardToken::Literal(slash));
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        if pattern[index] == b'*' as u16 {
+            tokens.push(WildcardToken::Any);
+            wildcard_count += 1;
+        } else {
+            tokens.push(WildcardToken::Literal(pattern[index]));
+        }
+        index += 1;
+    }
+
+    if wildcard_count == 1
+        && matches!(
+            tokens.as_slice(),
+            [.., WildcardToken::Literal(space), WildcardToken::Any]
+                if *space == b' ' as u16
+        )
+    {
+        tokens.truncate(tokens.len() - 2);
+        tokens.push(WildcardToken::OptionalSpaceAndAny);
+    }
+
+    let mut memo = HashMap::new();
+    match_wildcard_tokens_utf16(&tokens, value, 0, 0, &mut memo)
+}
+
+#[derive(Clone, Copy)]
+enum WildcardToken {
+    Literal(u16),
+    Any,
+    GlobstarSegment,
+    OptionalSpaceAndAny,
+}
+
+fn match_wildcard_tokens_utf16(
+    tokens: &[WildcardToken],
+    value: &[u16],
+    token_index: usize,
+    value_index: usize,
+    memo: &mut HashMap<(usize, usize), bool>,
+) -> bool {
+    if let Some(result) = memo.get(&(token_index, value_index)) {
+        return *result;
+    }
+    let result = if token_index == tokens.len() {
+        value_index == value.len()
+    } else {
+        match tokens[token_index] {
+            WildcardToken::Literal(unit) => {
+                value.get(value_index) == Some(&unit)
+                    && match_wildcard_tokens_utf16(
+                        tokens,
+                        value,
+                        token_index + 1,
+                        value_index + 1,
+                        memo,
+                    )
+            }
+            WildcardToken::Any => {
+                match_wildcard_tokens_utf16(tokens, value, token_index + 1, value_index, memo)
+                    || (value_index < value.len()
+                        && match_wildcard_tokens_utf16(
+                            tokens,
+                            value,
+                            token_index,
+                            value_index + 1,
+                            memo,
+                        ))
+            }
+            WildcardToken::GlobstarSegment => {
+                match_wildcard_tokens_utf16(tokens, value, token_index + 1, value_index, memo)
+                    || (value_index..value.len()).any(|end| {
+                        value[end] == b'/' as u16
+                            && match_wildcard_tokens_utf16(
+                                tokens,
+                                value,
+                                token_index + 1,
+                                end + 1,
+                                memo,
+                            )
+                    })
+            }
+            WildcardToken::OptionalSpaceAndAny => {
+                match_wildcard_tokens_utf16(tokens, value, token_index + 1, value_index, memo)
+                    || (value.get(value_index) == Some(&(b' ' as u16))
+                        && (value_index + 1..=value.len()).any(|end| {
+                            match_wildcard_tokens_utf16(tokens, value, token_index + 1, end, memo)
+                        }))
+            }
+        }
+    };
+    memo.insert((token_index, value_index), result);
+    result
+}
+
 fn cached_wildcard_regex(pattern: &str) -> Result<Regex, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Result<Regex, String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -343,6 +487,57 @@ mod tests {
     #[test]
     fn wildcard_dotall_spans_newlines() {
         assert!(match_wildcard_pattern("bash *", "bash -c 'a\nb'", false));
+    }
+
+    #[test]
+    fn source_wildcard_uses_exact_utf16_units_and_native_operators() {
+        let lone_pattern = [0xd800, b'.' as u16, b'r' as u16, b's' as u16];
+        let lone_value = [b'/' as u16, 0xd800, b'.' as u16, b'r' as u16, b's' as u16];
+        let other_value = [b'/' as u16, 0xd801, b'.' as u16, b'r' as u16, b's' as u16];
+        assert!(match_wildcard_pattern_utf16(&lone_pattern, &lone_value));
+        assert!(!match_wildcard_pattern_utf16(&lone_pattern, &other_value));
+
+        let paired = "file 😀.rs".encode_utf16().collect::<Vec<_>>();
+        assert!(match_wildcard_pattern_utf16(
+            &"file *.rs".encode_utf16().collect::<Vec<_>>(),
+            &paired
+        ));
+        let pua_pattern = "file \u{e000}.rs".encode_utf16().collect::<Vec<_>>();
+        let pua_neighbor = "file \u{e001}.rs".encode_utf16().collect::<Vec<_>>();
+        assert!(match_wildcard_pattern_utf16(&pua_pattern, &pua_pattern));
+        assert!(!match_wildcard_pattern_utf16(&pua_pattern, &pua_neighbor));
+
+        let escaped_star = "echo \\*".encode_utf16().collect::<Vec<_>>();
+        assert!(match_wildcard_pattern_utf16(
+            &escaped_star,
+            &"echo *".encode_utf16().collect::<Vec<_>>()
+        ));
+        assert!(!match_wildcard_pattern_utf16(
+            &escaped_star,
+            &"echo value".encode_utf16().collect::<Vec<_>>()
+        ));
+        assert!(match_wildcard_pattern_utf16(
+            &"git *".encode_utf16().collect::<Vec<_>>(),
+            &"git".encode_utf16().collect::<Vec<_>>()
+        ));
+        assert!(match_wildcard_pattern_utf16(
+            &"/a/**/b".encode_utf16().collect::<Vec<_>>(),
+            &"/a/x/y/b".encode_utf16().collect::<Vec<_>>()
+        ));
+    }
+
+    #[test]
+    fn source_wildcard_trims_feff_but_keeps_nel_and_line_terminators() {
+        let feff_pattern = "\u{feff}name".encode_utf16().collect::<Vec<_>>();
+        let nel_pattern = "\u{0085}name".encode_utf16().collect::<Vec<_>>();
+        let name = "name".encode_utf16().collect::<Vec<_>>();
+        assert!(match_wildcard_pattern_utf16(&feff_pattern, &name));
+        assert!(!match_wildcard_pattern_utf16(&nel_pattern, &name));
+
+        // Native wildcard `.*` is dotAll and counts source UTF-16 units.
+        let wildcard = [b'*' as u16];
+        let line_separators = [0x2028, 0x2029];
+        assert!(match_wildcard_pattern_utf16(&wildcard, &line_separators));
     }
 
     #[test]

@@ -6,9 +6,9 @@
 //! by `HookEventType` (the type-tag enum) and inspect the carried `HookEvent`
 //! payload when invoked.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::PathBuf;
 
 /// Type-tag for every supported hook event. Used by [`crate::HookDefinition`]
@@ -120,12 +120,18 @@ pub struct PostToolBatchCall {
     /// Canonical name of the tool (wire `tool_name`).
     pub tool_name: String,
     /// The tool input the engine dispatched (wire `tool_input`).
-    pub tool_input: Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: Utf16JsonProjection,
     /// Tool invocation ID (wire `tool_use_id`).
     pub tool_use_id: ToolUseId,
     /// Result payload returned by the tool (wire `tool_response`, optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_response: Option<Value>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_response: Option<Utf16JsonProjection>,
 }
 
 /// Source of a [`HookEvent::ConfigChange`] — which settings layer (or skills)
@@ -199,7 +205,8 @@ pub enum HookEvent {
         tool_name: String,
         /// Raw tool input JSON. Hooks may emit a mutated copy via
         /// [`crate::HookResponse::updated_input`].
-        tool_input: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_input: Utf16JsonProjection,
         /// Unique ID of this tool invocation (correlates with `PostToolUse`).
         tool_use_id: ToolUseId,
     },
@@ -208,9 +215,11 @@ pub enum HookEvent {
         /// Canonical name of the tool.
         tool_name: String,
         /// The tool input the engine ultimately dispatched (post-mutation).
-        tool_input: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_input: Utf16JsonProjection,
         /// Result payload returned by the tool.
-        tool_output: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_output: Utf16JsonProjection,
         /// Tool invocation ID, matching the prior `PreToolUse`.
         tool_use_id: ToolUseId,
         /// Tool execution time in ms (excludes permission-prompt + hook time) —
@@ -224,9 +233,11 @@ pub enum HookEvent {
         tool_name: String,
         /// The tool input the engine ultimately dispatched (post-mutation),
         /// matching the `tool_input` carried by `PostToolUse`.
-        tool_input: Value,
-        /// Stringified error for log / display.
-        error: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_input: Utf16JsonProjection,
+        /// Exact raw tool error string, including any lone UTF-16 units.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        error: Utf16JsonProjection,
         /// Tool invocation ID, matching the prior `PreToolUse`.
         tool_use_id: ToolUseId,
         /// Tool execution time in ms (excludes permission-prompt + hook time) —
@@ -257,7 +268,8 @@ pub enum HookEvent {
     /// User submitted a top-level prompt. Hooks may rewrite or block.
     UserPromptSubmit {
         /// The user-supplied prompt text.
-        prompt: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        prompt: Utf16JsonProjection,
     },
     /// Agent / session reached a stop signal.
     Stop {
@@ -312,12 +324,18 @@ pub enum HookEvent {
         /// Optional `/compact` focus text already supplied by the caller. This
         /// is exposed to the hook as `custom_instructions` so it can refine or
         /// augment the same summary request.
-        custom_instructions: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        custom_instructions: Option<Utf16JsonProjection>,
     },
     /// Compaction finished.
     PostCompact {
         /// Summary text produced by the compaction pass.
-        summary: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        summary: Utf16JsonProjection,
         /// Number of tokens reclaimed by the compaction.
         tokens_freed: u64,
         /// Compaction trigger (`manual` / `auto`). claude keys `PostCompact`
@@ -376,7 +394,8 @@ pub enum HookEvent {
         /// Tool the permission applies to.
         tool_name: String,
         /// Tool input that triggered the request.
-        tool_input: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_input: Utf16JsonProjection,
         /// Engine-supplied human-readable reason for the prompt.
         reason: String,
     },
@@ -386,12 +405,14 @@ pub enum HookEvent {
         tool_name: String,
         /// Tool input that was denied (wire `tool_input`). 1:1 with the
         /// `PermissionDeniedHookInputSchema` field (`coreSchemas.ts:466`).
-        tool_input: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        tool_input: Utf16JsonProjection,
         /// Tool invocation ID, matching the prior `PreToolUse`
         /// (wire `tool_use_id`, `coreSchemas.ts:467`).
         tool_use_id: ToolUseId,
-        /// Stringified reason for the denial.
-        reason: String,
+        /// Source-exact reason for the denial.
+        #[serde(with = "crate::definition::hook_if_pattern_source")]
+        reason: Utf16JsonProjection,
     },
     /// A teammate's query loop stopped and it is about to park awaiting the
     /// next message ("about to go idle").
@@ -414,10 +435,12 @@ pub enum HookEvent {
     TaskCreated {
         /// Caller-supplied or engine-generated task ID.
         task_id: String,
-        /// Task taxonomy bucket.
-        task_type: String,
-        /// Human-readable description for logs.
-        description: String,
+        /// Task taxonomy bucket / subject, preserving the source JSON string.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        task_type: Utf16JsonProjection,
+        /// Human-readable description for logs, preserving source UTF-16 units.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        description: Utf16JsonProjection,
         /// Name of the teammate that created the task (wire `teammate_name`,
         /// optional). claude-code sources this from `getAgentName()`
         /// (`TaskCreateTool.ts:97`). `None` for the main thread / leader.
@@ -442,12 +465,19 @@ pub enum HookEvent {
         /// Terminal status (e.g. `"completed"`, `"failed"`). Routing only — not
         /// serialized into the wire payload.
         status: String,
-        /// Task subject/title (wire `task_subject`, required). claude-code
-        /// sources this from `existingTask.subject` / `task.subject`.
-        task_subject: String,
-        /// Task description (wire `task_description`, optional). claude-code
-        /// sources this from `existingTask.description` / `task.description`.
-        task_description: Option<String>,
+        /// Task subject/title (wire `task_subject`, required), preserving the
+        /// source JSON string and its UTF-16 code units.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        task_subject: Utf16JsonProjection,
+        /// Task description (wire `task_description`, optional). Absence stays
+        /// distinct from a present empty or null source value.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+        )]
+        task_description: Option<Utf16JsonProjection>,
         /// Name of the teammate completing the task (wire `teammate_name`,
         /// optional). claude-code sources this from `getAgentName()`.
         teammate_name: Option<String>,
@@ -460,16 +490,35 @@ pub enum HookEvent {
         /// Name of the MCP server (wire `mcp_server_name`).
         server_name: String,
         /// Human-readable prompt shown to the user (wire `message`, required).
-        message: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        message: Utf16JsonProjection,
         /// Presentation mode (`form` / `url`), if specified.
         mode: Option<ElicitationMode>,
         /// URL to open when `mode == Url`, if specified.
-        url: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        url: Option<Utf16JsonProjection>,
         /// Server-assigned elicitation ID, if specified.
-        elicitation_id: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        elicitation_id: Option<Utf16JsonProjection>,
         /// JSON Schema describing the requested form fields, if specified
         /// (wire `requested_schema`).
-        requested_schema: Option<Value>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        requested_schema: Option<Utf16JsonProjection>,
     },
     /// User completed (or cancelled) an elicitation.
     ElicitationResult {
@@ -480,7 +529,8 @@ pub enum HookEvent {
         /// Presentation mode used for the elicitation.
         mode: Option<ElicitationMode>,
         /// User-supplied result payload.
-        result: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        result: Utf16JsonProjection,
     },
     /// Engine configuration changed at runtime.
     ConfigChange {
@@ -565,15 +615,24 @@ pub enum HookEvent {
         /// (wire `expansion_type`, required).
         expansion_type: PromptExpansionType,
         /// The command name that was expanded (wire `command_name`, required).
-        command_name: String,
+        /// Source UTF-16 units are preserved for the hook payload and matcher.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        command_name: Utf16JsonProjection,
         /// The raw argument string passed to the command (wire `command_args`,
         /// required; may be empty).
-        command_args: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        command_args: Utf16JsonProjection,
         /// The command's source/provenance (wire `command_source`, optional).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command_source: Option<String>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        command_source: Option<Utf16JsonProjection>,
         /// The expanded prompt text (wire `prompt`, required).
-        prompt: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        prompt: Utf16JsonProjection,
     },
     /// A working directory was added to the session mid-run (2.1.219) —
     /// `/add-dir` or the SDK `register_repo_root` control request.
@@ -608,7 +667,8 @@ pub enum HookEvent {
         #[serde(rename = "final")]
         is_final: bool,
         /// The delta text being displayed (wire `delta`, required).
-        delta: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        delta: Utf16JsonProjection,
     },
 }
 
@@ -692,7 +752,6 @@ impl HookEvent {
 #[cfg(test)]
 mod event_tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn event_type_roundtrips_for_new_events() {
@@ -708,7 +767,7 @@ mod event_tests {
                 HookEvent::UserPromptExpansion {
                     expansion_type: PromptExpansionType::SlashCommand,
                     command_name: "c".into(),
-                    command_args: String::new(),
+                    command_args: String::new().into(),
                     command_source: None,
                     prompt: "p".into(),
                 },
@@ -744,20 +803,146 @@ mod event_tests {
     fn post_tool_batch_call_omits_tool_response_when_none() {
         let call = PostToolBatchCall {
             tool_name: "Bash".into(),
-            tool_input: json!({ "command": "ls" }),
+            tool_input: Utf16JsonProjection::parse(r#"{ "command": "ls" }"#).unwrap(),
             tool_use_id: ToolUseId::new(),
             tool_response: None,
         };
         let s = serde_json::to_string(&call).unwrap();
         assert!(s.contains(r#""tool_name":"Bash""#), "{s}");
+        assert!(
+            s.contains(r#""tool_input":{"command":"ls"}"#),
+            "the UJP member serializes as its JSON value: {s}"
+        );
         assert!(!s.contains("tool_response"), "None omits the key: {s}");
         // present when Some
         let call2 = PostToolBatchCall {
-            tool_response: Some(json!("out")),
+            tool_response: Some(Utf16JsonProjection::parse(r#""out""#).unwrap()),
             ..call
         };
         let s2 = serde_json::to_string(&call2).unwrap();
         assert!(s2.contains(r#""tool_response":"out""#), "{s2}");
+    }
+
+    #[test]
+    fn arbitrary_hook_event_payloads_roundtrip_exact_utf16_strings() {
+        let event = HookEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            tool_input: Utf16JsonProjection::parse(r#"{"command":"\ud800"}"#).unwrap(),
+            reason: "confirm".into(),
+        };
+        let source = serde_json::to_string(&event).unwrap();
+        assert!(
+            source.contains(r#""tool_input":{"command":"\ud800"}"#),
+            "{source}"
+        );
+        let restored: HookEvent = serde_json::from_str(&source).unwrap();
+        let HookEvent::PermissionRequest { tool_input, .. } = restored else {
+            panic!("expected permission request");
+        };
+        assert_eq!(tool_input.string_units("/command").unwrap(), vec![0xd800]);
+
+        let event = HookEvent::Elicitation {
+            server_name: "forms".into(),
+            message: "complete this form".into(),
+            mode: Some(ElicitationMode::Form),
+            url: None,
+            elicitation_id: None,
+            requested_schema: Some(Utf16JsonProjection::parse("null").unwrap()),
+        };
+        let source = serde_json::to_string(&event).unwrap();
+        assert!(source.contains(r#""requested_schema":null"#), "{source}");
+        let restored: HookEvent = serde_json::from_str(&source).unwrap();
+        let HookEvent::Elicitation {
+            requested_schema, ..
+        } = restored
+        else {
+            panic!("expected elicitation");
+        };
+        assert!(requested_schema
+            .and_then(|schema| schema.at_pointer("").map(|root| root.is_null()))
+            .unwrap_or(false));
+
+        let event = HookEvent::ElicitationResult {
+            server_name: "forms".into(),
+            elicitation_id: Some("request-1".into()),
+            mode: Some(ElicitationMode::Form),
+            result: Utf16JsonProjection::parse(r#"{"answer":"\ud800"}"#).unwrap(),
+        };
+        let source = serde_json::to_string(&event).unwrap();
+        assert!(
+            source.contains(r#""result":{"answer":"\ud800"}"#),
+            "{source}"
+        );
+        let restored: HookEvent = serde_json::from_str(&source).unwrap();
+        let HookEvent::ElicitationResult { result, .. } = restored else {
+            panic!("expected elicitation result");
+        };
+        assert_eq!(result.string_units("/answer").unwrap(), vec![0xd800]);
+    }
+
+    #[test]
+    fn task_event_serde_keeps_source_utf16_and_optional_presence() {
+        let exact = Utf16JsonProjection::parse(r#""task \ud800 subject""#).unwrap();
+        let empty = Utf16JsonProjection::parse(r#""""#).unwrap();
+        let event = HookEvent::TaskCreated {
+            task_id: "task-1".into(),
+            task_type: exact.clone(),
+            description: exact.clone(),
+            teammate_name: None,
+            team_name: None,
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(
+            serialized.contains(r#""task_type":"task \ud800 subject""#),
+            "{serialized}"
+        );
+        let restored: HookEvent = serde_json::from_str(&serialized).unwrap();
+        let HookEvent::TaskCreated {
+            task_type,
+            description,
+            ..
+        } = restored
+        else {
+            panic!("expected TaskCreated");
+        };
+        assert_eq!(task_type.string_units(""), exact.string_units(""));
+        assert_eq!(description.string_units(""), exact.string_units(""));
+
+        let event = HookEvent::TaskCompleted {
+            task_id: "task-1".into(),
+            status: "completed".into(),
+            task_subject: exact.clone(),
+            task_description: Some(empty),
+            teammate_name: None,
+            team_name: None,
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(
+            serialized.contains(r#""task_description":"""#),
+            "{serialized}"
+        );
+        let restored: HookEvent = serde_json::from_str(&serialized).unwrap();
+        let HookEvent::TaskCompleted {
+            task_subject,
+            task_description,
+            ..
+        } = restored
+        else {
+            panic!("expected TaskCompleted");
+        };
+        assert_eq!(task_subject.string_units(""), exact.string_units(""));
+        assert_eq!(task_description.unwrap().string_units(""), Some(Vec::new()));
+
+        let event = HookEvent::TaskCompleted {
+            task_id: "task-1".into(),
+            status: "completed".into(),
+            task_subject: exact,
+            task_description: None,
+            teammate_name: None,
+            team_name: None,
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("task_description"), "{serialized}");
     }
 
     #[test]

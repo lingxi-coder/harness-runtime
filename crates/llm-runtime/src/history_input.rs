@@ -8,9 +8,273 @@ use lingxi_llm_client::replay::{
     has_replay_metadata, native_cited_text, ReplayContext, ReplayPolicy,
 };
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
+
+fn computer_marker(block: &ContentBlock) -> Option<(&str, &wire::JsonPayload, &str)> {
+    let ContentBlock::ProviderContent { protocol, value } = block else {
+        return None;
+    };
+    let kind = value.string_at("/type")?;
+    matches!(
+        kind.as_str(),
+        "lingxi_computer_binding"
+            | "lingxi_computer_receipt"
+            | "lingxi_computer_continuation"
+            | "lingxi_computer_receipt_ack"
+            | "lingxi_computer_abandoned"
+    )
+    .then(|| {
+        (
+            // The discriminator is selected from the fixed marker vocabulary.
+            match kind.as_str() {
+                "lingxi_computer_binding" => "lingxi_computer_binding",
+                "lingxi_computer_receipt" => "lingxi_computer_receipt",
+                "lingxi_computer_continuation" => "lingxi_computer_continuation",
+                "lingxi_computer_receipt_ack" => "lingxi_computer_receipt_ack",
+                "lingxi_computer_abandoned" => "lingxi_computer_abandoned",
+                _ => unreachable!(),
+            },
+            value,
+            protocol.as_str(),
+        )
+    })
+}
+
+fn parse_payload<T: serde::de::DeserializeOwned>(
+    payload: &wire::JsonPayload,
+) -> Result<T, LlmError> {
+    serde_json::from_str(payload.as_json_source()).map_err(invalid)
+}
+
+fn payload_field<T: serde::de::DeserializeOwned>(
+    payload: &wire::JsonPayload,
+    pointer: &str,
+    error: &'static str,
+) -> Result<T, LlmError> {
+    let field = payload.payload_at(pointer).ok_or_else(|| invalid(error))?;
+    parse_payload(&field)
+}
+
+fn serialized_payload(value: &impl serde::Serialize) -> Result<wire::JsonPayload, LlmError> {
+    let source = serde_json::to_string(value).map_err(invalid)?;
+    wire::JsonPayload::parse(&source).map_err(invalid)
+}
+
+fn exact_tool_result_units(output: &wire::JsonPayload) -> Option<Vec<u16>> {
+    if !output.is_root_array() || output.array_len("")? != 1 {
+        return None;
+    }
+    let block = output.array_item(0)?;
+    if block.string_at("/type")? != "lingxi_tool_result_string_utf16" {
+        return None;
+    }
+    let units = block.payload_at("/utf16_code_units")?;
+    if !units.is_root_array() {
+        return None;
+    }
+    serde_json::from_str(units.as_json_source()).ok()
+}
+
+fn object_payload(fields: Vec<(&str, wire::JsonPayload)>) -> Result<wire::JsonPayload, LlmError> {
+    let mut object = wire::JsonPayload::parse("{}").expect("empty JSON object is valid");
+    for (name, value) in fields {
+        object = object.with_object_field(name, &value).map_err(invalid)?;
+    }
+    Ok(object)
+}
+
+fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
+    let mut ids = BTreeSet::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
+    for item in messages.iter().flat_map(|message| &message.content) {
+        if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
+            let mapped: Vec<String> = payload_field(
+                value,
+                "/tool_use_ids",
+                "computer binding is missing tool_use_ids",
+            )?;
+            if mapped.is_empty()
+                || mapped
+                    .iter()
+                    .any(|id| id.is_empty() || !ids.insert(id.clone()))
+            {
+                return Err(invalid(
+                    "computer binding has empty or duplicate synthetic tool IDs",
+                ));
+            }
+            // Validate the saved provider call even though outgoing projection never executes it.
+            let _: wire::computer::NativeComputerCall = payload_field(
+                value,
+                "/call",
+                "computer binding is missing the original call",
+            )?;
+        }
+    }
+    Ok(ids)
+}
+// Provider call IDs are opaque and can recur on a later response. A marker
+// only retires work in earlier messages, never a new call in its own response.
+// Keeping the latest marker index is sufficient to test that temporal boundary.
+type ComputerMarkerBoundaries = BTreeMap<String, usize>;
+
+fn marked_after(markers: &ComputerMarkerBoundaries, call_id: &str, message_index: usize) -> bool {
+    markers
+        .get(call_id)
+        .is_some_and(|index| *index > message_index)
+}
+
+fn acknowledged_computer_receipts(
+    messages: &[Message],
+) -> Result<ComputerMarkerBoundaries, LlmError> {
+    let mut ids = BTreeMap::new();
+    for (message_index, block) in messages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, message)| message.content.iter().map(move |block| (index, block)))
+    {
+        if let Some(("lingxi_computer_receipt_ack", value, _)) = computer_marker(block) {
+            let calls: Vec<String> = payload_field(
+                value,
+                "/call_ids",
+                "computer receipt acknowledgment is missing call_ids",
+            )?;
+            if calls.is_empty() || calls.iter().any(|id| id.trim().is_empty()) {
+                return Err(invalid(
+                    "computer receipt acknowledgment requires nonempty call IDs",
+                ));
+            }
+            ids.extend(calls.into_iter().map(|id| (id, message_index)));
+        }
+    }
+    Ok(ids)
+}
+
+fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
+    let mut ids = BTreeSet::new();
+    for block in messages.iter().flat_map(|message| &message.content) {
+        if let Some(("lingxi_computer_abandoned", value, _)) = computer_marker(block) {
+            let allowed_fields = ["type", "call_ids", "call_identities", "reason"];
+            let present_allowed_fields = allowed_fields
+                .iter()
+                .filter(|field| value.payload_at(&format!("/{field}")).is_some())
+                .count();
+            if !value.is_root_object() || value.object_len("") != Some(present_allowed_fields) {
+                return Err(invalid(
+                    "computer abandoned marker contains unsupported fields",
+                ));
+            }
+            if value
+                .string_at("/reason")
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(invalid(
+                    "computer abandoned marker requires a nonempty recovery reason",
+                ));
+            }
+            let calls: Vec<String> = payload_field(
+                value,
+                "/call_ids",
+                "computer abandoned marker is missing call_ids",
+            )?;
+            let mut unique = BTreeSet::new();
+            if calls.is_empty()
+                || calls
+                    .iter()
+                    .any(|id| id.trim().is_empty() || !unique.insert(id.clone()))
+            {
+                return Err(invalid(
+                    "computer abandoned marker requires distinct nonempty call IDs",
+                ));
+            }
+            let identities: Vec<(String, String)> = payload_field(
+                value,
+                "/call_identities",
+                "computer abandoned marker is missing scoped call identities",
+            )?;
+            let scoped: BTreeSet<_> = identities.iter().cloned().collect();
+            let scoped_calls: BTreeSet<_> =
+                identities.iter().map(|(_, call)| call.clone()).collect();
+            if identities.is_empty()
+                || scoped.len() != identities.len()
+                || identities
+                    .iter()
+                    .any(|(response, call)| response.trim().is_empty() || call.trim().is_empty())
+                || scoped_calls != unique
+            {
+                return Err(invalid(
+                    "computer abandoned marker has inconsistent scoped identities",
+                ));
+            }
+            ids.extend(scoped);
+        }
+    }
+    Ok(ids)
+}
+
+fn computer_continuation_boundary(
+    messages: &[Message],
+    protocol: wire::ProtocolFamily,
+) -> Result<Option<usize>, LlmError> {
+    if !matches!(
+        protocol,
+        wire::ProtocolFamily::GeminiInteractions | wire::ProtocolFamily::OpenAiResponses
+    ) {
+        return Ok(None);
+    }
+    let Some(current) = crate::computer::current_continuation() else {
+        return Ok(None);
+    };
+    let mut boundary = None;
+    for (index, message) in messages.iter().enumerate() {
+        for block in &message.content {
+            if let Some(("lingxi_computer_continuation", value, _)) = computer_marker(block) {
+                let saved: wire::ContinuationRef = payload_field(
+                    value,
+                    "/continuation",
+                    "computer continuation marker is missing its reference",
+                )?;
+                if saved == current {
+                    boundary = Some(index);
+                }
+            }
+        }
+    }
+    boundary
+        .map(Some)
+        .ok_or_else(|| invalid("computer continuation has no matching durable input boundary"))
+}
+
 fn invalid(error: impl std::fmt::Display) -> LlmError {
     LlmError::InvalidRequest {
         message: error.to_string(),
+    }
+}
+
+fn stringify_payload(payload: &wire::JsonPayload) -> Result<String, LlmError> {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(payload.as_json_source())
+        .and_then(|projection| projection.to_json_string())
+        .map_err(invalid)
+}
+
+fn tool_result_content_payload(
+    output: &wire::JsonPayload,
+) -> Result<(wire::JsonPayload, Option<wire::JsonPayload>), LlmError> {
+    if output.is_root_string() {
+        return Ok((output.clone(), None));
+    }
+    if let Some(units) = exact_tool_result_units(output) {
+        return Ok((
+            wire::JsonPayload::string_from_utf16_code_units(&units),
+            None,
+        ));
+    }
+    let stringified = wire::JsonPayload::string(&stringify_payload(output)?);
+    if output.is_root_array() {
+        Ok((stringified, Some(output.clone())))
+    } else {
+        Ok((stringified, None))
     }
 }
 fn cache(cache: &CacheControl) -> wire::CacheControl {
@@ -30,14 +294,14 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
     };
     let base64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(match block {
-        ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_native_content" => {
-            let block = serde_json::from_value(
-                value
-                    .get("block")
-                    .ok_or_else(|| invalid("native history carrier is missing its SDK block"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
+        ContentBlock::ProviderContent { value, .. }
+            if value.string_at("/type").as_deref() == Some("lingxi_native_content") =>
+        {
+            let block: wire::ContentBlock = payload_field(
+                value,
+                "/block",
+                "native history carrier is missing its SDK block",
+            )?;
             if !matches!(block, wire::ContentBlock::Native { .. }) {
                 return Err(invalid(
                     "native history carrier must contain an SDK native block",
@@ -49,12 +313,16 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             protocol: serde_json::from_value(json!(protocol)).map_err(invalid)?,
             value: value.clone(),
         },
-        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
-            wire::ContentBlock::Text {
-                text: text.clone(),
-                thought_signature: None,
-            }
+        ContentBlock::Text {
+            text, citations, ..
         }
+        | ContentBlock::TextJsUtf16 {
+            text, citations, ..
+        } => wire::ContentBlock::Text {
+            text: text.clone(),
+            thought_signature: None,
+            citations: citations.clone(),
+        },
         ContentBlock::Image { media_type, bytes } => wire::ContentBlock::Image {
             source: wire::ImageSource::Base64 {
                 media_type: media_type.clone(),
@@ -87,32 +355,41 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             cache_control,
             cache_reference,
         } => {
-            let exact_text =
-                ::lingxi_core::types::js_utf16::tool_result_display(output).map(Value::String);
-            let output = exact_text.as_ref().unwrap_or(output);
             if cache_reference.is_some() {
-                let content = if output.is_string() || output.is_array() {
+                let content = if output.is_root_string() || output.is_root_array() {
                     output.clone()
                 } else {
-                    Value::String(output.to_string())
+                    wire::JsonPayload::string(&stringify_payload(output)?)
                 };
-                let mut value = json!({"type":"tool_result","tool_use_id":tool_call_id,"content":content,"is_error":is_error});
+                let mut fields = vec![
+                    ("type", wire::JsonPayload::string("tool_result")),
+                    ("tool_use_id", wire::JsonPayload::string(tool_call_id)),
+                    ("content", content),
+                ];
+                if let Some(is_error) = is_error {
+                    fields.push((
+                        "is_error",
+                        wire::JsonPayload::parse(if *is_error { "true" } else { "false" })
+                            .expect("boolean literal is valid JSON"),
+                    ));
+                }
                 if let Some(control) = cache_control {
-                    value["cache_control"] = cache(control).wire_value();
+                    fields.push((
+                        "cache_control",
+                        serialized_payload(&cache(control).wire_value())?,
+                    ));
                 }
                 if let Some(reference) = cache_reference {
-                    value["cache_reference"] = json!(reference);
+                    fields.push(("cache_reference", wire::JsonPayload::string(reference)));
                 }
-                native(value)
+                native(object_payload(fields)?)
             } else {
+                let (content, blocks) = tool_result_content_payload(output)?;
                 wire::ContentBlock::ToolResult {
                     tool_use_id: wire::ToolUseId::new(tool_call_id),
-                    content: output
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| output.to_string()),
+                    content,
                     is_error: *is_error,
-                    blocks: output.as_array().cloned(),
+                    blocks,
                     toolset_name: None,
                 }
             }
@@ -124,23 +401,46 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
         ContentBlock::RedactedThinking { data } => {
             wire::ContentBlock::RedactedThinking { data: data.clone() }
         }
-        ContentBlock::ServerToolUse { id, name, input } => {
-            native(json!({"type":"server_tool_use","id":id,"name":name,"input":input}))
-        }
+        ContentBlock::ServerToolUse { id, name, input } => native(object_payload(vec![
+            ("type", wire::JsonPayload::string("server_tool_use")),
+            ("id", wire::JsonPayload::string(id)),
+            ("name", wire::JsonPayload::string(name)),
+            ("input", input.clone()),
+        ])?),
         ContentBlock::ConnectorText {
             connector_text,
             signature,
-        } => native(
-            json!({"type":"connector_text","connector_text":connector_text,"signature":signature}),
-        ),
+        } => native(object_payload(vec![
+            ("type", wire::JsonPayload::string("connector_text")),
+            ("connector_text", wire::JsonPayload::string(connector_text)),
+            (
+                "signature",
+                signature
+                    .as_deref()
+                    .map(wire::JsonPayload::string)
+                    .unwrap_or_else(|| {
+                        wire::JsonPayload::parse("null").expect("null is valid JSON")
+                    }),
+            ),
+        ])?),
         ContentBlock::AdvisorToolResult {
             tool_use_id,
             content,
             is_error,
-        } => native(
-            json!({"type":"advisor_tool_result","tool_use_id":tool_use_id,"content":content,"is_error":is_error}),
-        ),
-        ContentBlock::CacheEdits { edits } => native(json!({"type":"cache_edits","edits":edits})),
+        } => native(object_payload(vec![
+            ("type", wire::JsonPayload::string("advisor_tool_result")),
+            ("tool_use_id", wire::JsonPayload::string(tool_use_id)),
+            ("content", content.clone()),
+            (
+                "is_error",
+                wire::JsonPayload::parse(if *is_error { "true" } else { "false" })
+                    .expect("boolean literal is valid JSON"),
+            ),
+        ])?),
+        ContentBlock::CacheEdits { edits } => native(object_payload(vec![
+            ("type", wire::JsonPayload::string("cache_edits")),
+            ("edits", serialized_payload(edits)?),
+        ])?),
     })
 }
 
@@ -153,10 +453,10 @@ pub(crate) fn replay_companion(
         return None;
     };
     let family = serde_json::from_value(json!(protocol)).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("lingxi_replay_metadata") {
+    if value.string_at("/type").as_deref() != Some("lingxi_replay_metadata") {
         return None;
     }
-    let block: wire::ContentBlock = serde_json::from_value(value.get("block")?.clone()).ok()?;
+    let block: wire::ContentBlock = parse_payload(&value.payload_at("/block")?).ok()?;
     has_replay_metadata(&block).then_some((family, block))
 }
 /// Match durable companion rows to their visible history block, then ask the SDK
@@ -195,15 +495,11 @@ fn project_message(
                 ));
             }
             if kind == "lingxi_computer_continuation" {
-                let continuation: wire::ContinuationRef = serde_json::from_value(
-                    value
-                        .get("continuation")
-                        .ok_or_else(|| {
-                            invalid("computer continuation marker is missing its reference")
-                        })?
-                        .clone(),
-                )
-                .map_err(invalid)?;
+                let continuation: wire::ContinuationRef = payload_field(
+                    value,
+                    "/continuation",
+                    "computer continuation marker is missing its reference",
+                )?;
                 if native_family(continuation.protocol) != native_family(family) {
                     return Err(invalid(
                         "computer continuation marker does not match its protocol",
@@ -218,15 +514,13 @@ fn project_message(
                 continue;
             }
             if kind == "lingxi_computer_binding" {
-                let call: wire::computer::NativeComputerCall = serde_json::from_value(
-                    value
-                        .get("call")
-                        .ok_or_else(|| invalid("computer binding is missing the original call"))?
-                        .clone(),
-                )
-                .map_err(invalid)?;
-                let response_id = value["provider_response_id"]
-                    .as_str()
+                let call: wire::computer::NativeComputerCall = payload_field(
+                    value,
+                    "/call",
+                    "computer binding is missing the original call",
+                )?;
+                let response_id = value
+                    .string_at("/provider_response_id")
                     .ok_or_else(|| invalid("computer binding is missing its response identity"))?;
                 if abandoned_calls.contains(&(response_id.into(), call.context.call_id.clone())) {
                     continue;
@@ -234,8 +528,7 @@ fn project_message(
             }
             if kind == "lingxi_computer_receipt" {
                 let call_id = value
-                    .get("call_id")
-                    .and_then(Value::as_str)
+                    .string_at("/call_id")
                     .filter(|id| !id.trim().is_empty())
                     .ok_or_else(|| {
                         invalid("computer receipt marker is missing its original call ID")
@@ -245,39 +538,35 @@ fn project_message(
                     wire::ProtocolFamily::OpenAiResponses
                         | wire::ProtocolFamily::GeminiInteractions
                 );
-                let response_id = value["provider_response_id"]
-                    .as_str()
+                let response_id = value
+                    .string_at("/provider_response_id")
                     .ok_or_else(|| invalid("computer receipt is missing its response identity"))?;
-                if abandoned_calls.contains(&(response_id.into(), call_id.into()))
+                if abandoned_calls.contains(&(response_id.clone(), call_id.clone()))
                     || continuation_protocol
-                        && marked_after(acknowledged_receipts, call_id, message_index)
+                        && marked_after(acknowledged_receipts, &call_id, message_index)
                 {
                     continue;
                 }
             }
             let originals: Vec<wire::ContentBlock> = if kind == "lingxi_computer_binding" {
-                serde_json::from_value(
-                    value
-                        .get("original_blocks")
-                        .ok_or_else(|| invalid("computer binding is missing original_blocks"))?
-                        .clone(),
-                )
-                .map_err(invalid)?
+                payload_field(
+                    value,
+                    "/original_blocks",
+                    "computer binding is missing original_blocks",
+                )?
             } else {
-                vec![serde_json::from_value(
-                    value
-                        .get("block")
-                        .ok_or_else(|| invalid("computer receipt is missing its SDK block"))?
-                        .clone(),
-                )
-                .map_err(invalid)?]
+                vec![payload_field(
+                    value,
+                    "/block",
+                    "computer receipt is missing its SDK block",
+                )?]
             };
             if originals.is_empty() {
                 return Err(invalid("computer binding has no original provider blocks"));
             }
             for original in originals {
                 if matches!(&original, wire::ContentBlock::ProviderContent { value, .. }
-                    if matches!(value["type"].as_str(), Some("lingxi_computer_binding" | "lingxi_computer_receipt" | "lingxi_computer_continuation" | "lingxi_computer_receipt_ack" | "lingxi_computer_abandoned" | "lingxi_native_content")))
+                    if matches!(value.string_at("/type").as_deref(), Some("lingxi_computer_binding" | "lingxi_computer_receipt" | "lingxi_computer_continuation" | "lingxi_computer_receipt_ack" | "lingxi_computer_abandoned" | "lingxi_native_content")))
                 {
                     return Err(invalid(
                         "computer marker cannot contain another host marker",
@@ -293,7 +582,7 @@ fn project_message(
             continue;
         }
         if replay_companion(item).is_some()
-            || matches!(item, ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_observation")
+            || matches!(item, ContentBlock::ProviderContent { value, .. } if value.string_at("/type").as_deref() == Some("lingxi_observation"))
         {
             continue;
         }
@@ -313,7 +602,7 @@ fn project_message(
                 (
                     ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
                     native,
-                ) if *native_index == index + 1 => native_cited_text(native) == Some(text.as_str()),
+                ) if *native_index == index + 1 => native_cited_text(native) == Some(text.clone()),
                 _ => false,
             });
         let (source, mapped_block) = if let Some(position) = position {
@@ -372,6 +661,21 @@ pub(crate) fn message_content(
     )
 }
 
+pub(crate) fn canonical_message_content(
+    message: &Message,
+    family: wire::ProtocolFamily,
+) -> Result<Vec<wire::ContentBlock>, LlmError> {
+    let ids = computer_tool_ids(std::slice::from_ref(message))?;
+    let acknowledged = acknowledged_computer_receipts(std::slice::from_ref(message))?;
+    let abandoned = abandoned_computer_calls(std::slice::from_ref(message))?;
+    Ok(
+        project_message(message, family, &ids, &acknowledged, &abandoned, 0, false)?
+            .into_iter()
+            .map(|(_, block)| block)
+            .collect(),
+    )
+}
+
 pub fn history_input(
     model: &str,
     messages: &[Message],
@@ -410,6 +714,25 @@ pub fn history_input(
         if projected.is_empty() {
             continue;
         }
+        // Retain malformed UTF-16 text at a protocol-neutral message/content
+        // pointer; the SDK codec maps that source coordinate to the final
+        // provider body after it has encoded the request.
+        for (position, (original, _)) in projected.iter().enumerate() {
+            if let ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } = &message.content[*original]
+            {
+                if String::from_utf16(utf16_code_units).is_err() {
+                    overrides.insert(
+                        format!(
+                            "/messages/{}/content/{position}/text",
+                            result.messages.len()
+                        ),
+                        utf16_code_units.clone(),
+                    );
+                }
+            }
+        }
         if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
             for (position, (original, _)) in projected.iter().enumerate() {
                 let item = &message.content[*original];
@@ -435,12 +758,8 @@ pub fn history_input(
                     });
                 }
                 let exact = match item {
-                    ContentBlock::TextJsUtf16 {
-                        utf16_code_units, ..
-                    } => Some(("text", utf16_code_units.clone())),
                     ContentBlock::ToolResult { output, .. } => {
-                        ::lingxi_core::types::js_utf16::tool_result_units(output)
-                            .map(|units| ("content", units))
+                        exact_tool_result_units(output).map(|units| ("content", units))
                     }
                     _ => None,
                 };
@@ -487,12 +806,14 @@ pub fn history_input(
                 wire::ContentBlock::ProviderContent {
                     protocol: wire::ProtocolFamily::AnthropicMessages,
                     value,
-                } if value["type"] == "tool_result" => {
-                    if let Some(name) = value["tool_use_id"]
-                        .as_str()
-                        .and_then(|id| toolsets.get(&wire::ToolUseId::new(id)))
+                } if value.string_at("/type").as_deref() == Some("tool_result") => {
+                    if let Some(name) = value
+                        .string_at("/tool_use_id")
+                        .and_then(|id| toolsets.get(&wire::ToolUseId::new(&id)))
                     {
-                        value["toolset_name"] = json!(name);
+                        *value = value
+                            .with_object_field("toolset_name", &wire::JsonPayload::string(name))
+                            .map_err(invalid)?;
                     }
                 }
                 _ => {}
@@ -501,8 +822,12 @@ pub fn history_input(
     }
     result.system = system
         .iter()
-        .map(|b| wire::SystemBlock {
-            text: b.text.clone(),
+        .map(|block| {
+            let units = block
+                .text
+                .string_units("")
+                .expect("SystemBlock text is a root-string projection");
+            wire::SystemBlock::from_utf16_code_units(&units)
         })
         .collect();
     // Legacy system markers now use the SDK's positional cache policy.
@@ -536,24 +861,26 @@ pub fn history_input(
     }
     result.tools = tools
         .iter()
-        .map(|t| wire::ToolSpec {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.input_schema.clone(),
-            strict: t.strict,
-            tool_type: t.tool_type.clone(),
-            defer_loading: t.defer_loading,
-            native_options: Vec::new(),
-            extra: Value::Object(t.extra.clone()),
+        .map(|tool| {
+            Ok(wire::ToolSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+                strict: tool.strict,
+                tool_type: tool.tool_type.clone(),
+                defer_loading: tool.defer_loading,
+                native_options: Vec::new(),
+                extra: serialized_payload(&Value::Object(tool.extra.clone()))?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, LlmError>>()?;
     for tool in &mut result.tools {
-        if let Some(extra) = tool.extra.as_object_mut() {
-            if let Some(callers) = extra.remove("allowed_callers") {
-                tool.set_anthropic_allowed_callers(
-                    serde_json::from_value(callers).map_err(invalid)?,
-                );
-            }
+        if let Some(callers) = tool.extra.payload_at("/allowed_callers") {
+            tool.set_anthropic_allowed_callers(parse_payload(&callers)?);
+            tool.extra = tool
+                .extra
+                .without_object_field("allowed_callers")
+                .map_err(invalid)?;
         }
         if tool.strict {
             match lingxi_llm_client::providers::anthropic::strict_schema::to_strict_schema(
@@ -571,91 +898,22 @@ pub fn history_input(
 mod tests {
     use super::*;
 
-    #[test]
-    fn history_edge_consumes_companion_once_and_preserves_tool_metadata() {
-        let native = wire::ContentBlock::ToolUse {
-            id: wire::ToolUseId::new("call-1"),
-            name: "old".into(),
-            input: json!({}),
-            provider_id: Some("provider-1".into()),
-            caller: None,
-            toolset_name: Some("browser".into()),
-            thought_signature: None,
-        };
-        let history = vec![Message {
-            role: "assistant".into(),
-            content: vec![
-                ContentBlock::ToolCall {
-                    id: "call-1".into(),
-                    name: "updated".into(),
-                    input: json!({"url":"example"}),
-                },
-                ContentBlock::ProviderContent {
-                    protocol: "anthropic_messages".into(),
-                    value: json!({"type":"lingxi_replay_metadata","block":native}),
-                },
-            ],
-        }];
-        let (input, overrides) = history_input(
-            "model",
-            &history,
-            &[],
-            &[],
-            wire::ProtocolFamily::AnthropicMessages,
-        )
-        .unwrap();
-        assert!(overrides.is_empty());
-        assert_eq!(input.messages[0].content.len(), 1);
-        let wire::ContentBlock::ToolUse {
-            name,
-            input,
-            provider_id,
-            toolset_name,
-            ..
-        } = &input.messages[0].content[0]
-        else {
-            panic!("canonical tool use")
-        };
-        assert_eq!(name, "updated");
-        assert_eq!(input, &json!({"url":"example"}));
-        assert_eq!(provider_id.as_deref(), Some("provider-1"));
-        assert_eq!(toolset_name.as_deref(), Some("browser"));
+    fn host_payload(value: Value) -> wire::JsonPayload {
+        wire::JsonPayload::from_generated_value(&value).expect("test JSON is valid")
     }
 
     #[test]
-    fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
-        let history = vec![Message {
-            role: "user".into(),
-            content: vec![
-                ContentBlock::ProviderContent {
-                    protocol: "open_ai_responses".into(),
-                    value: json!({"type":"reasoning","id":"r"}),
-                },
-                ContentBlock::TextJsUtf16 {
-                    text: "�".into(),
-                    utf16_code_units: vec![0xd800],
-                    cache_control: Some(CacheControl::Ephemeral),
-                },
-            ],
-        }];
-        let (input, overrides) = history_input(
-            "model",
-            &history,
-            &[],
-            &[],
-            wire::ProtocolFamily::AnthropicMessages,
-        )
-        .unwrap();
-        assert_eq!(input.messages[0].content.len(), 1);
-        assert!(matches!(
-            input.messages[0].content[0],
-            wire::ContentBlock::Text { .. }
-        ));
-        assert_eq!(overrides["/messages/0/content/0/text"], vec![0xd800]);
-        assert_eq!(
-            input.prompt_cache.breakpoints[0].position,
-            wire::CachePosition::Message { index: 0, block: 0 }
-        );
+    fn exact_tool_result_sidecar_becomes_a_source_string_before_sdk_dispatch() {
+        let units = vec![65, 0xd83d, 10];
+        let sidecar = host_payload(json!([{
+            "type": "lingxi_tool_result_string_utf16",
+            "utf16_code_units": units,
+        }]));
+
+        let (content, blocks) = tool_result_content_payload(&sidecar).unwrap();
+
+        assert!(blocks.is_none());
+        assert_eq!(content.root_string_code_units(), Some(vec![65, 0xd83d, 10]));
     }
 
     fn encoded_body(request: &wire::ChatRequest, protocol: wire::ProtocolFamily) -> Value {
@@ -705,12 +963,14 @@ mod tests {
         })).unwrap();
         ContentBlock::ProviderContent {
             protocol: "anthropic_messages".into(),
-            value: json!({"type":"lingxi_computer_binding", "provider_response_id":"old-response", "tool_use_ids":ids,
+            value: host_payload(
+                json!({"type":"lingxi_computer_binding", "provider_response_id":"old-response", "tool_use_ids":ids,
                 "call":{"context":{"provider":"anthropic","protocol_version":"computer_toolset_20260801",
                     "call_id":"native-call","item_id":null,"member_name":"screenshot","call_index":0,
                     "action_count":1,"pending_safety_checks":[],"continuation":null,"opaque":{}},
                     "operations":[{"type":"screenshot"}],"requires_screenshot":false},
                 "original_blocks":[original]}),
+            ),
         }
     }
 
@@ -731,11 +991,11 @@ mod tests {
                     "actions":[{"type":"screenshot"}],"pending_safety_checks":[]
                 })).unwrap().into_content_block().unwrap(),
             ),
-            wire::ProtocolFamily::GeminiInteractions => (
-                wire::NativeComputerProvider::Gemini, "gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash",
+                wire::ProtocolFamily::GeminiInteractions => (
+                    wire::NativeComputerProvider::Gemini, "gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash",
                 wire::ContentBlock::Native {value:wire::NativeExtension::new(
                     lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-                    json!({"type":"function_call","id":"reused-call","name":"take_screenshot","arguments":{}})
+                    wire::JsonPayload::from_generated_value(&json!({"type":"function_call","id":"reused-call","name":"take_screenshot","arguments":{}})).unwrap()
                 ).unwrap()},
             ),
             _ => unreachable!(),
@@ -760,13 +1020,31 @@ mod tests {
         .unwrap()
         .remove(0);
         let image = base64::engine::general_purpose::STANDARD.encode(observation);
-        let receipt = wire::encode_computer_receipt(&call, &wire::ComputerReceiptInput {
-            results: vec![wire::NativeComputerResult {
-                operation_index:0, status:wire::NativeExecutionStatus::Succeeded, content:observation.into(),
-                blocks:Some(vec![json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":image}})]),
-            }],
-            acknowledged_safety_checks:vec![],
-        }).unwrap();
+        let receipt = wire::encode_computer_receipt(
+            &call,
+            &wire::ComputerReceiptInput {
+                results: vec![wire::NativeComputerResult {
+                    operation_index: 0,
+                    status: wire::NativeExecutionStatus::Succeeded,
+                    content: observation.into(),
+                    blocks: Some(
+                        lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                            &serde_json::Value::Array(vec![json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": image
+                                }
+                            })]),
+                        )
+                        .expect("generated computer blocks are valid JSON"),
+                    ),
+                }],
+                acknowledged_safety_checks: vec![],
+            },
+        )
+        .unwrap();
         let source = serde_json::to_value(protocol)
             .unwrap()
             .as_str()
@@ -777,21 +1055,21 @@ mod tests {
             ContentBlock::ToolCall {
                 id: synthetic.clone(),
                 name: "computer".into(),
-                input: json!({"action":"screenshot"}),
+                input: host_payload(json!({"action":"screenshot"})),
             },
             ContentBlock::ProviderContent {
                 protocol: source.clone(),
-                value: json!({
+                value: host_payload(json!({
                     "type":"lingxi_computer_binding","provider_response_id":response_id,"call":call,"tool_use_ids":[synthetic],"original_blocks":[original]
-                }),
+                })),
             },
         ];
         if let Some(reference) = &continuation {
             content.push(ContentBlock::ProviderContent {
                 protocol: source.clone(),
-                value: json!({
+                value: host_payload(json!({
                     "type":"lingxi_computer_continuation","continuation":reference
-                }),
+                })),
             });
         }
         (
@@ -804,16 +1082,16 @@ mod tests {
                 content: vec![
                     ContentBlock::ToolResult {
                         tool_call_id: synthetic,
-                        output: json!(observation),
+                        output: host_payload(json!(observation)),
                         is_error: None,
                         cache_control: None,
                         cache_reference: None,
                     },
                     ContentBlock::ProviderContent {
                         protocol: source,
-                        value: json!({
+                        value: host_payload(json!({
                             "type":"lingxi_computer_receipt","provider_response_id":response_id,"call_id":"reused-call","block":receipt
-                        }),
+                        })),
                     },
                 ],
             },
@@ -924,13 +1202,13 @@ mod tests {
             }
             wire::ProtocolFamily::OpenAiResponses => {
                 assert_eq!(body["previous_response_id"], "current-response");
-                assert_eq!(body["input"].as_array().unwrap().len(), 1);
+                assert_eq!(body["input"].as_array().unwrap().len(), 1, "{body}");
                 assert_eq!(body["input"][0]["type"], "computer_call_output");
                 assert_eq!(body["input"][0]["call_id"], "reused-call");
             }
             wire::ProtocolFamily::GeminiInteractions => {
                 assert_eq!(body["previous_interaction_id"], "current-response");
-                assert_eq!(body["input"].as_array().unwrap().len(), 1);
+                assert_eq!(body["input"].as_array().unwrap().len(), 1, "{body}");
                 assert_eq!(body["input"][0]["type"], "function_result");
                 assert_eq!(body["input"][0]["call_id"], "reused-call");
                 assert!(body["input"][0].get("_sdk_continuation").is_none());
@@ -956,9 +1234,9 @@ mod tests {
                 .to_owned();
             // The response accepting the old receipt can contain a new call with
             // the same opaque ID. Its ACK applies only to earlier messages.
-            current_call.content.push(ContentBlock::ProviderContent {protocol:source,value:json!({
+            current_call.content.push(ContentBlock::ProviderContent {protocol:source,value:host_payload(json!({
                 "type":"lingxi_computer_receipt_ack","call_ids":["reused-call"],"provider_response_id":"current-response"
-            })});
+            }))});
             let messages = [old_call, old_receipt, current_call, current_receipt];
             let model = continuation.as_ref().unwrap().request_model.clone();
             let (mut request, _) = crate::computer::scope_computer_request(
@@ -1003,9 +1281,9 @@ mod tests {
                     content: vec![
                         ContentBlock::ProviderContent {
                             protocol: source,
-                            value: json!({
+                            value: host_payload(json!({
                                 "type":"lingxi_computer_abandoned","call_ids":["reused-call"],"call_identities":[["old-response","reused-call"]],"reason":"Previous outcome unknown; obtain a fresh observation"
-                            }),
+                            })),
                         },
                         ContentBlock::Text {
                             text: "Obtain a fresh observation".into(),
@@ -1051,7 +1329,7 @@ mod tests {
             native_round(protocol, "current-response", "current observation");
         current_receipt.content.push(ContentBlock::ProviderContent {
             protocol:"anthropic_messages".into(),
-            value:json!({"type":"lingxi_computer_abandoned","call_ids":["reused-call"],"call_identities":[["old-response","reused-call"]],"reason":"Previous outcome unknown; observe again"}),
+            value:host_payload(json!({"type":"lingxi_computer_abandoned","call_ids":["reused-call"],"call_identities":[["old-response","reused-call"]],"reason":"Previous outcome unknown; observe again"})),
         });
         let (mut request, _) = history_input(
             "claude-opus-4-8",
@@ -1070,16 +1348,16 @@ mod tests {
         let synthetic = ContentBlock::ToolCall {
             id: "synthetic".into(),
             name: "computer".into(),
-            input: json!({"action":"screenshot"}),
+            input: host_payload(json!({"action":"screenshot"})),
         };
         let unrelated = ContentBlock::ToolCall {
             id: "ordinary".into(),
             name: "computer".into(),
-            input: json!({"action":"get_access"}),
+            input: host_payload(json!({"action":"get_access"})),
         };
         let result = |id: &str| ContentBlock::ToolResult {
             tool_call_id: id.into(),
-            output: json!("done"),
+            output: host_payload(json!("done")),
             is_error: None,
             cache_control: None,
             cache_reference: None,
@@ -1099,7 +1377,9 @@ mod tests {
                     result("ordinary"),
                     ContentBlock::ProviderContent {
                         protocol: "anthropic_messages".into(),
-                        value: json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                        value: host_payload(
+                            json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                        ),
                     },
                 ],
             },
@@ -1155,8 +1435,11 @@ mod tests {
         )
         .is_err());
         if let ContentBlock::ProviderContent { value, .. } = &mut malformed {
-            value["tool_use_ids"] = json!(["single"]);
-            value.as_object_mut().unwrap().remove("original_blocks");
+            *value = value
+                .with_object_field("tool_use_ids", &host_payload(json!(["single"])))
+                .unwrap()
+                .without_object_field("original_blocks")
+                .unwrap();
         }
         assert!(history_input(
             "model",
@@ -1190,14 +1473,18 @@ mod tests {
                     role: "user".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source.clone(),
-                        value: json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                        value: host_payload(
+                            json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                        ),
                     }],
                 },
                 Message {
                     role: "assistant".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source,
-                        value: json!({"type":"lingxi_computer_receipt_ack","call_ids":["native-call"]}),
+                        value: host_payload(
+                            json!({"type":"lingxi_computer_receipt_ack","call_ids":["native-call"]}),
+                        ),
                     }],
                 },
             ];
@@ -1220,14 +1507,18 @@ mod tests {
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
-                    value: json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                    value: host_payload(
+                        json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                    ),
                 }],
             },
             Message {
                 role: "assistant".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
-                    value: json!({"type":"lingxi_computer_receipt_ack","call_ids":["native-call"]}),
+                    value: host_payload(
+                        json!({"type":"lingxi_computer_receipt_ack","call_ids":["native-call"]}),
+                    ),
                 }],
             },
             Message {
@@ -1290,7 +1581,7 @@ mod tests {
                     })).unwrap().into_content_block().unwrap()),
                 _ => (wire::NativeComputerProvider::Gemini, wire::ContentBlock::Native {value:wire::NativeExtension::new(
                     lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-                    json!({"type":"function_call","id":"native-call","name":"take_screenshot","arguments":{}})
+                    wire::JsonPayload::from_generated_value(&json!({"type":"function_call","id":"native-call","name":"take_screenshot","arguments":{}})).unwrap()
                 ).unwrap()}),
             };
             let continuation:wire::ContinuationRef = serde_json::from_value(json!({
@@ -1310,9 +1601,9 @@ mod tests {
             .unwrap();
             let binding = ContentBlock::ProviderContent {
                 protocol: source.clone(),
-                value: json!({
+                value: host_payload(json!({
                     "type":"lingxi_computer_binding","provider_response_id":"old-response","call":calls[0],"tool_use_ids":["synthetic"],"original_blocks":[original]
-                }),
+                })),
             };
             let receipt:wire::ContentBlock = serde_json::from_value(json!({"type":"tool_result","tool_use_id":"native-call","content":"obsolete receipt","toolset_name":"computer"})).unwrap();
             let messages = [
@@ -1322,12 +1613,12 @@ mod tests {
                         ContentBlock::ToolCall {
                             id: "ordinary".into(),
                             name: "computer".into(),
-                            input: json!({"action":"get_access"}),
+                            input: host_payload(json!({"action":"get_access"})),
                         },
                         ContentBlock::ToolCall {
                             id: "synthetic".into(),
                             name: "computer".into(),
-                            input: json!({"action":"screenshot"}),
+                            input: host_payload(json!({"action":"screenshot"})),
                         },
                         binding,
                     ],
@@ -1337,21 +1628,23 @@ mod tests {
                     content: vec![
                         ContentBlock::ToolResult {
                             tool_call_id: "ordinary".into(),
-                            output: json!("normal audit result"),
+                            output: host_payload(json!("normal audit result")),
                             is_error: None,
                             cache_control: None,
                             cache_reference: None,
                         },
                         ContentBlock::ToolResult {
                             tool_call_id: "synthetic".into(),
-                            output: json!("old synthetic result"),
+                            output: host_payload(json!("old synthetic result")),
                             is_error: None,
                             cache_control: None,
                             cache_reference: None,
                         },
                         ContentBlock::ProviderContent {
                             protocol: source.clone(),
-                            value: json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                            value: host_payload(
+                                json!({"type":"lingxi_computer_receipt","provider_response_id":"old-response","call_id":"native-call","block":receipt}),
+                            ),
                         },
                     ],
                 },
@@ -1360,7 +1653,9 @@ mod tests {
                     content: vec![
                         ContentBlock::ProviderContent {
                             protocol: source,
-                            value: json!({"type":"lingxi_computer_abandoned","call_ids":["native-call"],"call_identities":[["old-response","native-call"]],"reason":"started action outcome unknown; observe again"}),
+                            value: host_payload(
+                                json!({"type":"lingxi_computer_abandoned","call_ids":["native-call"],"call_identities":[["old-response","native-call"]],"reason":"started action outcome unknown; observe again"}),
+                            ),
                         },
                         ContentBlock::Text {
                             text: "Execution outcome unknown; perform a fresh observation".into(),
@@ -1400,7 +1695,9 @@ mod tests {
             json!({"type":"lingxi_computer_abandoned","call_ids":["id"],"reason":""}),
             json!({"type":"lingxi_computer_abandoned","call_ids":["id","id"],"reason":"unknown"}),
             json!({"type":"lingxi_computer_abandoned","call_ids":["id"],"reason":"unknown","force":true}),
-        ] {
+        ]
+        .map(host_payload)
+        {
             let message = Message {
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
@@ -1440,11 +1737,13 @@ mod tests {
                     ContentBlock::ToolCall {
                         id: "current-call".into(),
                         name: "Read".into(),
-                        input: json!({}),
+                        input: host_payload(json!({})),
                     },
                     ContentBlock::ProviderContent {
                         protocol: "gemini_interactions".into(),
-                        value: json!({"type":"lingxi_computer_continuation","continuation":continuation}),
+                        value: host_payload(
+                            json!({"type":"lingxi_computer_continuation","continuation":continuation}),
+                        ),
                     },
                 ],
             },
@@ -1452,7 +1751,7 @@ mod tests {
                 role: "user".into(),
                 content: vec![ContentBlock::ToolResult {
                     tool_call_id: "current-call".into(),
-                    output: json!("new tool result"),
+                    output: host_payload(json!("new tool result")),
                     is_error: None,
                     cache_control: None,
                     cache_reference: None,
@@ -1483,7 +1782,7 @@ mod tests {
             matches!(&request.messages[0].content[0], wire::ContentBlock::ToolUse{id,..} if id.as_str()=="current-call")
         );
         assert!(
-            matches!(&request.messages[1].content[0], wire::ContentBlock::ToolResult{content,..} if content=="new tool result")
+            matches!(&request.messages[1].content[0], wire::ContentBlock::ToolResult{content,..} if content.string_at("").as_deref()==Some("new tool result"))
         );
         assert!(!serde_json::to_string(&request)
             .unwrap()
@@ -1499,7 +1798,7 @@ mod tests {
         })).unwrap();
         let result = |id: &str, text: &str| ContentBlock::ToolResult {
             tool_call_id: id.into(),
-            output: json!(text),
+            output: host_payload(json!(text)),
             is_error: None,
             cache_control: None,
             cache_reference: None,
@@ -1510,7 +1809,7 @@ mod tests {
                 content: vec![ContentBlock::ToolCall {
                     id: "old-call".into(),
                     name: "computer".into(),
-                    input: json!({"action":"get_access"}),
+                    input: host_payload(json!({"action":"get_access"})),
                 }],
             },
             Message {
@@ -1523,11 +1822,13 @@ mod tests {
                     ContentBlock::ToolCall {
                         id: "current-call".into(),
                         name: "computer".into(),
-                        input: json!({"action":"get_access"}),
+                        input: host_payload(json!({"action":"get_access"})),
                     },
                     ContentBlock::ProviderContent {
                         protocol: "open_ai_responses".into(),
-                        value: json!({"type":"lingxi_computer_continuation","continuation":continuation}),
+                        value: host_payload(
+                            json!({"type":"lingxi_computer_continuation","continuation":continuation}),
+                        ),
                     },
                 ],
             },
@@ -1566,225 +1867,135 @@ mod tests {
         assert!(!body.to_string().contains("old-call"));
         assert!(!body.to_string().contains("old accepted output"));
     }
-}
-use std::collections::{BTreeMap, BTreeSet};
 
-fn computer_marker(block: &ContentBlock) -> Option<(&str, &Value, &str)> {
-    let ContentBlock::ProviderContent { protocol, value } = block else {
-        return None;
-    };
-    let kind = value.get("type")?.as_str()?;
-    matches!(
-        kind,
-        "lingxi_computer_binding"
-            | "lingxi_computer_receipt"
-            | "lingxi_computer_continuation"
-            | "lingxi_computer_receipt_ack"
-            | "lingxi_computer_abandoned"
-    )
-    .then_some((kind, value, protocol))
-}
-
-fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
-    let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
-    }
-    for item in messages.iter().flat_map(|message| &message.content) {
-        if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
-            let mapped: Vec<String> = serde_json::from_value(
-                value
-                    .get("tool_use_ids")
-                    .ok_or_else(|| invalid("computer binding is missing tool_use_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            if mapped.is_empty()
-                || mapped
-                    .iter()
-                    .any(|id| id.is_empty() || !ids.insert(id.clone()))
-            {
-                return Err(invalid(
-                    "computer binding has empty or duplicate synthetic tool IDs",
-                ));
-            }
-            // Validate the saved provider call even though outgoing projection never executes it.
-            let _: wire::computer::NativeComputerCall = serde_json::from_value(
-                value
-                    .get("call")
-                    .ok_or_else(|| invalid("computer binding is missing the original call"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
+    #[test]
+    fn nullable_text_citations_survive_next_request_projection() {
+        for (citations, expected) in [
+            (None, None),
+            (Some(None), Some(Value::Null)),
+            (
+                Some(Some(
+                    wire::JsonPayload::from_generated_value(&json!([])).unwrap(),
+                )),
+                Some(json!([])),
+            ),
+        ] {
+            let message = Message {
+                role: "user".into(),
+                content: vec![ContentBlock::Text {
+                    text: "prompt".into(),
+                    citations,
+                    cache_control: None,
+                }],
+            };
+            let content =
+                message_content(&message, wire::ProtocolFamily::AnthropicMessages).unwrap();
+            let value = serde_json::to_value(&content[0]).unwrap();
+            assert_eq!(value.get("citations"), expected.as_ref());
         }
     }
-    Ok(ids)
-}
-// Provider call IDs are opaque and can recur on a later response. A marker
-// only retires work in earlier messages, never a new call in its own response.
-// Keeping the latest marker index is sufficient to test that temporal boundary.
-type ComputerMarkerBoundaries = BTreeMap<String, usize>;
 
-fn marked_after(markers: &ComputerMarkerBoundaries, call_id: &str, message_index: usize) -> bool {
-    markers
-        .get(call_id)
-        .is_some_and(|index| *index > message_index)
-}
+    #[test]
+    fn omitted_tool_result_error_survives_next_request_projection() {
+        let result = ContentBlock::ToolResult {
+            tool_call_id: "toolu_1".into(),
+            output: host_payload(json!("ok")),
+            is_error: None,
+            cache_control: None,
+            cache_reference: None,
+        };
+        let projected = block(&result).unwrap();
+        assert!(serde_json::to_value(projected)
+            .unwrap()
+            .get("is_error")
+            .is_none());
+    }
 
-fn acknowledged_computer_receipts(
-    messages: &[Message],
-) -> Result<ComputerMarkerBoundaries, LlmError> {
-    let mut ids = BTreeMap::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
+    #[test]
+    fn history_edge_consumes_companion_once_and_preserves_tool_metadata() {
+        let native = wire::ContentBlock::ToolUse {
+            id: wire::ToolUseId::new("call-1"),
+            name: "old".into(),
+            input: host_payload(json!({})),
+            provider_id: Some("provider-1".into()),
+            caller: None,
+            toolset_name: Some("browser".into()),
+            thought_signature: None,
+        };
+        let history = vec![Message {
+            role: "assistant".into(),
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "call-1".into(),
+                    name: "updated".into(),
+                    input: host_payload(json!({"url":"example"})),
+                },
+                ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: host_payload(json!({"type":"lingxi_replay_metadata","block":native})),
+                },
+            ],
+        }];
+        let (input, overrides) = history_input(
+            "model",
+            &history,
+            &[],
+            &[],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert!(overrides.is_empty());
+        assert_eq!(input.messages[0].content.len(), 1);
+        let wire::ContentBlock::ToolUse {
+            name,
+            input,
+            provider_id,
+            toolset_name,
+            ..
+        } = &input.messages[0].content[0]
+        else {
+            panic!("canonical tool use")
+        };
+        assert_eq!(name, "updated");
+        assert_eq!(input.string_at("/url").as_deref(), Some("example"));
+        assert_eq!(provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(toolset_name.as_deref(), Some("browser"));
     }
-    for (message_index, block) in messages
-        .iter()
-        .enumerate()
-        .flat_map(|(index, message)| message.content.iter().map(move |block| (index, block)))
-    {
-        if let Some(("lingxi_computer_receipt_ack", value, _)) = computer_marker(block) {
-            let calls: Vec<String> = serde_json::from_value(
-                value
-                    .get("call_ids")
-                    .ok_or_else(|| invalid("computer receipt acknowledgment is missing call_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            if calls.is_empty() || calls.iter().any(|id| id.trim().is_empty()) {
-                return Err(invalid(
-                    "computer receipt acknowledgment requires nonempty call IDs",
-                ));
-            }
-            ids.extend(calls.into_iter().map(|id| (id, message_index)));
-        }
-    }
-    Ok(ids)
-}
 
-fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
-    let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
+    #[test]
+    fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
+        let history = vec![Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: host_payload(json!({"type":"reasoning","id":"r"})),
+                },
+                ContentBlock::TextJsUtf16 {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                    citations: None,
+                    cache_control: Some(CacheControl::Ephemeral),
+                },
+            ],
+        }];
+        let (input, overrides) = history_input(
+            "model",
+            &history,
+            &[],
+            &[],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(input.messages[0].content.len(), 1);
+        assert!(matches!(
+            input.messages[0].content[0],
+            wire::ContentBlock::Text { .. }
+        ));
+        assert_eq!(overrides["/messages/0/content/0/text"], vec![0xd800]);
+        assert_eq!(
+            input.prompt_cache.breakpoints[0].position,
+            wire::CachePosition::Message { index: 0, block: 0 }
+        );
     }
-    for block in messages.iter().flat_map(|message| &message.content) {
-        if let Some(("lingxi_computer_abandoned", value, _)) = computer_marker(block) {
-            let object = value
-                .as_object()
-                .ok_or_else(|| invalid("computer abandoned marker must be an object"))?;
-            if object.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "type" | "call_ids" | "call_identities" | "reason"
-                )
-            }) {
-                return Err(invalid(
-                    "computer abandoned marker contains unsupported fields",
-                ));
-            }
-            if value
-                .get("reason")
-                .and_then(Value::as_str)
-                .is_none_or(|reason| reason.trim().is_empty())
-            {
-                return Err(invalid(
-                    "computer abandoned marker requires a nonempty recovery reason",
-                ));
-            }
-            let calls: Vec<String> = serde_json::from_value(
-                value
-                    .get("call_ids")
-                    .ok_or_else(|| invalid("computer abandoned marker is missing call_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            let mut unique = BTreeSet::new();
-            if calls.is_empty()
-                || calls
-                    .iter()
-                    .any(|id| id.trim().is_empty() || !unique.insert(id.clone()))
-            {
-                return Err(invalid(
-                    "computer abandoned marker requires distinct nonempty call IDs",
-                ));
-            }
-            let identities: Vec<(String, String)> = serde_json::from_value(
-                value
-                    .get("call_identities")
-                    .ok_or_else(|| {
-                        invalid("computer abandoned marker is missing scoped call identities")
-                    })?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            let scoped: BTreeSet<_> = identities.iter().cloned().collect();
-            let scoped_calls: BTreeSet<_> =
-                identities.iter().map(|(_, call)| call.clone()).collect();
-            if identities.is_empty()
-                || scoped.len() != identities.len()
-                || identities
-                    .iter()
-                    .any(|(response, call)| response.trim().is_empty() || call.trim().is_empty())
-                || scoped_calls != unique
-            {
-                return Err(invalid(
-                    "computer abandoned marker has inconsistent scoped identities",
-                ));
-            }
-            ids.extend(scoped);
-        }
-    }
-    Ok(ids)
-}
-
-fn computer_continuation_boundary(
-    messages: &[Message],
-    protocol: wire::ProtocolFamily,
-) -> Result<Option<usize>, LlmError> {
-    if !matches!(
-        protocol,
-        wire::ProtocolFamily::GeminiInteractions | wire::ProtocolFamily::OpenAiResponses
-    ) {
-        return Ok(None);
-    }
-    let Some(current) = crate::computer::current_continuation() else {
-        return Ok(None);
-    };
-    let mut boundary = None;
-    for (index, message) in messages.iter().enumerate() {
-        for block in &message.content {
-            if let Some(("lingxi_computer_continuation", value, _)) = computer_marker(block) {
-                let saved: wire::ContinuationRef = serde_json::from_value(
-                    value
-                        .get("continuation")
-                        .ok_or_else(|| {
-                            invalid("computer continuation marker is missing its reference")
-                        })?
-                        .clone(),
-                )
-                .map_err(invalid)?;
-                if saved == current {
-                    boundary = Some(index);
-                }
-            }
-        }
-    }
-    boundary
-        .map(Some)
-        .ok_or_else(|| invalid("computer continuation has no matching durable input boundary"))
-}
-
-pub(crate) fn canonical_message_content(
-    message: &Message,
-    family: wire::ProtocolFamily,
-) -> Result<Vec<wire::ContentBlock>, LlmError> {
-    let ids = computer_tool_ids(std::slice::from_ref(message))?;
-    let acknowledged = acknowledged_computer_receipts(std::slice::from_ref(message))?;
-    let abandoned = abandoned_computer_calls(std::slice::from_ref(message))?;
-    Ok(
-        project_message(message, family, &ids, &acknowledged, &abandoned, 0, false)?
-            .into_iter()
-            .map(|(_, block)| block)
-            .collect(),
-    )
 }

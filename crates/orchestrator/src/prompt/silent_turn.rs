@@ -161,7 +161,7 @@ fn text_speaks(text: &str) -> bool {
 /// The `o=!0` predicate inside `Ezm`.
 fn assistant_spoke(content: &[ContentBlock]) -> bool {
     content.iter().any(|b| match b {
-        ContentBlock::Text { text } => text_speaks(text),
+        ContentBlock::Text { text, .. } => text_speaks(text),
         ContentBlock::ToolUse { name, .. } => SPEAKING_TOOL_NAMES.contains(&name.as_str()),
         _ => false,
     })
@@ -304,6 +304,7 @@ mod tests {
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -312,8 +313,10 @@ mod tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "Here is what I found.".into(),
+                citations: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -323,7 +326,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -413,6 +416,7 @@ mod tests {
                     provider_id: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             };
             let history = vec![real_user(), asked, tool_result_user(), silent_assistant()];
             assert_eq!(
@@ -429,8 +433,10 @@ mod tests {
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: sentinel.into(),
+                    citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             };
             let history = vec![real_user(), quiet, tool_result_user(), silent_assistant()];
             assert_eq!(

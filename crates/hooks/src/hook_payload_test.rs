@@ -7,6 +7,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const MAX_TEST_JSON_BYTES: usize = 16 * 1024;
+
+    fn source_text(value: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        let json = serde_json::to_string(value).expect("test string serializes as JSON");
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+            .expect("test string JSON parses")
+    }
+
+    fn source(value: serde_json::Value) -> HookJson {
+        let raw = serde_json::to_string(&value).expect("test JSON value serializes");
+        assert!(
+            raw.len() <= MAX_TEST_JSON_BYTES,
+            "test JSON fixture exceeds its explicit byte bound"
+        );
+        HookJson::parse(&raw).expect("bounded test JSON value is valid")
+    }
+
     #[test]
     fn pre_payload_serializes_byte_lock() {
         let p = PreToolUsePayload {
@@ -20,7 +37,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_input: source(json!({"command": "ls"})),
             tool_use_id: "tu-1".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -47,7 +64,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_input: source(json!({"command": "ls"})),
             tool_use_id: "tu-1".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -101,8 +118,8 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Read".into(),
-            tool_input: json!({"path": "/x"}),
-            tool_response: json!({"content": "data"}),
+            tool_input: source(json!({"path": "/x"})),
+            tool_response: source(json!({"content": "data"})),
             tool_use_id: "tu-2".into(),
             duration_ms: None,
         };
@@ -124,13 +141,78 @@ mod tests {
             agent_type: Some("general-purpose".into()),
             effort: None,
             tool_name: "Edit".into(),
-            tool_input: json!({"file_path": "/f"}),
+            tool_input: source(json!({"file_path": "/f"})),
             tool_use_id: "tu".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: PreToolUsePayload = serde_json::from_str(&s).unwrap();
         assert_eq!(back.tool_name, "Edit");
         assert_eq!(back.agent_type.as_deref(), Some("general-purpose"));
+    }
+
+    #[test]
+    fn arbitrary_tool_input_stays_a_raw_member_through_envelope_serde() {
+        let payload = PreToolUsePayload {
+            hook_event_name: HookEventNamePre,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            tool_name: "Bash".into(),
+            tool_input: HookJson::parse(r#"{"text":"\ud800","nested":[null]}"#).unwrap(),
+            tool_use_id: "tu".into(),
+        };
+        let envelope = HookEventEnvelope::Pre(payload);
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(encoded.contains(r#""tool_input":{"text":"\ud800","nested":[null]}"#));
+
+        let decoded: HookEventEnvelope = serde_json::from_str(&encoded).unwrap();
+        let HookEventEnvelope::Pre(decoded) = decoded else {
+            panic!("PreToolUse envelope should remain PreToolUse");
+        };
+        assert_eq!(
+            decoded.tool_input.to_json_string().unwrap(),
+            r#"{"text":"\ud800","nested":[null]}"#
+        );
+    }
+
+    #[test]
+    fn optional_arbitrary_hook_payload_keeps_absent_and_explicit_null_distinct() {
+        let payload = ElicitationResultPayload {
+            hook_event_name: HookEventNameElicitationResult,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            mcp_server_name: "server".into(),
+            elicitation_id: None,
+            mode: None,
+            action: "accept".into(),
+            content: Some(HookJson::parse("null").unwrap()),
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        assert!(encoded.contains(r#""content":null"#));
+        let decoded: ElicitationResultPayload = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded
+            .content
+            .as_ref()
+            .and_then(|value| value.at_pointer(""))
+            .is_some_and(|value| value.is_null()));
+
+        let mut absent = payload;
+        absent.content = None;
+        let encoded = serde_json::to_string(&absent).unwrap();
+        assert!(!encoded.contains("\"content\""));
+        let decoded: ElicitationResultPayload = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.content.is_none());
     }
 
     /// `effort` is the base-shape `effort: { level }` object (finding #44):
@@ -153,7 +235,7 @@ mod tests {
             agent_type: None,
             effort: Some(EffortLevel::new("high")),
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "ls"}),
+            tool_input: source(json!({"command": "ls"})),
             tool_use_id: "tu".into(),
         };
         let s = serde_json::to_string(&with_effort).unwrap();
@@ -203,7 +285,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.decision, Some(HookDecision::Block));
-        assert_eq!(r.reason.as_deref(), Some("because"));
+        assert_eq!(
+            r.reason.as_ref().map(|text| text.display.as_str()),
+            Some("because")
+        );
     }
 
     #[test]
@@ -306,16 +391,16 @@ mod tests {
         assert_eq!(response.decision, Some(HookDecision::Allow));
         assert_eq!(
             response.updated_input,
-            Some(json!({"command": "printf safe"}))
+            Some(source(json!({"command": "printf safe"})))
         );
         assert_eq!(
             response.updated_permissions,
-            Some(vec![json!({
+            Some(source(json!([{
                 "type": "addRules",
                 "rules": [{"toolName": "Bash", "ruleContent": "printf *"}],
                 "behavior": "allow",
                 "destination": "session"
-            })])
+            }])))
         );
         assert!(matches!(
             response.permission_request_result,
@@ -324,6 +409,45 @@ mod tests {
                 updated_permissions: Some(_),
             })
         ));
+    }
+
+    #[test]
+    fn parse_response_permission_request_keeps_raw_utf16_in_updates() {
+        let projection = HookJson::parse(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"printf \ud800"},"updatedPermissions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"printf \udfff"}],"behavior":"allow","destination":"session"}]}}}"#,
+        )
+        .unwrap();
+        let response = parse_response_projection(&projection, "PermissionRequest").unwrap();
+        let input = response.updated_input.as_ref().unwrap();
+        assert_eq!(
+            input.to_json_string().unwrap(),
+            r#"{"command":"printf \ud800"}"#
+        );
+        let mut expected_input_units = "printf ".encode_utf16().collect::<Vec<_>>();
+        expected_input_units.push(0xD800);
+        assert_eq!(input.string_units("/command"), Some(expected_input_units));
+
+        let permissions = response.updated_permissions.as_ref().unwrap();
+        assert_eq!(
+            permissions.to_json_string().unwrap(),
+            r#"[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"printf \udfff"}],"behavior":"allow","destination":"session"}]"#
+        );
+        let mut expected_rule_units = "printf ".encode_utf16().collect::<Vec<_>>();
+        expected_rule_units.push(0xDFFF);
+        assert_eq!(
+            permissions.string_units("/0/rules/0/ruleContent"),
+            Some(expected_rule_units)
+        );
+
+        let crate::response::PermissionRequestResult::Allow {
+            updated_input: Some(result_input),
+            updated_permissions: Some(result_permissions),
+        } = response.permission_request_result.unwrap()
+        else {
+            panic!("expected the allow result to retain both raw updates");
+        };
+        assert_eq!(result_input, *input);
+        assert_eq!(result_permissions, *permissions);
     }
 
     #[test]
@@ -337,11 +461,11 @@ mod tests {
         assert_eq!(response.decision, Some(HookDecision::Allow));
         assert_eq!(
             response.updated_permissions,
-            Some(vec![json!({
+            Some(source(json!([{
                 "type": "setMode",
                 "mode": "auto",
                 "destination": "session"
-            })])
+            }])))
         );
     }
 
@@ -353,7 +477,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.decision, Some(HookDecision::Block));
-        assert_eq!(response.reason.as_deref(), Some("not safe"));
+        assert_eq!(
+            response.reason.as_ref().map(|text| text.display.as_str()),
+            Some("not safe")
+        );
         assert_eq!(response.interrupt, Some(true));
         assert!(matches!(
             response.permission_request_result,
@@ -401,12 +528,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.system_message.as_deref(),
+            r.system_message.as_ref().map(|text| text.display.as_str()),
             Some("hello"),
             "systemMessage stays on its own field (transcript-facing, not the model)"
         );
         assert_eq!(
-            r.additional_context.as_deref(),
+            r.additional_context
+                .as_ref()
+                .map(|text| text.display.as_str()),
             Some("world"),
             "additionalContext stays on its own field (model-facing)"
         );
@@ -416,13 +545,15 @@ mod tests {
     fn parse_response_elicitation_accept_with_content() {
         // hookSpecificOutput.{action,content} -> elicitation_response, no block.
         let r = parse_response(
-            r#"{"hookSpecificOutput":{"hookEventName":"Elicitation","action":"accept","content":{"token":"xyz"}}}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"Elicitation","action":"accept","content":{"token":"\ud800"}}}"#,
             "Elicitation",
         )
         .unwrap();
         let er = r.elicitation_response.expect("elicitation response");
         assert_eq!(er.action, "accept");
-        assert_eq!(er.content, Some(json!({"token": "xyz"})));
+        let content = er.content.expect("structured content");
+        assert_eq!(content.to_json_string().unwrap(), r#"{"token":"\ud800"}"#);
+        assert_eq!(content.string_units("/token"), Some(vec![0xD800]));
         assert_eq!(r.decision, None, "accept must NOT block");
     }
 
@@ -458,11 +589,14 @@ mod tests {
     #[test]
     fn parse_response_post_extracts_updated_mcp_tool_output() {
         let r = parse_response(
-            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"content":"new"}}}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"content":"\ud800"}}}"#,
             "PostToolUse",
         )
         .unwrap();
-        assert_eq!(r.updated_mcp_tool_output, Some(json!({ "content": "new" })));
+        assert_eq!(
+            r.updated_mcp_tool_output,
+            Some(HookJson::parse(r#"{"content":"\ud800"}"#).unwrap())
+        );
     }
 
     #[test]
@@ -512,7 +646,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.updated_tool_output,
-            Some(Some(json!({ "result": "replaced" })))
+            Some(source(json!({ "result": "replaced" })))
         );
     }
 
@@ -520,13 +654,16 @@ mod tests {
     fn parse_response_post_explicit_null_updated_tool_output_is_replacement() {
         // KEY DISTINCTION from the MCP field: `updatedToolOutput` uses
         // `!== void 0` — an explicit JSON `null` IS a replacement (the key being
-        // present matters), so the outer `Some` is set with `Some(Value::Null)`.
+        // present matters), so the outer `Some` contains a root-null projection.
         let r = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":null}}"#,
             "PostToolUse",
         )
         .unwrap();
-        assert_eq!(r.updated_tool_output, Some(Some(serde_json::Value::Null)));
+        assert_eq!(
+            r.updated_tool_output,
+            Some(HookJson::parse("null").unwrap())
+        );
         // ... whereas the legacy MCP field treats null as a no-op:
         assert!(r.updated_mcp_tool_output.is_none());
     }
@@ -556,15 +693,15 @@ mod tests {
     #[test]
     fn updated_tool_output_wire_round_trips_camel_case() {
         // The struct field round-trips through serde with the camelCase wire key
-        // and `Option<Option<Value>>` shape preserved.
+        // and exact source member shape preserved.
         let resp = crate::response::HookResponse {
-            updated_tool_output: Some(Some(json!({ "a": 1 }))),
+            updated_tool_output: Some(source(json!({ "a": 1 }))),
             ..Default::default()
         };
         let s = serde_json::to_string(&resp).unwrap();
         assert!(s.contains(r#""updated_tool_output":{"a":1}"#), "{s}");
         let back: crate::response::HookResponse = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.updated_tool_output, Some(Some(json!({ "a": 1 }))));
+        assert_eq!(back.updated_tool_output, Some(source(json!({ "a": 1 }))));
         // Default (absent) is skip_serializing_if-omitted.
         let none = crate::response::HookResponse::default();
         let s2 = serde_json::to_string(&none).unwrap();
@@ -608,7 +745,12 @@ mod tests {
             "SessionStart",
         )
         .unwrap();
-        assert_eq!(r.initial_user_message.as_deref(), Some("hi there"));
+        assert_eq!(
+            r.initial_user_message
+                .as_ref()
+                .map(|text| text.display.as_str()),
+            Some("hi there")
+        );
         assert_eq!(r.reload_skills, Some(true));
         // Scoped to SessionStart: the same keys on another event are ignored.
         let r2 = parse_response(
@@ -633,7 +775,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.decision, Some(HookDecision::Block));
-        assert_eq!(r.reason.as_deref(), Some("policy violation"));
+        assert_eq!(
+            r.reason.as_ref().map(|text| text.display.as_str()),
+            Some("policy violation")
+        );
     }
 
     #[test]
@@ -646,7 +791,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.decision, Some(HookDecision::Block));
-        assert_eq!(r.reason.as_deref(), Some("specific"));
+        assert_eq!(
+            r.reason.as_ref().map(|text| text.display.as_str()),
+            Some("specific")
+        );
     }
 
     #[test]
@@ -733,7 +881,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(allowed.decision, Some(HookDecision::Approve));
-        assert_eq!(allowed.reason.as_deref(), Some("approved"));
+        assert_eq!(
+            allowed.reason.as_ref().map(|text| text.display.as_str()),
+            Some("approved")
+        );
 
         let asked = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"PreModelSwitch","permissionDecision":"ask"}}"#,
@@ -766,7 +917,9 @@ mod tests {
         .unwrap();
         assert_eq!(post.decision, None);
         assert_eq!(
-            post.additional_context.as_deref(),
+            post.additional_context
+                .as_ref()
+                .map(|text| text.display.as_str()),
             Some("use the new model")
         );
     }
@@ -849,7 +1002,9 @@ mod tests {
         let raw = "{\"terminalSequence\":\"\\u001b]9;hi\\u0007\"}";
         let r = parse_response(raw, "PreToolUse").unwrap();
         assert_eq!(
-            r.terminal_sequence.as_deref(),
+            r.terminal_sequence
+                .as_ref()
+                .map(|text| text.display.as_str()),
             Some("\u{001b}]9;hi\u{0007}")
         );
     }
@@ -869,7 +1024,12 @@ mod tests {
         let s = serde_json::to_string(&resp).unwrap();
         assert!(s.contains("\"terminal_sequence\":\"\\u0007\""), "{s}");
         let back: crate::response::HookResponse = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.terminal_sequence.as_deref(), Some("\u{0007}"));
+        assert_eq!(
+            back.terminal_sequence
+                .as_ref()
+                .map(|text| text.display.as_str()),
+            Some("\u{0007}")
+        );
         // default (None) is omitted
         let none = crate::response::HookResponse::default();
         assert!(!serde_json::to_string(&none)
@@ -892,7 +1052,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Bash".into(),
-            tool_input: json!({ "command": "git push" }),
+            tool_input: source(json!({ "command": "git push" })),
             tool_use_id: "tu-9".into(),
             reason: "policy".into(),
         };
@@ -902,6 +1062,29 @@ mod tests {
         assert!(s.contains(r#""tool_input":{"command":"git push"}"#));
         assert!(s.contains(r#""tool_use_id":"tu-9""#));
         assert!(s.contains(r#""reason":"policy""#));
+    }
+
+    #[test]
+    fn permission_denied_reason_preserves_lone_surrogate_units() {
+        let p = PermissionDeniedPayload {
+            hook_event_name: HookEventNamePermissionDenied,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            prompt_id: None,
+            permission_mode: Some("default".into()),
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            tool_name: "Bash".into(),
+            tool_input: source(json!({ "command": "git push" })),
+            tool_use_id: "tu-9".into(),
+            reason: HookJson::parse(r#""\ud800""#).unwrap(),
+        };
+
+        let encoded = serde_json::to_string(&p).unwrap();
+        assert!(encoded.contains(r#""reason":"\ud800""#));
+        assert_eq!(p.reason.string_units(""), Some(vec![0xD800]));
     }
 
     // ---- B1: lifecycle-event payload byte-lock tests --------------------
@@ -1050,6 +1233,52 @@ mod tests {
     }
 
     #[test]
+    fn task_payload_raw_json_preserves_utf16_and_optional_description() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let exact = Utf16JsonProjection::parse(r#""task \ud800 subject""#).unwrap();
+        let empty = Utf16JsonProjection::parse(r#""""#).unwrap();
+        let payload = TaskCompletedPayload {
+            hook_event_name: HookEventNameTaskCompleted,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            task_id: "task-1".into(),
+            task_subject: exact.clone(),
+            task_description: Some(empty),
+            teammate_name: None,
+            team_name: None,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            json.contains(r#""task_subject":"task \ud800 subject""#),
+            "{json}"
+        );
+        let projection = Utf16JsonProjection::parse(&json).unwrap();
+        assert_eq!(
+            projection.string_units("/task_subject"),
+            exact.string_units("")
+        );
+        assert_eq!(
+            projection.string_units("/task_description"),
+            Some(Vec::new())
+        );
+
+        let absent = TaskCompletedPayload {
+            task_description: None,
+            ..payload
+        };
+        let json = serde_json::to_string(&absent).unwrap();
+        let projection = Utf16JsonProjection::parse(&json).unwrap();
+        assert!(projection.at_pointer("/task_description").is_none());
+    }
+
+    #[test]
     fn task_completed_payload_serializes_byte_lock() {
         let p = TaskCompletedPayload {
             hook_event_name: HookEventNameTaskCompleted,
@@ -1062,7 +1291,7 @@ mod tests {
             agent_type: None,
             effort: None,
             task_id: "task-42".into(),
-            task_subject: "Build the thing".into(),
+            task_subject: source_text("Build the thing"),
             task_description: None,
             teammate_name: None,
             team_name: None,
@@ -1087,8 +1316,8 @@ mod tests {
             agent_type: None,
             effort: None,
             task_id: "t1".into(),
-            task_subject: "subj".into(),
-            task_description: Some("desc".into()),
+            task_subject: source_text("subj"),
+            task_description: Some(source_text("desc")),
             teammate_name: Some("alice".into()),
             team_name: Some("core".into()),
         };
@@ -1112,8 +1341,8 @@ mod tests {
             agent_type: None,
             effort: None,
             task_id: "task-42".into(),
-            task_subject: "LocalBash".into(),
-            task_description: Some("do the work".into()),
+            task_subject: source_text("LocalBash"),
+            task_description: Some(source_text("do the work")),
             teammate_name: None,
             team_name: None,
         };
@@ -1141,7 +1370,7 @@ mod tests {
             effort: None,
             task_id: "t1".into(),
             task_subject: "subj".into(),
-            task_description: Some("desc".into()),
+            task_description: Some(source_text("desc")),
             teammate_name: Some("researcher".into()),
             team_name: Some("alpha".into()),
         };
@@ -1172,6 +1401,20 @@ mod tests {
             s,
             r#"{"hook_event_name":"UserPromptSubmit","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","prompt":"fix the bug"}"#
         );
+    }
+
+    #[test]
+    fn hook_session_cron_prompt_preserves_lone_utf16_units() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let cron = HookSessionCron {
+            id: "c1".into(),
+            schedule: "* * * * *".into(),
+            recurring: false,
+            prompt: Utf16JsonProjection::parse(r#""\ud800""#).unwrap(),
+        };
+        let encoded = serde_json::to_string(&cron).unwrap();
+        let decoded = Utf16JsonProjection::parse(&encoded).unwrap();
+        assert_eq!(decoded.string_units("/prompt"), Some(vec![0xd800]));
     }
 
     #[test]
@@ -1355,7 +1598,12 @@ mod tests {
             let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
             let r = parse_response(&raw, leaked).unwrap();
             // `additionalContext` now lands on its own field (NOT system_message).
-            assert_eq!(r.additional_context.as_deref(), Some("x"));
+            assert_eq!(
+                r.additional_context
+                    .as_ref()
+                    .map(|text| text.display.as_str()),
+                Some("x")
+            );
 
             // A mismatched name is rejected.
             let err = parse_response(
@@ -1385,7 +1633,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Bash".into(),
-            tool_input: Value::Null,
+            tool_input: HookJson::parse("null").unwrap(),
             tool_use_id: "tu-1".into(),
             error: "boom".into(),
             is_interrupt: None,
@@ -1411,7 +1659,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Edit".into(),
-            tool_input: json!({"file_path": "/f"}),
+            tool_input: source(json!({"file_path": "/f"})),
             tool_use_id: "tu".into(),
             error: "cancelled".into(),
             is_interrupt: Some(true),
@@ -1420,6 +1668,30 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""tool_input":{"file_path":"/f"}"#));
         assert!(s.contains(r#""error":"cancelled","is_interrupt":true"#));
+    }
+
+    #[test]
+    fn post_tool_use_failure_error_keeps_lone_surrogate_units() {
+        let error = Utf16JsonProjection::parse(r#""x\ud800y""#).unwrap();
+        let payload = PostToolUseFailurePayload {
+            hook_event_name: HookEventNamePostToolUseFailure,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            tool_name: "Mcp".into(),
+            tool_input: HookJson::parse("null").unwrap(),
+            tool_use_id: "tu".into(),
+            error,
+            is_interrupt: None,
+            duration_ms: None,
+        };
+        let wire = serde_json::to_string(&payload).unwrap();
+        assert!(wire.contains(r#""error":"x\ud800y""#));
     }
 
     #[test]
@@ -1505,6 +1777,66 @@ mod tests {
         assert_eq!(
             s,
             r#"{"hook_event_name":"PostCompact","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","trigger":"","compact_summary":"did the thing"}"#
+        );
+    }
+
+    #[test]
+    fn compact_payloads_preserve_lone_utf16_units() {
+        let custom_units = "focus ".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+        let custom = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "focus �".into(),
+            custom_units.clone(),
+        )
+        .unwrap();
+        let pre = PreCompactPayload {
+            hook_event_name: HookEventNamePreCompact,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            trigger: "manual".into(),
+            custom_instructions: Some(custom),
+        };
+        let pre_json = serde_json::to_string(&pre).unwrap();
+        assert!(pre_json.contains(r#""custom_instructions":"focus \ud800""#));
+        let pre_roundtrip: PreCompactPayload = serde_json::from_str(&pre_json).unwrap();
+        assert_eq!(
+            pre_roundtrip.custom_instructions.unwrap().string_units(""),
+            Some(custom_units)
+        );
+
+        let summary_units = "summary "
+            .encode_utf16()
+            .chain([0xdfff])
+            .collect::<Vec<_>>();
+        let summary = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "summary �".into(),
+            summary_units.clone(),
+        )
+        .unwrap();
+        let post = PostCompactPayload {
+            hook_event_name: HookEventNamePostCompact,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            trigger: "manual".into(),
+            compact_summary: summary,
+        };
+        let post_json = serde_json::to_string(&post).unwrap();
+        assert!(post_json.contains(r#""compact_summary":"summary \udfff""#));
+        let post_roundtrip: PostCompactPayload = serde_json::from_str(&post_json).unwrap();
+        assert_eq!(
+            post_roundtrip.compact_summary.string_units(""),
+            Some(summary_units)
         );
     }
 
@@ -1618,7 +1950,7 @@ mod tests {
             agent_type: None,
             effort: None,
             tool_name: "Bash".into(),
-            tool_input: json!({"command": "rm -rf /"}),
+            tool_input: source(json!({"command": "rm -rf /"})),
             permission_suggestions: None,
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1969,7 +2301,7 @@ mod tests {
             mode: Some(crate::events::ElicitationMode::Url),
             url: Some("https://example.test".into()),
             elicitation_id: Some("e-1".into()),
-            requested_schema: Some(json!({"type": "object"})),
+            requested_schema: Some(source(json!({"type": "object"}))),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -2082,7 +2414,7 @@ mod tests {
             elicitation_id: Some("eid-42".into()),
             mode: Some(crate::events::ElicitationMode::Form),
             action: "decline".into(),
-            content: Some(json!({"reason": "no thanks"})),
+            content: Some(source(json!({"reason": "no thanks"}))),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""action":"decline""#), "{s}");
@@ -2174,7 +2506,10 @@ mod tests {
             "UserPromptSubmit",
         )
         .unwrap();
-        assert_eq!(r.session_title.as_deref(), Some("Renamed"));
+        assert_eq!(
+            r.session_title.as_ref().map(|text| text.display.as_str()),
+            Some("Renamed")
+        );
         // Not parsed for other events.
         let r2 = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"Stop","sessionTitle":"x"}}"#,
@@ -2236,7 +2571,10 @@ mod tests {
             "MessageDisplay",
         )
         .unwrap();
-        assert_eq!(r.display_content.as_deref(), Some("overridden text"));
+        assert_eq!(
+            r.display_content.as_ref().map(|text| text.display.as_str()),
+            Some("overridden text")
+        );
         // Absent when not set.
         let r2 = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"MessageDisplay"}}"#,
@@ -2268,12 +2606,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.watch_paths,
-            Some(vec![
-                ".env".to_string(),
-                ".envrc".to_string(),
-                "/etc/abs.conf".to_string(),
-            ])
+            r.watch_paths
+                .unwrap()
+                .iter()
+                .map(|path| path.display.as_str())
+                .collect::<Vec<_>>(),
+            vec![".env", ".envrc", "/etc/abs.conf"]
         );
     }
 
@@ -2285,7 +2623,7 @@ mod tests {
             "CwdChanged",
         )
         .unwrap();
-        assert_eq!(r.watch_paths, Some(vec!["a/b".to_string()]));
+        assert_eq!(r.watch_paths.unwrap()[0].display.as_str(), "a/b");
     }
 
     #[test]
@@ -2320,7 +2658,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.classifier_context.as_deref(),
+            r.classifier_context
+                .as_ref()
+                .map(|context| context.display.as_str()),
             Some("the user approved this in the desktop app")
         );
         assert!(r.additional_context.is_none());
@@ -2370,7 +2710,13 @@ mod tests {
     #[test]
     fn validation_hints_are_byte_locked() {
         use crate::hook_payload::validation_hint;
-        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let j = |s: &str| {
+            assert!(
+                s.len() <= MAX_TEST_JSON_BYTES,
+                "validation-hint fixture exceeds its explicit byte bound"
+            );
+            HookJson::parse(s).unwrap()
+        };
 
         // hookSpecificOutput without hookEventName — the binary REPLACES the
         // message with this one rather than appending.
@@ -2388,7 +2734,9 @@ mod tests {
                 r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":"allow"}}"#
             ))
             .as_deref(),
-            Some(" (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})")
+            Some(
+                " (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})"
+            )
         );
         // …and none when the decision IS an object.
         assert_eq!(
@@ -2401,7 +2749,9 @@ mod tests {
         // The legacy top-level `decision`, with the ask variant differing.
         assert_eq!(
             validation_hint(&j(r#"{"decision":"ask"}"#)).as_deref(),
-            Some(" (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)")
+            Some(
+                " (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)"
+            )
         );
         for behavior in ["allow", "deny"] {
             assert_eq!(
@@ -2417,5 +2767,80 @@ mod tests {
         assert_eq!(validation_hint(&j(r#"{"decision":"block"}"#)), None);
         assert_eq!(validation_hint(&j(r#"{}"#)), None);
         assert_eq!(validation_hint(&j(r#"[]"#)), None);
+    }
+
+    #[test]
+    fn parse_response_keeps_exact_js_utf16_for_all_fse_response_fields() {
+        let response = parse_response(
+            r#"{"systemMessage":"\ud800x","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a\udc00","initialUserMessage":"\ud800"}}"#,
+            "SessionStart",
+        )
+        .unwrap();
+        let system = response.system_message.unwrap();
+        assert_eq!(system.display, "�x");
+        assert_eq!(system.utf16_code_units, [0xD800, u16::from(b'x')]);
+        let additional = response.additional_context.unwrap();
+        assert_eq!(additional.display, "a�");
+        assert_eq!(additional.utf16_code_units, [u16::from(b'a'), 0xDC00]);
+        let initial = response.initial_user_message.unwrap();
+        assert_eq!(initial.display, "�");
+        assert_eq!(initial.utf16_code_units, [0xD800]);
+    }
+
+    #[test]
+    fn response_text_channels_preserve_exact_utf16_units() {
+        let reason = parse_response(r#"{"reason":"\ud800"}"#, "PreToolUse").unwrap();
+        assert_eq!(reason.reason.unwrap().utf16_code_units, [0xD800]);
+
+        let denied = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"\udfff"}}}"#,
+            "PermissionRequest",
+        )
+        .unwrap();
+        assert_eq!(denied.reason.unwrap().utf16_code_units, [0xDFFF]);
+        let crate::response::PermissionRequestResult::Deny {
+            message: Some(message),
+            ..
+        } = denied.permission_request_result.unwrap()
+        else {
+            panic!("expected the denied request message");
+        };
+        assert_eq!(message.utf16_code_units, [0xDFFF]);
+
+        let terminal = parse_response(r#"{"terminalSequence":"\ud800"}"#, "PreToolUse").unwrap();
+        assert_eq!(
+            terminal.terminal_sequence.unwrap().utf16_code_units,
+            [0xD800]
+        );
+
+        let titled = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"a\ud800"}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert_eq!(
+            titled.session_title.unwrap().utf16_code_units,
+            [u16::from(b'a'), 0xD800]
+        );
+
+        let displayed = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"MessageDisplay","displayContent":"\udfff"}}"#,
+            "MessageDisplay",
+        )
+        .unwrap();
+        assert_eq!(
+            displayed.display_content.unwrap().utf16_code_units,
+            [0xDFFF]
+        );
+
+        let watched = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"FileChanged","watchPaths":["/tmp/\ud800"]}}"#,
+            "FileChanged",
+        )
+        .unwrap();
+        assert_eq!(
+            watched.watch_paths.unwrap()[0].utf16_code_units,
+            "/tmp/".encode_utf16().chain([0xD800]).collect::<Vec<_>>()
+        );
     }
 }

@@ -1,0 +1,170 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "case": "override",
+  "runner_sha256": "e89b5cc70f1c7db79bc291dce4df65bbc8dec47097f26e72951d85e59d85ce5e",
+  "hook_sha256": "b8f3c3a7bef99934342dd62deefd5e7943995a84f3f62700bc1af70c6f39a5d4",
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f01",
+    "Find the file matching *.fixture and report its path."
+  ],
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "tools_setting": "default",
+  "run_name": "glob-default-only",
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 126278,
+      "request_sha256": "0eb8e937c09a91fae557a76a0e1d2428413223efd68328dfdb1df968c751801c",
+      "raw_request": "request-01.raw.json",
+      "advertised_glob": false,
+      "tool_names": [
+        "Agent",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "NotebookEdit",
+        "Read",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskStop",
+        "TaskUpdate",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 126803,
+      "request_sha256": "2596b1522e56fbcc93fb57e7d665ca234820c7e91401a21c081fb0ff80f16a60",
+      "raw_request": "request-02.raw.json",
+      "advertised_glob": false,
+      "tool_names": [
+        "Agent",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "NotebookEdit",
+        "Read",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskStop",
+        "TaskUpdate",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ]
+    }
+  ],
+  "stub_responses": [
+    {
+      "path": "response-01.raw.sse",
+      "bytes": 872,
+      "sha256": "c00ea5503b99ce33ffe9f6361de101464db1a7998d41b227c50c2f2bef2bcae1"
+    },
+    {
+      "path": "response-02.raw.sse",
+      "bytes": 796,
+      "sha256": "3018f80436c2641d80b4794aaf0b178f7cd4b9abc7d6adb3e25637d2a4097e5d"
+    }
+  ],
+  "tool_catalog_raw": {
+    "path": "tool-catalog.raw.json",
+    "bytes": 73867,
+    "sha256": "f10ed4fe161c04ea2da9919e621c078092eb2903c7e5b3f3671eb31305e14b96"
+  },
+  "tool_use_result_session_rows": {
+    "path": "tool-use-result-session-rows.raw.jsonl",
+    "rows": 1,
+    "sha256": "1727233b148aece74018532ad99a996e1045ad7c3d20395bb2ae208042634fb0"
+  },
+  "hook_marker_stdout_or_stderr": [],
+  "hook_marker_debug_log": [],
+  "model_tool_result_content": "<tool_use_error>Error: No such tool available: Glob. Glob is not available in this session \u2014 find files with `find` via the Bash tool instead.</tool_use_error>\n\n<system-reminder>\n<total_tokens>14999994 tokens left</total_tokens>\n</system-reminder>",
+  "parsed_tool_use_results": [
+    "Error: No such tool available: Glob. Glob is not available in this session \u2014 find files with `find` via the Bash tool instead."
+  ],
+  "checks": {
+    "catalog_glob_availability_matches_cli_profile": true,
+    "hook_marker_matches_tool_availability": true,
+    "two_loopback_requests": true,
+    "default_profile_reports_glob_unavailable": true
+  },
+  "expected_return_object": {
+    "durationMs": 1,
+    "numFiles": 1,
+    "filenames": [
+      "hook-return.fixture"
+    ],
+    "truncated": false,
+    "totalMatches": 1,
+    "countIsComplete": true
+  },
+  "model_tool_result_content_utf8": {
+    "path": "model-tool-result-content.raw.txt",
+    "bytes": 249,
+    "sha256": "ad3514a519417c35a4ccaefd3f6537aabe19dd03213bd09d9f7f11d8bcdb8ba0"
+  },
+  "hook_marker_raw": null,
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 14,
+    "sha256": "78fe71bbc60474c0bbb454a1a2f6e3e7a14a096d3513ada72f6d5475f4e61382"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "run_output_dir": "run-output/glob-default-only",
+  "scope": "Native 2.1.293 public CLI tool.call continuation-wrapper output parser probe for built-in Glob; all model and file inputs are local and fixed"
+}

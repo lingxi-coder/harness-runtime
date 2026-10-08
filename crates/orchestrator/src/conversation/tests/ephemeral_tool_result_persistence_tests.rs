@@ -11,7 +11,7 @@ fn tool_result(
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
             content,
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks,
         }],

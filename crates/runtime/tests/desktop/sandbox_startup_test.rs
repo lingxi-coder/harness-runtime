@@ -76,6 +76,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: None,
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,
@@ -126,6 +127,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         append_system_prompt: None,
         session_id_override: None,
         session_writer_lease: None,
+        session_skill_allowlist: None,
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),

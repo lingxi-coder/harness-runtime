@@ -1,6 +1,6 @@
 //! Reply shape from `EffectHandler` back to the run loop.
 
-use crate::types::ids::{RequestId, SessionId};
+use crate::types::ids::SessionId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -8,13 +8,9 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResult {
-    /// No-op (`Render*`, `RecordUnexpectedEvent`, etc.).
+    /// No additional result payload (`Render*`, `RecordUnexpectedEvent`, or
+    /// an accepted semantic model-request intent).
     Ack,
-    /// API request was accepted; events will follow asynchronously.
-    ApiRequestQueued {
-        /// Correlation ID of the queued request.
-        request_id: RequestId,
-    },
     /// Session loaded successfully.
     SessionLoaded {
         /// Identifier of the loaded session.

@@ -9,6 +9,7 @@
 //! prompt-build-time reads: set once by the composition point that knows the
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -60,9 +61,9 @@ static TODO_TOOLS_OPT_IN: AtomicBool = AtomicBool::new(false);
 /// UNSET; `Some("")` is an explicit empty, which DISABLES that trailer — the
 /// two must never collapse into one state or the override silently becomes a
 /// no-op in the direction that keeps emitting the trailer.
-static ATTRIBUTION_COMMIT: RwLock<Option<String>> = RwLock::new(None);
+static ATTRIBUTION_COMMIT: RwLock<Option<Utf16JsonProjection>> = RwLock::new(None);
 /// Companion of [`ATTRIBUTION_COMMIT`] for the PR-body line.
-static ATTRIBUTION_PR: RwLock<Option<String>> = RwLock::new(None);
+static ATTRIBUTION_PR: RwLock<Option<Utf16JsonProjection>> = RwLock::new(None);
 /// `settings.includeCoAuthoredBy`. 0 = unset, 1 = true, 2 = false.
 static INCLUDE_CO_AUTHORED_BY: AtomicU8 = AtomicU8::new(0);
 /// `settings.includeGitInstructions`. 0 = unset, 1 = true, 2 = false.
@@ -526,8 +527,8 @@ pub fn system_prompt_snapshot() -> Option<bool> {
 }
 
 /// Publish `settings.attribution`. Pass `None` for a field the settings do not
-/// name; `Some(String::new())` is an explicit empty and disables that trailer.
-pub fn set_attribution(commit: Option<String>, pr: Option<String>) {
+/// name; an empty root-string projection is explicit and disables that trailer.
+pub fn set_attribution(commit: Option<Utf16JsonProjection>, pr: Option<Utf16JsonProjection>) {
     if let Ok(mut slot) = ATTRIBUTION_COMMIT.write() {
         *slot = commit;
     }
@@ -539,7 +540,7 @@ pub fn set_attribution(commit: Option<String>, pr: Option<String>) {
 /// The published `settings.attribution` pair: `(commit, pr)`, each `None` when
 /// the settings do not name it.
 #[must_use]
-pub fn attribution() -> (Option<String>, Option<String>) {
+pub fn attribution() -> (Option<Utf16JsonProjection>, Option<Utf16JsonProjection>) {
     let commit = ATTRIBUTION_COMMIT.read().ok().and_then(|s| s.clone());
     let pr = ATTRIBUTION_PR.read().ok().and_then(|s| s.clone());
     (commit, pr)
@@ -666,6 +667,31 @@ pub fn workflow_size_guideline_snapshot() -> WorkflowSizeGuidelineSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("test source string is valid JSON")
+    }
+
+    #[test]
+    fn attribution_preserves_source_units_and_explicit_empty_strings() {
+        let prior = attribution();
+        let commit = source_string(vec![0xD800, u16::from(b'x')]);
+        let pr = source_string(Vec::new());
+
+        set_attribution(Some(commit.clone()), Some(pr.clone()));
+
+        let observed = attribution();
+        assert_eq!(observed.0, Some(commit.clone()));
+        assert_eq!(observed.1, Some(pr.clone()));
+        assert_eq!(
+            observed.0.unwrap().string_units(""),
+            Some(vec![0xD800, u16::from(b'x')])
+        );
+        assert_eq!(observed.1.unwrap().string_units(""), Some(Vec::new()));
+
+        set_attribution(prior.0, prior.1);
+    }
 
     #[test]
     fn tool_search_flag_round_trips() {

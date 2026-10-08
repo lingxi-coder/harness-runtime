@@ -18,11 +18,52 @@ use command_api::{
     CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
 };
 use lingxi_core::host::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::ContentBlock;
 use session::jsonl::SessionMode;
 use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader as ToolSkillLoader};
+
+fn namespaced_name(prefix: &str, name: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        name.string_units("")
+            .expect("registered command name is a root string"),
+    );
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("namespaced command name is a root string")
+}
+
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("preloaded prompt is a root string")
+}
+
+fn replace_prompt_text(
+    source: &Utf16JsonProjection,
+    needle: &str,
+    replacement: &str,
+) -> Utf16JsonProjection {
+    let source_units = source.string_units("").expect("prompt is a root string");
+    let needle_units = needle.encode_utf16().collect::<Vec<_>>();
+    let replacement_units = replacement.encode_utf16().collect::<Vec<_>>();
+    if needle_units.is_empty() {
+        return source.clone();
+    }
+    let mut output = Vec::with_capacity(source_units.len());
+    let mut index = 0;
+    while index < source_units.len() {
+        if source_units[index..].starts_with(&needle_units) {
+            output.extend_from_slice(&replacement_units);
+            index += needle_units.len();
+        } else {
+            output.push(source_units[index]);
+            index += 1;
+        }
+    }
+    projection_from_units(output)
+}
 
 /// Project a registered [`SlashCommand`] onto the [`SkillDescriptor`] subset the
 /// `Skill` tool surfaces (verbatim with harness-runtime::desktop's `skill_loader::to_descriptor`).
@@ -50,7 +91,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
-            argument_names: frontmatter.argument_names.clone(),
+            argument_names: cmd.argument_names.clone(),
             shell: frontmatter.shell,
             skip_shell_expansion: false,
             skill_root: cmd.skill_root.clone(),
@@ -66,7 +107,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
         } => SkillDescriptor {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
-            body: String::new(),
+            body: "".into(),
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
@@ -113,7 +154,10 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
 /// file-backed skill that only says "read references/router.md" is not usable
 /// when preloaded. Inline the verified Markdown reference closure into the
 /// descriptor. Desktop remains file-backed; this is the mobile bundled form.
-fn append_bundled_references(mut body: String, skill_root: &Path) -> String {
+fn append_bundled_references(body: Utf16JsonProjection, skill_root: &Path) -> Utf16JsonProjection {
+    let mut units = body
+        .string_units("")
+        .expect("skill prompt is a root string");
     let references = skill_root.join("references");
     let mut pending = vec![references.clone()];
     let mut files = Vec::new();
@@ -141,11 +185,9 @@ fn append_bundled_references(mut body: String, skill_root: &Path) -> String {
             continue;
         };
         let relative = path.strip_prefix(skill_root).unwrap_or(&path).display();
-        body.push_str(&format!(
-            "\n\n## Bundled resource: {relative}\n\n{contents}"
-        ));
+        units.extend(format!("\n\n## Bundled resource: {relative}\n\n{contents}").encode_utf16());
     }
-    body
+    projection_from_units(units)
 }
 
 fn product_prompt_token(suffix: &str) -> String {
@@ -195,14 +237,17 @@ fn contains_embedded_shell(command: &SlashCommand) -> bool {
         }
         | SlashCommandKind::Plugin {
             prompt_template, ..
-        } => prompt_template.as_str(),
+        } => prompt_template
+            .string_units("")
+            .expect("registered skill body is text"),
         SlashCommandKind::Bundled { .. }
         | SlashCommandKind::Builtin { .. }
         | SlashCommandKind::Mcp { .. } => {
             return false;
         }
     };
-    body.contains("```!") || body.contains("!`")
+    body.windows(4).any(|part| part == [96, 96, 96, 33])
+        || body.windows(2).any(|part| part == [33, 96])
 }
 
 fn to_descriptor_for_mode(
@@ -290,8 +335,7 @@ impl MobileDiskSkillLoader {
         self
     }
 
-    /// Back-compat helper for tests that want a disk-populated live registry in
-    /// one call.
+    /// Construct a disk-populated live registry for the selected session mode.
     pub async fn load_from_disk(
         cwd: &Path,
         lingxi_home: &Path,
@@ -347,22 +391,23 @@ pub async fn load_mobile_disk_commands_into_registry(
 impl ToolSkillLoader for MobileDiskSkillLoader {
     // Supply canonical names for the Skill tool's unknown-name suggestions.
     // Read the live registry and apply the same visibility rules as load().
-    async fn list_names(&self) -> Vec<String> {
-        self.registry
-            .read()
-            .await
+    async fn list_names(&self) -> Vec<Utf16JsonProjection> {
+        let registry = self.registry.read().await;
+        registry
             .list_all()
             .into_iter()
             .filter(|command| command_visible_in_session_mode(command, self.session_mode))
+            .filter(|command| registry.session_skill_allowed(command))
             .map(|command| command.name.clone())
             .collect()
     }
 
-    async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+    async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError> {
         let reg = self.registry.read().await;
         Ok(reg.resolve(name).and_then(|cmd| {
-            command_visible_in_session_mode(cmd, self.session_mode)
-                .then(|| to_descriptor_for_mode(cmd, self.session_id.as_deref(), self.session_mode))
+            (command_visible_in_session_mode(cmd, self.session_mode)
+                && reg.session_skill_allowed(cmd))
+            .then(|| to_descriptor_for_mode(cmd, self.session_id.as_deref(), self.session_mode))
         }))
     }
 }
@@ -372,21 +417,27 @@ impl MobileDiskSkillLoader {
         registry: &CommandRegistry,
         skill_name: &str,
         agent_type: &str,
-    ) -> Option<String> {
-        if let Some(command) = registry.resolve(skill_name) {
+    ) -> Option<Utf16JsonProjection> {
+        let skill_name_source = Utf16JsonProjection::from(skill_name);
+        if let Some(command) = registry.resolve(&skill_name_source) {
             return Some(command.name.clone());
         }
         if let Some(plugin_name) = agent_type.split(':').next().filter(|name| !name.is_empty()) {
-            let qualified = format!("{plugin_name}:{skill_name}");
+            let qualified = Utf16JsonProjection::from(format!("{plugin_name}:{skill_name}"));
             if let Some(command) = registry.resolve(&qualified) {
                 return Some(command.name.clone());
             }
         }
-        let suffix = format!(":{skill_name}");
+        let suffix = format!(":{skill_name}").encode_utf16().collect::<Vec<_>>();
         registry
             .list_all()
             .into_iter()
-            .find(|command| command.name.ends_with(&suffix))
+            .find(|command| {
+                command
+                    .name
+                    .string_units("")
+                    .is_some_and(|units| units.ends_with(&suffix))
+            })
             .map(|command| command.name.clone())
     }
 }
@@ -398,6 +449,7 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         skill_name: &str,
         agent_type: &str,
         cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String> {
         let registry = self.registry.read().await;
         let Some(resolved) = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)
@@ -430,12 +482,20 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
                     .as_ref()
                     .map_or_else(|| cwd.clone(), |state| state.project_root());
                 builder
-                    .try_build_at("", &root, &cwd, true)
+                    .try_build_at(
+                        &Utf16JsonProjection::from(""),
+                        command_api::BundledPromptContext {
+                            project_root: &root,
+                            cwd: &cwd,
+                            is_preload: true,
+                            main_loop_model: model,
+                        },
+                    )
                     .map_err(|error| error.to_string())?
             }
-            None => command_api::substitute_arguments_faithful(
+            None => command_api::substitute_arguments_source(
                 &descriptor.body,
-                Some(""),
+                &Utf16JsonProjection::from(""),
                 true,
                 &descriptor.argument_names,
             )
@@ -448,15 +508,22 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
             } else {
                 root.into_owned()
             };
-            body = body.replace(&product_prompt_token("SKILL_DIR"), &root);
+            body = replace_prompt_text(&body, &product_prompt_token("SKILL_DIR"), &root);
         }
         if let Some(session_id) = descriptor.session_id {
-            body = body.replace(&product_prompt_token("SESSION_ID"), &session_id);
+            body = replace_prompt_text(&body, &product_prompt_token("SESSION_ID"), &session_id);
         }
+        let body_units = body
+            .string_units("")
+            .expect("preloaded skill prompt is a root string");
         Ok(Some(SkillLoad {
-            display_name: skill_name.to_string(),
+            display_name: skill_name.into(),
             progress_message: None,
-            content: vec![ContentBlock::Text { text: body }],
+            content: vec![ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&body_units),
+                utf16_code_units: body_units,
+                citations: None,
+            }],
         }))
     }
 }
@@ -503,7 +570,7 @@ mod tests {
                 _ => unreachable!("skill parser must produce markdown command"),
             };
             commands.push(SlashCommand {
-                name: format!("{LOCAL_APP_PLUGIN}:{}", base.name),
+                name: namespaced_name(&format!("{LOCAL_APP_PLUGIN}:"), &base.name),
                 source: CommandSource::Plugin,
                 kind: SlashCommandKind::Plugin {
                     plugin_id,
@@ -530,8 +597,16 @@ mod tests {
 
         let loader = Arc::new(loaded_local_app_skill_registry().await);
         let canonical = "lingxi-local-app:canvas-2d-local-app";
-        assert!(loader.list_names().await.contains(&canonical.to_owned()));
-        assert!(loader.load("canvas-2d-local-app").await.unwrap().is_none());
+        assert!(loader
+            .list_names()
+            .await
+            .iter()
+            .any(|name| name.string_at("") == Some(canonical)));
+        assert!(loader
+            .load(&"canvas-2d-local-app".into())
+            .await
+            .unwrap()
+            .is_none());
         let tool = tool_skill::skill::SkillTool::with_loader(
             shell_test_ctx(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
@@ -543,15 +618,22 @@ mod tests {
         );
         let error = tool
             .validate_input(
-                &serde_json::json!({ "skill": "canvas-2d-local-app" }),
+                &Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({ "skill": "canvas-2d-local-app" }),
+                )
+                .expect("generated test input is JSON"),
                 &fresh_ctx(),
             )
             .await
             .expect_err("bare plugin names must suggest an exact retry");
         assert!(error.to_string().contains(canonical));
-        tool.validate_input(&serde_json::json!({ "skill": canonical }), &fresh_ctx())
-            .await
-            .expect("the suggested canonical name must validate");
+        tool.validate_input(
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!({ "skill": canonical }))
+                .expect("generated test input is JSON"),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("the suggested canonical name must validate");
     }
 
     #[tokio::test]
@@ -563,7 +645,7 @@ mod tests {
             name: "later-skill".into(),
             ..SlashCommand::default()
         });
-        assert_eq!(loader.list_names().await, vec!["later-skill"]);
+        assert_eq!(loader.list_names().await, vec!["later-skill".into()]);
     }
 
     /// The deferred #14 test: a disk-authored `.lingxi/commands/*.md` under the
@@ -591,19 +673,22 @@ mod tests {
         let loader = MobileDiskSkillLoader::new(registry);
 
         let desc = loader
-            .load("review-pr")
+            .load(&"review-pr".into())
             .await
             .expect("load ok")
             .expect("disk command resolves as a skill");
-        assert_eq!(desc.name, "review-pr");
+        assert_eq!(desc.name.string_at(""), Some("review-pr"));
         assert_eq!(desc.command_type, SkillCommandType::Prompt);
         assert!(
-            desc.body.contains("Review $ARGUMENTS"),
+            desc.body
+                .string_at("")
+                .unwrap()
+                .contains("Review $ARGUMENTS"),
             "body carries the markdown prompt template: {:?}",
             desc.body
         );
         assert!(loader
-            .load("does-not-exist")
+            .load(&"does-not-exist".into())
             .await
             .expect("load ok")
             .is_none());
@@ -633,7 +718,10 @@ mod tests {
                 plugin_id,
                 file_path: skill_root.join("SKILL.md"),
                 frontmatter: Default::default(),
-                prompt_template: "Read references/router.md".into(),
+                prompt_template: Utf16JsonProjection::parse(
+                    r#""Read \ud800 references/router.md""#,
+                )
+                .unwrap(),
             },
             ..SlashCommand::default()
         };
@@ -649,14 +737,16 @@ mod tests {
             "frontend-design",
             "lingxi-local-app:designer",
             None,
+            None,
         )
         .await
         .expect("checked skill preload")
         .expect("namespaced Plugin skill must preload");
         assert!(matches!(
             preload.content.as_slice(),
-            [ContentBlock::Text { text }]
-                if text.contains("ROUTER-ONLY-MARKER")
+            [ContentBlock::TextJsUtf16 { text, utf16_code_units, .. }]
+                if utf16_code_units.contains(&0xd800)
+                    && text.contains("ROUTER-ONLY-MARKER")
                     && text.contains("IOS-PROFILE-ONLY-MARKER")
                     && text.contains("## Bundled resource: references/router.md")
         ));
@@ -685,6 +775,7 @@ mod tests {
             "lingxi-local-app:apple-design",
             "lingxi-local-app:designer",
             None,
+            None,
         )
         .await
         .expect("checked skill preload")
@@ -693,7 +784,7 @@ mod tests {
             .content
             .iter()
             .find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text),
+                ContentBlock::TextJsUtf16 { text, .. } => Some(text),
                 _ => None,
             })
             .expect("Apple Design preload must be text");
@@ -728,15 +819,23 @@ mod tests {
 
         let chat_loader = MobileDiskSkillLoader::for_mode(registry.clone(), SessionMode::Chat);
         assert!(
-            chat_loader.load("review-pr").await.unwrap().is_none(),
+            chat_loader
+                .load(&"review-pr".into())
+                .await
+                .unwrap()
+                .is_none(),
             "undeclared disk commands stay code-only in chat mode"
         );
 
         assert!(chat_loader.list_names().await.is_empty());
         let code_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Code);
-        assert_eq!(code_loader.list_names().await, vec!["review-pr"]);
+        assert_eq!(code_loader.list_names().await, vec!["review-pr".into()]);
         assert!(
-            code_loader.load("review-pr").await.unwrap().is_some(),
+            code_loader
+                .load(&"review-pr".into())
+                .await
+                .unwrap()
+                .is_some(),
             "code mode keeps the existing skill catalog"
         );
     }
@@ -767,9 +866,13 @@ mod tests {
                 .await;
         }
         let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
-        assert!(chat_loader.load("research").await.unwrap().is_some());
-        assert!(chat_loader.load("mutate").await.unwrap().is_none());
-        assert_eq!(chat_loader.list_names().await, vec!["research"]);
+        assert!(chat_loader
+            .load(&"research".into())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(chat_loader.load(&"mutate".into()).await.unwrap().is_none());
+        assert_eq!(chat_loader.list_names().await, vec!["research".into()]);
     }
 
     #[tokio::test]
@@ -808,7 +911,7 @@ mod tests {
         assert!(chat_loader.list_names().await.is_empty());
         for denied in ["forked", "shell-frontmatter", "embedded-shell"] {
             assert!(
-                chat_loader.load(denied).await.unwrap().is_none(),
+                chat_loader.load(&denied.into()).await.unwrap().is_none(),
                 "{denied} must not expose a forbidden Chat execution path"
             );
         }
@@ -817,16 +920,18 @@ mod tests {
     async fn mobile_bundled_preload_checks_paths_and_propagates_read_errors() {
         struct Checked;
         impl command_api::BundledPromptFn for Checked {
-            fn build(&self, _: &str) -> String {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
                 panic!("unchecked preload");
             }
             fn try_build_at(
                 &self,
-                _: &str,
-                root: &Path,
-                cwd: &Path,
-                preload: bool,
-            ) -> std::io::Result<String> {
+                _: &Utf16JsonProjection,
+                context: command_api::BundledPromptContext<'_>,
+            ) -> std::io::Result<Utf16JsonProjection> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(context.main_loop_model, Some("claude-fable-5"));
                 assert!(preload);
                 assert_eq!(root, Path::new("/project"));
                 assert_eq!(cwd, Path::new("/child"));
@@ -849,9 +954,15 @@ mod tests {
         let loader = MobileDiskSkillLoader::new(Arc::new(RwLock::new(reg)))
             .with_prompt_cwd(tool_api::SessionCwd::new("/project".into(), Vec::new()));
         assert_eq!(
-            AgentSkillLoader::resolve_and_load(&loader, "loop", "agent", Some(Path::new("/child")))
-                .await
-                .unwrap_err(),
+            AgentSkillLoader::resolve_and_load(
+                &loader,
+                "loop",
+                "agent",
+                Some(Path::new("/child")),
+                Some("claude-fable-5")
+            )
+            .await
+            .unwrap_err(),
             "loop.md denied"
         );
     }

@@ -34,14 +34,14 @@ impl BuiltinCommandHandler for LogoutHandler {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::LOGOUT_COMPLETED, "");
                 CommandResult::Done {
-                    display: Some("Logged out.".to_string()),
+                    display: Some(("Logged out.".to_string()).into()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::LOGOUT_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not log out: {msg}")),
+                    display: Some((format!("Could not log out: {msg}")).into()),
                 }
             }
         }
@@ -63,7 +63,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "logout".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -88,6 +88,12 @@ mod tests {
         struct FailingAuth;
         #[async_trait]
         impl AuthHandle for FailingAuth {
+            fn register_account_change_observer(
+                &self,
+                _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+            ) {
+            }
+
             async fn login(&self) -> Result<LoginInfo, AuthError> {
                 Err(AuthError::Cancelled)
             }

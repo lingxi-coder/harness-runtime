@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -40,8 +41,8 @@ use serde_json::{json, Value};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    generated_builtin_result, generated_builtin_schema, DescriptionOptions, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolStaticContext, ValidationError,
 };
 
 /// Maximum script size in bytes (claude-code `P2 = 524288` = 512 KB).
@@ -58,10 +59,35 @@ use workflow::description::{assemble_description, subagent_model_forced};
 /// zod `strictObject` definition (source-order properties, `additionalProperties:
 /// false`, no required keys — the "at least one of script/name/scriptPath"
 /// constraint is a runtime `.refine`, enforced in [`Tool::validate_input`]).
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    serde_json::from_str(include_str!("workflow_input_schema.json"))
-        .expect("workflow_input_schema.json is valid JSON")
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    let schema = serde_json::from_str(include_str!("workflow_input_schema.json"))
+        .expect("workflow_input_schema.json is valid JSON");
+    generated_builtin_schema(&schema)
 });
+
+fn append_projection_field(
+    object: &Utf16JsonProjection,
+    key: &str,
+    value: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let key_units: Vec<u16> = key.encode_utf16().collect();
+    let mut fields = object
+        .object_entries()
+        .expect("workflow request is an object")
+        .into_iter()
+        .filter(|entry| entry.code_units != key_units)
+        .map(|entry| {
+            (
+                entry.code_units.to_vec(),
+                object
+                    .subprojection_property_units(entry.code_units)
+                    .expect("workflow request property remains present"),
+            )
+        })
+        .collect::<Vec<_>>();
+    fields.push((key_units, value));
+    Utf16JsonProjection::object_units(fields).expect("workflow request fields are unique")
+}
 
 /// Oracle B0 removes Cc/Cf/Cs, Default_Ignorable_Code_Point and line separators.
 /// Rust scalar strings cannot contain Cs. Keep the remaining Unicode ranges
@@ -88,8 +114,8 @@ pub struct WorkflowLaunchSpec {
     pub name: Option<String>,
     /// Path to a script file on disk (takes precedence over `script`/`name`).
     pub script_path: Option<String>,
-    /// `args` global value, passed verbatim.
-    pub args: Option<Value>,
+    /// `args` global value, passed verbatim as exact JSON source.
+    pub args: Option<Utf16JsonProjection>,
     /// Resume a prior run by its `wf_…` id.
     pub resume_from_run_id: Option<String>,
     /// Internal host pin for an explicit resume, in canonical bare-UUID form.
@@ -1020,14 +1046,23 @@ impl WorkflowTool {
         !workflows_enabled(self.managed_disable_workflows)
     }
 
-    fn spec_from_input(input: &Value) -> WorkflowLaunchSpec {
-        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
-        WorkflowLaunchSpec {
-            script: s("script"),
-            name: s("name"),
-            script_path: s("scriptPath"),
-            args: input.get("args").cloned(),
-            resume_from_run_id: s("resumeFromRunId"),
+    fn spec_from_input(input: &Utf16JsonProjection) -> Result<WorkflowLaunchSpec, ToolError> {
+        let string_field = |key: &str| -> Result<Option<String>, ToolError> {
+            let Some(units) = input.string_units(&format!("/{key}")) else {
+                return Ok(None);
+            };
+            String::from_utf16(&units).map(Some).map_err(|_| {
+                ToolError::InvalidInput(
+                    format!("Workflow field `{key}` must contain valid Unicode text.").into(),
+                )
+            })
+        };
+        Ok(WorkflowLaunchSpec {
+            script: string_field("script")?,
+            name: string_field("name")?,
+            script_path: string_field("scriptPath")?,
+            args: input.subprojection("/args").ok(),
+            resume_from_run_id: string_field("resumeFromRunId")?,
             session_uuid: None,
             tool_use_id: None,
             launched_from_subagent: false,
@@ -1035,7 +1070,7 @@ impl WorkflowTool {
             creator_team_name: None,
             creator_agent_id: None,
             script_path_approval: None,
-        }
+        })
     }
 
     /// Resolve a model-supplied script path against the live session cwd.
@@ -1062,10 +1097,15 @@ impl WorkflowTool {
         })
     }
 
-    fn script_path_permission_input(&self, raw: &str) -> Result<(PathBuf, Value), String> {
+    fn script_path_permission_input(
+        &self,
+        raw: &str,
+    ) -> Result<(PathBuf, Utf16JsonProjection), String> {
         let path = self.resolve_script_path_for_permission(raw)?;
         let wire = path.to_string_lossy().into_owned();
-        Ok((path, json!({ "file_path": wire })))
+        let input = Utf16JsonProjection::object(vec![("file_path".into(), wire.into())])
+            .expect("a filesystem path is valid source JSON");
+        Ok((path, input))
     }
 
     fn allow_script_path_permission(path: &Path) -> PermissionResult {
@@ -1074,7 +1114,8 @@ impl WorkflowTool {
                 reason: format!(
                     "Workflow scriptPath is authorized as Read: {}",
                     path.display()
-                ),
+                )
+                .into(),
             },
             updated_input: None,
             update_destination: None,
@@ -1085,12 +1126,11 @@ impl WorkflowTool {
         }
     }
 
-    fn deny_script_path_permission(path: &Path, reason: String) -> PermissionResult {
+    fn deny_script_path_permission(path: &Path, reason: Utf16JsonProjection) -> PermissionResult {
+        let explanation = reason.clone();
         PermissionResult::Deny {
-            reason: PermissionDecisionReason::Other {
-                reason: reason.clone(),
-            },
-            explanation: Some(reason),
+            reason: PermissionDecisionReason::Other { reason },
+            explanation: Some(explanation),
             metadata: PermissionMetadata {
                 blocked_path: Some(path.to_string_lossy().into_owned()),
                 ..PermissionMetadata::default()
@@ -1100,7 +1140,9 @@ impl WorkflowTool {
 
     fn ask_script_path_permission(path: &Path) -> PermissionResult {
         let wire = path.to_string_lossy().into_owned();
-        let message = format!("Workflow needs Read permission for scriptPath: {wire}");
+        let message = Utf16JsonProjection::from(format!(
+            "Workflow needs Read permission for scriptPath: {wire}"
+        ));
         PermissionResult::Ask {
             reason: PermissionDecisionReason::Other {
                 reason: message.clone(),
@@ -1163,37 +1205,44 @@ impl Tool for WorkflowTool {
         TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("orchestrate subagents with deterministic JavaScript workflow")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("orchestrate subagents with deterministic JavaScript workflow".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
-    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn input_validation_issues(&self, input: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
         // 2.1.263 Xt retains refinements absent from its exported JSON Schema.
         let mut issues = Vec::new();
-        if input
-            .get("script")
-            .and_then(Value::as_str)
-            .is_some_and(|script| {
-                script.chars().any(|c| {
-                    let code = u32::from(c);
-                    (code < 32 && code != 9 && code != 10) || (127..=159).contains(&code)
-                })
-            })
-        {
-            issues.push(serde_json::json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"}));
+        let script_has_control = input.string_units("/script").is_some_and(|units| {
+            units
+                .iter()
+                .any(|unit| (*unit < 32 && *unit != 9 && *unit != 10) || (127..=159).contains(unit))
+        });
+        if script_has_control {
+            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"})));
         }
         for key in ["name", "scriptPath"] {
-            if input
-                .get(key)
-                .and_then(Value::as_str)
-                .is_some_and(|value| value.chars().any(hidden_workflow_input_char))
-            {
-                issues.push(serde_json::json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"}));
+            let hidden = input
+                .string_units(&format!("/{key}"))
+                .and_then(|units| String::from_utf16(&units).ok())
+                .is_some_and(|value| value.chars().any(hidden_workflow_input_char));
+            if hidden {
+                issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"})));
             }
         }
-        let base_types_parse = input.is_object()
+        let input_root = input.at_pointer("");
+        let base_types_parse = input_root.is_some_and(|root| root.object_entries().is_some())
             && [
                 "script",
                 "name",
@@ -1203,16 +1252,19 @@ impl Tool for WorkflowTool {
                 "resumeFromRunId",
             ]
             .iter()
-            .all(|key| input.get(*key).is_none_or(Value::is_string));
+            .all(|key| {
+                input_root
+                    .and_then(|root| root.get_property(key))
+                    .is_none_or(|value| value.code_units().is_some())
+            });
         if base_types_parse
             && !["script", "name", "scriptPath"].iter().any(|key| {
                 input
-                    .get(*key)
-                    .and_then(Value::as_str)
+                    .string_units(&format!("/{key}"))
                     .is_some_and(|value| !value.is_empty())
             })
         {
-            issues.push(serde_json::json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"}));
+            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"})));
         }
         issues
     }
@@ -1237,18 +1289,21 @@ impl Tool for WorkflowTool {
     fn max_result_size_chars(&self) -> usize {
         100000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         // A workflow fans out many side-effecting agents.
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
-        let Some(raw_path) = input
-            .get("scriptPath")
-            .and_then(Value::as_str)
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> PermissionResult {
+        let Some(raw_path_units) = input
+            .string_units("/scriptPath")
             .filter(|path| !path.is_empty())
         else {
             // Inline and named workflows do not read a caller-selected file at
@@ -1263,11 +1318,17 @@ impl Tool for WorkflowTool {
                 metadata: PermissionMetadata::default(),
             };
         };
+        let Ok(raw_path) = String::from_utf16(&raw_path_units) else {
+            return Self::deny_script_path_permission(
+                Path::new(""),
+                "Workflow scriptPath must contain valid Unicode text.".into(),
+            );
+        };
 
-        let (path, read_input) = match self.script_path_permission_input(raw_path) {
+        let (path, read_input) = match self.script_path_permission_input(&raw_path) {
             Ok(value) => value,
             Err(reason) => {
-                return Self::deny_script_path_permission(Path::new(raw_path), reason);
+                return Self::deny_script_path_permission(Path::new(&raw_path), reason.into());
             }
         };
         // Capture the resolved target BEFORE the permission check. If a parent
@@ -1295,9 +1356,9 @@ impl Tool for WorkflowTool {
                 Ok(lingxi_core::host::permission_gate::PermissionResolution::Deny {
                     reason,
                     ..
-                })
-                | Err(lingxi_core::host::permission_gate::PermissionAbort { message: reason }) => {
-                    Self::deny_script_path_permission(&path, reason)
+                }) => Self::deny_script_path_permission(&path, reason),
+                Err(lingxi_core::host::permission_gate::PermissionAbort { message }) => {
+                    Self::deny_script_path_permission(&path, message.into())
                 }
                 Ok(lingxi_core::host::permission_gate::PermissionResolution::Ask)
                 | Ok(lingxi_core::host::permission_gate::PermissionResolution::AskWithContext {
@@ -1341,11 +1402,11 @@ impl Tool for WorkflowTool {
         result
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Running a workflow".into()
     }
 
-    async fn prompt(&self, options: &PromptOptions) -> String {
+    async fn prompt(&self, options: &PromptOptions) -> Utf16JsonProjection {
         // Binary (2.1.267): `async prompt(e){ return Epn(nre(e?.tools)) +
         // Kvn(ne().workflowSizeGuideline) + ct() }` — the assembled description
         // plus the (possibly-empty) size-guideline appendix. (`ct()` is
@@ -1360,11 +1421,12 @@ impl Tool for WorkflowTool {
             ),
             self.workflow_size_guideline().prompt_appendix()
         )
+        .into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // ── Schema-level `.refine()` on the `script` field (claude-code 2.1.195) ──
@@ -1374,15 +1436,16 @@ impl Tool for WorkflowTool {
         // validateInput gates below — so it is the first check here. It applies
         // ONLY to the raw inline `script` field (not scriptPath-read content nor
         // name-resolved scripts). Message byte-exact (`hYp`).
-        if let Some(raw_script) = input.get("script").and_then(Value::as_str) {
-            if raw_script.chars().any(|c| {
-                let code = c as u32;
-                if code == 9 || code == 10 {
-                    false
-                } else {
-                    code < 32 || (127..=159).contains(&code)
-                }
-            }) {
+        if let Some(script_units) = input.string_units("/script") {
+            if String::from_utf16(&script_units).is_err() {
+                return Err(ValidationError(
+                    "Workflow script must contain valid Unicode text.".into(),
+                ));
+            }
+            if script_units
+                .iter()
+                .any(|unit| *unit != 9 && *unit != 10 && (*unit < 32 || (127..=159).contains(unit)))
+            {
                 return Err(ValidationError(
                     "script contains control characters that would be hidden in the approval dialog"
                         .into(),
@@ -1423,10 +1486,19 @@ impl Tool for WorkflowTool {
         // not part of validate_input: the dispatcher invokes this method before
         // permission checks, so reading a caller-selected script here would
         // bypass the `Read` policy and could leak file bytes/errors.
-        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
-        let script_path = s("scriptPath").filter(|v| !v.is_empty());
-        let script = s("script").filter(|v| !v.is_empty());
-        let name = s("name").filter(|v| !v.is_empty());
+        let s = |key: &str| -> Result<Option<String>, ValidationError> {
+            let Some(units) = input.string_units(&format!("/{key}")) else {
+                return Ok(None);
+            };
+            String::from_utf16(&units).map(Some).map_err(|_| {
+                ValidationError(
+                    format!("Workflow field `{key}` must contain valid Unicode text.").into(),
+                )
+            })
+        };
+        let script_path = s("scriptPath")?.filter(|value| !value.is_empty());
+        let script = s("script")?.filter(|value| !value.is_empty());
+        let name = s("name")?.filter(|value| !value.is_empty());
 
         // Resolved script text (for errorCode 2 and 4 checks below). A
         // `scriptPath` is deliberately represented as `None`: its bytes must
@@ -1437,7 +1509,7 @@ impl Tool for WorkflowTool {
             // Path checks are lexical and therefore safe before authorization;
             // in particular this does not stat/canonicalize/follow symlinks.
             self.resolve_script_path_for_permission(path)
-                .map_err(ValidationError)?;
+                .map_err(|message| ValidationError(message.into()))?;
             resolved_script = None;
         } else if let Some(ref wf_name) = name {
             // Built-ins are immutable and must win before project/user files.
@@ -1490,9 +1562,9 @@ impl Tool for WorkflowTool {
                     } else {
                         available
                     };
-                    return Err(ValidationError(format!(
-                        "Workflow \"{wf_name}\" not found. Available: {list}"
-                    )));
+                    return Err(ValidationError(
+                        format!("Workflow \"{wf_name}\" not found. Available: {list}").into(),
+                    ));
                 }
             }
         } else if let Some(ref inline) = script {
@@ -1508,7 +1580,9 @@ impl Tool for WorkflowTool {
         // Mirrors binary's `Bw(n.script)` → `validate_meta`.
         if let Some(resolved_script) = resolved_script.as_deref() {
             if let Err(e) = workflow::validate_meta(resolved_script) {
-                return Err(ValidationError(format!("Invalid workflow script: {e}")));
+                return Err(ValidationError(
+                    format!("Invalid workflow script: {e}").into(),
+                ));
             }
         }
 
@@ -1527,7 +1601,7 @@ impl Tool for WorkflowTool {
                         WorkflowError::Script(m) => m,
                         WorkflowError::Engine(m) => m,
                     };
-                    return Err(ValidationError(msg));
+                    return Err(ValidationError(msg.into()));
                 }
             }
         } else if let Some(name) = name {
@@ -1556,7 +1630,7 @@ impl Tool for WorkflowTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1567,7 +1641,8 @@ impl Tool for WorkflowTool {
                 return Err(ToolError::InvalidInput(
                     lingxi_core::host::agent_processes::stop_pending_refusal(
                         "launch workflows or act on existing runs.",
-                    ),
+                    )
+                    .into(),
                 ));
             }
         }
@@ -1575,7 +1650,7 @@ impl Tool for WorkflowTool {
         let launcher = self.launcher.as_ref().ok_or_else(|| {
             ToolError::Internal("Workflow launching is not available in this host".into())
         })?;
-        let mut spec = Self::spec_from_input(&input);
+        let mut spec = Self::spec_from_input(&input)?;
         // A Workflow task can outlive the turn that launched it. Capture the
         // owning session at this boundary so later `agent()` calls continue
         // to use the original session-scoped budget after a clear/resume or
@@ -1595,7 +1670,7 @@ impl Tool for WorkflowTool {
         if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
             let requested = self
                 .resolve_script_path_for_permission(raw_path)
-                .map_err(ToolError::InvalidInput)?;
+                .map_err(|message| ToolError::InvalidInput(message.into()))?;
             let approval = self
                 .take_script_path_approval(&ctx, &requested)
                 .ok_or_else(|| {
@@ -1631,11 +1706,12 @@ impl Tool for WorkflowTool {
                     ) == Some("plugin")
             })
             .map(|name| {
-                let mut request = json!({ "name": name });
+                let mut fields = vec![("name".to_owned(), name.into())];
                 if let Some(args) = &spec.args {
-                    request["args"] = args.clone();
+                    fields.push(("args".to_owned(), args.clone()));
                 }
-                request
+                Utf16JsonProjection::object(fields)
+                    .expect("workflow resume request fields are unique")
             });
         let launch_result = launcher
             .launch(spec)
@@ -1645,15 +1721,16 @@ impl Tool for WorkflowTool {
             let model_content =
                 format!("Workflow script has a syntax error and was not launched:\n{error}");
             return Ok(ToolCallResult {
-                data: json!({
+                data: generated_builtin_result(&json!({
                     "error": error,
                     "model_content": model_content,
-                }),
+                })),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: true,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
         // claude-code result shape (output schema `sUp`, local path): status,
@@ -1687,11 +1764,15 @@ impl Tool for WorkflowTool {
             )
             });
         let s = match (plugin_resume, script_p, run_id_str) {
-            (Some(mut request), _, Some(rid)) => {
-                request["resumeFromRunId"] = Value::String(rid.to_string());
+            (Some(request), _, Some(rid)) => {
+                let request =
+                    append_projection_field(&request, "resumeFromRunId", rid.to_string().into());
                 format!(
-                    "\nRun ID: {rid}\nTo resume this Host-owned plugin workflow: Workflow({request}). \
-                     The Host resolves the registered script; completed unchanged agents return cached results."
+                    "\nRun ID: {rid}\nTo resume this Host-owned plugin workflow: Workflow({}). \
+                     The Host resolves the registered script; completed unchanged agents return cached results.",
+                    request
+                        .to_json_string()
+                        .expect("workflow resume request is JSON")
                 )
             }
             (None, Some(p), Some(rid)) => format!(
@@ -1729,12 +1810,13 @@ impl Tool for WorkflowTool {
             obj.insert("transcriptDir".into(), Value::String(td));
         }
         Ok(ToolCallResult {
-            data,
+            data: generated_builtin_result(&data),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -1757,6 +1839,12 @@ mod tests {
     // crate (§8.1: a command crate may not depend on a tool crate, and the
     // `workflow-authoring` skill reads the same texts).
     use super::*;
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            generated_builtin_result(&serde_json::json!($($tokens)*))
+        };
+    }
     use std::sync::Mutex as StdMutex;
     use workflow::description::*;
 
@@ -1790,8 +1878,18 @@ mod tests {
         WorkflowTool::new(launcher)
     }
 
+    fn validation_error_message(error: &ValidationError) -> String {
+        String::from_utf16(
+            &error
+                .0
+                .string_units("")
+                .expect("validation message is root string"),
+        )
+        .expect("generated validation message is valid Unicode")
+    }
+
     struct RecordingPermissionGate {
-        calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        calls: Arc<StdMutex<Vec<(String, Utf16JsonProjection)>>>,
         decision: lingxi_core::host::permission_gate::PermissionDecision,
     }
 
@@ -1800,7 +1898,7 @@ mod tests {
         async fn check(
             &self,
             name: &str,
-            input: &Value,
+            input: &Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             self.calls
                 .lock()
@@ -1811,7 +1909,7 @@ mod tests {
     }
 
     struct ContextAwarePermissionGate {
-        calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        calls: Arc<StdMutex<Vec<(String, Utf16JsonProjection)>>>,
         contexts: Arc<StdMutex<Vec<lingxi_core::host::permission_gate::PermissionCheckContext>>>,
     }
 
@@ -1820,7 +1918,7 @@ mod tests {
         async fn check(
             &self,
             _name: &str,
-            _input: &Value,
+            _input: &Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             panic!("Workflow scriptPath must use resolve_detailed_or_abort")
         }
@@ -1828,7 +1926,7 @@ mod tests {
         async fn resolve_detailed_or_abort(
             &self,
             name: &str,
-            input: &Value,
+            input: &Utf16JsonProjection,
             ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<
             lingxi_core::host::permission_gate::PermissionResolution,
@@ -1841,7 +1939,7 @@ mod tests {
             self.contexts.lock().unwrap().push(ctx.clone());
             if ctx.is_non_interactive_session {
                 return Ok(lingxi_core::host::permission_gate::PermissionResolution::Deny {
-                    reason: permission::headless_gate::headless_deny_message(name),
+                    reason: permission::headless_gate::headless_deny_message(name).into(),
                     source: lingxi_core::host::permission_gate::PermissionDecisionSource::Unspecified,
                     rule_source: None,
                     decision_reason_type: None,
@@ -2304,8 +2402,10 @@ mod tests {
 
         set_gate(true, true);
         let pointed = tool.prompt(&opts).await;
+        let pointed_text = pointed.string_at("").unwrap();
         assert!(
-            pointed.contains("`workflow-authoring`") && !pointed.contains("- workflow(nameOrRef:"),
+            pointed_text.contains("`workflow-authoring`")
+                && !pointed_text.contains("- workflow(nameOrRef:"),
             "with the skill registered and the Skill tool advertised, the description must point"
         );
 
@@ -2320,12 +2420,13 @@ mod tests {
         ] {
             set_gate(registered, skill_tool);
             let inlined = tool.prompt(&opts).await;
+            let inlined_text = inlined.string_at("").unwrap();
             assert!(
-                inlined.contains("- workflow(nameOrRef:"),
+                inlined_text.contains("- workflow(nameOrRef:"),
                 "the reference must be inlined when {why}: otherwise the description points at \
                  documentation the model cannot load, and every hook it lists is unreachable"
             );
-            assert!(inlined.len() > pointed.len() * 4);
+            assert!(inlined_text.len() > pointed_text.len() * 4);
         }
         set_gate(false, false);
     }
@@ -2523,11 +2624,11 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let err = t
-            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .validate_input(&source_json!({"script": "x"}), &ctx)
             .await
             .expect_err("must reject");
         assert_eq!(
-            err.0,
+            validation_error_message(&err),
             "Dynamic workflows are disabled by managed settings (`disableWorkflows`)."
         );
     }
@@ -2548,11 +2649,11 @@ mod tests {
         let t = WorkflowTool::new(None).with_session_enabled(false);
         let ctx = tool_api::test_support::fresh_ctx();
         let err = t
-            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .validate_input(&source_json!({"script": "x"}), &ctx)
             .await
             .expect_err("must reject");
         assert_eq!(
-            err.0,
+            validation_error_message(&err),
             "Dynamic workflows are not enabled for this session (org policy, launch gate, or the \"Dynamic workflows\" setting in /config)."
         );
     }
@@ -2582,17 +2683,17 @@ mod tests {
         let tool = WorkflowTool::new(None).with_dynamic_workflows_gate(gate.clone());
         let ctx = tool_api::test_support::fresh_ctx();
 
-        tool.validate_input(&serde_json::json!({"script": "x"}), &ctx)
+        tool.validate_input(&source_json!({"script": "x"}), &ctx)
             .await
             .expect_err("script must still fail later checks while gate is on");
 
         gate.set_enabled(false);
         let err = tool
-            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .validate_input(&source_json!({"script": "x"}), &ctx)
             .await
             .expect_err("must reject once the live gate turns off");
         assert_eq!(
-            err.0,
+            validation_error_message(&err),
             "Dynamic workflows are not enabled for this session (org policy, launch gate, or the \"Dynamic workflows\" setting in /config)."
         );
     }
@@ -2606,11 +2707,11 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let err = t
-            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .validate_input(&source_json!({"script": "x"}), &ctx)
             .await
             .expect_err("must reject");
         assert_eq!(
-            err.0,
+            validation_error_message(&err),
             "Dynamic workflows are disabled by managed settings (`disableWorkflows`)."
         );
     }
@@ -2636,13 +2737,14 @@ mod tests {
         // unconfigured tool already carries the medium appendix. Shipping
         // `Unrestricted` by default meant shipping NO agent cap where the
         // oracle advises under 15.
+        let default_expected = format!(
+            "{}{}",
+            base,
+            WorkflowSizeGuideline::Medium.prompt_appendix()
+        );
         assert_eq!(
-            tool(None).prompt(&opts).await,
-            format!(
-                "{}{}",
-                base,
-                WorkflowSizeGuideline::Medium.prompt_appendix()
-            )
+            tool(None).prompt(&opts).await.string_at(""),
+            Some(default_expected.as_str())
         );
         // Each configured size appends its byte-exact `VAs` appendix
         // (`qAs + VAs(size)`), with NO separator between description and appendix
@@ -2654,24 +2756,32 @@ mod tests {
         ] {
             let t = WorkflowTool::new(None).with_size_guideline(size);
             let want = format!("{}{}", base, size.prompt_appendix());
-            assert_eq!(t.prompt(&opts).await, want, "size={:?}", size);
+            assert_eq!(
+                t.prompt(&opts).await.string_at(""),
+                Some(want.as_str()),
+                "size={:?}",
+                size
+            );
             // Sanity: the model-visible cap text is present.
             assert!(t
                 .prompt(&opts)
                 .await
+                .string_at("")
+                .unwrap()
                 .contains("The user has configured a workflow size guideline in /config:"));
         }
         // Explicit unrestricted also yields no appendix.
         let u = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
-        assert_eq!(u.prompt(&opts).await, base);
+        assert_eq!(u.prompt(&opts).await.string_at(""), Some(base.as_str()));
 
         // `/config` updates the session snapshot after construction; the next
         // prompt must reflect it without rebuilding the tool registry.
         let live = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Medium);
         let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("small", false);
+        let live_expected = format!("{}{}", base, WorkflowSizeGuideline::Small.prompt_appendix());
         assert_eq!(
-            live.prompt(&opts).await,
-            format!("{}{}", base, WorkflowSizeGuideline::Small.prompt_appendix())
+            live.prompt(&opts).await.string_at(""),
+            Some(live_expected.as_str())
         );
         let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("medium", false);
 
@@ -2683,9 +2793,11 @@ mod tests {
             .with_size_guideline_state(session_state.clone())
             .with_size_guideline_source(WorkflowSizeGuideline::Large, false, false);
         let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("small", false);
+        let session_expected =
+            format!("{}{}", base, WorkflowSizeGuideline::Large.prompt_appendix());
         assert_eq!(
-            session_owned.prompt(&opts).await,
-            format!("{}{}", base, WorkflowSizeGuideline::Large.prompt_appendix()),
+            session_owned.prompt(&opts).await.string_at(""),
+            Some(session_expected.as_str()),
             "session-owned state must win over the process-global compatibility snapshot"
         );
         let _ = session_state.set("medium", false);
@@ -2695,12 +2807,20 @@ mod tests {
     #[test]
     fn input_schema_is_byte_exact() {
         let s = &*INPUT_SCHEMA;
-        assert_eq!(s["type"], "object");
-        assert_eq!(s["additionalProperties"], false);
-        assert!(s.get("required").is_none(), "no required keys");
+        assert_eq!(s.string_at("/type"), Some("object"));
+        assert_eq!(
+            s.at_pointer("/additionalProperties")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
+        );
+        assert!(!s.contains_property("required"), "no required keys");
         // Source-order properties (the zod definition order).
-        let props = s["properties"].as_object().unwrap();
-        let order: Vec<&String> = props.keys().collect();
+        let props = s
+            .at_pointer("/properties")
+            .unwrap()
+            .object_entries()
+            .unwrap();
+        let order: Vec<&str> = props.iter().map(|entry| entry.display_key).collect();
         assert_eq!(
             order,
             vec![
@@ -2713,12 +2833,18 @@ mod tests {
                 "resumeFromRunId"
             ]
         );
-        assert_eq!(props["script"]["maxLength"], 524288);
-        assert_eq!(props["resumeFromRunId"]["pattern"], "^wf_[a-z0-9-]{6,}$");
+        assert_eq!(s.number_at("/properties/script/maxLength"), Some(524288.0));
+        assert_eq!(
+            s.string_at("/properties/resumeFromRunId/pattern"),
+            Some("^wf_[a-z0-9-]{6,}$")
+        );
         // E.unknown() → `args` has no `type` constraint.
-        assert!(props["args"].get("type").is_none());
-        assert!(props["script"]["description"]
-            .as_str()
+        assert!(s
+            .at_pointer("/properties/args")
+            .and_then(|args| args.get_property("type"))
+            .is_none());
+        assert!(s
+            .string_at("/properties/script/description")
             .unwrap()
             .starts_with("Self-contained workflow script."));
     }
@@ -2737,14 +2863,20 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        let err = t.validate_input(&json!({}), &ctx).await.unwrap_err();
-        assert_eq!(err.0, "Must provide script, name, scriptPath, or runId");
+        let err = t.validate_input(&source_json!({}), &ctx).await.unwrap_err();
+        assert_eq!(
+            validation_error_message(&err),
+            "Must provide script, name, scriptPath, or runId"
+        );
 
         let err2 = t
-            .validate_input(&json!({ "title": "x" }), &ctx)
+            .validate_input(&source_json!({ "title": "x" }), &ctx)
             .await
             .unwrap_err();
-        assert_eq!(err2.0, "Must provide script, name, scriptPath, or runId");
+        assert_eq!(
+            validation_error_message(&err2),
+            "Must provide script, name, scriptPath, or runId"
+        );
     }
 
     #[tokio::test]
@@ -2760,11 +2892,11 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        t.validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
+        t.validate_input(&source_json!({ "scriptPath": "workflow.js" }), &ctx)
             .await
             .expect("relative scriptPath syntax is valid from the live cwd");
         *cwd.lock().unwrap() = moved.clone();
-        t.validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
+        t.validate_input(&source_json!({ "scriptPath": "workflow.js" }), &ctx)
             .await
             .expect("validation must not read the moved-away scriptPath");
 
@@ -2790,11 +2922,11 @@ mod tests {
             .with_permission_gate(gate);
         let ctx = tool_api::test_support::fresh_ctx();
 
-        tool.validate_input(&json!({ "scriptPath": "script.js" }), &ctx)
+        tool.validate_input(&source_json!({ "scriptPath": "script.js" }), &ctx)
             .await
             .expect("path syntax validation must not read scriptPath");
         assert!(matches!(
-            tool.check_permissions(&json!({ "scriptPath": "script.js" }), &ctx)
+            tool.check_permissions(&source_json!({ "scriptPath": "script.js" }), &ctx)
                 .await,
             PermissionResult::Allow { .. }
         ));
@@ -2802,7 +2934,7 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             &[(
                 "Read".to_string(),
-                json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+                source_json!({ "file_path": cwd.join("script.js").to_string_lossy().to_string() })
             )]
         );
 
@@ -2826,7 +2958,10 @@ mod tests {
         interactive_ctx.tool_use_id = Some("toolu_workflow_interactive".into());
 
         let interactive = tool
-            .check_permissions(&json!({ "scriptPath": "script.js" }), &interactive_ctx)
+            .check_permissions(
+                &source_json!({ "scriptPath": "script.js" }),
+                &interactive_ctx,
+            )
             .await;
         assert!(matches!(interactive, PermissionResult::Ask { .. }));
 
@@ -2834,17 +2969,15 @@ mod tests {
         headless_ctx.tool_use_id = Some("toolu_workflow_headless".into());
         headless_ctx.options.is_non_interactive_session = true;
         let headless = tool
-            .check_permissions(&json!({ "scriptPath": "script.js" }), &headless_ctx)
+            .check_permissions(&source_json!({ "scriptPath": "script.js" }), &headless_ctx)
             .await;
         match headless {
             PermissionResult::Deny {
                 explanation: Some(reason),
                 ..
             } => {
-                assert_eq!(
-                    reason,
-                    permission::headless_gate::headless_deny_message("Read")
-                );
+                let expected = permission::headless_gate::headless_deny_message("Read");
+                assert_eq!(reason.string_at(""), Some(expected.as_str()));
             }
             other => panic!("expected headless deny, got {other:?}"),
         }
@@ -2854,11 +2987,11 @@ mod tests {
             &[
                 (
                     "Read".to_string(),
-                    json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+                    source_json!({ "file_path": cwd.join("script.js").to_string_lossy().to_string() })
                 ),
                 (
                     "Read".to_string(),
-                    json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+                    source_json!({ "file_path": cwd.join("script.js").to_string_lossy().to_string() })
                 )
             ]
         );
@@ -2895,12 +3028,12 @@ mod tests {
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
             .with_permission_gate(gate);
         let ctx = tool_api::test_support::fresh_ctx();
-        tool.validate_input(&json!({ "scriptPath": "secret.js" }), &ctx)
+        tool.validate_input(&source_json!({ "scriptPath": "secret.js" }), &ctx)
             .await
             .expect("validation must not read a denied scriptPath");
 
         let result = tool
-            .check_permissions(&json!({ "scriptPath": "secret.js" }), &ctx)
+            .check_permissions(&source_json!({ "scriptPath": "secret.js" }), &ctx)
             .await;
         let rendered = format!("{result:?}");
         assert!(matches!(result, PermissionResult::Deny { .. }));
@@ -2931,11 +3064,11 @@ mod tests {
             .with_permission_gate(gate);
         let ctx = tool_api::test_support::fresh_ctx();
 
-        tool.validate_input(&json!({ "scriptPath": "link.js" }), &ctx)
+        tool.validate_input(&source_json!({ "scriptPath": "link.js" }), &ctx)
             .await
             .expect("symlink path validation must not follow the link");
         assert!(matches!(
-            tool.check_permissions(&json!({ "scriptPath": "link.js" }), &ctx)
+            tool.check_permissions(&source_json!({ "scriptPath": "link.js" }), &ctx)
                 .await,
             PermissionResult::Allow { .. }
         ));
@@ -2943,12 +3076,12 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "Read");
         assert_eq!(
-            recorded[0].1["file_path"],
-            cwd.join("link.js").to_string_lossy().as_ref()
+            recorded[0].1.string_at("/file_path"),
+            Some(cwd.join("link.js").to_string_lossy().as_ref())
         );
         assert_ne!(
-            recorded[0].1["file_path"],
-            target.to_string_lossy().as_ref(),
+            recorded[0].1.string_at("/file_path"),
+            Some(target.to_string_lossy().as_ref()),
             "Workflow must reuse the existing permission path semantics"
         );
 
@@ -2963,7 +3096,7 @@ mod tests {
         let ctx = tool_api::test_support::fresh_ctx();
 
         let result = tool
-            .check_permissions(&json!({ "scriptPath": "script.js" }), &ctx)
+            .check_permissions(&source_json!({ "scriptPath": "script.js" }), &ctx)
             .await;
         assert!(matches!(result, PermissionResult::Ask { .. }));
         assert!(!format!("{result:?}").contains("secret workflow contents"));
@@ -2994,7 +3127,7 @@ mod tests {
             .with_permission_gate(gate);
         let ctx = tool_api::test_support::fresh_ctx();
         let result = tool
-            .check_permissions(&json!({ "scriptPath": "script.js" }), &ctx)
+            .check_permissions(&source_json!({ "scriptPath": "script.js" }), &ctx)
             .await;
         assert!(matches!(result, PermissionResult::Allow { .. }));
         let approval = tool
@@ -3037,7 +3170,7 @@ mod tests {
             .with_permission_gate(gate);
         let ctx = tool_api::test_support::fresh_ctx();
         let result = tool
-            .check_permissions(&json!({ "scriptPath": "scripts/script.js" }), &ctx)
+            .check_permissions(&source_json!({ "scriptPath": "scripts/script.js" }), &ctx)
             .await;
         assert!(matches!(result, PermissionResult::Allow { .. }));
         let requested = link.join("script.js");
@@ -3065,13 +3198,13 @@ mod tests {
 
         // A script with no meta block at all triggers the "must be first statement" error.
         let err = t
-            .validate_input(&json!({ "script": "console.log('hello');" }), &ctx)
+            .validate_input(&source_json!({ "script": "console.log('hello');" }), &ctx)
             .await
             .unwrap_err();
         assert!(
-            err.0.starts_with("Invalid workflow script:"),
+            validation_error_message(&err).starts_with("Invalid workflow script:"),
             "expected errorCode 2 message, got: {:?}",
-            err.0
+            err
         );
     }
 
@@ -3086,7 +3219,7 @@ mod tests {
             "export const meta = { name: 'bad-body', description: 'syntax error' };\n",
             "if (\n",
         );
-        t.validate_input(&json!({ "script": script }), &ctx)
+        t.validate_input(&source_json!({ "script": script }), &ctx)
             .await
             .expect("body compilation belongs to the launcher, not validate_input");
     }
@@ -3106,25 +3239,30 @@ mod tests {
         let t = tool(Some(launcher));
         let res = t
             .call(
-                json!({ "script": "export const meta = { name: 'bad-body', description: 'syntax error' }; if (" }),
+                source_json!({ "script": "export const meta = { name: 'bad-body', description: 'syntax error' }; if (" }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("compile failures return a structured tool-error result");
 
-        assert!(res.data.get("status").is_none());
-        assert_eq!(res.data["error"], "Unexpected end of input");
-        assert!(res.is_error);
-        assert!(res.data.get("taskId").is_none());
-        assert!(res.data.get("taskType").is_none());
-        assert!(res.data.get("runId").is_none());
-        assert!(res.data.get("workflowName").is_none());
-        assert!(res.data.get("summary").is_none());
-        assert!(res.data.get("transcriptDir").is_none());
+        assert!(!res.data.contains_property("status"));
         assert_eq!(
-            res.data["model_content"],
-            "Workflow script has a syntax error and was not launched:\nUnexpected end of input"
+            res.data.string_at("/error"),
+            Some("Unexpected end of input")
+        );
+        assert!(res.is_error);
+        assert!(!res.data.contains_property("taskId"));
+        assert!(!res.data.contains_property("taskType"));
+        assert!(!res.data.contains_property("runId"));
+        assert!(!res.data.contains_property("workflowName"));
+        assert!(!res.data.contains_property("summary"));
+        assert!(!res.data.contains_property("transcriptDir"));
+        assert_eq!(
+            res.data.string_at("/model_content"),
+            Some(
+                "Workflow script has a syntax error and was not launched:\nUnexpected end of input"
+            )
         );
     }
 
@@ -3141,11 +3279,11 @@ mod tests {
             "const t = Date.now();\n",
         );
         let err = t
-            .validate_input(&json!({ "script": script }), &ctx)
+            .validate_input(&source_json!({ "script": script }), &ctx)
             .await
             .unwrap_err();
         assert_eq!(
-            err.0,
+            validation_error_message(&err),
             workflow::NON_DETERMINISTIC_MESSAGE,
             "errorCode 4 message must be byte-exact"
         );
@@ -3174,7 +3312,7 @@ mod tests {
         std::fs::write(&wf_path, nondeterministic_src).unwrap();
 
         let result = t
-            .validate_input(&json!({ "name": "nondet-wf" }), &ctx)
+            .validate_input(&source_json!({ "name": "nondet-wf" }), &ctx)
             .await;
 
         // Clean up before asserting so we don't leave stray files.
@@ -3198,7 +3336,7 @@ mod tests {
         std::fs::write(&shadow, "not a valid workflow").unwrap();
 
         let result = t
-            .validate_input(&json!({ "name": "deep-research" }), &ctx)
+            .validate_input(&source_json!({ "name": "deep-research" }), &ctx)
             .await;
 
         if let Some(previous) = previous {
@@ -3248,7 +3386,7 @@ mod tests {
             workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
             Some("projectSettings")
         );
-        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
             .await
             .expect("named workflow validation must not read the saved winner");
 
@@ -3258,7 +3396,7 @@ mod tests {
             workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
             Some("plugin")
         );
-        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
             .await
             .expect("named workflow validation must not read the plugin winner");
 
@@ -3268,7 +3406,7 @@ mod tests {
             workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
             Some("built-in")
         );
-        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
             .await
             .expect("builtin is the final fallback");
         let _ = std::fs::remove_dir_all(cwd);
@@ -3289,7 +3427,7 @@ mod tests {
         let old_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
         std::env::set_var(branding::CONFIG_DIR_ENV, &config_dir);
         let result = t
-            .validate_input(&json!({ "name": "user-only-wf" }), &ctx)
+            .validate_input(&source_json!({ "name": "user-only-wf" }), &ctx)
             .await;
         match old_config_dir {
             Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
@@ -3323,7 +3461,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let result = t
-            .validate_input(&json!({ "name": "acme:deploy" }), &ctx)
+            .validate_input(&source_json!({ "name": "acme:deploy" }), &ctx)
             .await;
 
         let _ = std::fs::remove_file(&script_path);
@@ -3340,14 +3478,13 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let err = t
-            .validate_input(&json!({ "name": "no-such-workflow" }), &ctx)
+            .validate_input(&source_json!({ "name": "no-such-workflow" }), &ctx)
             .await
             .unwrap_err();
         assert!(
-            err.0
-                .starts_with("Workflow \"no-such-workflow\" not found."),
+            validation_error_message(&err).starts_with("Workflow \"no-such-workflow\" not found."),
             "unexpected error: {}",
-            err.0
+            validation_error_message(&err)
         );
     }
 
@@ -3442,13 +3579,14 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "1");
         let result = t
-            .validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
+            .validate_input(&source_json!({ "script": VALID_SCRIPT }), &ctx)
             .await;
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let err = result.unwrap_err();
         assert_eq!(
-            err.0, "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
+            validation_error_message(&err),
+            "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
             "errorCode 5 message must be byte-exact"
         );
     }
@@ -3457,16 +3595,16 @@ mod tests {
     fn schema_refinement_retains_native_issue_shape() {
         let tool = tool(None);
         assert_eq!(
-            tool.input_validation_issues(&json!({"script":"a\u{0}b"})),
+            tool.input_validation_issues(&source_json!({"script":"a\u{0}b"})),
             vec![
-                json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"})
+                source_json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"})
             ]
         );
         assert!(tool
-            .input_validation_issues(&json!({"script":"a\nb\tc"}))
+            .input_validation_issues(&source_json!({"script":"a\nb\tc"}))
             .is_empty());
         assert!(tool
-            .input_validation_issues(&json!({"script":12}))
+            .input_validation_issues(&source_json!({"script":12}))
             .is_empty());
     }
 
@@ -3474,16 +3612,16 @@ mod tests {
     fn schema_refinements_include_selector_and_invisible_name_failures() {
         let tool = tool(None);
         assert_eq!(
-            tool.input_validation_issues(&json!({})),
+            tool.input_validation_issues(&source_json!({})),
             vec![
-                json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"})
+                source_json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"})
             ]
         );
         for key in ["name", "scriptPath"] {
             assert_eq!(
-                tool.input_validation_issues(&json!({key:"bad\u{034f}name"})),
+                tool.input_validation_issues(&source_json!({key:"bad\u{034f}name"})),
                 vec![
-                    json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"})
+                    source_json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"})
                 ]
             );
         }
@@ -3500,11 +3638,12 @@ mod tests {
 
         let with_ctrl = format!("{VALID_SCRIPT}\u{0}");
         let err = t
-            .validate_input(&json!({ "script": with_ctrl }), &ctx)
+            .validate_input(&source_json!({ "script": with_ctrl }), &ctx)
             .await
             .unwrap_err();
         assert_eq!(
-            err.0, "script contains control characters that would be hidden in the approval dialog",
+            validation_error_message(&err),
+            "script contains control characters that would be hidden in the approval dialog",
             "control-char refine message must be byte-exact"
         );
     }
@@ -3518,7 +3657,7 @@ mod tests {
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let with_ws = format!("{VALID_SCRIPT}\n\tlog('ok')\n");
-        t.validate_input(&json!({ "script": with_ws }), &ctx)
+        t.validate_input(&source_json!({ "script": with_ws }), &ctx)
             .await
             .expect("tab/newline must not trip the control-char refine");
     }
@@ -3531,7 +3670,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        t.validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
+        t.validate_input(&source_json!({ "script": VALID_SCRIPT }), &ctx)
             .await
             .expect("valid script must pass all gates");
     }
@@ -3558,19 +3697,19 @@ mod tests {
         )));
         let res = t
             .call(
-                json!({ "script": "return 1;", "args": ["a.ts", "b.ts"] }),
+                source_json!({ "script": "return 1;", "args": ["a.ts", "b.ts"] }),
                 ctx,
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("call ok");
-        assert_eq!(res.data["status"], "async_launched");
-        assert_eq!(res.data["taskId"], "w_abc123");
-        assert_eq!(res.data["taskType"], "local_workflow");
+        assert_eq!(res.data.string_at("/status"), Some("async_launched"));
+        assert_eq!(res.data.string_at("/taskId"), Some("w_abc123"));
+        assert_eq!(res.data.string_at("/taskType"), Some("local_workflow"));
         // The launcher saw the parsed spec (script + args).
         let spec = launcher.seen.lock().unwrap().clone().expect("launched");
         assert_eq!(spec.script.as_deref(), Some("return 1;"));
-        assert_eq!(spec.args, Some(json!(["a.ts", "b.ts"])));
+        assert_eq!(spec.args, Some(source_json!(["a.ts", "b.ts"])));
         assert_eq!(spec.session_uuid, Some(session_id.to_string()));
     }
 
@@ -3584,7 +3723,7 @@ mod tests {
             Some(serde_json::from_value(json!(origin_id)).expect("origin session fixture"));
 
         t.call(
-            json!({ "script": "return 1;" }),
+            source_json!({ "script": "return 1;" }),
             ctx,
             tool_api::test_support::fresh_tx(),
         )
@@ -3600,7 +3739,7 @@ mod tests {
         let t = tool(None);
         let err = t
             .call(
-                json!({ "script": "return 1;" }),
+                source_json!({ "script": "return 1;" }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -3652,13 +3791,13 @@ mod tests {
         let args = json!({ "requirement": "quoted \"name\"", "nested": { "enabled": true } });
         let result = t
             .call(
-                json!({ "name": "acme:create", "args": args }),
+                source_json!({ "name": "acme:create", "args": args }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        let content = result.data["model_content"].as_str().unwrap();
+        let content = result.data.string_at("/model_content").unwrap();
         let request = content
             .split("Workflow(")
             .nth(1)
@@ -3676,8 +3815,8 @@ mod tests {
         assert!(!content.contains("/host/private"));
         // Persisted path stays available as diagnostic metadata, not an editing instruction.
         assert_eq!(
-            result.data["scriptPath"],
-            "/host/private/workflows/wf_abc123.js"
+            result.data.string_at("/scriptPath"),
+            Some("/host/private/workflows/wf_abc123.js")
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3702,7 +3841,7 @@ mod tests {
         let t = tool(Some(launcher));
         let res = t
             .call(
-                json!({ "script": "return 1;" }),
+                source_json!({ "script": "return 1;" }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -3710,21 +3849,27 @@ mod tests {
             .expect("call ok");
 
         // JSON data shape
-        assert_eq!(res.data["status"], "async_launched");
-        assert_eq!(res.data["taskId"], "w_t1");
-        assert_eq!(res.data["taskType"], "local_workflow");
-        assert_eq!(res.data["summary"], "A test workflow");
+        assert_eq!(res.data.string_at("/status"), Some("async_launched"));
+        assert_eq!(res.data.string_at("/taskId"), Some("w_t1"));
+        assert_eq!(res.data.string_at("/taskType"), Some("local_workflow"));
+        assert_eq!(res.data.string_at("/summary"), Some("A test workflow"));
         assert_eq!(
-            res.data["transcriptDir"],
-            "/home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"
+            res.data.string_at("/transcriptDir"),
+            Some(
+                "/home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"
+            )
         );
-        assert_eq!(res.data["runId"], "wf_abc123def456");
-        assert_eq!(res.data["scriptPath"], "/tmp/wf_abc123def456.js");
-        assert_eq!(res.data["workflowName"], "my-wf");
+        assert_eq!(res.data.string_at("/runId"), Some("wf_abc123def456"));
+        assert_eq!(
+            res.data.string_at("/scriptPath"),
+            Some("/tmp/wf_abc123def456.js")
+        );
+        assert_eq!(res.data.string_at("/workflowName"), Some("my-wf"));
 
         // model_content text — byte-exact per oracle §1 async_launched template
-        let mc = res.data["model_content"]
-            .as_str()
+        let mc = res
+            .data
+            .string_at("/model_content")
             .expect("model_content string");
         assert!(
             mc.starts_with("Workflow launched in background. Task ID: w_t1"),
@@ -3772,7 +3917,7 @@ mod tests {
         let t = tool(Some(launcher));
         let res = t
             .call(
-                json!({ "script": "return 1;" }),
+                source_json!({ "script": "return 1;" }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -3780,23 +3925,27 @@ mod tests {
             .expect("call ok");
 
         // Optional fields absent from JSON
-        assert!(res.data.get("summary").is_none(), "summary must be absent");
         assert!(
-            res.data.get("transcriptDir").is_none(),
+            !res.data.contains_property("summary"),
+            "summary must be absent"
+        );
+        assert!(
+            !res.data.contains_property("transcriptDir"),
             "transcriptDir must be absent"
         );
         assert!(
-            res.data.get("runId").is_none(),
+            !res.data.contains_property("runId"),
             "runId must be absent when None"
         );
         assert!(
-            res.data.get("scriptPath").is_none(),
+            !res.data.contains_property("scriptPath"),
             "scriptPath must be absent when None"
         );
 
         // model_content has no conditional lines
-        let mc = res.data["model_content"]
-            .as_str()
+        let mc = res
+            .data
+            .string_at("/model_content")
             .expect("model_content string");
         assert!(
             !mc.contains("Summary:"),
@@ -3838,15 +3987,16 @@ mod tests {
         let t = tool(Some(launcher));
         let res = t
             .call(
-                json!({ "script": "return 1;" }),
+                source_json!({ "script": "return 1;" }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("call ok");
 
-        let mc = res.data["model_content"]
-            .as_str()
+        let mc = res
+            .data
+            .string_at("/model_content")
             .expect("model_content string");
 
         // Verify the EXACT string per §1 oracle template

@@ -341,7 +341,11 @@ fn make_transcript(messages: &[(&str, Option<&str>, &str, &str, bool)]) -> Loade
             "userType": "external",
             "message": {"role": ty, "content": "hi"},
         });
-        let m: session::jsonl::JsonlMessage = serde_json::from_value(msg).unwrap();
+        let m = session::jsonl::reader::route_lines(&msg.to_string())
+            .messages_in_order
+            .into_iter()
+            .next()
+            .unwrap();
         t.by_uuid.insert(uuid.to_string(), m.clone());
         t.messages_in_order.push(m);
     }
@@ -483,7 +487,7 @@ fn find_tip_last_prompt_pointing_at_unknown_uuid_falls_through() {
 // ── Gap #1: route_lines parses last-prompt entries ───────────────────────────
 
 #[test]
-fn route_lines_parses_last_prompt_explicit_true() {
+fn route_lines_new_message_clears_active_checkpoint_but_retains_explicit_branch() {
     // Binary: `{type:"last-prompt", leafUuid, explicit:true}` sets L=true, O=uuid.
     let content = concat!(
         r#"{"type":"last-prompt","leafUuid":"leaf-1","explicit":true,"sessionId":"s1"}"#,
@@ -497,7 +501,14 @@ fn route_lines_parses_last_prompt_explicit_true() {
         Some("leaf-1"),
         "last-prompt leafUuid must be captured"
     );
-    assert!(t.last_prompt_explicit, "explicit:true must be captured");
+    assert!(
+        !t.last_prompt_explicit,
+        "a subsequent main-thread row clears the active pin"
+    );
+    assert!(
+        t.last_prompt_was_explicit,
+        "the explicit branch boundary is retained"
+    );
 }
 
 #[test]

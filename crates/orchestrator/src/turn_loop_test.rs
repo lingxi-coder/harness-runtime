@@ -40,7 +40,13 @@ mod terminal_sequence_tests {
     async fn accepted_sequence_is_forwarded_to_terminal_seam() {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_with_output(output.clone());
-        apply_terminal_sequence(&orch, "Notification", Some("\u{001B}]9;hello\u{0007}")).await;
+        apply_terminal_sequence(
+            &orch,
+            "Notification",
+            Some("\u{001B}]9;hello\u{0007}"),
+            None,
+        )
+        .await;
         assert_eq!(
             output.terminal_sequences().await,
             vec!["\u{001B}]9;hello\u{0007}".to_string()],
@@ -54,7 +60,13 @@ mod terminal_sequence_tests {
     async fn rejected_sequence_is_not_forwarded() {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_with_output(output.clone());
-        apply_terminal_sequence(&orch, "Notification", Some("\u{001B}]8;;http://x\u{0007}")).await;
+        apply_terminal_sequence(
+            &orch,
+            "Notification",
+            Some("\u{001B}]8;;http://x\u{0007}"),
+            None,
+        )
+        .await;
         assert!(
             output.terminal_sequences().await.is_empty(),
             "a rejected terminalSequence must NOT be forwarded"
@@ -66,7 +78,7 @@ mod terminal_sequence_tests {
     async fn none_is_a_noop() {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_with_output(output.clone());
-        apply_terminal_sequence(&orch, "Notification", None).await;
+        apply_terminal_sequence(&orch, "Notification", None, None).await;
         assert!(output.terminal_sequences().await.is_empty());
     }
 }
@@ -78,7 +90,7 @@ mod terminal_api_error_tests {
     fn details(category: &str, explanation: Option<&str>) -> HistoryStopDetails {
         HistoryStopDetails {
             category: Some(category.to_string()),
-            explanation: explanation.map(str::to_string),
+            explanation: explanation.map(Into::into),
         }
     }
 
@@ -87,21 +99,31 @@ mod terminal_api_error_tests {
     /// omits it otherwise. The suffix is REFUSAL-ONLY.
     #[test]
     fn refusal_appends_request_id_suffix() {
-        let with =
-            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"), None)
-                .expect("refusal text");
+        let with = terminal_api_error_text(
+            "claude-opus-4-8",
+            true,
+            "refusal",
+            Some("req_011abc"),
+            None,
+            None,
+        )
+        .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+        .expect("refusal text");
         assert!(
             with.ends_with("\n\nRequest ID: req_011abc"),
             "double newline; got: {with}"
         );
 
-        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
+        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None, None)
+            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
             .expect("refusal text");
         assert!(!without.contains("Request ID:"), "got: {without}");
 
         // Empty id is treated as absent.
-        let empty = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None)
-            .expect("refusal text");
+        let empty =
+            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None, None)
+                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                .expect("refusal text");
         assert!(!empty.contains("Request ID:"), "got: {empty}");
     }
 
@@ -110,8 +132,16 @@ mod terminal_api_error_tests {
     #[test]
     fn non_refusal_terminals_have_no_request_id() {
         for sr in ["max_tokens", "model_context_window_exceeded"] {
-            let t = terminal_api_error_text("claude-opus-4-8", true, sr, Some("req_011abc"), None)
-                .unwrap_or_else(|| panic!("{sr} text"));
+            let t = terminal_api_error_text(
+                "claude-opus-4-8",
+                true,
+                sr,
+                Some("req_011abc"),
+                None,
+                None,
+            )
+            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+            .unwrap_or_else(|| panic!("{sr} text"));
             assert!(!t.contains("Request ID:"), "{sr}: {t}");
         }
     }
@@ -121,7 +151,8 @@ mod terminal_api_error_tests {
     #[test]
     fn refusal_without_stop_details_is_generic() {
         // opus-4-8 HAS a marketing name → the label branch.
-        let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
+        let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None, None)
+            .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
             .expect("refusal");
         assert!(t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."), "got: {t}");
         assert!(!t.contains("cybersecurity"), "got: {t}");
@@ -134,8 +165,10 @@ mod terminal_api_error_tests {
     fn refusal_label_cyber_or_bio_variant() {
         for cat in ["cyber", "bio"] {
             let sd = details(cat, None);
-            let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, Some(&sd))
-                .expect("refusal");
+            let t =
+                terminal_api_error_text("claude-opus-4-8", true, "refusal", None, Some(&sd), None)
+                    .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                    .expect("refusal");
             assert!(
                 t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well."),
                 "{cat}: {t}"
@@ -161,8 +194,10 @@ mod terminal_api_error_tests {
         // that `marketing_name_for_model` does not resolve.
         let sd = details("cyber", None);
         // Interactive → includes the feedback tail.
-        let ti = terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd))
-            .expect("refusal");
+        let ti =
+            terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd), None)
+                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                .expect("refusal");
         assert!(
             ti.starts_with("API Error: This model has safety measures that flagged this message for a cybersecurity topic. To learn about the Cyber Verification Program and apply for access, visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude."),
             "got: {ti}"
@@ -176,8 +211,10 @@ mod terminal_api_error_tests {
         // 206 dropped the pre-206 exemption wording entirely.
         assert!(!ti.contains("apply for an exemption"), "got: {ti}");
         // Non-interactive → NO feedback tail; ends at the help-center URL.
-        let tn = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
-            .expect("refusal");
+        let tn =
+            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
+                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                .expect("refusal");
         assert!(
             tn.ends_with("14604842-real-time-cyber-safeguards-on-claude."),
             "non-interactive omits the feedback tail; got: {tn}"
@@ -191,8 +228,10 @@ mod terminal_api_error_tests {
     #[test]
     fn refusal_nolabel_military_weapons_falls_through_to_generic_206() {
         let sd = details("military_weapons", None);
-        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
-            .expect("refusal");
+        let t =
+            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
+                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                .expect("refusal");
         assert!(
             t.contains("is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup)."),
             "got: {t}"
@@ -208,19 +247,24 @@ mod terminal_api_error_tests {
     /// explanation lacks one; "" when absent; truncate (+ `…`) past 400 chars.
     #[test]
     fn refusal_explanation_clause_formats() {
-        assert_eq!(refusal_explanation_clause(None), "");
-        assert_eq!(refusal_explanation_clause(Some("")), "");
-        assert_eq!(
-            refusal_explanation_clause(Some("see policy X")),
-            " see policy X."
-        );
-        assert_eq!(refusal_explanation_clause(Some("denied.")), " denied.");
-        assert_eq!(refusal_explanation_clause(Some("why?")), " why?");
-        assert_eq!(refusal_explanation_clause(Some("stop!")), " stop!");
-        // Over 400 chars → 400-char head + `…` (terminal punct ⇒ no extra `.`).
-        let clause = refusal_explanation_clause(Some(&"x".repeat(450)));
-        assert!(clause.starts_with(' ') && clause.ends_with('\u{2026}'));
-        assert_eq!(clause.chars().count(), 1 + 400 + 1);
+        assert_eq!(refusal_explanation_clause(None).string_at(""), Some(""));
+        for (input, expected) in [
+            ("", ""),
+            ("see policy X", " see policy X."),
+            ("denied.", " denied."),
+            ("why?", " why?"),
+            ("stop!", " stop!"),
+        ] {
+            assert_eq!(
+                refusal_explanation_clause(Some(&input.into())).string_at(""),
+                Some(expected)
+            );
+        }
+        let clause = refusal_explanation_clause(Some(&"x".repeat(450).into()));
+        let units = clause.string_units("").unwrap();
+        assert_eq!(units.first(), Some(&32));
+        assert_eq!(units.last(), Some(&0x2026));
+        assert_eq!(units.len(), 402);
     }
 
     /// NO-LABEL + non-cyber/non-weapons category + explanation → the generic
@@ -228,16 +272,26 @@ mod terminal_api_error_tests {
     #[test]
     fn refusal_nolabel_generic_appends_explanation() {
         let sd = details("other", Some("This violates section 2"));
-        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
-            .expect("refusal");
+        let t =
+            terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd), None)
+                .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+                .expect("refusal");
         assert!(
             t.contains("violate our Usage Policy (https://www.anthropic.com/legal/aup). This violates section 2."),
             "got: {t}"
         );
         // No explanation → no clause (period-space-{m}, the prior output).
         let sd2 = details("other", None);
-        let t2 = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd2))
-            .expect("refusal");
+        let t2 = terminal_api_error_text(
+            "unknown-model-xyz",
+            false,
+            "refusal",
+            None,
+            Some(&sd2),
+            None,
+        )
+        .map(|value| String::from_utf16(&value.string_units("").unwrap()).unwrap())
+        .expect("refusal");
         assert!(
             t2.contains("Usage Policy (https://www.anthropic.com/legal/aup). "),
             "got: {t2}"
@@ -248,21 +302,26 @@ mod terminal_api_error_tests {
 #[cfg(test)]
 mod model_text_tests {
     use crate::turn_loop::tool_result_to_model_text;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::json;
+
+    fn source(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test JSON is valid")
+    }
 
     #[test]
     fn prefers_model_content_over_content() {
         // Read-shaped: the model sees the cat -n string, not the raw `content`.
-        let data = json!({ "model_content": "1\thi\n2\t", "content": "hi\n" });
-        assert_eq!(tool_result_to_model_text(&data), "1\thi\n2\t");
+        let data = source(&json!({ "model_content": "1\thi\n2\t", "content": "hi\n" }));
+        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("1\thi\n2\t"));
     }
 
     #[test]
     fn falls_back_to_content_string_verbatim() {
         // Bash/Edit/Write-shaped: no `model_content`, so the model sees the raw
         // `content` string verbatim — NOT a JSON dump of the object.
-        let data = json!({ "content": "build ok\n", "exit_code": 0 });
-        assert_eq!(tool_result_to_model_text(&data), "build ok\n");
+        let data = source(&json!({ "content": "build ok\n", "exit_code": 0 }));
+        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("build ok\n"));
     }
 
     #[test]
@@ -270,26 +329,43 @@ mod model_text_tests {
         // WebFetch's claude-code result `data` names the model-facing markdown
         // `result` (no `content`/`model_content`). The model must see that
         // markdown verbatim — NOT a JSON dump of the whole {bytes,code,…} object.
-        let data = json!({
+        let data = source(&json!({
             "bytes": 11,
             "code": 200,
             "codeText": "OK",
             "result": "# Hello\n\nbody",
             "durationMs": 3,
             "url": "https://e.example/",
-        });
-        assert_eq!(tool_result_to_model_text(&data), "# Hello\n\nbody");
+        }));
+        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("# Hello\n\nbody"));
+    }
+
+    #[test]
+    fn live_nontext_tool_and_hook_results_match_claude_2_1_286() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../tests/fixtures/tool-result-2.1.286/cases.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let input = source(&case["input"]);
+            assert_eq!(
+                tool_result_to_model_text(&input).string_at(""),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]
     fn falls_back_to_json_when_no_string_content() {
-        // Structured-only result (no string `content`/`model_content`): legacy
-        // JSON serialization is preserved.
-        let data = json!({ "matches": ["a", "b"] });
-        assert_eq!(tool_result_to_model_text(&data), r#"{"matches":["a","b"]}"#);
+        // Structured-only result (no string `content`/`model_content`) uses
+        // JSON text; these small ASCII outputs remain unchanged.
+        let data = source(&json!({ "matches": ["a", "b"] }));
+        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some(r#"{"matches":["a","b"]}"#));
         // A non-string `content` also falls through to JSON.
-        let data2 = json!({ "content": 42 });
-        assert_eq!(tool_result_to_model_text(&data2), r#"{"content":42}"#);
+        let data2 = source(&json!({ "content": 42 }));
+        assert_eq!(tool_result_to_model_text(&data2).string_at(""), Some(r#"{"content":42}"#));
     }
 }
 #[cfg(test)]
@@ -299,12 +375,20 @@ mod read_file_state_tests {
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
-    use crate::turn_loop::{dispatch_tool_uses, execute_one_turn};
+    use crate::turn_loop::{
+        dispatch_tool_uses, dispatch_tool_uses_tracked_deferred, execute_one_turn,
+    };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
+    use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+    use hooks::events::HookEventType;
     use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
-    use lingxi_core::types::ToolUseId;
+    use lingxi_core::types::{HookId, ToolUseId};
+    use permission::{
+        PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+        PermissionRuleValue, PolicyPermissionGate,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -382,8 +466,11 @@ mod read_file_state_tests {
         ) -> String {
             "stub file tool".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -400,7 +487,7 @@ mod read_file_state_tests {
             let resolved = self.cwd.join(path);
             let content = tokio::fs::read_to_string(&resolved)
                 .await
-                .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display())))?;
+                .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display()).into()))?;
             Ok(ToolCallResult {
                 data: json!({ "content": content }),
                 model_content: None,
@@ -417,6 +504,40 @@ mod read_file_state_tests {
     /// `dispatch_tool_uses` directly, never `run_turn`).
     fn orch_with_tools(cwd: PathBuf, tools: Vec<Arc<dyn Tool>>) -> ConversationOrchestrator {
         orch_with_tools_and_gate(cwd, tools, Arc::new(NoOpPermissionGate))
+    }
+
+    #[tokio::test]
+    async fn mod_session_messages_api_reads_live_main_history_with_meta() {
+        let orch = orch_with_tools(PathBuf::from("/tmp"), Vec::new());
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(lingxi_core::types::ConversationMessage::user_meta(
+                lingxi_core::types::MessageId::new(),
+                "hidden context".into(),
+            ));
+        let api = hooks::mods::ModSessionContext::messages(&orch, json!({"as":"api"}))
+            .await
+            .unwrap();
+        let summary = hooks::mods::ModSessionContext::messages(&orch, json!({}))
+            .await
+            .unwrap();
+        assert!(api.strings.is_empty());
+        assert!(summary.strings.is_empty());
+        assert_eq!(
+            api.value,
+            json!([{"role":"user","content":[
+            {"type":"text","text":"hidden context"}]}])
+        );
+        assert_eq!(summary.value, json!([]));
+        let missing_agent =
+            hooks::mods::ModSessionContext::messages(&orch, json!({"agentId":"not-this-session"}))
+                .await
+                .unwrap_err();
+        assert!(missing_agent
+            .to_string()
+            .contains("no conversation of agent not-this-session"));
     }
 
     fn orch_with_tools_and_gate(
@@ -442,8 +563,8 @@ mod read_file_state_tests {
 
     #[derive(Default)]
     struct RecordingUpdateGate {
-        applied: std::sync::Mutex<Vec<serde_json::Value>>,
-        persisted: std::sync::Mutex<Vec<serde_json::Value>>,
+        applied: std::sync::Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        persisted: std::sync::Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         mode_sets: std::sync::Mutex<Vec<String>>,
     }
 
@@ -457,14 +578,20 @@ mod read_file_state_tests {
             permission::PermissionDecision::Allow
         }
 
-        fn apply_permission_updates(&self, updates: &[serde_json::Value]) {
+        fn apply_permission_updates(
+            &self,
+            updates: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+        ) {
             self.applied
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend_from_slice(updates);
         }
 
-        async fn persist_permission_updates(&self, updates: &[serde_json::Value]) {
+        async fn persist_permission_updates(
+            &self,
+            updates: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+        ) {
             self.persisted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -497,6 +624,7 @@ mod read_file_state_tests {
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -508,7 +636,7 @@ mod read_file_state_tests {
                         content, is_error, ..
                     } = b
                     {
-                        return (content.clone(), *is_error);
+                        return (content.clone(), is_error.unwrap_or(false));
                     }
                 }
             }
@@ -604,13 +732,16 @@ mod read_file_state_tests {
             "behavior": "allow",
             "destination": "session"
         });
+        let update_projection =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&update)
+                .expect("test permission update is valid JSON");
 
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
-                    permission_updates: vec![update.clone()],
+                    permission_updates: vec![update_projection.clone()],
                     decision_classification: None,
                 },
             )
@@ -621,14 +752,14 @@ mod read_file_state_tests {
                 .applied
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![update.clone()]
+            vec![update_projection.clone()]
         );
         assert_eq!(
             *gate
                 .persisted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![update]
+            vec![update_projection]
         );
     }
 
@@ -723,6 +854,183 @@ mod read_file_state_tests {
     }
 
     #[tokio::test]
+    async fn mod_tool_check_can_veto_an_orphaned_permission_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("real.txt"), "SHOULD_NOT_READ")
+            .await
+            .unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Read' }, ($, e) => {
+                if (typeof e.tool_use_id !== 'string' || e.input.file_path !== 'real.txt') {
+                  throw new Error('orphaned tool identity missing');
+                }
+                return { decision: 'deny', reason: 'recovery veto' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("recovery-mod", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut hook_registry = hooks::HookRegistry::new();
+        hook_registry.set_mod_host(host);
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool])
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)));
+        let tool_use_id = ToolUseId::new();
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &tool_use_id,
+                "Read",
+                json!({"file_path":"real.txt"}),
+            ));
+        assert!(orch
+            .run_orphaned_permission(
+                &tool_use_id,
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    permission_updates: vec![],
+                    decision_classification: None,
+                },
+            )
+            .await
+            .unwrap());
+        let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
+        assert!(is_error, "{content}");
+        assert_eq!(
+            content,
+            "Permission to use Read denied by plugin recovery-mod: recovery veto"
+        );
+        assert!(!content.contains("SHOULD_NOT_READ"));
+    }
+
+    #[tokio::test]
+    async fn orphaned_mod_veto_does_not_check_tool_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, () => ({
+                decision: 'deny', reason: 'recovery veto before core'
+              }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("recovery-lazy", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: Some(permission_checks.clone()),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool])
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let tool_use_id = ToolUseId::new();
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &tool_use_id,
+                "Schemic",
+                json!({"path":"/x"}),
+            ));
+        assert!(orch
+            .run_orphaned_permission(
+                &tool_use_id,
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(json!({"path":"/x"})),
+                    permission_updates: vec![],
+                    decision_classification: None,
+                },
+            )
+            .await
+            .unwrap());
+        let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
+        assert!(is_error, "{content}");
+        assert!(content.contains("recovery veto before core"), "{content}");
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_allow_still_obeys_a_current_deny_rule() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("real.txt"), "SHOULD_NOT_READ")
+            .await
+            .unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Read"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            Arc::new(NoOpPermissionGate),
+        ));
+        let orch = orch_with_tools_and_gate(dir.path().to_path_buf(), vec![tool], gate);
+        let tool_use_id = ToolUseId::new();
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &tool_use_id,
+                "Read",
+                json!({"file_path":"real.txt"}),
+            ));
+        assert!(orch
+            .run_orphaned_permission(
+                &tool_use_id,
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    permission_updates: vec![],
+                    decision_classification: None,
+                },
+            )
+            .await
+            .unwrap());
+        let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
+        assert!(is_error, "{content}");
+        assert!(!content.contains("SHOULD_NOT_READ"));
+    }
+
+    #[tokio::test]
     async fn orphaned_permission_noop_when_already_resolved() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tool = Arc::new(StubFileTool {
@@ -747,7 +1055,7 @@ mod read_file_state_tests {
                     content: vec![lingxi_core::types::ContentBlock::ToolResult {
                         tool_use_id: tuid.clone(),
                         content: "prior".into(),
-                        is_error: false,
+                        is_error: Some(false),
                         provider_tool_use_id: None,
                         content_blocks: None,
                     }],
@@ -946,7 +1254,7 @@ mod read_file_state_tests {
         match block {
             lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
-            } => (content.as_str(), *is_error),
+            } => (content.as_str(), is_error.unwrap_or(false)),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -957,6 +1265,7 @@ mod read_file_state_tests {
     struct SchemaCallTrackerTool {
         called: Arc<std::sync::atomic::AtomicBool>,
         rejected_message_id: Option<Arc<std::sync::Mutex<Option<String>>>>,
+        permission_checks: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     #[async_trait]
@@ -974,6 +1283,22 @@ mod read_file_state_tests {
                     })
                 });
             &SCHEMA
+        }
+        fn output_schema(&self) -> Option<&serde_json::Value> {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type":["object","string"]}));
+            Some(&SCHEMA)
+        }
+        fn map_result_text(&self, result: &serde_json::Value) -> Option<String> {
+            result
+                .get("mapped")
+                .and_then(serde_json::Value::as_str)
+                .map(|text| format!("tool-mapped:{text}"))
+        }
+        fn map_result_is_error(&self, result: &serde_json::Value) -> Option<bool> {
+            result
+                .get("mappedError")
+                .and_then(serde_json::Value::as_bool)
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -1009,6 +1334,9 @@ mod read_file_state_tests {
             _input: &serde_json::Value,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
+            if let Some(counter) = &self.permission_checks {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             permission::PermissionResult::Allow {
                 reason: permission::PermissionDecisionReason::Other {
                     reason: "test".into(),
@@ -1025,8 +1353,11 @@ mod read_file_state_tests {
         ) -> String {
             "schema tracker".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -1057,6 +1388,7 @@ mod read_file_state_tests {
             vec![Arc::new(SchemaCallTrackerTool {
                 called: called.clone(),
                 rejected_message_id: None,
+                permission_checks: None,
             })],
         );
         let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
@@ -1084,6 +1416,7 @@ mod read_file_state_tests {
             vec![Arc::new(SchemaCallTrackerTool {
                 called: called.clone(),
                 rejected_message_id: None,
+                permission_checks: None,
             })],
         );
         let uses = vec![(
@@ -1105,6 +1438,2317 @@ mod read_file_state_tests {
         );
     }
 
+    /// Minimal Bash-shaped tool for end-to-end permission/Mod dispatch tests.
+    struct BashDispatchProbeTool {
+        called: Arc<std::sync::atomic::AtomicBool>,
+        permission_checks: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    }
+
+    #[async_trait]
+    impl Tool for BashDispatchProbeTool {
+        fn name(&self) -> &str {
+            "Bash"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| {
+                    json!({
+                        "type":"object",
+                        "properties":{"command":{"type":"string"}},
+                        "required":["command"]
+                    })
+                });
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            if let Some(permission_checks) = &self.permission_checks {
+                permission_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test tool".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "Bash dispatch probe".into()
+        }
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({"ran":true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Minimal MCP-shaped connector for the Native 2.1.291 organization-ask
+    /// ceiling contract. It exposes only a trusted metadata accessor and a
+    /// deterministic local Ask result; no server or external command is used.
+    struct McpCeilingProbeTool {
+        name: &'static str,
+        called: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for McpCeilingProbeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn is_mcp(&self) -> bool {
+            true
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        async fn tool_check_permission_ceiling(
+            &self,
+            _input: &serde_json::Value,
+        ) -> Option<lingxi_core::host::McpPermissionCeiling> {
+            Some(lingxi_core::host::McpPermissionCeiling::Ask)
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            let message = "Your organization requires approval for this tool";
+            permission::PermissionResult::Ask {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: message.into(),
+                },
+                prompt: permission::result::PermissionPrompt {
+                    title: "Permission required".into(),
+                    message: message.into(),
+                    options: vec!["Allow once".into(), "Deny".into()],
+                },
+                pending_classifier_check: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "MCP connector probe".into()
+        }
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({"ran":true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    struct DenyPermissionPrompt;
+
+    #[async_trait]
+    impl permission::PermissionGate for DenyPermissionPrompt {
+        async fn check(
+            &self,
+            _tool_name: &str,
+            _input: &serde_json::Value,
+        ) -> permission::PermissionDecision {
+            permission::PermissionDecision::Deny {
+                reason: "test prompt denied".into(),
+            }
+        }
+    }
+
+    async fn dispatch_mcp_probe_after_mod_allow(
+        tool_name: &'static str,
+        facts: hooks::mods::ProjectsConsentFacts,
+        rules: Vec<PermissionRule>,
+    ) -> (String, bool, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("tool-check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', async ($, e, next) => {
+                if (e.ceiling !== 'ask') {
+                  throw new Error(`missing native organization ceiling: ${JSON.stringify(e)}`);
+                }
+                const core = await next(e);
+                if (core.decision !== 'ask' && core.decision !== 'deny') {
+                  throw new Error(`expected an objection from the captured core: ${JSON.stringify(core)}`);
+                }
+                if (core.decision === 'ask' &&
+                    core.reason !== 'Your organization requires approval for this tool') {
+                  throw new Error(`wrong organization ask reason: ${JSON.stringify(core)}`);
+                }
+                $.ui.log(`captured core: ${core.decision}`);
+                return { decision: 'allow' };
+              });
+            }
+            "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("permission-probe", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool = Arc::new(McpCeilingProbeTool {
+            name: tool_name,
+            called: called.clone(),
+        });
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
+                .with_roots(roots),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(DenyPermissionPrompt),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let mut config = OrchestratorConfig::default();
+        config.mod_projects_consent = facts;
+        let orch = ConversationOrchestrator::new(
+            config,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new({
+                let mut tools = ToolRegistry::new();
+                tools.register_builtin(tool);
+                tools
+            }),
+            noop_hook_executor(),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        // Exercise the non-normal plan path: its post-dispatch tool-Ask guard
+        // used to undo a Mod Allow after `next(e)` returned the core Ask.
+        orch.session().lock().await.plan_mode = true;
+        let uses = vec![(ToolUseId::new(), tool_name.into(), json!({}), None)];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(
+            output.snapshot().await.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "permission-probe"
+                        && text
+                            .string_at("")
+                            .is_some_and(|text| text.starts_with("captured core: "))
+            )),
+            "the real Mod session must invoke next(e) and see the core objection"
+        );
+        (
+            content.to_owned(),
+            is_error,
+            called.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    async fn dispatch_bash_with_managed_rule(
+        command: &str,
+        content_rule: Option<&str>,
+    ) -> (String, bool, bool, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("approve.js");
+        std::fs::write(
+            &module,
+            "export function register(on) { on('tool.check', { tool: 'Bash' }, () => ({ decision: 'allow' })); }",
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("user-approval", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        host.set_sec_default_order(Some(-1));
+        let mut hook_registry = hooks::HookRegistry::new();
+        hook_registry.set_mod_host(host);
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(BashDispatchProbeTool {
+            called: called.clone(),
+            permission_checks: None,
+        }));
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let rules: Vec<PermissionRule> = content_rule
+            .map(|content| PermissionRule {
+                value: PermissionRuleValue::from_rule_string(content),
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            })
+            .into_iter()
+            .collect();
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
+                .with_roots(roots)
+                .with_sandbox_runtime(permission::SandboxAutoAllowConfig::new(true, true, vec![])),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(NoOpPermissionGate),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            noop_hook_executor(),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)));
+
+        let uses = vec![(
+            ToolUseId::new(),
+            "Bash".to_string(),
+            json!({"command":command}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        let managed_deny_logged = output.snapshot().await.iter().any(|event| {
+            matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "cc-plugin-sec-default"
+                        && text
+                            .string_at("")
+                            .is_some_and(|text| text.contains("Bash(rm:*)"))
+            )
+        });
+        (
+            content.to_string(),
+            is_error,
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            managed_deny_logged,
+        )
+    }
+
+    mod mod_tool_call_api_test {
+        include!("turn_loop/mod_tool_call_api_test.rs");
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_deny_prevents_tool_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, ($, e, next) => ({ deny: 'blocked by mod' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("deny-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error);
+        assert_eq!(content, "<tool_use_error>blocked by mod</tool_use_error>");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn mod_session_reads_use_running_orchestrator_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_cwd = dir.path().join("first");
+        let second_cwd = dir.path().join("second");
+        std::fs::create_dir_all(&first_cwd).unwrap();
+        std::fs::create_dir_all(&second_cwd).unwrap();
+        let module = dir.path().join("session.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($) => ({ result: {
+                cwd: await $.session.cwd(),
+                root: await $.session.root(),
+                model: await $.session.model(),
+                id: await $.session.id(),
+                turns: await $.session.turns(),
+              } }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("session-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let session_cwd = tool_api::SessionCwd::new(first_cwd.clone(), vec![first_cwd.clone()]);
+        let cwd_cell = Arc::new(std::sync::Mutex::new(first_cwd.clone()));
+        session_cwd.link_live_cwd(cwd_cell.clone());
+        let orch = orch_with_tools(
+            first_cwd.clone(),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_current_cwd(cwd_cell)
+        .with_session_cwd(session_cwd.clone())
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let (id, model) = {
+            let mut session = orch.session.lock().await;
+            session
+                .history
+                .push(lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "one prompt".into(),
+                ));
+            session
+                .history
+                .push(lingxi_core::types::ConversationMessage::user_meta(
+                    lingxi_core::types::MessageId::new(),
+                    "internal note".into(),
+                ));
+            (session.session_id.to_string(), session.model.clone())
+        };
+        let uses = vec![(ToolUseId::new(), "Schemic".into(), json!({}), None)];
+        dispatch_tool_uses(&orch, &uses).await.unwrap();
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!({
+                "cwd": first_cwd.to_string_lossy(),
+                "root": first_cwd.to_string_lossy(),
+                "model": model,
+                "id": id,
+                "turns": 1,
+            }))
+        );
+
+        session_cwd.change_cwd(second_cwd.clone());
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "second prompt".into(),
+            ));
+        let moved_use = vec![(ToolUseId::new(), "Schemic".into(), json!({}), None)];
+        dispatch_tool_uses(&orch, &moved_use).await.unwrap();
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(moved_use[0].0.as_str()),
+            Some(&json!({
+                "cwd": second_cwd.to_string_lossy(),
+                "root": second_cwd.to_string_lossy(),
+                "model": model,
+                "id": id,
+                "turns": 2,
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_rewrite_reaches_schema_and_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, ($, e, next) =>
+                next({ ...e, path: '/x' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("rewrite-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
+        assert!(!is_error, "{content}");
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(dispatched.post_tool_batch_calls[0].tool_input, json!({}));
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_denies_real_call_before_tool_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, ($, e) => {
+                if (typeof e.tool_use_id !== 'string' || e.input.path !== '/x') {
+                  throw new Error('real tool.check identity missing');
+                }
+                return { decision: 'deny', reason: 'blocked by Mod' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("check-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error);
+        assert!(
+            content
+                .contains("Permission to use Schemic denied by plugin check-test: blocked by Mod"),
+            "{content}"
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_observes_toolcheck_ask_before_dontask_execution_denial() {
+        use permission::{PermissionPolicy, PolicyPermissionGate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("phase.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
+                const core = await next(e);
+                const repeated = await next(e);
+                if (core.decision !== 'ask' || core.reason !== 'This command requires approval') {
+                  throw new Error(`expected Native ToolCheck Ask, got ${JSON.stringify(core)}`);
+                }
+                if (JSON.stringify(core) !== JSON.stringify(repeated)) {
+                  throw new Error('repeated next(e) changed the cached Native core result');
+                }
+                $.ui.log('native toolcheck snapshot verified');
+                return core;
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("permission-phase", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(BashDispatchProbeTool {
+            called: called.clone(),
+            permission_checks: Some(permission_checks.clone()),
+        }));
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(permission::PermissionMode::DontAsk, vec![])
+                .with_roots(roots),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(NoOpPermissionGate),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            noop_hook_executor(),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Bash".to_string(),
+            json!({"command":"curl https://example.invalid"}),
+            None,
+        )];
+
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "Execution/DontAsk must deny after Mod: {content}");
+        assert!(
+            content.contains("Permission to use Bash has been denied"),
+            "{content}"
+        );
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "the fake Bash body must not run"
+        );
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "repeated Mod next(e) calls must reuse one captured ToolCheck core"
+        );
+        assert!(
+            output.snapshot().await.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "permission-phase"
+                        && text.string_at("") == Some("native toolcheck snapshot verified")
+            )),
+            "the Mod callback must have received the expected pre-execution ToolCheck result"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_projects_native_org_ask_ceiling_from_trusted_tool_context() {
+        use permission::{PermissionPolicy, PolicyPermissionGate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("ceiling.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'McpConnector' }, async ($, e, next) => {
+                if (e.ceiling !== 'ask' || Object.prototype.hasOwnProperty.call(e, 'agentId')) {
+                  throw new Error(`wrong main-session tool.check metadata: ${JSON.stringify(e)}`);
+                }
+                const core = await next(e);
+                if (core.ceiling !== 'ask' || core.decision !== 'ask' ||
+                    core.reason !== 'Your organization requires approval for this tool') {
+                  throw new Error(`wrong native ceiling core: ${JSON.stringify(core)}`);
+                }
+                $.ui.log('native organization ceiling verified');
+                return core;
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("org-ceiling", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool = Arc::new(McpCeilingProbeTool {
+            name: "McpConnector",
+            called: called.clone(),
+        });
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(permission::PermissionMode::Default, Vec::new())
+                .with_roots(roots),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(DenyPermissionPrompt),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new({
+                let mut tools = ToolRegistry::new();
+                tools.register_builtin(tool);
+                tools
+            }),
+            noop_hook_executor(),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        // The server-pushed ask ceiling remains an Ask for a non-read-only
+        // connector while the session is in Plan mode.
+        orch.session().lock().await.plan_mode = true;
+        let uses = vec![(ToolUseId::new(), "McpConnector".into(), json!({}), None)];
+
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(
+            is_error,
+            "organization ceiling remains prompt-gated: {content}"
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            output.snapshot().await.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "org-ceiling"
+                        && text.string_at("") == Some("native organization ceiling verified")
+            )),
+            "the real Mod session must receive the Native ceiling and core fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_preserves_explicit_ask_rule_ahead_of_org_ceiling() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("ask-rule.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'McpConnector' }, async ($, e, next) => {
+                if (e.ceiling !== 'ask') {
+                  throw new Error(`missing organization ceiling: ${JSON.stringify(e)}`);
+                }
+                const core = await next(e);
+                if (core.decision !== 'ask' || core.rule !== 'McpConnector' ||
+                    core.reason === 'Your organization requires approval for this tool') {
+                  throw new Error(`the explicit ask rule must precede the organization ceiling: ${JSON.stringify(core)}`);
+                }
+                $.ui.log('explicit ask rule precedence verified');
+                return core;
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("org-ceiling-ask-rule", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool = Arc::new(McpCeilingProbeTool {
+            name: "McpConnector",
+            called: called.clone(),
+        });
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("McpConnector"),
+                    behavior: PermissionBehavior::Ask,
+                    source: PermissionRuleSource::Session,
+                }],
+            )
+            .with_roots(roots),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(DenyPermissionPrompt),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new({
+                let mut tools = ToolRegistry::new();
+                tools.register_builtin(tool);
+                tools
+            }),
+            noop_hook_executor(),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(ToolUseId::new(), "McpConnector".into(), json!({}), None)];
+
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (_, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "an explicit ask rule must remain prompt-gated");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(output.snapshot().await.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                if plugin == "org-ceiling-ask-rule"
+                    && text.string_at("") == Some("explicit ask rule precedence verified")
+        )));
+    }
+
+    #[tokio::test]
+    async fn generic_mcp_org_ask_is_overridable_by_mod_after_core_runs() {
+        let (content, is_error, called) = dispatch_mcp_probe_after_mod_allow(
+            "McpConnector",
+            hooks::mods::ProjectsConsentFacts::default(),
+            Vec::new(),
+        )
+        .await;
+        assert!(!is_error, "a generic MCP Mod Allow should stand: {content}");
+        assert!(called, "the actual MCP tool body must be entered");
+    }
+
+    #[tokio::test]
+    async fn projects_fetch_and_search_keep_the_native_mod_allow_hard_hold() {
+        let facts = hooks::mods::ProjectsConsentFacts {
+            default_host_sticky_latch: Some(true),
+            projects_env: Some(false),
+            session_mcp_signal: Some(false),
+            feature_result: Some(hooks::mods::ProjectsFeatureResult {
+                value: false,
+                source: hooks::mods::ProjectsFeatureSource::Fallback,
+            }),
+            growthbook_used_non_default_host: Some(false),
+        };
+        for tool_name in ["WebFetch", "WebSearch"] {
+            let (content, is_error, called) =
+                dispatch_mcp_probe_after_mod_allow(tool_name, facts.clone(), Vec::new()).await;
+            assert!(
+                is_error,
+                "Native Projects predicate must retain the Ask: {content}"
+            );
+            assert!(!called, "the protected tool body must not be entered");
+        }
+    }
+
+    #[tokio::test]
+    async fn projects_missing_feature_source_uses_native_false_fallback() {
+        let facts = hooks::mods::ProjectsConsentFacts {
+            default_host_sticky_latch: Some(true),
+            projects_env: Some(false),
+            session_mcp_signal: Some(false),
+            feature_result: None,
+            growthbook_used_non_default_host: None,
+        };
+        let (content, is_error, called) =
+            dispatch_mcp_probe_after_mod_allow("WebFetch", facts, Vec::new()).await;
+        assert!(
+            is_error,
+            "Native `gr(F, false)` fallback must keep the hard hold: {content}"
+        );
+        assert!(
+            !called,
+            "the protected WebFetch fake body must not be entered"
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_payload_feature_on_default_host_disables_mod_hard_hold() {
+        let facts = hooks::mods::ProjectsConsentFacts {
+            default_host_sticky_latch: Some(true),
+            projects_env: Some(false),
+            session_mcp_signal: Some(false),
+            feature_result: Some(hooks::mods::ProjectsFeatureResult {
+                value: true,
+                source: hooks::mods::ProjectsFeatureSource::Payload,
+            }),
+            growthbook_used_non_default_host: Some(false),
+        };
+        let (content, is_error, called) =
+            dispatch_mcp_probe_after_mod_allow("WebFetch", facts, Vec::new()).await;
+        assert!(
+            !is_error,
+            "the payload feature exception should apply: {content}"
+        );
+        assert!(called, "the WebFetch fake body must be entered");
+    }
+
+    #[tokio::test]
+    async fn disabled_native_computer_use_gate_does_not_protect_generic_mcp() {
+        let (content, is_error, called) = dispatch_mcp_probe_after_mod_allow(
+            "mcp__computer_use__screenshot",
+            hooks::mods::ProjectsConsentFacts::default(),
+            Vec::new(),
+        )
+        .await;
+        assert!(!is_error, "2.1.291 eVe is disabled: {content}");
+        assert!(called, "the MCP-shaped fake body must be entered");
+    }
+
+    #[tokio::test]
+    async fn projects_mod_hard_hold_preserves_managed_deny_result() {
+        let facts = hooks::mods::ProjectsConsentFacts {
+            default_host_sticky_latch: Some(true),
+            projects_env: Some(false),
+            session_mcp_signal: Some(false),
+            feature_result: Some(hooks::mods::ProjectsFeatureResult {
+                value: false,
+                source: hooks::mods::ProjectsFeatureSource::Fallback,
+            }),
+            growthbook_used_non_default_host: Some(false),
+        };
+        let rules = vec![PermissionRule {
+            value: PermissionRuleValue::from_rule_string("WebFetch"),
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
+        }];
+        let (content, is_error, called) =
+            dispatch_mcp_probe_after_mod_allow("WebFetch", facts, rules).await;
+        assert!(
+            is_error,
+            "the managed core Deny must survive Mod Allow: {content}"
+        );
+        assert!(content.contains("Permission to use WebFetch"), "{content}");
+        assert!(!called, "the managed-denied tool body must not be entered");
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_direct_denial_skips_core_permission_resolution() {
+        struct CountingGate(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl permission::PermissionGate for CountingGate {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> permission::PermissionDecision {
+                panic!("the direct Mod denial must not call the legacy permission gate")
+            }
+
+            async fn resolve_detailed_or_abort(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+                _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+            ) -> Result<
+                lingxi_core::host::permission_gate::PermissionResolution,
+                lingxi_core::host::permission_gate::PermissionAbort,
+            > {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(
+                    lingxi_core::host::permission_gate::PermissionResolution::Allow {
+                        rule_source: None,
+                        classifier_approved: false,
+                    },
+                )
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, ($, e, next) =>
+                e.input.path === '/x'
+                  ? { decision: 'deny', reason: 'decided without next' }
+                  : next(e));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("lazy-check", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::new(CountingGate(std::sync::atomic::AtomicUsize::new(0)));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: Some(permission_checks.clone()),
+        }));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            gate.clone(),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert!(content.contains("decided without next"), "{content}");
+        assert_eq!(gate.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+
+        let next_uses = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            json!({"path":"/run"}),
+            None,
+        )];
+        let next_results = dispatch_tool_uses(&orch, &next_uses).await.unwrap();
+        let (next_content, next_is_error) = schema_gate_tool_result(&next_results[0]);
+        assert!(!next_is_error, "{next_content}");
+        assert_eq!(gate.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn rule_denial_in_mod_core_skips_tool_permission_check() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, ($, e, next) => next(e));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("rule-first", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: Some(permission_checks.clone()),
+        }));
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Schemic"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            Arc::new(NoOpPermissionGate),
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_query_reads_policy_without_executing_tool() {
+        use permission::{PermissionPolicy, PermissionRule, PolicyPermissionGate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("query.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($) => ({ result: await $.tool.check({
+                tool: 'Schemic', input: { path: '/x' }
+              }) }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("query-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: None,
+        }));
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            vec![PermissionRule::allow_tool_session("Schemic")],
+        ));
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(NoOpPermissionGate),
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(!is_error, "{content}");
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!({"decision":"allow","rule":"Schemic"}))
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    async fn assert_managed_bash_dispatch_controls() {
+        // Prove the fake Bash body is reachable when no content rule matches.
+        // These controls catch roots=None's tool-wide content matching, which
+        // could otherwise let the deny assertion pass without matching argv.
+        let control_command = "TZ=staging rm -rf build";
+        for rule in [None, Some("Bash(ls:*)")] {
+            let (content, is_error, called, logged) =
+                dispatch_bash_with_managed_rule(control_command, rule).await;
+            assert!(
+                !is_error,
+                "unmatched content rule should permit the probe: {content}"
+            );
+            assert!(called, "the fake Bash body must run for an unmatched rule");
+            assert!(!logged, "sec-default should not log an unmatched deny rule");
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_bash_mod_dispatch_denies_eue_fallback_assignments() {
+        assert_managed_bash_dispatch_controls().await;
+        // Always-on coverage of Native's existing Eue-style text fallback.
+        // No parser availability is implied by this test.
+        for command in [
+            "TZ=staging rm -rf build",
+            "LANG=staging; TZ=staging rm -rf build",
+            "echo ok | TZ=staging rm -rf build",
+        ] {
+            let (content, is_error, called, logged) =
+                dispatch_bash_with_managed_rule(command, Some("Bash(rm:*)")).await;
+            assert!(is_error, "managed deny should beat Mod approval: {content}");
+            assert!(content.contains("Permission to use Bash"), "{content}");
+            assert!(
+                !called,
+                "the fake Bash body must not run for a managed deny"
+            );
+            assert!(logged, "sec-default should report the held managed deny");
+        }
+    }
+
+    #[cfg(feature = "bash-ast")]
+    #[tokio::test]
+    async fn managed_bash_mod_dispatch_denies_ast_expanded_env_assignments() {
+        assert_managed_bash_dispatch_controls().await;
+        // This test is compiled only when orchestrator's explicit feature
+        // forwards permission/bash-ast. `$HOME` prevents the legacy Eue regex
+        // from stripping the assignment, so success proves the parsed argv
+        // candidate is used through the actual Mod/permission dispatcher.
+        for command in [
+            "TZ=\"$HOME\" rm -rf build",
+            "LANG=staging; TZ=\"$HOME\" rm -rf build",
+            "echo ok | TZ=\"$HOME\" rm -rf build",
+        ] {
+            let (content, is_error, called, logged) =
+                dispatch_bash_with_managed_rule(command, Some("Bash(rm:*)")).await;
+            assert!(is_error, "managed deny should beat Mod approval: {content}");
+            assert!(content.contains("Permission to use Bash"), "{content}");
+            assert!(
+                !called,
+                "the fake Bash body must not run for a managed deny"
+            );
+            assert!(logged, "sec-default should report the held managed deny");
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_allow_can_replace_a_rule_denial() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("allow.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, () => ({ decision: 'allow' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("allow-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: None,
+        }));
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            vec![PermissionRule {
+                value: PermissionRuleValue::from_rule_string("Schemic"),
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Session,
+            }],
+        ));
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(NoOpPermissionGate),
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(!is_error, "{content}");
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_ask_over_rule_denial_reaches_the_prompt_transport() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        struct RecordingPrompt(std::sync::Mutex<Option<String>>);
+        #[async_trait]
+        impl permission::PermissionGate for RecordingPrompt {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> permission::PermissionDecision {
+                panic!("the Mod ask must carry its reason through the contextual transport")
+            }
+
+            async fn check_with_context(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+                ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+            ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+                *self.0.lock().unwrap() = ctx.decision_reason.clone();
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                    reason: "dialog refused".into(),
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("ask.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Schemic' }, () => ({
+                decision: 'ask', reason: 'human review'
+              }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("ask-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: None,
+        }));
+        let prompt = Arc::new(RecordingPrompt(std::sync::Mutex::new(None)));
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Schemic"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            prompt.clone(),
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert_eq!(content, "dialog refused");
+        assert_eq!(
+            prompt.0.lock().unwrap().as_deref(),
+            Some("Schemic needs approval (asked by plugin ask-test: human review)")
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+
+    #[tokio::test]
+    async fn mod_prompt_attachment_retains_utf16_through_rewrite_and_cache_identity() {
+        use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              let calls = 0;
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e) => {
+                return { text: String(++calls) + e.text + String.fromCharCode(0xdc00) };
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("utf16-context", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let id = lingxi_core::types::MessageId::new();
+        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
+        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+        for (source, count) in [(0xd800, b'1'), (0xd800, b'1'), (0xd801, b'2')] {
+            let units = [
+                prefix.clone(),
+                vec![u16::from(b'A'), source],
+                suffix.clone(),
+            ]
+            .concat();
+            let message = ConversationMessage::User {
+                id,
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&units),
+                    utf16_code_units: units,
+                    citations: None,
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            };
+            let rendered = orch
+                .mod_prompt_attachment(
+                    "hook_additional_context",
+                    message,
+                    json!({"kind":"plugin","event":"tool.call"}),
+                )
+                .await
+                .unwrap();
+            let ConversationMessage::User { content, .. } = rendered else {
+                panic!("attachment must remain a user message");
+            };
+            let ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } = &content[0]
+            else {
+                panic!("attachment must retain its exact UTF-16 representation");
+            };
+            assert_eq!(
+                utf16_code_units,
+                &[
+                    prefix.clone(),
+                    vec![u16::from(count), u16::from(b'A'), source, 0xdc00],
+                    suffix.clone()
+                ]
+                .concat(),
+                "rewrites preserve code units; equal display text cannot alias cache identities"
+            );
+        }
+    }
+}
+// ============================================================================
+// A1: max_output_tokens recovery (multi-turn nudge + escalation/exhaustion).
+// Drives `execute_one_turn_with_recovery` directly with a `max_tokens`-scripted
+// MockApiClient and asserts the nudge injection, counter increments, and
+// disposition (Continue while under the limit; Ended on exhaustion).
+// ============================================================================
+#[cfg(test)]
+mod max_output_tokens_recovery_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::turn_loop::{
+        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
+        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+    };
+    use crate::OrchestratorConfig;
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+    use llm_runtime::HistoryResponse;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    #[tokio::test]
+    async fn mod_tool_call_can_replace_model_visible_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                const result = await next(e);
+                if (result.result.ok !== true) throw new Error('core result was not structured');
+                $.ui.log('core result checked');
+                $.ui.toast('result redacted', { timeoutMs: 2500 });
+                $.ui.status('checking result');
+                $.ui.status(undefined);
+                return { ...result, result: 'redacted' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("result-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output = Arc::new(MockOutputStream::new());
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: None,
+            permission_checks: None,
+        }));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert_eq!(content, "redacted");
+        assert!(!is_error);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!("redacted")),
+            "the core payload must not reach transcript persistence"
+        );
+        let output_events = output.snapshot().await;
+        assert!(output_events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                if plugin == "result-test" && text.string_at("") == Some("core result checked")
+        )));
+        assert!(output_events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModToast { plugin, text, timeout_ms }
+                if plugin == "result-test"
+                    && text.string_at("") == Some("result redacted")
+                    && *timeout_ms == 2500
+        )));
+        assert!(output_events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModStatus { plugin, text }
+                if plugin == "result-test"
+                    && text.as_ref().and_then(|text| text.string_at("")) == Some("checking result")
+        )));
+        assert!(output_events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModStatus { plugin, text }
+                if plugin == "result-test" && text.is_none()
+        )));
+        let tool_results: Vec<_> = output_events
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::ToolResult { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_results, vec![json!("redacted")]);
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_context_follows_its_tool_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                const result = await next(e);
+                return { ...result, context: ['Contents of /tmp/AGENTS.md:\n\nNested rule', 'second line'] };
+              });
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) => {
+                if (e.origin.kind !== 'plugin' || e.origin.event !== 'tool.call') {
+                  throw new Error('wrong tool.call context origin');
+                }
+                return next({ ...e, text: `modded ${e.text}` });
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("context-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(dispatched.results.len(), 1);
+        assert_eq!(dispatched.injected_messages.len(), 1);
+        let (reminder, source) = &dispatched.injected_messages[0];
+        assert_eq!(source, &uses[0].0);
+        assert!(reminder.is_meta());
+        assert_eq!(
+            reminder.text_content(),
+            "<system-reminder>\ntool.call hook additional context: Contents of /tmp/AGENTS.md:\n\nNested rule\nsecond line\n</system-reminder>"
+        );
+        let queued = orch.take_queued_hook_attachments(&uses[0].0).await;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0.value["type"], "hook_additional_context");
+        assert_eq!(queued[0].0.value["hookName"], "tool.call");
+        assert_eq!(
+            queued[0].0.value["toolUseID"],
+            format!("{}-context", uses[0].0.as_str())
+        );
+        assert_eq!(
+            queued[0].0.value["content"],
+            json!(["Contents of /tmp/AGENTS.md:\n\nNested rule", "second line"])
+        );
+        let mut model_copy = vec![reminder.clone()];
+        orch.screen_mod_persisted_attachments(&mut model_copy).await;
+        assert!(model_copy[0]
+            .text_content()
+            .starts_with("<system-reminder>\nmodded tool.call hook additional context:"));
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_reuses_core_result_when_only_text_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                const result = await next(e);
+                return { ...result, text: 'forged text' };
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("text-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(content, "{\"ok\":true}");
+        assert!(!is_error);
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!({"ok":true}))
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_rejects_a_result_outside_the_tool_output_schema() {
+        for (source, core_should_run) in [
+            (
+                "export function register(on) { on('tool.call', () => ({ result: 42 })); }",
+                false,
+            ),
+            (
+                "export function register(on) { on('tool.call', async ($, e, next) => ({ ...await next(e), result: 42 })); }",
+                true,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let module = dir.path().join("register.js");
+            std::fs::write(&module, source).unwrap();
+            let host = hooks::mods::ModHost::start(None).await.unwrap();
+            host.load("schema-test", dir.path(), &module, json!({}))
+                .await
+                .unwrap();
+            let mut registry = hooks::HookRegistry::new();
+            registry.set_mod_host(host);
+            let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let orch = orch_with_tools(
+                PathBuf::from("/tmp"),
+                vec![Arc::new(SchemaCallTrackerTool {
+                    called: called.clone(),
+                    rejected_message_id: None,
+                    permission_checks: None,
+                })],
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+            let uses = vec![(
+                ToolUseId::new(),
+                "Schemic".to_string(),
+                json!({"path":"/x"}),
+                None,
+            )];
+            let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+                .await
+                .unwrap();
+            let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
+            assert!(is_error, "{content}");
+            assert!(
+                content.starts_with("<tool_use_error>tool.call step resolved Schemic with a result that does not match its output shape:"),
+                "{content}"
+            );
+            assert_eq!(
+                called.load(std::sync::atomic::Ordering::SeqCst),
+                core_should_run
+            );
+            assert!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(uses[0].0.as_str())
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|raw| raw.starts_with("Error: tool.call step resolved Schemic"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_uses_the_tools_mapper_for_a_replacement() {
+        for source in [
+            "export function register(on) { on('tool.call', () => ({ result: { mapped: 'direct' } })); }",
+            "export function register(on) { on('tool.call', async ($, e, next) => ({ ...await next(e), result: { mapped: 'direct' } })); }",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let module = dir.path().join("register.js");
+            std::fs::write(&module, source).unwrap();
+            let host = hooks::mods::ModHost::start(None).await.unwrap();
+            host.load("mapping-test", dir.path(), &module, json!({}))
+                .await
+                .unwrap();
+            let mut registry = hooks::HookRegistry::new();
+            registry.set_mod_host(host);
+            let orch = orch_with_tools(
+                PathBuf::from("/tmp"),
+                vec![Arc::new(SchemaCallTrackerTool {
+                    called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    rejected_message_id: None,
+                    permission_checks: None,
+                })],
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+            let uses = vec![(
+                ToolUseId::new(),
+                "Schemic".to_string(),
+                json!({"path":"/x"}),
+                None,
+            )];
+            let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                schema_gate_tool_result(&dispatched.results[0]),
+                ("tool-mapped:direct", false)
+            );
+            assert_eq!(
+                orch.transcript
+                    .tool_use_results
+                    .lock()
+                    .await
+                    .get(uses[0].0.as_str()),
+                Some(&json!({"mapped":"direct"}))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_maps_an_image_replacement_to_model_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('tool.call', () => ({ result: {
+                type: 'image', file: { base64: 'AAAA', type: 'image/png' }
+              } }));
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("image-mapping", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        let lingxi_core::types::ContentBlock::ToolResult { content_blocks, .. } =
+            &dispatched.results[0]
+        else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            content_blocks.as_ref().unwrap()[0]["source"]["data"],
+            "AAAA"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_uses_the_tools_error_bit_for_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            "export function register(on) { on('tool.call', () => ({ result: { mapped: 'interrupted', mappedError: true } })); }",
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("error-mapping", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({"path":"/x"}),
+            None,
+        )];
+        let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            schema_gate_tool_result(&dispatched.results[0]),
+            ("tool-mapped:interrupted", true)
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_registered_tool_enters_live_pool_and_answers_through_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(&module, r#"
+            export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.tool.register({
+                  name: 'echo', description: 'Echo a message',
+                  inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] }
+                });
+                return next(e);
+              });
+              on('tool.call', { tool: 'mcp__mod-test__echo' }, (_$, e) => ({ result: e.text }));
+            }
+        "#).unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("mod-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut hooks = hooks::HookRegistry::new();
+        hooks.set_mod_host(host.clone());
+        let hook_registry = Arc::new(tokio::sync::RwLock::new(hooks));
+        let orch = Arc::new(
+            orch_with_tools(dir.path().to_path_buf(), Vec::new())
+                .with_hook_registry(hook_registry.clone()),
+        );
+        let mod_session: Arc<dyn hooks::mods::ModSessionContext> = orch.clone();
+        hook_registry
+            .write()
+            .await
+            .attach_mod_background_context(Arc::downgrade(&mod_session));
+        orch.fire_session_start("startup").await;
+        let tool = orch
+            .tools
+            .find_by_name("mcp__mod-test__echo")
+            .expect("registered tool");
+        assert!(tool.is_mcp());
+        assert_eq!(tool.input_schema()["required"], json!(["text"]));
+        assert!(orch
+            .build_wire_tools()
+            .await
+            .0
+            .iter()
+            .any(|entry| entry["name"] == "mcp__mod-test__echo"
+                && entry["description"] == "Echo a message"));
+        let second = vec![(
+            ToolUseId::new(),
+            "mcp__mod-test__echo".into(),
+            json!({"text":"hello"}),
+            None,
+        )];
+        let result = dispatch_tool_uses(&orch, &second).await.unwrap();
+        assert_eq!(schema_gate_tool_result(&result[0]), ("hello", false));
+        host.unload("mod-test").await.unwrap();
+        assert!(orch.tools.find_by_name("mcp__mod-test__echo").is_none());
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_deny_after_next_discards_core_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                const core = await next(e);
+                return { deny: 'hidden', ref: core.ref };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("deny-after-next", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert_eq!(content, "<tool_use_error>hidden</tool_use_error>");
+        assert!(is_error);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!("<tool_use_error>hidden</tool_use_error>")),
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_retry_uses_second_core_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                await next(e);
+                const retry = await next(e);
+                return { result: String(retry.ref) };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("retry", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert_eq!(content, "2");
+        assert!(!is_error);
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!("2")),
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_zero_ref_uses_synthetic_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, async ($, e, next) => {
+                const core = await next(e);
+                return { ...core, ref: 0, result: 'synthetic replacement' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("zero-ref", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert_eq!(content, "synthetic replacement");
+        assert!(!is_error);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!("synthetic replacement")),
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_managed_pre_tool_hook_prevents_mod_short_circuit() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Schemic' }, () => ({ deny: 'mod denied' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("short-circuit", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        registry.register(HookDefinition {
+            id: HookId::new(),
+            name: "managed-pre".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "managed-pre".into(),
+            },
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        });
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+                rejected_message_id: None,
+                permission_checks: None,
+            })],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (_, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(!is_error);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn mod_fs_read_uses_orchestrator_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "session working directory").unwrap();
+        let module = dir.path().join("read.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', async ($) => ({ result: await $.fs.read('readme.txt') }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("read-cwd", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(dir.path().to_path_buf(), Vec::new())
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(ToolUseId::new(), "Read".to_string(), json!({}), None)];
+        let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert_eq!(content, "session working directory");
+        assert!(!is_error);
+    }
+
     #[tokio::test]
     async fn schema_gate_threads_current_assistant_message_id_to_rejection_hook() {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1121,6 +3765,7 @@ mod read_file_state_tests {
         registry.register_builtin(Arc::new(SchemaCallTrackerTool {
             called: called.clone(),
             rejected_message_id: Some(rejected_message_id.clone()),
+            permission_checks: None,
         }) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -1135,7 +3780,7 @@ mod read_file_state_tests {
 
         assert!(matches!(
             execute_one_turn(&orch, None).await.expect("turn step"),
-            crate::turn_loop::TurnStepOutcome::Continue
+            crate::turn_loop::TurnStepOutcome::Continue(_)
         ));
         assert!(
             !called.load(std::sync::atomic::Ordering::SeqCst),
@@ -1145,11 +3790,47 @@ mod read_file_state_tests {
         let assistant_message_id = {
             let session_handle = orch.session();
             let session = session_handle.lock().await;
-            match session.history.first() {
-                Some(lingxi_core::types::ConversationMessage::Assistant { id, .. }) => {
+            let date = crate::prompt::env_meta::current_date_string();
+            assert_eq!(
+                session.history.len(),
+                5,
+                "three native context rows, assistant tool_use, rejected tool_result"
+            );
+            assert_eq!(
+                orch.context_attachment_history(&session.history),
+                vec![
+                    json!({"type":"session_context","context":{}}),
+                    json!({"type":"date","date":date}),
+                    json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                ]
+            );
+            assert!(
+                matches!(&session.history[0], lingxi_core::types::ConversationMessage::System {
+                subtype: Some(subtype), content, ..
+            } if subtype == "model_reminder_attachment" && content.is_empty())
+            );
+            assert_eq!(
+                session.history[1].text_content(),
+                format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            );
+            assert_eq!(
+                session.history[2].text_content(),
+                "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            );
+            assert!(session.history[1].is_meta() && session.history[2].is_meta());
+            match &session.history[3] {
+                lingxi_core::types::ConversationMessage::Assistant { id, content, .. } => {
+                    assert!(
+                        matches!(content.as_slice(), [lingxi_core::types::ContentBlock::ToolUse { name, input, .. }]
+                        if name == "Schemic" && input == &json!({}))
+                    );
                     id.to_string()
                 }
-                other => panic!("expected assistant message first, got {other:?}"),
+                other => {
+                    panic!(
+                        "expected current assistant tool_use after native context, got {other:?}"
+                    )
+                }
             }
         };
         assert_eq!(
@@ -1178,7 +3859,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_tools(cwd, tools);
-        let wire = orch.build_wire_tools().await;
+        let wire = orch.build_wire_tools().await.0;
 
         let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Bash", "Read"], "sorted by name");
@@ -1193,7 +3874,104 @@ mod read_file_state_tests {
     #[tokio::test]
     async fn build_wire_tools_empty_registry_is_empty() {
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        assert!(orch.build_wire_tools().await.is_empty());
+        assert!(orch.build_wire_tools().await.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mod_tool_describe_rewrites_wire_and_deferral_until_invalidated() {
+        use tool_api::tool_search_view::ToolRegistryView;
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("describe.js");
+        std::fs::write(
+            &module,
+            r#"let calls = 0;
+            export function register(on) {
+              on('tool.describe', { tool: 'Read' }, ($, e, next) => {
+                if (e.provider.plugin !== 'engine' || e.provider.tier !== 'core') {
+                  throw new Error('wrong tool provider');
+                }
+                return { description: `mod description ${++calls}`, isDeferred: true };
+              });
+              on('prompt.submit', ($, e, next) => {
+                $.ui.invalidate('tool.describe');
+                return next(e);
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("describe", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut hooks = hooks::HookRegistry::new();
+        hooks.set_mod_host(host.clone());
+        let deferral = Arc::new(tool_api::DeferralState::new(
+            tool_api::ToolSearchMode::Enabled,
+            false,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.set_deferral(deferral.clone());
+        for name in ["Read", "ToolSearch"] {
+            registry.register_builtin(Arc::new(StubFileTool {
+                name,
+                cwd: dir.path().to_path_buf(),
+            }));
+        }
+        let registry = Arc::new(registry);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            registry.clone(),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks)));
+
+        orch.build_wire_tools().await.0;
+        assert!(deferral.wants_defer("Read", false));
+        let first = registry.tool_search_view().entries();
+        assert_eq!(
+            first
+                .iter()
+                .find(|tool| tool.name == "Read")
+                .unwrap()
+                .description,
+            "mod description 1"
+        );
+        deferral.mark_loaded(["Read".to_string()]);
+        let cached = orch.build_wire_tools().await.0;
+        let read = cached.iter().find(|entry| entry["name"] == "Read").unwrap();
+        assert_eq!(read["description"], "mod description 1");
+        assert_eq!(read["defer_loading"], true);
+
+        host.dispatch_with_log_at_session(
+            "prompt.submit",
+            json!({"text":"refresh"}),
+            &orch,
+            |event| async move { Ok(event) },
+            |_, _| async {},
+        )
+        .await
+        .unwrap();
+        let refreshed = orch.build_wire_tools().await.0;
+        let read = refreshed
+            .iter()
+            .find(|entry| entry["name"] == "Read")
+            .unwrap();
+        assert_eq!(read["description"], "mod description 2");
+        host.unload("describe").await.unwrap();
+        let ordinary = orch.build_wire_tools().await.0;
+        let read = ordinary
+            .iter()
+            .find(|entry| entry["name"] == "Read")
+            .unwrap();
+        assert_eq!(read["description"], "");
+        assert!(read.get("defer_loading").is_none());
+        assert!(!deferral.wants_defer("Read", false));
     }
 
     struct StubCoordinatorMode {
@@ -1244,7 +4022,7 @@ mod read_file_state_tests {
             .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
             .with_coordinator_simple_mode_for_test(false)
             .with_coordinator_pool_for_test(false, &[]);
-        let wire = orch.build_wire_tools().await;
+        let wire = orch.build_wire_tools().await.0;
         let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
         let mut actual = names;
         actual.sort_unstable();
@@ -1335,7 +4113,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_deny_rules(builtins, vec![], &["WebFetch"]);
-        let names = wire_tool_names(&orch.build_wire_tools().await);
+        let names = wire_tool_names(&orch.build_wire_tools().await.0);
         assert_eq!(names, vec!["Read"], "deny:[WebFetch] hides WebFetch");
     }
 
@@ -1363,7 +4141,7 @@ mod read_file_state_tests {
             }),
         ];
         let orch = orch_with_deny_rules(builtins, mcp, &["mcp__github"]);
-        let names = wire_tool_names(&orch.build_wire_tools().await);
+        let names = wire_tool_names(&orch.build_wire_tools().await.0);
         assert_eq!(
             names,
             vec!["Read", "mcp__slack__post"],
@@ -1390,10 +4168,14 @@ mod read_file_state_tests {
         };
         // No-deny gate (PolicyPermissionGate with empty rules) vs the default
         // NoOp gate: both must yield the same wire bytes as the plain registry.
-        let baseline = orch_with_tools(cwd.clone(), mk()).build_wire_tools().await;
+        let baseline = orch_with_tools(cwd.clone(), mk())
+            .build_wire_tools()
+            .await
+            .0;
         let gated = orch_with_deny_rules(mk(), vec![], &[])
             .build_wire_tools()
-            .await;
+            .await
+            .0;
         assert_eq!(
             gated, baseline,
             "empty deny must be byte-identical to the unfiltered wire tools"
@@ -1412,6 +4194,7 @@ mod read_file_state_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         )]));
@@ -1435,10 +4218,7 @@ mod read_file_state_tests {
 
         let captured = api.captured_tools().await;
         assert_eq!(captured.len(), 1, "exactly one messages_create round-trip");
-        let names: Vec<&str> = captured[0]
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = captured[0].iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["Read"],
@@ -1605,8 +4385,10 @@ mod read_file_state_tests {
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
+                            citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
+                        resumable: None,
                     });
                 }
             }
@@ -1666,7 +4448,7 @@ mod read_file_state_tests {
         assert!(!reread.seeded_from_context);
         assert!(!reread.is_partial_view);
 
-        // Each restored file is a pair of native Read call/result reminders,
+        // Each restored file owns both native Read reminder blocks in one row,
         // after the boundary, summary and preserved tail. Selection is MRU.
         let session = orch.session();
         let s = session.lock().await;
@@ -1684,15 +4466,13 @@ mod read_file_state_tests {
             restored,
             vec![
                 format!(
-                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>\n<system-reminder>\nResult of calling the Read tool:\n1\tfn fresh() {{}}\n2\t\n</system-reminder>",
                     serde_json::json!({"file_path": new_path})
                 ),
-                "<system-reminder>\nResult of calling the Read tool:\n1\tfn fresh() {}\n2\t\n</system-reminder>".to_string(),
                 format!(
-                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>\n<system-reminder>\nResult of calling the Read tool:\n1\tfn old() {{}}\n2\t\n</system-reminder>",
                     serde_json::json!({"file_path": old_path})
                 ),
-                "<system-reminder>\nResult of calling the Read tool:\n1\tfn old() {}\n2\t\n</system-reminder>".to_string(),
             ],
             "restored attachments preserve native Read bytes and MRU ordering"
         );
@@ -1772,8 +4552,10 @@ mod read_file_state_tests {
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
+                            citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
+                        resumable: None,
                     });
                 }
             }
@@ -1820,7 +4602,7 @@ mod read_file_state_tests {
         );
         assert_eq!(orch.files_in_context().await, vec![tool_read_path.clone()]);
 
-        // Both native reminder messages reach model history, proving that the
+        // Both native reminder blocks reach one current model-history row;
         // shared tool registry fed the restore and the stale bytes were replaced.
         let session = orch.session();
         let s = session.lock().await;
@@ -1834,13 +4616,13 @@ mod read_file_state_tests {
                     || text.starts_with("<system-reminder>\nResult of calling the Read tool:")
             })
             .collect();
-        assert_eq!(restored, vec![
-            format!(
-                "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+        assert_eq!(
+            restored,
+            vec![format!(
+                "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>\n<system-reminder>\nResult of calling the Read tool:\n1\tfn tool_read() {{}}\n2\t\n</system-reminder>",
                 serde_json::json!({"file_path": tool_read_path})
-            ),
-            "<system-reminder>\nResult of calling the Read tool:\n1\tfn tool_read() {}\n2\t\n</system-reminder>".to_string(),
-        ]);
+            ),]
+        );
     }
 
     #[tokio::test]
@@ -1875,82 +4657,6 @@ mod read_file_state_tests {
             orch.files_in_context().await,
             vec![cwd.join("a.rs"), cwd.join("c.rs"), cwd.join("b.rs")]
         );
-    }
-    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
-
-    #[tokio::test]
-    async fn mod_prompt_attachment_retains_utf16_through_rewrite_and_cache_identity() {
-        use lingxi_core::types::{ContentBlock, ConversationMessage};
-
-        let dir = tempfile::tempdir().unwrap();
-        let module = dir.path().join("register.js");
-        std::fs::write(
-            &module,
-            r#"export function register(on) {
-              let calls = 0;
-              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e) => {
-                return { text: String(++calls) + e.text + String.fromCharCode(0xdc00) };
-              });
-            }"#,
-        )
-        .unwrap();
-        let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("utf16-context", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
-        let mut registry = hooks::HookRegistry::new();
-        registry.set_mod_host(host);
-        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
-            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let id = lingxi_core::types::MessageId::new();
-        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
-        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
-        for (source, count) in [(0xd800, b'1'), (0xd800, b'1'), (0xd801, b'2')] {
-            let units = [
-                prefix.clone(),
-                vec![u16::from(b'A'), source],
-                suffix.clone(),
-            ]
-            .concat();
-            let message = ConversationMessage::User {
-                id,
-                content: vec![ContentBlock::TextJsUtf16 {
-                    text: String::from_utf16_lossy(&units),
-                    utf16_code_units: units,
-                    citations: None,
-                }],
-                is_meta: true,
-                is_compact_summary: false,
-                is_visible_in_transcript_only: false,
-            };
-            let rendered = orch
-                .mod_prompt_attachment(
-                    "hook_additional_context",
-                    message,
-                    json!({"kind":"plugin","event":"tool.call"}),
-                )
-                .await
-                .unwrap();
-            let ConversationMessage::User { content, .. } = rendered else {
-                panic!("attachment must remain a user message");
-            };
-            let ContentBlock::TextJsUtf16 {
-                utf16_code_units, ..
-            } = &content[0]
-            else {
-                panic!("attachment must retain its exact UTF-16 representation");
-            };
-            assert_eq!(
-                utf16_code_units,
-                &[
-                    prefix.clone(),
-                    vec![u16::from(count), u16::from(b'A'), source, 0xdc00],
-                    suffix.clone()
-                ]
-                .concat(),
-                "rewrites preserve code units; equal display text cannot alias cache identities"
-            );
-        }
     }
 }
 // ============================================================================
@@ -1999,6 +4705,7 @@ mod max_output_tokens_recovery_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("max_tokens"),
         )
@@ -2053,13 +4760,7 @@ mod max_output_tokens_recovery_tests {
             "agent:custom:reviewer",
             true
         ));
-        assert!(truncated_response_recovery_eligible("subagent", true));
-        for source in [
-            "agent:custom:reviewer",
-            "agent:explore",
-            "hook_agent",
-            "subagent",
-        ] {
+        for source in ["agent:custom:reviewer", "agent:explore", "hook_agent"] {
             assert!(crate::turn_loop::truncated_response_recovery_is_subagent(
                 source
             ));
@@ -2074,7 +4775,15 @@ mod max_output_tokens_recovery_tests {
             assert!(truncated_response_recovery_eligible(source, false));
             assert!(!truncated_response_recovery_eligible(source, true));
         }
-        for source in ["agent", "agentless", "side_question", "compact", "hook", ""] {
+        for source in [
+            "agent",
+            "agentless",
+            "subagent",
+            "side_question",
+            "compact",
+            "hook",
+            "",
+        ] {
             assert!(!crate::turn_loop::truncated_response_recovery_is_subagent(
                 source
             ));
@@ -2097,7 +4806,7 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("turn step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 1);
         assert_eq!(state.max_output_tokens_override, None);
 
@@ -2114,7 +4823,7 @@ mod max_output_tokens_recovery_tests {
                 assert!(*is_meta, "max-output-tokens recovery nudge must be is_meta");
                 match &content[0] {
                     // (Test plan 4) the nudge is a User message with exact bytes.
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         assert_eq!(text, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE);
                     }
                     other => panic!("expected text block, got {other:?}"),
@@ -2155,7 +4864,7 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("turn step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
 
         let contents = tokio::fs::read_to_string(&session_path)
             .await
@@ -2190,14 +4899,14 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 2);
 
         // count 2 → 3 (still < limit, so still nudges)
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 3);
 
         // Two nudges were appended (one per step).
@@ -2208,7 +4917,7 @@ mod max_output_tokens_recovery_tests {
                 matches!(
                     m,
                     ConversationMessage::User { content, .. }
-                        if matches!(content.first(), Some(ContentBlock::Text { text })
+                        if matches!(content.first(), Some(ContentBlock::Text { text, .. })
                             if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
                 )
             })
@@ -2241,12 +4950,13 @@ mod max_output_tokens_recovery_tests {
                 assert_eq!(stop_reason, "max_tokens");
                 final_message_id
             }
-            TurnStepOutcome::Continue => panic!("expected Ended on exhaustion"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended on exhaustion"),
         };
         // The counter is NOT incremented past the limit, and NO nudge is
         // appended on exhaustion. The step appends the response assistant message
         // AND the surfaced terminal `API Error: …` assistant message (#24 batched
-        // parity with the streaming terminal arm) → +2.
+        // parity with the streaming terminal arm), after the three durable
+        // native context announcements.
         assert_eq!(
             state.max_output_tokens_recovery_count,
             MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
@@ -2254,8 +4964,33 @@ mod max_output_tokens_recovery_tests {
         let h = history(&orch).await;
         assert_eq!(
             h.len(),
-            len_before + 2,
-            "the step's assistant msg + the surfaced terminal API-error msg"
+            len_before + 5,
+            "three native context rows + response assistant + terminal API-error assistant"
+        );
+        let date = crate::prompt::env_meta::current_date_string();
+        assert_eq!(
+            orch.context_attachment_history(&h),
+            vec![
+                serde_json::json!({"type":"session_context","context":{}}),
+                serde_json::json!({"type":"date","date":date}),
+                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        assert!(
+            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            if subtype == "model_reminder_attachment" && content.is_empty())
+        );
+        assert_eq!(
+            h[len_before + 1].text_content(),
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+        );
+        assert_eq!(
+            h[len_before + 2].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        );
+        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(
+            matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "max_tokens")
         );
         // The last message is the surfaced terminal API-error assistant.
         match h.last() {
@@ -2265,7 +5000,7 @@ mod max_output_tokens_recovery_tests {
                 ..
             }) => {
                 assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
-                let ContentBlock::Text { text } = &content[0] else {
+                let ContentBlock::Text { text, .. } = &content[0] else {
                     panic!("expected a text block");
                 };
                 assert!(
@@ -2294,6 +5029,7 @@ mod max_output_tokens_recovery_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("model_context_window_exceeded"),
         )]);
@@ -2307,13 +5043,38 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Ended { stop_reason, .. } => {
                 assert_eq!(stop_reason, "model_context_window_exceeded");
             }
-            TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended, not a bare re-call"),
         }
         let h = history(&orch).await;
         assert_eq!(
             h.len(),
-            len_before + 2,
-            "response asst + surfaced API-error asst"
+            len_before + 5,
+            "three native context rows + response assistant + terminal API-error assistant"
+        );
+        let date = crate::prompt::env_meta::current_date_string();
+        assert_eq!(
+            orch.context_attachment_history(&h),
+            vec![
+                serde_json::json!({"type":"session_context","context":{}}),
+                serde_json::json!({"type":"date","date":date}),
+                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        assert!(
+            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            if subtype == "model_reminder_attachment" && content.is_empty())
+        );
+        assert_eq!(
+            h[len_before + 1].text_content(),
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+        );
+        assert_eq!(
+            h[len_before + 2].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        );
+        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(
+            matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "model_context_window_exceeded")
         );
         let Some(ConversationMessage::Assistant {
             content,
@@ -2327,7 +5088,7 @@ mod max_output_tokens_recovery_tests {
             stop_reason.as_deref(),
             Some("model_context_window_exceeded")
         );
-        let ContentBlock::Text { text } = &content[0] else {
+        let ContentBlock::Text { text, .. } = &content[0] else {
             panic!("expected a text block");
         };
         assert_eq!(
@@ -2346,6 +5107,7 @@ mod max_output_tokens_recovery_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("refusal"),
         )]);
@@ -2364,13 +5126,38 @@ mod max_output_tokens_recovery_tests {
                 assert_eq!(stop_reason, "refusal");
                 final_message_id
             }
-            TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended, not a bare re-call"),
         };
         let h = history(&orch).await;
         assert_eq!(
             h.len(),
-            len_before + 2,
-            "response asst + surfaced API-error asst"
+            len_before + 5,
+            "three native context rows + response assistant + terminal API-error assistant"
+        );
+        let date = crate::prompt::env_meta::current_date_string();
+        assert_eq!(
+            orch.context_attachment_history(&h),
+            vec![
+                serde_json::json!({"type":"session_context","context":{}}),
+                serde_json::json!({"type":"date","date":date}),
+                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        assert!(
+            matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            if subtype == "model_reminder_attachment" && content.is_empty())
+        );
+        assert_eq!(
+            h[len_before + 1].text_content(),
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+        );
+        assert_eq!(
+            h[len_before + 2].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        );
+        assert!(h[len_before + 1].is_meta() && h[len_before + 2].is_meta());
+        assert!(
+            matches!(&h[len_before + 3], ConversationMessage::Assistant { stop_reason: Some(reason), .. } if reason == "refusal")
         );
         let Some(ConversationMessage::Assistant {
             content,
@@ -2381,7 +5168,7 @@ mod max_output_tokens_recovery_tests {
             panic!("expected the surfaced Assistant API-error");
         };
         assert_eq!(stop_reason.as_deref(), Some("refusal"));
-        let ContentBlock::Text { text } = &content[0] else {
+        let ContentBlock::Text { text, .. } = &content[0] else {
             panic!("expected a text block");
         };
         // Either the labelled "safety measures" or the generic Usage-Policy
@@ -2410,6 +5197,7 @@ mod max_output_tokens_recovery_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         )]);
@@ -2420,7 +5208,7 @@ mod max_output_tokens_recovery_tests {
             .expect("step");
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
-            TurnStepOutcome::Continue => panic!("expected Ended"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended"),
         }
         assert_eq!(state.max_output_tokens_recovery_count, 0);
         let h = history(&orch).await;
@@ -2432,7 +5220,7 @@ mod max_output_tokens_recovery_tests {
         assert!(!h.iter().any(|m| matches!(
             m,
             ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text })
+                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
                     if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
         )));
     }
@@ -2466,7 +5254,7 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("turn step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_override, Some(ESCALATED_MAX_TOKENS));
         assert!(state.max_output_tokens_escalated);
         // No nudge counted/injected — the escalation precedes the nudge path.
@@ -2485,7 +5273,20 @@ mod max_output_tokens_recovery_tests {
     /// escalate-forever loop.
     #[tokio::test]
     async fn second_max_tokens_after_escalation_takes_override_then_nudges() {
-        let orch = orch_with_responses_escalating(vec![max_tokens_response()]);
+        let api = Arc::new(MockApiClient::new(vec![max_tokens_response()]));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                escalate_max_output_tokens: true,
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
         let mut state = RecoveryState {
             max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
             max_output_tokens_escalated: true,
@@ -2495,7 +5296,12 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("turn step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
+        let requests = api.captured_requests().await;
+        let [crate::OrchestratorApiRequest::Main(request)] = requests.as_slice() else {
+            panic!("expected one actual main request");
+        };
+        assert_eq!(request.opts.max_output_tokens, Some(ESCALATED_MAX_TOKENS));
         // The one-shot override was consumed for this call; the nudge path ran.
         assert_eq!(state.max_output_tokens_override, None);
         assert!(
@@ -2521,13 +5327,13 @@ mod max_output_tokens_recovery_tests {
         let step = crate::turn_loop::execute_one_turn(&orch, None)
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         let h = history(&orch).await;
         // Only the assistant message; no nudge appended by the shim.
         assert!(!h.iter().any(|m| matches!(
             m,
             ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text })
+                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
                     if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
         )));
     }
@@ -2577,6 +5383,7 @@ mod malformed_and_thinking_only_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "I'll call the tool".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("tool_use"),
         )
@@ -2601,7 +5408,7 @@ mod malformed_and_thinking_only_tests {
     fn last_user_text(h: &[ConversationMessage]) -> Option<String> {
         match h.last()? {
             ConversationMessage::User { content, .. } => match content.first()? {
-                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::Text { text, .. } => Some(text.clone()),
                 _ => None,
             },
             _ => None,
@@ -2656,7 +5463,7 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.malformed_tool_use_retried, "guard armed");
         assert_eq!(
             state.max_output_tokens_recovery_count, 0,
@@ -2692,7 +5499,7 @@ mod malformed_and_thinking_only_tests {
             let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
                 .await
                 .expect("step");
-            assert!(matches!(step, TurnStepOutcome::Continue));
+            assert!(matches!(step, TurnStepOutcome::Continue(_)));
         }
         assert!(state.malformed_tool_use_retried);
     }
@@ -2721,7 +5528,7 @@ mod malformed_and_thinking_only_tests {
                 assert_eq!(stop_reason, "end_turn");
                 final_message_id
             }
-            TurnStepOutcome::Continue => panic!("expected Ended on second failure"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended on second failure"),
         };
         let h = history(&orch).await;
         // Terminal message = ASSISTANT api-error message, stop_reason
@@ -2736,7 +5543,7 @@ mod malformed_and_thinking_only_tests {
                 assert_eq!(stop_reason.as_deref(), Some("stop_sequence"));
                 assert!(matches!(
                     content.first(),
-                    Some(ContentBlock::Text { text }) if text == MALFORMED_TOOL_USE_RETRY_FAILED
+                    Some(ContentBlock::Text { text, .. }) if text == MALFORMED_TOOL_USE_RETRY_FAILED
                 ));
                 assert_eq!(
                     final_message_id, *id,
@@ -2767,13 +5574,13 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(!state.malformed_tool_use_retried, "guard NOT armed");
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,
             ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text })
+                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
                     if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
         )));
     }
@@ -2784,12 +5591,12 @@ mod malformed_and_thinking_only_tests {
     async fn legacy_shim_does_not_handle_malformed_tool_use() {
         let orch = orch_with_responses(vec![malformed_tool_use_response()]);
         let step = execute_one_turn(&orch, None).await.expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,
             ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text })
+                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
                     if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
         )));
     }
@@ -2806,6 +5613,7 @@ mod malformed_and_thinking_only_tests {
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -2815,7 +5623,7 @@ mod malformed_and_thinking_only_tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "Structured output provided successfully".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -2828,7 +5636,10 @@ mod malformed_and_thinking_only_tests {
     fn real_user(text: &str) -> ConversationMessage {
         ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -2840,6 +5651,7 @@ mod malformed_and_thinking_only_tests {
             id: MessageId::new(),
             content: vec![],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -2882,6 +5694,7 @@ mod malformed_and_thinking_only_tests {
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         };
         let h = vec![
             real_user("read it"),
@@ -2921,7 +5734,7 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged, "guard armed");
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
@@ -2939,6 +5752,7 @@ mod malformed_and_thinking_only_tests {
                 vec![llm_runtime::ContentBlock::Text {
                     text: "Complete answer".into(),
                     cache_control: None,
+                    citations: None,
                 }],
                 stop_reason,
             )]);
@@ -2978,7 +5792,7 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged);
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
@@ -3004,7 +5818,7 @@ mod malformed_and_thinking_only_tests {
             .expect("step");
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
-            TurnStepOutcome::Continue => panic!("expected Ended once already nudged"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended once already nudged"),
         }
         let h = history(&orch).await;
         assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
@@ -3017,6 +5831,7 @@ mod malformed_and_thinking_only_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "Here is the answer.".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         );
@@ -3039,6 +5854,7 @@ mod malformed_and_thinking_only_tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "   \n  ".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         );
@@ -3048,7 +5864,7 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged);
     }
 
@@ -3060,7 +5876,7 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn(&orch, None).await.expect("step");
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
-            TurnStepOutcome::Continue => panic!("legacy shim should end on end_turn"),
+            TurnStepOutcome::Continue(_) => panic!("legacy shim should end on end_turn"),
         }
         let h = history(&orch).await;
         assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
@@ -3346,7 +6162,9 @@ mod pre_tool_hook_tests {
 
         let seen = Arc::new(std::sync::Mutex::new(None));
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -3385,7 +6203,9 @@ mod pre_tool_hook_tests {
 
         let seen = Arc::new(std::sync::Mutex::new(None));
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -3437,7 +6257,9 @@ mod pre_tool_hook_tests {
 
         let seen = Arc::new(std::sync::Mutex::new(None));
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -3488,7 +6310,9 @@ mod pre_tool_hook_tests {
         // faithful approximation of claude-code's permission-mode enum.
         let seen = Arc::new(std::sync::Mutex::new(None));
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -3514,10 +6338,8 @@ mod pre_tool_hook_tests {
         );
     }
 
-    /// Permission gate that denies every tool call AT THE PROMPT (`check`), but
-    /// leaves `check_after_hook_allow` at the default (Allow) — modeling a gate
-    /// with NO deny RULE, only a would-be prompt. A hook 'allow' therefore skips
-    /// the prompt and the tool runs (HOOK.3 issue 1: hook-allow skips the prompt).
+    /// Prompt-denying gate with no policy rules. Its captured PreToolUse core
+    /// defaults to clean Allow, so an approved hook skips the would-be prompt.
     struct DenyAllGate;
     #[async_trait]
     impl PermissionGate for DenyAllGate {
@@ -3528,22 +6350,12 @@ mod pre_tool_hook_tests {
         }
     }
 
-    /// Permission gate modeling an explicit DENY RULE: it denies on BOTH `check`
-    /// and `check_after_hook_allow`, so even a hook 'allow' cannot override it
-    /// (HOOK.3 issue 1 / claude-code `checkRuleBasedPermissions`).
+    /// Permission gate modeling an explicit DENY RULE through the current
+    /// captured PreToolUse permission-core interface.
     struct DenyRuleGate;
     #[async_trait]
     impl PermissionGate for DenyRuleGate {
         async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
-            PermissionDecision::Deny {
-                reason: "denied-by-rule".into(),
-            }
-        }
-        async fn check_after_hook_allow(
-            &self,
-            _tool: &str,
-            _input: &serde_json::Value,
-        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "denied-by-rule".into(),
             }
@@ -3574,24 +6386,12 @@ mod pre_tool_hook_tests {
         }
     }
 
-    /// Permission gate that returns a DISTINGUISHABLE denial from each entry
-    /// point, so a test can assert WHICH method the turn loop routed to:
-    /// `check` → "via-check", `check_after_hook_allow` → "via-hook-allow",
-    /// `resolve_detailed_in_plan_mode_or_abort` → "via-plan-mode".
-    /// Gate that ALLOWS every call on every path (used by the #37 defer tests
-    /// where an IGNORED defer must fall through to a gate that lets the tool
-    /// run).
+    /// Gate that allows every call, used by tests where an ignored defer must
+    /// fall through to a gate that lets the tool run.
     struct AllowAllGate;
     #[async_trait]
     impl PermissionGate for AllowAllGate {
         async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
-            PermissionDecision::Allow
-        }
-        async fn check_after_hook_allow(
-            &self,
-            _t: &str,
-            _i: &serde_json::Value,
-        ) -> PermissionDecision {
             PermissionDecision::Allow
         }
     }
@@ -3602,15 +6402,6 @@ mod pre_tool_hook_tests {
         async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "via-check".into(),
-            }
-        }
-        async fn check_after_hook_allow(
-            &self,
-            _t: &str,
-            _i: &serde_json::Value,
-        ) -> PermissionDecision {
-            PermissionDecision::Deny {
-                reason: "via-hook-allow".into(),
             }
         }
         async fn resolve_detailed_in_plan_mode_or_abort(
@@ -3633,7 +6424,7 @@ mod pre_tool_hook_tests {
     }
 
     /// Gate that is ABOUT TO ASK (`resolve_detailed` → `Ask`). Its `check` denies
-    /// (models the prompt / headless auto-deny) and `check_after_hook_allow`
+    /// (models the prompt / headless auto-deny) and `rewritten-hook resolver`
     /// allows (no deny rule), so a `PermissionRequest` 'allow' rescues an
     /// otherwise-denied ask, while no PermissionRequest decision delegates to the
     /// (denying) inner.
@@ -3645,7 +6436,7 @@ mod pre_tool_hook_tests {
                 reason: "prompt-denied".into(),
             }
         }
-        async fn check_after_hook_allow(
+        async fn check_after_hook_allow_rewritten(
             &self,
             _t: &str,
             _i: &serde_json::Value,
@@ -3662,6 +6453,32 @@ mod pre_tool_hook_tests {
             std::sync::Mutex<Option<lingxi_core::host::permission_gate::PermissionCheckContext>>,
         transport_calls: std::sync::atomic::AtomicUsize,
         transport_outcome: lingxi_core::host::permission_gate::PermissionOutcome,
+    }
+
+    struct RecordingTransportGate {
+        saw_ctx:
+            std::sync::Mutex<Option<lingxi_core::host::permission_gate::PermissionCheckContext>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PermissionGate for RecordingTransportGate {
+        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+            panic!("the Mod ask must use the contextual transport")
+        }
+
+        async fn check_with_context(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+            *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                reason: "dialog declined".into(),
+            }
+        }
     }
 
     #[async_trait]
@@ -3745,7 +6562,9 @@ mod pre_tool_hook_tests {
     }
 
     /// A tool that always succeeds with the fixed string `ECHOED-OUTPUT`.
-    struct EchoTool;
+    struct EchoTool {
+        permission_checks: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    }
     #[async_trait]
     impl Tool for EchoTool {
         fn name(&self) -> &str {
@@ -3780,6 +6599,9 @@ mod pre_tool_hook_tests {
             _input: &serde_json::Value,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
+            if let Some(counter) = &self.permission_checks {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             permission::PermissionResult::Allow {
                 reason: permission::PermissionDecisionReason::Other {
                     reason: "test".into(),
@@ -3796,8 +6618,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "echo".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -3871,8 +6696,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "mcp-end-turn".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -3946,8 +6774,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "refresh-mcp-tools".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -4035,8 +6866,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             self.name.clone()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -4112,8 +6946,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "capture".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -4261,8 +7098,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "inject".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -4295,7 +7135,9 @@ mod pre_tool_hook_tests {
         responses: Vec<llm_runtime::HistoryResponse>,
     ) -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -4310,6 +7152,50 @@ mod pre_tool_hook_tests {
 
     fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
         vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+    }
+
+    struct AbortHookPreflightGate;
+
+    #[async_trait]
+    impl PermissionGate for AbortHookPreflightGate {
+        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        async fn resolve_after_hook_allow_mod_core(
+            &self,
+            _tool: &str,
+            _input: &serde_json::Value,
+            _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> Result<
+            lingxi_core::host::permission_gate::HookAllowModCoreEvaluation,
+            lingxi_core::host::permission_gate::PermissionAbort,
+        > {
+            Err(lingxi_core::host::permission_gate::PermissionAbort {
+                message: "captured permission preflight failed".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pretool_allow_permission_preflight_abort_fails_closed() {
+        let orch = orch_with(
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            Arc::new(AbortHookPreflightGate),
+            vec![],
+        );
+        let error = match dispatch_tool_uses_tracked(&orch, &uses(), None).await {
+            Err(error) => error,
+            Ok(_) => panic!("an unavailable captured permission core must abort dispatch"),
+        };
+        assert!(matches!(
+            error,
+            crate::error::OrchestratorError::PermissionAbort { message }
+                if message == "captured permission preflight failed"
+        ));
     }
 
     fn orch_with_mcp_end_turn(
@@ -4377,7 +7263,7 @@ mod pre_tool_hook_tests {
         match block {
             ContentBlock::ToolResult {
                 content, is_error, ..
-            } => (content.as_str(), *is_error),
+            } => (content.as_str(), is_error.unwrap_or(false)),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -4447,7 +7333,7 @@ mod pre_tool_hook_tests {
         );
         match injected_msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
                 other => panic!("expected leading Text block, got {other:?}"),
             },
             other => panic!("expected injected User message, got {other:?}"),
@@ -4489,7 +7375,7 @@ mod pre_tool_hook_tests {
             .iter()
             .find(|m| {
                 matches!(m, ConversationMessage::User { content, .. }
-                    if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))
+                    if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "EXPANDED-SKILL-PROMPT")))
             })
             .expect("injected skill-prompt message present in history");
         assert_eq!(
@@ -4583,7 +7469,7 @@ mod pre_tool_hook_tests {
         let injected = &h[tr_idx + 1];
         match injected {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
                 other => panic!("expected leading Text block, got {other:?}"),
             },
             other => panic!("expected injected User message after tool_result, got {other:?}"),
@@ -4658,13 +7544,13 @@ mod pre_tool_hook_tests {
         let (msg, tagged_tu) = &injected[0];
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
-            ConversationMessage::User { content, .. } => {
-                assert_eq!(content.len(), 1);
-                assert_eq!(
-                    content[0].visible_text(),
-                    Some("<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>")
-                );
-            }
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(
+                    text,
+                    "<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>"
+                ),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -4774,7 +7660,7 @@ mod pre_tool_hook_tests {
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(
                     text,
                     "<system-reminder>\nPreToolUse:Echo hook stopped continuation: STOP-NOW\n</system-reminder>"
                 ),
@@ -4804,7 +7690,7 @@ mod pre_tool_hook_tests {
         assert_eq!(injected.len(), 1);
         match &injected[0].0 {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(
                     text,
                     "<system-reminder>\nPreToolUse:Echo hook stopped continuation: Execution stopped by hook\n</system-reminder>"
                 ),
@@ -4848,7 +7734,7 @@ mod pre_tool_hook_tests {
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
             ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(
+                Some(ContentBlock::Text { text, .. }) => assert_eq!(
                     text,
                     "<system-reminder>\nPostToolUse:Echo hook stopped continuation: POST-STOP\n</system-reminder>"
                 ),
@@ -4884,7 +7770,7 @@ mod pre_tool_hook_tests {
             TurnStepOutcome::Ended { stop_reason, .. } => {
                 assert_eq!(stop_reason, "hook_stopped");
             }
-            TurnStepOutcome::Continue => panic!("expected Ended(hook_stopped), got Continue"),
+            TurnStepOutcome::Continue(_) => panic!("expected Ended(hook_stopped), got Continue"),
         }
     }
 
@@ -4907,7 +7793,7 @@ mod pre_tool_hook_tests {
         );
         assert!(matches!(
             execute_one_turn(&orch, None).await.expect("turn step"),
-            TurnStepOutcome::Continue
+            TurnStepOutcome::Continue(_)
         ));
     }
 
@@ -4926,7 +7812,7 @@ mod pre_tool_hook_tests {
         let bus = Arc::new(telemetry::AnalyticsBus::new());
         let sink = Arc::new(telemetry::InMemorySink::new());
         bus.attach_sink(sink.clone()).await;
-        let orch = orch_with_mcp_end_turn(api.clone(), output.clone(), bus, false);
+        let orch = orch_with_mcp_end_turn(api.clone(), output, bus, false);
 
         match execute_one_turn(&orch, None).await.expect("turn step") {
             TurnStepOutcome::Ended {
@@ -4940,7 +7826,9 @@ mod pre_tool_hook_tests {
                     "tool-requested end_turn must bypass budget continuation"
                 );
             }
-            TurnStepOutcome::Continue => panic!("expected tool-requested end_turn, got Continue"),
+            TurnStepOutcome::Continue(_) => {
+                panic!("expected tool-requested end_turn, got Continue")
+            }
         }
 
         assert_eq!(
@@ -4948,32 +7836,38 @@ mod pre_tool_hook_tests {
             1,
             "no follow-up model call"
         );
-        let result_frames = output
-            .snapshot()
-            .await
-            .into_iter()
-            .filter(|event| {
-                matches!(event, lingxi_core::host::OutputEvent::ToolResult { id, tool, .. }
-                    if id == &tu && tool == "McpEndTurn")
-            })
-            .count();
-        assert_eq!(
-            result_frames, 1,
-            "the accepted tool result emits one client frame"
-        );
-        assert!(
-            orch.transcript
-                .pending_tool_result_turn_end
-                .lock()
-                .await
-                .is_empty(),
-            "the accepted end-turn request must be consumed once"
-        );
         let history = orch.session().lock().await.history.clone();
         assert_eq!(
             history.len(),
-            2,
-            "assistant tool_use + user tool_result only"
+            5,
+            "three native context rows + assistant tool_use + user tool_result"
+        );
+        let date = crate::prompt::env_meta::current_date_string();
+        assert_eq!(
+            orch.context_attachment_history(&history),
+            vec![
+                json!({"type":"session_context","context":{}}),
+                json!({"type":"date","date":date}),
+                json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        assert!(
+            matches!(&history[0], ConversationMessage::System { subtype: Some(subtype), content, .. }
+            if subtype == "model_reminder_attachment" && content.is_empty())
+        );
+        assert_eq!(
+            history[1].text_content(),
+            format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+        );
+        assert_eq!(
+            history[2].text_content(),
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        );
+        assert!(history[1].is_meta() && history[2].is_meta());
+        assert!(
+            matches!(&history[3], ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { id, name, .. }
+                if id == &tu && name == "McpEndTurn")))
         );
         assert!(matches!(
             history.last(),
@@ -5018,7 +7912,7 @@ mod pre_tool_hook_tests {
 
         assert!(matches!(
             execute_one_turn(&orch, None).await.expect("turn step"),
-            TurnStepOutcome::Continue
+            TurnStepOutcome::Continue(_)
         ));
         assert!(
             sink.events()
@@ -5026,6 +7920,60 @@ mod pre_tool_hook_tests {
                 .iter()
                 .all(|event| event.name != telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN),
             "isError:true suppresses both termination and its telemetry"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_call_ref_rewrite_preserves_selected_mcp_metadata_and_end_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'McpEndTurn' }, async ($, e, next) => {
+                const core = await next(e);
+                return { ...core, ref: '1', result: [{ type: 'text', text: 'rewritten' }] };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("rewrite-mcp", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_mcp_end_turn(
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            false,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(ToolUseId::new(), "McpEndTurn".to_string(), json!({}), None)];
+
+        let _ = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            orch.transcript
+                .tool_use_mcp_meta
+                .lock()
+                .await
+                .get(uses[0].0.as_str()),
+            Some(&json!({ "_meta": { "claude/endTurn": true } })),
+        );
+        assert_eq!(
+            orch.transcript
+                .pending_tool_result_turn_end
+                .lock()
+                .await
+                .get(uses[0].0.as_str())
+                .map(|turn_end| turn_end.source),
+            Some(tool_api::tool_trait::ToolResultTurnEndSource::McpMeta),
         );
     }
 
@@ -5103,7 +8051,7 @@ mod pre_tool_hook_tests {
 
         assert!(matches!(
             execute_one_turn(&orch, None).await.expect("turn step"),
-            TurnStepOutcome::Continue
+            TurnStepOutcome::Continue(_)
         ));
 
         let event = sink
@@ -5182,9 +8130,8 @@ mod pre_tool_hook_tests {
     async fn hook3_allow_skips_the_prompt_when_no_deny_rule() {
         // permissionDecision "allow"/legacy "approve" parses to Approve and SKIPS
         // the interactive prompt (claude-code `resolveHookPermissionDecision`).
-        // `DenyAllGate` would deny at the PROMPT (`check`) but has no deny RULE
-        // (`check_after_hook_allow` defaults to Allow), so the hook-allow skips
-        // the prompt and the tool runs.
+        // DenyAllGate denies prompts, but its captured PreToolUse core is a
+        // clean Allow, so the hook skips the prompt and the tool runs.
         let resp = HookResponse {
             decision: Some(HookDecision::Approve),
             ..HookResponse::default()
@@ -5200,10 +8147,243 @@ mod pre_tool_hook_tests {
     }
 
     #[tokio::test]
+    async fn mod_tool_check_can_deny_a_pre_tool_use_approved_call() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Echo' }, ($, e) => {
+                if (!e.tool_use_id) throw new Error('missing tool_use_id');
+                return { decision: 'deny', reason: 'Mod veto after PreToolUse' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("veto-test", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut mod_registry = HookRegistry::new();
+        mod_registry.set_mod_host(host);
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Echo"),
+                    behavior: PermissionBehavior::Ask,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            Arc::new(DenyAllGate),
+        ));
+        let orch = orch_with(
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            gate,
+            vec![],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(mod_registry)));
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert_eq!(
+            content,
+            "Permission to use Echo denied by plugin veto-test: Mod veto after PreToolUse"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_can_allow_over_a_rule_after_pre_tool_use_approval() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Echo' }, () => ({ decision: 'allow' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("allow-after-hook", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut mod_registry = HookRegistry::new();
+        mod_registry.set_mod_host(host);
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Echo"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+        ));
+        let orch = orch_with(
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            gate,
+            vec![],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(mod_registry)));
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "{content}");
+        assert!(content.contains("ECHOED-OUTPUT"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_approved_rule_denial_skips_tool_permission_check() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Echo' }, ($, e, next) => next(e));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("pre-rule-first", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut mod_registry = HookRegistry::new();
+        mod_registry.set_mod_host(host);
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(EchoTool {
+            permission_checks: Some(permission_checks.clone()),
+        }));
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Echo"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Session,
+                }],
+            )),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(mod_registry)));
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_tool_check_ask_after_pre_tool_use_reaches_permission_transport() {
+        use permission::{PermissionPolicy, PolicyPermissionGate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'Echo' }, () => ({ decision: 'ask', reason: 'review it' }));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("ask-after-hook", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut mod_registry = HookRegistry::new();
+        mod_registry.set_mod_host(host);
+        let transport = Arc::new(RecordingTransportGate {
+            saw_ctx: std::sync::Mutex::new(None),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let gate = Arc::new(PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                vec![],
+            )),
+            transport.clone(),
+        ));
+        let orch = orch_with(
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            gate,
+            vec![],
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(mod_registry)));
+        let calls = uses();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &calls, None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "{content}");
+        assert_eq!(content, "dialog declined");
+        assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let context = transport.saw_ctx.lock().unwrap().clone().unwrap();
+        assert_eq!(context.tool_use_id.as_deref(), Some(calls[0].0.as_str()));
+        assert_eq!(context.decision_reason_type.as_deref(), Some("hook"));
+        assert_eq!(
+            context.decision_reason.as_deref(),
+            Some("Echo needs approval (asked by plugin ask-after-hook: review it)")
+        );
+    }
+
+    #[tokio::test]
     async fn hook3_allow_cannot_override_a_deny_rule() {
         // (HOOK.3 issue 1) A hook 'allow' skips the prompt but must NOT override
         // an explicit deny RULE (claude-code `checkRuleBasedPermissions`).
-        // `DenyRuleGate.check_after_hook_allow` denies, so the tool is DENIED even
+        // DenyRuleGate captures a rule Deny, so the tool is DENIED even
         // though the hook approved.
         let resp = HookResponse {
             decision: Some(HookDecision::Approve),
@@ -5345,8 +8525,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "always fails".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -5470,8 +8653,11 @@ mod pre_tool_hook_tests {
         ) -> String {
             "always-invalid".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -5766,7 +8952,7 @@ mod pre_tool_hook_tests {
     #[tokio::test]
     async fn hook3_issue2_permission_request_allow_rescues_an_ask() {
         // The gate is about to ASK (resolve_detailed → Ask). A PermissionRequest
-        // hook 'allow' RESCUES the call (resolved via check_after_hook_allow →
+        // hook 'allow' RESCUES the call (resolved via rewritten-hook resolver →
         // Allow), so the tool runs — the headless rescue claude-code provides.
         let resp = HookResponse {
             decision: Some(HookDecision::Approve),
@@ -5858,7 +9044,7 @@ mod pre_tool_hook_tests {
                 ConversationMessage::User { content, .. } => content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .collect::<String>(),
@@ -5881,7 +9067,9 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }) as Arc<dyn Tool>);
         let cfg = OrchestratorConfig {
             interactive_permissions: true, // interactive → defer ignored
             ..OrchestratorConfig::default()
@@ -6079,9 +9267,13 @@ mod pre_tool_hook_tests {
 
         let mut calls = first.post_tool_batch_calls;
         calls.extend(second.post_tool_batch_calls);
-        let (prevent, injected) = run_post_tool_batch_hooks(&orch, calls).await;
-        assert!(!prevent);
-        assert!(injected.is_empty());
+        let outcome = run_post_tool_batch_hooks(
+            &orch,
+            crate::turn_loop::PostToolBatchDispatch::unguarded(calls),
+        )
+        .await;
+        assert!(!outcome.prevent_continuation);
+        assert!(outcome.injected_messages.is_empty());
         assert_eq!(
             *seen.lock().unwrap(),
             vec![2],
@@ -6103,19 +9295,21 @@ mod pre_tool_hook_tests {
         );
         let orch = orch_with(hooks, Arc::new(AllowAllGate), vec![]);
         let id = ToolUseId::new();
-        let messages = run_post_tool_batch_hooks_after_turn_end(
+        let outcome = run_post_tool_batch_hooks_after_turn_end(
             &orch,
-            vec![hooks::events::PostToolBatchCall {
-                tool_name: "Echo".into(),
-                tool_input: json!({}),
-                tool_use_id: id,
-                tool_response: Some(json!("ok")),
-            }],
+            crate::turn_loop::PostToolBatchDispatch::unguarded(vec![
+                hooks::events::PostToolBatchCall {
+                    tool_name: "Echo".into(),
+                    tool_input: json!({}),
+                    tool_use_id: id,
+                    tool_response: Some(json!("ok")),
+                },
+            ]),
         )
         .await;
 
         assert!(
-            messages.is_empty(),
+            outcome.injected_messages.is_empty(),
             "forced endTurn logs PostToolBatch dispositions but does not synthesize model messages"
         );
     }
@@ -6206,6 +9400,681 @@ mod pre_tool_hook_tests {
             "classifier deny MUST fire the PermissionDenied hook"
         );
     }
+    struct McpToolPermissionProbe {
+        name: &'static str,
+        called: Arc<std::sync::atomic::AtomicBool>,
+        permission_checks: Arc<std::sync::atomic::AtomicUsize>,
+        permission_result: permission::PermissionResult,
+    }
+
+    #[async_trait]
+    impl Tool for McpToolPermissionProbe {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+            &SCHEMA
+        }
+
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+
+        fn is_mcp(&self) -> bool {
+            true
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            self.permission_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.permission_result.clone()
+        }
+
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "MCP tool-owned deny probe".into()
+        }
+
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({"ran":true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    struct ApprovingPreToolTrace(Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait]
+    impl BuiltinHookHandler for ApprovingPreToolTrace {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(HookResponse {
+                    decision: Some(HookDecision::Approve),
+                    ..HookResponse::default()
+                }),
+            }
+        }
+
+        fn id(&self) -> &str {
+            "approving-pretool-trace"
+        }
+    }
+
+    fn approving_pretool_executor(
+        fired: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "approving-pretool-trace".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "approving-pretool-trace".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut executor =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        executor.register_builtin(Arc::new(ApprovingPreToolTrace(fired)));
+        Arc::new(executor)
+    }
+
+    async fn dispatch_mcp_tool_owned_deny_after_pretool_allow(
+        tool_name: &'static str,
+        install_mod: bool,
+        projects_hard_hold: bool,
+        raw_noop_permission_gate: bool,
+    ) -> (String, bool, bool, usize, bool, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = HookRegistry::new();
+        if install_mod {
+            let module = dir.path().join("tool-check.js");
+            std::fs::write(
+                &module,
+                r#"
+                export function register(on) {
+                  on('tool.check', async ($, e, next) => {
+                    const core = await next(e);
+                    if (core.decision !== 'deny' ||
+                        core.reason !== 'tool-owned MCP denial') {
+                      throw new Error(`expected captured tool denial: ${JSON.stringify(core)}`);
+                    }
+                    $.ui.log('captured tool-owned deny');
+                    return { decision: 'allow' };
+                  });
+                }
+                "#,
+            )
+            .unwrap();
+            let host = hooks::mods::ModHost::start(None).await.unwrap();
+            host.load("tool-deny-probe", dir.path(), &module, json!({}))
+                .await
+                .unwrap();
+            registry.set_mod_host(host);
+        }
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(McpToolPermissionProbe {
+            name: tool_name,
+            called: called.clone(),
+            permission_checks: permission_checks.clone(),
+            permission_result: permission::PermissionResult::Deny {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "tool-owned MCP denial".into(),
+                },
+                explanation: Some("tool-owned MCP denial".into()),
+                metadata: permission::result::PermissionMetadata::default(),
+            },
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(tool as Arc<dyn Tool>);
+        let output = Arc::new(MockOutputStream::new());
+        let pretool_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut config = OrchestratorConfig::default();
+        if projects_hard_hold {
+            config.mod_projects_consent = hooks::mods::ProjectsConsentFacts {
+                default_host_sticky_latch: Some(true),
+                projects_env: Some(false),
+                session_mcp_signal: Some(false),
+                feature_result: Some(hooks::mods::ProjectsFeatureResult {
+                    value: false,
+                    source: hooks::mods::ProjectsFeatureSource::Fallback,
+                }),
+                growthbook_used_non_default_host: Some(false),
+            };
+        }
+        let cwd = dir.path().to_path_buf();
+        // The policy-gate arm exercises a dynamic empty policy owner; the raw
+        // transport arm proves that its required clean-Allow default still
+        // reaches the real Mod `tool.check` path.
+        let gate: Arc<dyn PermissionGate> = if raw_noop_permission_gate {
+            Arc::new(crate::test_support::NoOpPermissionGate)
+        } else {
+            let roots = permission::FsRoots {
+                cwd: cwd.clone(),
+                home: Some(cwd.clone()),
+                lingxi_home: cwd.join(".lingxi"),
+            };
+            let policy = Arc::new(
+                permission::PermissionPolicy::from_rules(
+                    permission::PermissionMode::Default,
+                    vec![],
+                )
+                .with_roots(roots),
+            );
+            Arc::new(permission::PolicyPermissionGate::new(
+                policy,
+                Arc::new(crate::test_support::NoOpPermissionGate),
+            ))
+        };
+        let orch = ConversationOrchestrator::new(
+            config,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            approving_pretool_executor(pretool_fired.clone()),
+            gate,
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(ToolUseId::new(), tool_name.into(), json!({}), None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        let mod_saw_deny = output.snapshot().await.iter().any(|event| {
+            matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "tool-deny-probe"
+                        && text.string_at("") == Some("captured tool-owned deny")
+            )
+        });
+        (
+            content.to_string(),
+            is_error,
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            mod_saw_deny,
+            pretool_fired.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    struct CapturedPreflightBarrierTool {
+        check_started: Arc<tokio::sync::Notify>,
+        continue_check: Arc<tokio::sync::Notify>,
+        permission_checks: Arc<std::sync::atomic::AtomicUsize>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CapturedPreflightBarrierTool {
+        fn name(&self) -> &str {
+            "CapturedPreflight"
+        }
+
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+            &SCHEMA
+        }
+
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            self.permission_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let resume = self.continue_check.notified();
+            self.check_started.notify_one();
+            resume.await;
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "barrier probe".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "captured preflight barrier probe".into()
+        }
+
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({"content":"CAPTURED-PREFLIGHT-RAN"}),
+                model_content: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn no_mod_pretool_allow_uses_captured_policy_result_across_live_update() {
+        use permission::{PermissionMode, PermissionPolicy, PolicyPermissionGate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, Vec::new()).with_roots(roots),
+        );
+        let gate = Arc::new(PolicyPermissionGate::new(
+            policy,
+            Arc::new(crate::test_support::NoOpPermissionGate),
+        ));
+        let check_started = Arc::new(tokio::sync::Notify::new());
+        let continue_check = Arc::new(tokio::sync::Notify::new());
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(CapturedPreflightBarrierTool {
+            check_started: check_started.clone(),
+            continue_check: continue_check.clone(),
+            permission_checks: permission_checks.clone(),
+            calls: calls.clone(),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(tool as Arc<dyn Tool>);
+        let pretool_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tools),
+                approving_pretool_executor(pretool_fired.clone()),
+                gate.clone(),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                cwd,
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(HookRegistry::new()))),
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "CapturedPreflight".into(),
+            json!({}),
+            None,
+        )];
+        let dispatch = tokio::spawn({
+            let orch = orch.clone();
+            async move { dispatch_tool_uses_tracked(&orch, &uses, None).await }
+        });
+
+        check_started.notified().await;
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the barrier is reached after captured preflight and before fallback resolution"
+        );
+        gate.apply_permission_update(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
+                "type": "addRules",
+                "rules": [{"toolName": "CapturedPreflight"}],
+                "behavior": "deny",
+                "destination": "session"
+            }))
+            .expect("test permission update is valid JSON"),
+        );
+        continue_check.notify_one();
+
+        let (results, _, _, _) = dispatch.await.unwrap().unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(pretool_fired.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !is_error,
+            "the captured clean Allow remains terminal: {content}"
+        );
+        assert!(
+            content.contains("CAPTURED-PREFLIGHT-RAN"),
+            "dispatch honors the pre-update captured Allow: {content}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the tool-owned permission result is queried once"
+        );
+    }
+
+    #[tokio::test]
+    async fn pretool_allow_ask_still_uses_full_permission_pipeline_without_mod() {
+        use permission::{
+            PermissionBehavior, PermissionMode, PermissionPolicy, PermissionRule,
+            PermissionRuleSource, PermissionRuleValue, PolicyPermissionGate,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: Some(cwd.clone()),
+            lingxi_home: cwd.join(".lingxi"),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                vec![PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Echo"),
+                    behavior: PermissionBehavior::Ask,
+                    source: PermissionRuleSource::Session,
+                }],
+            )
+            .with_roots(roots),
+        );
+        let transport = Arc::new(RecordingTransportGate {
+            saw_ctx: std::sync::Mutex::new(None),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let gate = Arc::new(PolicyPermissionGate::new(policy, transport.clone()));
+        let orch = orch_with(
+            pre_hook_executor(HookResponse {
+                decision: Some(HookDecision::Approve),
+                ..HookResponse::default()
+            }),
+            gate,
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(
+            is_error,
+            "the permission transport decides the captured Ask: {content}"
+        );
+        assert_eq!(content, "dialog declined");
+        assert_eq!(
+            transport.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an Ask still reaches the full permission transport"
+        );
+    }
+
+    async fn dispatch_raw_noop_pretool_clean_core(
+        scenario: &'static str,
+    ) -> (String, bool, bool, usize, bool, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("tool-check.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.check', { tool: 'McpConnector' }, async ($, e, next) => {
+                const core = await next(e);
+                if (core.decision !== 'allow') {
+                  throw new Error(`expected the clean hook Allow core: ${JSON.stringify(core)}`);
+                }
+                $.ui.log(`observed clean core:${core.decision}`);
+                if (e.input.scenario === 'veto') {
+                  return { decision: 'deny', reason: 'Mod vetoed clean hook Allow' };
+                }
+                return core;
+              });
+            }
+            "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("raw-noop-clean-core", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = HookRegistry::new();
+        registry.set_mod_host(host);
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(McpToolPermissionProbe {
+            name: "McpConnector",
+            called: called.clone(),
+            permission_checks: permission_checks.clone(),
+            permission_result: permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "tool-owned allow".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            },
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(tool as Arc<dyn Tool>);
+        let output = Arc::new(MockOutputStream::new());
+        let pretool_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cwd = dir.path().to_path_buf();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            approving_pretool_executor(pretool_fired.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let uses = vec![(
+            ToolUseId::new(),
+            "McpConnector".into(),
+            json!({"scenario":scenario}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        let mod_saw_clean_core = output.snapshot().await.iter().any(|event| {
+            matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                    if plugin == "raw-noop-clean-core"
+                        && text.string_at("") == Some("observed clean core:allow")
+            )
+        });
+        (
+            content.to_string(),
+            is_error,
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            mod_saw_clean_core,
+            pretool_fired.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn raw_noop_pretool_allow_runs_mod_next_with_clean_core_for_passthrough_and_veto() {
+        let (veto_content, veto_is_error, veto_called, veto_checks, veto_saw_core, veto_hook) =
+            dispatch_raw_noop_pretool_clean_core("veto").await;
+        assert!(veto_hook, "the real PreToolUse approval hook must run");
+        assert_eq!(veto_checks, 1, "the tool-owned check is captured once");
+        assert!(
+            veto_saw_core,
+            "the real Mod session must call next() and see Allow"
+        );
+        assert!(
+            veto_is_error,
+            "a Mod Deny must veto the clean hook Allow: {veto_content}"
+        );
+        assert!(!veto_called, "the vetoed tool body must not be entered");
+
+        let (pass_content, pass_is_error, pass_called, pass_checks, pass_saw_core, pass_hook) =
+            dispatch_raw_noop_pretool_clean_core("passthrough").await;
+        assert!(pass_hook, "the real PreToolUse approval hook must run");
+        assert_eq!(pass_checks, 1, "the tool-owned check is captured once");
+        assert!(
+            pass_saw_core,
+            "Mod next() must receive the clean Allow core"
+        );
+        assert!(
+            !pass_is_error,
+            "returning next() unchanged must preserve Allow: {pass_content}"
+        );
+        assert!(
+            pass_called,
+            "the unchanged clean Allow must enter the tool body"
+        );
+    }
+
+    #[tokio::test]
+    async fn pretool_allow_mod_allow_overrides_generic_mcp_tool_owned_deny() {
+        let (content, is_error, called, checks, mod_saw_deny, pretool_fired) =
+            dispatch_mcp_tool_owned_deny_after_pretool_allow("McpConnector", true, false, true)
+                .await;
+        assert!(pretool_fired, "the real PreToolUse approval hook must run");
+        assert_eq!(
+            checks, 1,
+            "the captured tool-owned result must not be re-queried"
+        );
+        assert!(
+            mod_saw_deny,
+            "the real Mod session must observe the captured deny"
+        );
+        assert!(!is_error, "generic MCP Mod Allow follows Native: {content}");
+        assert!(called, "the fake MCP body must be entered");
+    }
+
+    #[tokio::test]
+    async fn pretool_allow_without_mod_keeps_generic_mcp_tool_owned_deny() {
+        let (content, is_error, called, checks, mod_saw_deny, pretool_fired) =
+            dispatch_mcp_tool_owned_deny_after_pretool_allow("McpConnector", false, false, false)
+                .await;
+        assert!(pretool_fired, "the real PreToolUse approval hook must run");
+        assert_eq!(checks, 1);
+        assert!(!mod_saw_deny);
+        assert!(
+            is_error,
+            "without a changed Mod verdict the deny stays: {content}"
+        );
+        assert!(!called, "the denied fake MCP body must not be entered");
+    }
+
+    #[tokio::test]
+    async fn pretool_allow_mod_allow_keeps_native_protected_webfetch_deny() {
+        let (content, is_error, called, checks, mod_saw_deny, pretool_fired) =
+            dispatch_mcp_tool_owned_deny_after_pretool_allow("WebFetch", true, true, false).await;
+        assert!(pretool_fired, "the real PreToolUse approval hook must run");
+        assert_eq!(checks, 1);
+        assert!(
+            mod_saw_deny,
+            "the real Mod session must attempt to allow the core deny"
+        );
+        assert!(
+            is_error,
+            "Native WebFetch protection retains the deny: {content}"
+        );
+        assert!(
+            !called,
+            "the protected fake WebFetch body must not be entered"
+        );
+    }
 
     #[tokio::test]
     async fn revoked_ordinary_dispatch_cannot_publish_mcp_metadata_or_result_frames() {
@@ -6218,6 +10087,8 @@ mod pre_tool_hook_tests {
         );
         let id = ToolUseId::new();
         let assistant_id = MessageId::new();
+        let empty_input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty tool input is valid JSON");
         let generation = lingxi_core::host::CancellationToken::new();
         let fence = crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
             generation.clone(),
@@ -6225,19 +10096,21 @@ mod pre_tool_hook_tests {
         );
         let mut dispatched = crate::native_computer::dispatch_tools(
             &orch,
-            &[(id.clone(), "McpEndTurn".into(), json!({}), None)],
+            &[(id.clone(), "McpEndTurn".into(), empty_input.clone(), None)],
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
+                native_query_depth: 0,
                 query_history: vec![],
                 assistant_message: ConversationMessage::Assistant {
                     id: assistant_id,
                     content: vec![ContentBlock::ToolUse {
                         id: id.clone(),
                         name: "McpEndTurn".into(),
-                        input: json!({}),
+                        input: empty_input,
                         provider_id: None,
                     }],
                     stop_reason: Some("tool_use".into()),
+                    resumable: None,
                 },
                 same_turn_tool_uses: vec![],
             },
@@ -6339,8 +10212,11 @@ mod pre_cancel_tests {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "never-run".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -6410,8 +10286,11 @@ mod pre_cancel_tests {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "non-cooperative-cancel".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -6492,8 +10371,11 @@ mod pre_cancel_tests {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "blocking-mutation".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
@@ -6551,7 +10433,7 @@ mod pre_cancel_tests {
                 content, is_error, ..
             } => {
                 assert!(
-                    *is_error,
+                    is_error.unwrap_or(false),
                     "pre-cancel tool_result must have is_error=true, got content={content:?}"
                 );
                 assert_eq!(
@@ -6621,7 +10503,7 @@ mod pre_cancel_tests {
         else {
             panic!("expected ToolResult");
         };
-        assert!(*is_error);
+        assert!(is_error.unwrap_or(false));
         assert!(content.contains("aborted"));
         assert_eq!(
             output.denial_snapshot().await,
@@ -6686,7 +10568,7 @@ mod pre_cancel_tests {
         else {
             panic!("expected ordinary Agent ToolResult");
         };
-        assert!(*is_error);
+        assert!(is_error.unwrap_or(false));
         assert!(content.contains("aborted"));
 
         let cancel = CancellationToken::new();
@@ -6726,7 +10608,7 @@ mod pre_cancel_tests {
         else {
             panic!("expected ToolResult");
         };
-        assert!(!is_error);
+        assert!(!is_error.unwrap_or(false));
         assert!(content.contains("committed"));
         assert_eq!(
             output.denial_snapshot().await.len(),
@@ -6767,6 +10649,7 @@ mod pre_cancel_tests {
                     provider_id: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             },
         );
     }
@@ -6803,13 +10686,24 @@ mod pre_cancel_tests {
                 .unwrap()
                 .unwrap()
         );
-        let expected = format!("Error: {}", ToolError::Aborted.model_facing_message());
+        let mut expected_units = "Error: ".encode_utf16().collect::<Vec<_>>();
+        expected_units.extend(
+            ToolError::Aborted
+                .model_facing_message()
+                .string_units("")
+                .expect("generated abort error is a string"),
+        );
+        let expected = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&expected_units),
+            expected_units,
+        )
+        .expect("valid UTF-16 string projection");
         let session = orch.session();
         let history = &session.lock().await.history;
         let results = history.iter().flat_map(|message| match message {
             lingxi_core::types::ConversationMessage::User { content, .. } => content.as_slice(),
             _ => &[],
-        }).filter(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, is_error: true, content, .. } if tool_use_id == &result_id && content == &expected)).count();
+        }).filter(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, is_error: Some(true), content, .. } if tool_use_id == &result_id && content == &expected)).count();
         assert_eq!(
             results, 1,
             "in-flight abort must be persisted for the exact recovered tool: {history:?}"
@@ -7030,8 +10924,11 @@ mod memdir_index_cap_tests {
             "write".into()
         }
 
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
 
         async fn call(
@@ -7057,11 +10954,11 @@ mod memdir_index_cap_tests {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| ToolError::Io(e.to_string()))?;
+                    .map_err(|e| ToolError::Io(e.to_string().into()))?;
             }
             tokio::fs::write(&path, content)
                 .await
-                .map_err(|e| ToolError::Io(e.to_string()))?;
+                .map_err(|e| ToolError::Io(e.to_string().into()))?;
             Ok(ToolCallResult {
                 data: json!({ "content": "wrote file" }),
                 model_content: Some("wrote file".into()),
@@ -7297,7 +11194,7 @@ mod compaction_failure_hint_tests {
             .find_map(|m| match m {
                 lingxi_core::types::ConversationMessage::Assistant { content, .. } => {
                     content.iter().find_map(|b| match b {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                 }
@@ -7459,15 +11356,20 @@ mod goal_auto_clear_tests {
 
         // Short, single-line: verbatim.
         assert_eq!(
-            goal_cleared_after_error_message("credit balance too low", "all tests pass"),
-            "Goal cleared after an unrecoverable error (credit balance too low): \
+            goal_cleared_after_error_message("credit balance too low", &"all tests pass".into())
+                .string_at(""),
+            Some(
+                "Goal cleared after an unrecoverable error (credit balance too low): \
              \"all tests pass\". Run /goal again to continue."
+            )
         );
 
         // Over 80 columns: `is(n,80)` keeps 79 columns and appends U+2026.
         let long = "x".repeat(200);
-        let msg = goal_cleared_after_error_message("model unavailable", &long);
+        let msg = goal_cleared_after_error_message("model unavailable", &long.into());
         let quoted = msg
+            .string_at("")
+            .unwrap()
             .split_once("): \"")
             .and_then(|(_, r)| r.split_once("\". Run"))
             .expect("quoted condition")
@@ -7480,9 +11382,12 @@ mod goal_auto_clear_tests {
         // and appends the ellipsis even though nothing exceeded the width. A
         // plain width-truncation would have returned the string unchanged.
         assert_eq!(
-            goal_cleared_after_error_message("context limit reached", "ship it\nthen rest"),
-            "Goal cleared after an unrecoverable error (context limit reached): \
+            goal_cleared_after_error_message("context limit reached", &"ship it\nthen rest".into())
+                .string_at(""),
+            Some(
+                "Goal cleared after an unrecoverable error (context limit reached): \
              \"ship it\u{2026}\". Run /goal again to continue."
+            )
         );
     }
 }
@@ -7496,4 +11401,26 @@ fn tool_result_size_matches_javascript_utf16_length() {
         serde_json::json!({"type": "text", "text": "a"}),
     ];
     assert_eq!(super::tool_result_size("ignored", Some(&blocks)), 4);
+}
+
+#[test]
+fn native_query_depth_advances_only_after_completed_tool_rounds() {
+    use crate::turn_loop::{native_query_depth_after, NativeQueryTransition};
+
+    assert_eq!(
+        native_query_depth_after(4, NativeQueryTransition::NextTurn),
+        5
+    );
+    assert_eq!(
+        native_query_depth_after(4, NativeQueryTransition::InPlaceRetry),
+        4
+    );
+    assert_eq!(
+        native_query_depth_after(4, NativeQueryTransition::ResumeIncompleteThinking),
+        4
+    );
+    assert_eq!(
+        native_query_depth_after(u32::MAX, NativeQueryTransition::NextTurn),
+        u32::MAX
+    );
 }

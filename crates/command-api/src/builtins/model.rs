@@ -100,7 +100,12 @@ impl ModelHandler {
 impl BuiltinCommandHandler for ModelHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         telemetry::emit_command_started(cmd_evt::MODEL_STARTED);
-        let trimmed = args.raw_args.trim();
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some("Model argument must be valid Unicode text.".into()),
+            };
+        };
+        let trimmed = raw_args.trim();
         if trimmed.is_empty() {
             // List mode. Curate to the "latest few" per provider (the shared
             // `lingxi_core::host::curated_model_refs`, same whitelist as the TUI picker +
@@ -139,7 +144,7 @@ impl BuiltinCommandHandler for ModelHandler {
             };
             telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "list");
             return CommandResult::Done {
-                display: Some(format!("Current model: {current}\n{available}")),
+                display: Some((format!("Current model: {current}\n{available}")).into()),
             };
         }
         // Switch mode. Resolve an optional `profile/model` qualifier so a shared
@@ -154,14 +159,14 @@ impl BuiltinCommandHandler for ModelHandler {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
                 CommandResult::Done {
-                    display: Some(format!("Switched to model: {model}")),
+                    display: Some((format!("Switched to model: {model}")).into()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::MODEL_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not switch model: {msg}")),
+                    display: Some((format!("Could not switch model: {msg}")).into()),
                 }
             }
         }
@@ -181,9 +186,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "model".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "model".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

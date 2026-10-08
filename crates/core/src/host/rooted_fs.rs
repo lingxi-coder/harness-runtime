@@ -90,6 +90,23 @@ pub fn atomic_write_pinned(
     imp::atomic_write_pinned(root, relative, bytes, options, expected)
 }
 
+/// Atomically replace a rooted file from a bounded-memory writer callback.
+/// The destination is staged in a no-follow temporary file, synced, and then
+/// renamed under the same pinned parent/root checks as [`atomic_write_pinned`].
+/// A callback error leaves the previous destination intact.
+pub fn atomic_write_stream_pinned<F>(
+    root: &Path,
+    relative: &Path,
+    options: AtomicWriteOptions,
+    expected: &RootIdentity,
+    write_body: F,
+) -> Result<(), FsError>
+where
+    F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+{
+    imp::atomic_write_stream_pinned(root, relative, options, expected, write_body)
+}
+
 fn read_opened_tail_bytes(
     mut file: std::fs::File,
     relative: &Path,
@@ -1223,8 +1240,19 @@ mod imp {
         relative: &Path,
         expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
+        let file = open_create_new_file_pinned(root, relative, expected)?;
+        drop(file);
+        Ok(())
+    }
+
+    pub(super) fn open_create_new_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
         let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
-        let file = open_regular(
+        let descriptor = private_security_descriptor()?;
+        open_regular_with_security(
             &parent,
             &file_name,
             relative,
@@ -1232,9 +1260,8 @@ mod imp {
             SHARE_ALL,
             FILE_CREATE,
             FILE_ATTRIBUTE_NORMAL,
-        )?;
-        drop(file);
-        Ok(())
+            descriptor.0,
+        )
     }
 
     pub(super) fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
@@ -1353,6 +1380,32 @@ mod imp {
         result
     }
 
+    fn atomic_write_stream_inner<F>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, options.create_parents, Some(expected))?;
+        validate_optional_regular(&parent, &file_name, relative)?;
+        let mut temp = create_temp(&parent, &file_name, relative)?;
+        let result = (|| {
+            write_body(&mut temp)?;
+            temp.sync_all().map_err(|error| map_io(relative, error))?;
+            validate_optional_regular(&parent, &file_name, relative)?;
+            rename_relative(&temp, &parent, &file_name, relative, options.overwrite)
+        })();
+        if result.is_err() {
+            let _ = mark_delete(&temp, relative);
+        }
+        result
+    }
+
     pub(super) fn open_recovery_file(
         root: &Path,
         relative: &Path,
@@ -1377,6 +1430,19 @@ mod imp {
         expected: &RootIdentity,
     ) -> Result<(), FsError> {
         atomic_write_inner(root, relative, bytes, options, Some(expected), || {})
+    }
+
+    pub(super) fn atomic_write_stream_pinned<F>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        atomic_write_stream_inner(root, relative, options, expected, write_body)
     }
 
     pub(super) fn atomic_write(
@@ -1684,6 +1750,25 @@ mod imp {
         })
     }
 
+    pub(super) fn validate_file_single_link(root: &Path, relative: &Path) -> Result<(), FsError> {
+        let pin = root_identity(root)?;
+        let (parent, file_name) = open_parent_checked(root, relative, false, Some(&pin))?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        if file_link_count(&file).map_err(|error| map_io(relative, error))? == 1 {
+            Ok(())
+        } else {
+            Err(FsError::OutsideWorkspace(relative.display().to_string()))
+        }
+    }
+
     pub(super) fn open_read_file_pinned(
         root: &Path,
         relative: &Path,
@@ -1864,7 +1949,6 @@ pub fn create_new_file_pinned(
 /// Exclusively create and return a regular file through a pinned, no-follow
 /// root handle. Unlike a create-then-reopen sequence, the returned handle is
 /// the exact inode whose `O_EXCL` allocation succeeded.
-#[cfg(unix)]
 pub fn open_create_new_file_pinned(
     root: &Path,
     relative: &Path,
@@ -1961,6 +2045,26 @@ pub fn open_append_file_pinned(
     expected: Option<&RootIdentity>,
 ) -> Result<std::fs::File, FsError> {
     imp::open_append_file_pinned(root, relative, expected)
+}
+
+/// Append through one pinned file handle, then sync both contents and parent
+/// before a durable recipient journal may acknowledge the appended row.
+pub fn append_file_durable(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
+    let pin = root_identity(root)?;
+    let mut file = open_append_file_pinned(root, relative, Some(&pin))?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| map_io(relative, error))?;
+    file.flush().map_err(|error| map_io(relative, error))?;
+    file.sync_all().map_err(|error| map_io(relative, error))?;
+    sync_parent_pinned(root, relative, Some(&pin))
+}
+
+/// Synchronize an existing regular recovery handle under a pinned root.
+pub fn sync_file_no_follow(root: &Path, relative: &Path) -> Result<(), FsError> {
+    let pin = root_identity(root)?;
+    let file = imp::open_recovery_file(root, relative, &pin)?;
+    file.sync_all().map_err(|error| map_io(relative, error))?;
+    sync_parent_pinned(root, relative, Some(&pin))
 }
 
 /// Append while distinguishing an unopened target from an uncertain write.
@@ -2129,6 +2233,26 @@ pub fn open_read_file_pinned(
     expected: Option<&RootIdentity>,
 ) -> Result<std::fs::File, FsError> {
     imp::open_read_file_pinned(root, relative, expected)
+}
+
+/// Check an existing regular output under a pinned root without opening its
+/// contents for reading. Leaf metadata is obtained without following links.
+pub fn validate_file_single_link(root: &Path, relative: &Path) -> Result<(), FsError> {
+    #[cfg(unix)]
+    {
+        imp::validate_file_single_link(root, relative)
+    }
+    #[cfg(windows)]
+    {
+        imp::validate_file_single_link(root, relative)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, relative);
+        Err(FsError::Io(
+            "rooted single-link validation is unsupported".into(),
+        ))
+    }
 }
 
 /// Flush the directory containing `relative` through the same pinned root.
@@ -2774,6 +2898,18 @@ mod imp {
     ) -> Result<(), FsError> {
         atomic_write_checked(root, relative, bytes, options, Some(expected))
     }
+    pub(super) fn atomic_write_stream_pinned<F>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        atomic_write_stream_checked(root, relative, options, expected, write_body)
+    }
     fn atomic_write_checked(
         root: &Path,
         relative: &Path,
@@ -2801,6 +2937,54 @@ mod imp {
         let result = (|| {
             temp.write_all(bytes)
                 .map_err(|error| map_io(relative, error))?;
+            temp.sync_all().map_err(|error| map_io(relative, error))?;
+            validate_optional_regular(&parent, &file_name, relative)?;
+            if options.overwrite {
+                fs::renameat(&parent, &temp_name, &parent, &file_name)
+                    .map_err(|error| map_unix_io(relative, error))?;
+            } else {
+                fs::linkat(&parent, &temp_name, &parent, &file_name, AtFlags::empty())
+                    .map_err(|error| map_unix_io(relative, error))?;
+                let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+            }
+            fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+        }
+        result
+    }
+
+    fn atomic_write_stream_checked<F>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            options.create_parents,
+            options.dir_mode,
+            Some(expected),
+        )?;
+        validate_optional_regular(&parent, &file_name, relative)?;
+        let temp_name = temp_name(&file_name);
+        let temp_fd = fs::openat(
+            &parent,
+            &temp_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(options.file_mode, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        let mut temp = std::fs::File::from(temp_fd);
+        let result = (|| {
+            write_body(&mut temp)?;
             temp.sync_all().map_err(|error| map_io(relative, error))?;
             validate_optional_regular(&parent, &file_name, relative)?;
             if options.overwrite {
@@ -3144,6 +3328,21 @@ mod imp {
         Ok(std::fs::File::from(fd))
     }
 
+    pub(super) fn validate_file_single_link(root: &Path, relative: &Path) -> Result<(), FsError> {
+        let pin = root_identity(root)?;
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, Some(&pin))?;
+        // Native lstat accepts unreadable regular collisions. Query the leaf
+        // relative to the confined parent, without data access or FIFO opens.
+        let stat = fs::statat(&parent, &file_name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| map_unix_io(relative, error))?;
+        if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile && stat.st_nlink == 1 {
+            Ok(())
+        } else {
+            Err(FsError::OutsideWorkspace(relative.display().to_string()))
+        }
+    }
+
     pub(super) fn sync_parent_pinned(
         root: &Path,
         relative: &Path,
@@ -3274,6 +3473,18 @@ mod imp {
     ) -> Result<(), FsError> {
         Err(unsupported())
     }
+    pub(super) fn atomic_write_stream_pinned<F>(
+        _root: &Path,
+        _relative: &Path,
+        _options: AtomicWriteOptions,
+        _expected: &RootIdentity,
+        _write_body: F,
+    ) -> Result<(), FsError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        Err(unsupported())
+    }
     pub(super) fn atomic_write(
         _root: &Path,
         _relative: &Path,
@@ -3292,6 +3503,14 @@ mod imp {
         _relative: &Path,
         _expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn open_create_new_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
         Err(unsupported())
     }
 
@@ -3412,6 +3631,35 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn handback_exclusive_handle_keeps_original_inode_after_leaf_replacement() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tool-results");
+        std::fs::create_dir(&root).unwrap();
+        let leaf = Path::new("toolu-report.txt");
+        let mut file = open_create_new_file_pinned(&root, leaf, None).unwrap();
+        assert!(matches!(
+            open_create_new_file_pinned(&root, leaf, None),
+            Err(FsError::AlreadyExists(_))
+        ));
+        let allocated = root.join("allocated.txt");
+        std::fs::rename(root.join(leaf), &allocated).unwrap();
+        let outside = directory.path().join("outside.txt");
+        std::fs::write(&outside, "unchanged").unwrap();
+        symlink(&outside, root.join(leaf)).unwrap();
+        file.write_all("full report 😀".as_bytes()).unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(allocated).unwrap(),
+            "full report 😀"
+        );
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "unchanged");
+        assert!(open_create_new_file_pinned(&root, leaf, None).is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_transcript_symlink_creation_failure_preserves_plain_spool() {
@@ -4109,6 +4357,56 @@ mod tests {
         atomic_write(root.path(), relative, b"old", AtomicWriteOptions::default()).unwrap();
         atomic_write(root.path(), relative, b"new", AtomicWriteOptions::default()).unwrap();
         assert_eq!(read_to_string(root.path(), relative).unwrap(), "new");
+    }
+
+    #[test]
+    fn atomic_stream_write_pins_root_and_preserves_old_file_on_callback_error() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new(".lingxi/transcript.jsonl");
+        atomic_write(
+            root.path(),
+            relative,
+            b"old transcript",
+            AtomicWriteOptions::default(),
+        )
+        .unwrap();
+        let identity = root_identity(root.path()).unwrap();
+
+        atomic_write_stream_pinned(
+            root.path(),
+            relative,
+            AtomicWriteOptions::default(),
+            &identity,
+            |temporary| {
+                temporary
+                    .write_all(b"new streamed transcript")
+                    .map_err(|error| FsError::Io(error.to_string()))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_to_string(root.path(), relative).unwrap(),
+            "new streamed transcript"
+        );
+
+        let error = atomic_write_stream_pinned(
+            root.path(),
+            relative,
+            AtomicWriteOptions::default(),
+            &identity,
+            |temporary| {
+                temporary
+                    .write_all(b"partial")
+                    .map_err(|error| FsError::Io(error.to_string()))?;
+                Err(FsError::Io("injected stream-copy failure".into()))
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected stream-copy failure"));
+        assert_eq!(
+            read_to_string(root.path(), relative).unwrap(),
+            "new streamed transcript"
+        );
     }
 
     #[test]

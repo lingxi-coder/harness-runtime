@@ -1,0 +1,57 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "fixture_module_sha256": "6f9e91ee386f83f367c470d028febfffbbff17666e77b8a04f935ad9f8664e04",
+  "argv": [
+    "/private/tmp/mods-current-native-293-reference-v1614/claude",
+    "plugin",
+    "test",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-middleware"
+  ],
+  "isolated_config": true,
+  "native_exit_code": 0,
+  "stdout_bytes": 502,
+  "stdout_sha256": "99c4d317a2ec76d67adb2f03b4e5b58e7b149c41126dea679d6e514b992394c6",
+  "stderr_bytes": 1182,
+  "stderr_sha256": "228e05326d0e4d624c183fda9b1c22d9e32d65452e3d11a3937f015cc7eaaf36",
+  "raw_event_lines_utf8": [
+    {
+      "stream": "stderr",
+      "json": "{\"case\":\"rewrite\",\"input\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"rewrite\"},\"result\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"native-prefix:fixture-input\"}]},\"uuid\":\"rewrite\"}}"
+    },
+    {
+      "stream": "stderr",
+      "json": "{\"case\":\"direct\",\"input\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"direct\"},\"result\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"direct\"}}"
+    },
+    {
+      "stream": "stderr",
+      "json": "{\"case\":\"cancel\",\"input\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"cancel\"},\"outcome\":{\"returned\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"cancel\"}}}"
+    },
+    {
+      "stream": "stderr",
+      "json": "{\"case\":\"throw\",\"input\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"throw\"},\"outcome\":{\"returned\":{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"throw\"}}}"
+    }
+  ],
+  "module_registration_observed_by_rewrite_case": true,
+  "native_plugin_test_process_exits_after_tests": true,
+  "per_handler_unregistration_api": "not observed; Native plugin static policy rejects retaining on() return handles",
+  "on_return_disposer_probe": {
+    "argv": [
+      "/private/tmp/mods-current-native-293-reference-v1614/claude",
+      "plugin",
+      "test",
+      "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-middleware/run-output/unregister-probe"
+    ],
+    "native_exit_code": 1,
+    "stdout_bytes": 680,
+    "stdout_sha256": "0bbb475f4cf89f1c7a642ed722a3b8f81e64831b1dd77d5972b2de48cd0c57d2",
+    "stderr_bytes": 0,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_file": "unregister-probe/native.stdout",
+    "stderr_file": "unregister-probe/native.stderr",
+    "static_policy_rejected_retained_on_result": true,
+    "conclusion": "on() return cannot be kept as an explicit per-handler unsubscribe handle; module/process unload lifecycle remains unverified"
+  },
+  "test_result": "passed",
+  "scope": "Native 2.1.293 public plugin-test/session.append middleware contract; process exit is test-run boundary, not proof of explicit unload hook; not whole Mods parity"
+}

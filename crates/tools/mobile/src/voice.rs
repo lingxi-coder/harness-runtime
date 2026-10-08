@@ -4,6 +4,7 @@ use lingxi_core::host::audio::{
     AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationKind,
     AudioOperationSuccess, AudioOwner, AudioRecordingHandle, AudioService,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
@@ -18,6 +19,8 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 use crate::audio_support::{execute_operation, operation_context, operation_supported};
 
@@ -36,13 +39,15 @@ fn input_schema() -> Value {
     })
 }
 
-fn sample_rate_hz(input: &Value) -> Result<u32, String> {
-    match input.get("sample_rate_hz") {
-        None | Some(Value::Null) => Ok(16_000),
+fn sample_rate_hz(input: &Utf16JsonProjection) -> Result<u32, String> {
+    match input.get_property("sample_rate_hz") {
+        None => Ok(16_000),
+        Some(value) if value.is_null() => Ok(16_000),
         Some(value) => {
             let rate = value
-                .as_u64()
-                .and_then(|rate| u32::try_from(rate).ok())
+                .as_number()
+                .filter(|rate| rate.is_finite() && rate.fract() == 0.0)
+                .and_then(|rate| u32::try_from(rate as u64).ok())
                 .filter(|rate| (8_000..=48_000).contains(rate))
                 .ok_or_else(|| {
                     "`sample_rate_hz` must be an integer from 8000 to 48000".to_string()
@@ -52,9 +57,10 @@ fn sample_rate_hz(input: &Value) -> Result<u32, String> {
     }
 }
 
-fn recording_format(input: &Value) -> Result<String, String> {
-    match input.get("format") {
-        None | Some(Value::Null) => Ok("m4a".into()),
+fn recording_format(input: &Utf16JsonProjection) -> Result<String, String> {
+    match input.get_property("format") {
+        None => Ok("m4a".into()),
+        Some(value) if value.is_null() => Ok("m4a".into()),
         Some(value) => value
             .as_str()
             .filter(|format| !format.trim().is_empty() && format.len() <= 32)
@@ -67,7 +73,7 @@ fn recording_format(input: &Value) -> Result<String, String> {
 #[derive(Clone)]
 pub struct VoiceTool {
     ctx: BuiltinToolContext,
-    schema: Value,
+    schema: Utf16JsonProjection,
     starts: Arc<StdMutex<HashSet<AudioOwner>>>,
 }
 
@@ -77,7 +83,7 @@ impl VoiceTool {
     pub fn new(ctx: BuiltinToolContext) -> Self {
         Self {
             ctx,
-            schema: input_schema(),
+            schema: generated_projection(&input_schema()),
             starts: Arc::new(StdMutex::new(HashSet::new())),
         }
     }
@@ -166,8 +172,12 @@ impl Tool for VoiceTool {
         TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -178,15 +188,19 @@ impl Tool for VoiceTool {
         4096
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "voice tool — native OS microphone permission gates recording".into(),
@@ -197,21 +211,24 @@ impl Tool for VoiceTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        match input.get("action").and_then(Value::as_str) {
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("stop_recording") => "Stopping the voice recording".into(),
             Some("is_recording") => "Checking recording state".into(),
             _ => "Starting a voice recording".into(),
         }
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Record audio from the device microphone.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if !self.supports_record() {
@@ -219,13 +236,16 @@ impl Tool for VoiceTool {
                 "recording is not supported on this device".into(),
             ));
         }
-        if input.get("sample_rate_hz").is_some() {
-            sample_rate_hz(input).map_err(ValidationError)?;
+        if input.get_property("sample_rate_hz").is_some() {
+            sample_rate_hz(input).map_err(|message| ValidationError(message.into()))?;
         }
-        if input.get("format").is_some() {
-            recording_format(input).map_err(ValidationError)?;
+        if input.get_property("format").is_some() {
+            recording_format(input).map_err(|message| ValidationError(message.into()))?;
         }
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("start_recording") => Ok(()),
             Some("stop_recording" | "is_recording") => Ok(()),
             _ => Err(ValidationError(
@@ -236,7 +256,7 @@ impl Tool for VoiceTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         use_context: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -249,11 +269,13 @@ impl Tool for VoiceTool {
             ));
         }
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .unwrap_or("start_recording");
-        let sample_rate_hz = sample_rate_hz(&input).map_err(ToolError::InvalidInput)?;
-        let format = recording_format(&input).map_err(ToolError::InvalidInput)?;
+        let sample_rate_hz =
+            sample_rate_hz(&input).map_err(|message| ToolError::InvalidInput(message.into()))?;
+        let format =
+            recording_format(&input).map_err(|message| ToolError::InvalidInput(message.into()))?;
         let timeout = match action {
             "start_recording" => Duration::from_secs(120),
             _ => Duration::from_secs(30),
@@ -332,7 +354,7 @@ impl Tool for VoiceTool {
                     _ => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid start result".into(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -374,7 +396,7 @@ impl Tool for VoiceTool {
                     Ok(_) => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid stop result".into(),
-                        ))
+                        ));
                     }
                     Err(error) => {
                         let mut handles = self.ctx.audio_recording_handles.lock().await;
@@ -430,7 +452,7 @@ impl Tool for VoiceTool {
                     Ok(_) => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid status result".into(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -438,12 +460,13 @@ impl Tool for VoiceTool {
         };
 
         Ok(ToolCallResult {
-            data,
+            data: generated_projection(&data),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -462,6 +485,7 @@ mod tests {
         AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
     };
     use lingxi_core::host::VoiceRecording;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -650,15 +674,21 @@ mod tests {
         let session = lingxi_core::types::SessionId::new();
         let started = tool
             .call(
-                json!({ "action": "start_recording" }),
+                generated_projection(&json!({ "action": "start_recording" })),
                 use_context(session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(started.data["recording"], true);
+        assert_eq!(
+            started
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert!(
-            started.data.get("handle").is_none(),
+            started.data.at_pointer("/handle").is_none(),
             "native handles stay host-managed"
         );
         let owner = audio.operations.lock().unwrap()[0].0.owner.clone();
@@ -673,23 +703,35 @@ mod tests {
 
         let status = tool
             .call(
-                json!({ "action": "is_recording" }),
+                generated_projection(&json!({ "action": "is_recording" })),
                 use_context(session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(status.data["recording"], true);
+        assert_eq!(
+            status
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         let stopped = tool
             .call(
-                json!({ "action": "stop_recording" }),
+                generated_projection(&json!({ "action": "stop_recording" })),
                 use_context(session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(stopped.data["recording"], false);
-        assert_eq!(stopped.data["audio_bytes_len"], 3);
+        assert_eq!(
+            stopped
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(stopped.data.number_at("/audio_bytes_len"), Some(3.0));
         assert_eq!(
             audio
                 .operations
@@ -819,7 +861,7 @@ mod tests {
             let tool = tool.clone();
             async move {
                 tool.call(
-                    json!({ "action": "start_recording" }),
+                    generated_projection(&json!({ "action": "start_recording" })),
                     use_context(first_session),
                     tool_api::test_support::fresh_tx(),
                 )
@@ -833,7 +875,7 @@ mod tests {
         let second = tokio::time::timeout(
             Duration::from_millis(250),
             tool.call(
-                json!({ "action": "start_recording" }),
+                generated_projection(&json!({ "action": "start_recording" })),
                 use_context(second_session),
                 tool_api::test_support::fresh_tx(),
             ),
@@ -878,7 +920,7 @@ mod tests {
         let first_session = lingxi_core::types::SessionId::new();
         let second_session = lingxi_core::types::SessionId::new();
         tool.call(
-            json!({ "action": "start_recording" }),
+            generated_projection(&json!({ "action": "start_recording" })),
             use_context(first_session),
             tool_api::test_support::fresh_tx(),
         )
@@ -886,7 +928,7 @@ mod tests {
         .unwrap();
         let result = tool
             .call(
-                json!({ "action": "stop_recording" }),
+                generated_projection(&json!({ "action": "stop_recording" })),
                 use_context(second_session),
                 tool_api::test_support::fresh_tx(),
             )
@@ -896,13 +938,19 @@ mod tests {
         );
         let stopped = tool
             .call(
-                json!({ "action": "stop_recording" }),
+                generated_projection(&json!({ "action": "stop_recording" })),
                 use_context(first_session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(stopped.data["recording"], false);
+        assert_eq!(
+            stopped
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[tokio::test]
@@ -918,7 +966,7 @@ mod tests {
         let tool = VoiceTool::new(builtin);
         let session = lingxi_core::types::SessionId::new();
         tool.call(
-            json!({ "action": "start_recording" }),
+            generated_projection(&json!({ "action": "start_recording" })),
             use_context(session),
             tool_api::test_support::fresh_tx(),
         )
@@ -927,23 +975,35 @@ mod tests {
         audio.active.lock().unwrap().clear();
         let status = tool
             .call(
-                json!({ "action": "is_recording" }),
+                generated_projection(&json!({ "action": "is_recording" })),
                 use_context(session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(status.data["recording"], false);
+        assert_eq!(
+            status
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
         assert!(registry.lock().await.is_empty());
         let restarted = tool
             .call(
-                json!({ "action": "start_recording" }),
+                generated_projection(&json!({ "action": "start_recording" })),
                 use_context(session),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(restarted.data["recording"], true);
+        assert_eq!(
+            restarted
+                .data
+                .at_pointer("/recording")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -957,7 +1017,7 @@ mod tests {
         let tool = VoiceTool::new(context(audio));
         let result = tool
             .call(
-                json!({ "action": "is_recording" }),
+                generated_projection(&json!({ "action": "is_recording" })),
                 use_context(lingxi_core::types::SessionId::new()),
                 tool_api::test_support::fresh_tx(),
             )
@@ -977,13 +1037,17 @@ mod tests {
         });
         let tool = VoiceTool::new(context(audio.clone()));
         let input = json!({ "action": "start_recording", "sample_rate_hz": -1 });
+        let input_source = generated_projection(&input);
         assert!(tool
-            .validate_input(&input, &use_context(lingxi_core::types::SessionId::new()))
+            .validate_input(
+                &input_source,
+                &use_context(lingxi_core::types::SessionId::new())
+            )
             .await
             .is_err());
         assert!(matches!(
-            tool.call(input, use_context(lingxi_core::types::SessionId::new()), tool_api::test_support::fresh_tx()).await,
-            Err(ToolError::InvalidInput(message)) if message.contains("sample_rate_hz")
+            tool.call(input_source, use_context(lingxi_core::types::SessionId::new()), tool_api::test_support::fresh_tx()).await,
+            Err(ToolError::InvalidInput(message)) if message.string_at("").is_some_and(|s| s.contains("sample_rate_hz"))
         ));
         assert!(audio.operations.lock().unwrap().is_empty());
     }

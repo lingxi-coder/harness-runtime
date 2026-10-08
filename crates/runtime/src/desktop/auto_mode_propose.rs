@@ -46,6 +46,10 @@ pub fn collect_propose_reply(events: Vec<Result<HistoryEvent, LlmError>>) -> Que
                 delta: HistoryContentDelta::TextDelta { text: chunk },
                 ..
             }) => text.push_str(&chunk),
+            Ok(HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::TextJsUtf16Delta { text: chunk, .. },
+                ..
+            }) => text.push_str(&chunk),
             Ok(HistoryEvent::MessageDelta { delta, .. }) => {
                 if let Some(reason) = delta.stop_reason {
                     stop_reason = Some(reason);
@@ -133,8 +137,10 @@ pub fn propose_messages_to_conversation(
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: m.content.clone(),
+                    citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             }),
             _ => None,
         })
@@ -288,6 +294,7 @@ mod tests {
             delta: HistoryMessageDelta {
                 stop_reason: Some(reason.to_string()),
                 stop_details: None,
+                resumable: None,
             },
             usage: None,
         })
@@ -304,6 +311,27 @@ mod tests {
             outcome,
             QueryOutcome::Text("{\"environment\":[\"laptop\"]}".to_string())
         );
+    }
+
+    #[test]
+    fn utf16_text_delta_uses_its_display_text_for_proposal_content() {
+        let text = "{\"environment\":[\"�\"]}";
+        let code_units = "{\"environment\":[\""
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("\"]}".encode_utf16())
+            .collect();
+        let outcome = collect_propose_reply(vec![
+            Ok(HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: text.to_string(),
+                    utf16_code_units: code_units,
+                },
+            }),
+            stop("end_turn"),
+        ]);
+        assert_eq!(outcome, QueryOutcome::Text(text.to_string()));
     }
 
     #[test]
@@ -455,7 +483,8 @@ mod tests {
                 assert_eq!(
                     content.as_slice(),
                     [ContentBlock::Text {
-                        text: "hello recon".to_string()
+                        text: "hello recon".to_string(),
+                        citations: None
                     }]
                 );
             }
@@ -686,7 +715,7 @@ impl command_api::builtins::ProposeRunner for DesktopProposeRunner {
         {
             Ok(id) => id,
             Err(error) => {
-                return serde_json::json!({"ok": false, "code": "recon_failed", "reason": error.to_string()})
+                return serde_json::json!({"ok": false, "code": "recon_failed", "reason": error.to_string()});
             }
         };
         let mut scan_guard = ScanGuard {

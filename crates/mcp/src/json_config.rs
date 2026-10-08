@@ -516,6 +516,28 @@ pub fn discovery_cache_flag(
     }
 }
 
+/// Native 2.1.287 declares this boolean only on ordinary external transports.
+pub(crate) fn bare_elicitation_is_schema_key_for(transport_type: Option<&str>) -> bool {
+    matches!(
+        transport_type,
+        None | Some("stdio" | "sse" | "http" | "streamable-http" | "ws")
+    )
+}
+
+fn bare_elicitation_flag(
+    transport_type: Option<&str>,
+    raw_entry: &serde_json::Value,
+) -> Result<Option<bool>, &'static str> {
+    if !bare_elicitation_is_schema_key_for(transport_type) {
+        return Ok(None);
+    }
+    match raw_entry.get("bareElicitationCapability") {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err("bareElicitationCapability must be a boolean"),
+    }
+}
+
 /// §11 — is `role` a declared schema key for `type`? Oracle: present on
 /// `stdio`/`sse`/`sse-ide`/`ws-ide`/`http` (+ `streamable-http`)/`ws`;
 /// ABSENT from `sdk` (`MAn` @154585319) and `claudeai-proxy` (`NAn`
@@ -758,6 +780,9 @@ pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
     if discovery_cache_flag(entry.transport_type.as_deref(), stripped.as_ref()).is_err() {
         return false;
     }
+    if bare_elicitation_flag(entry.transport_type.as_deref(), stripped.as_ref()).is_err() {
+        return false;
+    }
     entry_satisfies_schema(&entry, true)
 }
 
@@ -844,6 +869,13 @@ fn build_entry(
         // non-oracle alias `"websocket"` used to silently default to
         // Http/WebSocket instead of being rejected.
         let ty = entry.transport_type.as_deref();
+        let bare_elicitation_capability = match bare_elicitation_flag(ty, raw_entry.as_ref()) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(server = %name, error, "mcp.json: invalid server config; skipping entry");
+                return None;
+            }
+        };
         // §11 — `discoveryCache: q().optional()` (sse/http only, NO
         // `.catch`): a present-but-non-boolean value on a type that declares
         // the key fails the whole entry's `safeParse`, exactly like a
@@ -1183,6 +1215,7 @@ fn build_entry(
             tool_permissions: entry.tool_permissions,
             config_error,
             metadata: McpServerMetadata {
+                bare_elicitation_capability,
                 // Keep the existing logical key bytes for ordinary config
                 // transports.  Only labels that the enum projection loses
                 // need an explicit transport discriminator.
@@ -1401,6 +1434,79 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn bare_elicitation_capability_config_survives_current_declared_transports() {
+        for ty in [
+            None,
+            Some("stdio"),
+            Some("sse"),
+            Some("http"),
+            Some("streamable-http"),
+            Some("ws"),
+        ] {
+            for bare in [None, Some(false), Some(true)] {
+                let mut entry =
+                    serde_json::json!({"command": "mcp-test", "url": "https://mcp.test"});
+                if let Some(ty) = ty {
+                    entry["type"] = ty.into();
+                }
+                if let Some(bare) = bare {
+                    entry["bareElicitationCapability"] = bare.into();
+                }
+                let config =
+                    build_server_from_json_entry("srv", &entry, ConfigScope::Dynamic).unwrap();
+                assert_eq!(config.metadata.bare_elicitation_capability, bare, "{ty:?}");
+                let serialized = serde_json::to_value(&config).unwrap();
+                let decoded: McpServerConfig = serde_json::from_value(serialized.clone()).unwrap();
+                assert_eq!(decoded.metadata.bare_elicitation_capability, bare);
+                match bare {
+                    Some(bare) => {
+                        assert_eq!(serialized["metadata"]["bareElicitationCapability"], bare)
+                    }
+                    None => assert!(serialized["metadata"]
+                        .get("bareElicitationCapability")
+                        .is_none()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_bare_elicitation_flag_skips_only_declaring_transport_entries() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!("true"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            for ty in [
+                None,
+                Some("stdio"),
+                Some("sse"),
+                Some("http"),
+                Some("streamable-http"),
+                Some("ws"),
+            ] {
+                let mut entry = serde_json::json!({"command": "mcp-test", "url": "https://mcp.test", "bareElicitationCapability": value});
+                if let Some(ty) = ty {
+                    entry["type"] = ty.into();
+                }
+                let raw = serde_json::json!({"mcpServers": {"bad": entry, "good": {"command": "mcp-good"}}}).to_string();
+                let configs = parse_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
+                assert_eq!(configs.len(), 1, "{ty:?}: {value}");
+                assert_eq!(configs[0].name, "good");
+            }
+            for ty in ["sse-ide", "ws-ide", "sdk", "claudeai-proxy"] {
+                let entry = serde_json::json!({"type": ty, "url": "https://mcp.test", "ideName": "IDE", "name": "sdk-client", "id": "connector", "bareElicitationCapability": value});
+                let raw = serde_json::json!({"mcpServers": {"srv": entry}}).to_string();
+                let configs = parse_plugin_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
+                assert_eq!(configs.len(), 1, "undeclared {ty} ignores {value}");
+                assert_eq!(configs[0].metadata.bare_elicitation_capability, None);
+            }
+        }
+    }
 
     #[test]
     fn parse_empty_json_yields_no_servers() {

@@ -1,5 +1,6 @@
 //! Runtime interfaces for implicit session teammates.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::AgentId;
 use async_trait::async_trait;
 use thiserror::Error;
@@ -68,7 +69,7 @@ pub trait TeamSpawnSeam: Send + Sync {
         agent_id: AgentId,
         name: String,
         team_name: String,
-        description: String,
+        description: crate::types::utf16_json::Utf16JsonProjection,
     ) -> Result<String, TeamSpawnError>;
 
     /// Start a teammate carrying the Agent invocation's execution context.
@@ -115,10 +116,26 @@ pub trait TeamSpawnSeam: Send + Sync {
     ///
     /// A gone/terminated teammate maps to [`TeamSpawnError::Terminated`] — the
     /// mailbox→runner pump recognises that as its "stop" signal.
-    async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+    async fn send_message(
+        &self,
+        task_id: &str,
+        message: Utf16JsonProjection,
+    ) -> Result<(), TeamSpawnError> {
         let _ = (task_id, message);
         Err(TeamSpawnError::Unsupported(
             "TeamSpawnSeam::send_message not supported by this implementation".to_string(),
+        ))
+    }
+
+    /// Queue model output with its trusted peer origin intact. This default
+    /// fails closed rather than lowering it to an intentional human message.
+    async fn send_peer(
+        &self,
+        _task_id: &str,
+        _envelope: crate::host::handback::HandbackEnvelope,
+    ) -> Result<(), TeamSpawnError> {
+        Err(TeamSpawnError::Unsupported(
+            "typed peer delivery is unavailable on this host".into(),
         ))
     }
 
@@ -164,7 +181,7 @@ mod tests {
             _agent_id: AgentId,
             _name: String,
             _team_name: String,
-            _description: String,
+            _description: crate::types::utf16_json::Utf16JsonProjection,
         ) -> Result<String, TeamSpawnError> {
             Ok(String::new())
         }
@@ -177,7 +194,7 @@ mod tests {
     async fn send_message_default_is_unsupported() {
         let seam = DefaultOnlySeam;
         let err = seam
-            .send_message("t-1", "hello".to_string())
+            .send_message("t-1", "hello".into())
             .await
             .expect_err("the defaulted send_message must return an error");
         assert!(

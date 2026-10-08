@@ -1,12 +1,74 @@
 //! Hook definition + executor / source taxonomy (spec §9.2, §9.3).
 
 use crate::events::HookEventType;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Raw JSON adapters for optional exact hook rule strings. A present null keeps
+/// the existing Option<String> meaning of None; a non-string value is rejected.
+pub(crate) mod hook_if_pattern_source {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Utf16JsonProjection, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.string_units("").is_some() {
+            lingxi_core::types::utf16_json::raw_json_serde::serialize(value, serializer)
+        } else {
+            Err(serde::ser::Error::custom("expected a string"))
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        if value.string_units("").is_some() {
+            Ok(value)
+        } else {
+            Err(serde::de::Error::custom("expected a string"))
+        }
+    }
+
+    pub fn serialize_option<S>(
+        value: &Option<Utf16JsonProjection>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(value) if value.string_units("").is_some() => {
+                lingxi_core::types::utf16_json::raw_json_serde::serialize(value, serializer)
+            }
+            Some(_) => Err(serde::ser::Error::custom("expected a string")),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize_option<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value =
+            lingxi_core::types::utf16_json::raw_json_serde::deserialize_option(deserializer)?;
+        match value {
+            None => Ok(None),
+            Some(value) if value.at_pointer("").is_some_and(|root| root.is_null()) => Ok(None),
+            Some(value) if value.string_units("").is_some() => Ok(Some(value)),
+            Some(_) => Err(serde::de::Error::custom("expected a string")),
+        }
+    }
+}
 
 /// A registered hook: which events to fire on, optional matcher, how to
 /// execute, and where the definition was loaded from.
@@ -67,7 +129,7 @@ pub struct HookDefinition {
 }
 
 impl HookDefinition {
-    /// The hook's tool-name matcher pattern, if any (B3).
+    /// The hook's exact tool-name matcher source projection, if any (B3).
     ///
     /// In claude-code a `Pre/PostToolUse` hook declares a `matcher` string
     /// (e.g. `"Write|Edit"`, `"^Bash$"`, `"*"`) that gates whether the hook
@@ -76,7 +138,7 @@ impl HookDefinition {
     /// whose [`HookCondition::match_tool_name`] is `true` — that is how the
     /// settings loader (`loader.rs`) and the orchestrator's `list_hooks`
     /// (`handle_impl.rs`) already model it. This accessor surfaces that pattern
-    /// as the `Option<String>`-shaped "matcher" the B3 spec calls for, WITHOUT
+    /// as the optional exact-source "matcher" the B3 spec calls for, WITHOUT
     /// adding a new struct field (which would break the explicit
     /// `HookDefinition { … }` literals constructed in the locked test-harness
     /// and orchestrator integration tests).
@@ -86,11 +148,11 @@ impl HookDefinition {
     /// false`) — such a condition is a permission-rule / input matcher,
     /// surfaced separately by [`Self::if_pattern`].
     #[must_use]
-    pub fn matcher(&self) -> Option<&str> {
+    pub fn matcher(&self) -> Option<&Utf16JsonProjection> {
         self.if_condition
             .as_ref()
             .filter(|c| c.match_tool_name)
-            .map(|c| c.pattern.as_str())
+            .map(|c| &c.pattern)
     }
 
     /// The hook's `if`-condition permission-rule string, if any (e.g.
@@ -106,10 +168,10 @@ impl HookDefinition {
     /// fires (`utils/hooks.ts:1681-1685` then `:1808-1850`). Returns `None` when
     /// the hook carries no `if`-condition.
     #[must_use]
-    pub fn if_pattern(&self) -> Option<&str> {
+    pub fn if_pattern(&self) -> Option<&Utf16JsonProjection> {
         self.if_condition
             .as_ref()
-            .and_then(|c| c.if_pattern.as_deref())
+            .and_then(|c| c.if_pattern.as_ref())
     }
 }
 
@@ -149,6 +211,22 @@ impl HookShell {
             "powershell" => Some(Self::Powershell),
             _ => None,
         }
+    }
+}
+
+pub(crate) fn empty_mcp_tool_input() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty object projection is valid")
+}
+
+fn deserialize_mcp_tool_input<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let input = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if input.object_entries().is_some() {
+        Ok(input)
+    } else {
+        Err(serde::de::Error::custom("expected an object"))
     }
 }
 
@@ -215,7 +293,11 @@ pub enum HookExecutor {
         /// Agent type discriminator.
         agent_type: String,
         /// Prompt text supplied to the spawned agent.
-        prompt: String,
+        #[serde(
+            serialize_with = "hook_if_pattern_source::serialize",
+            deserialize_with = "hook_if_pattern_source::deserialize"
+        )]
+        prompt: Utf16JsonProjection,
         /// Optional model override (`schemas/hooks.ts:128-163` `model`). When
         /// `None` the spawned verifier inherits the spawner's default model.
         model: Option<String>,
@@ -232,7 +314,11 @@ pub enum HookExecutor {
         /// Prompt text to evaluate. May contain `$ARGUMENTS` placeholders that
         /// the executor substitutes with the serialized event payload
         /// (`addArgumentsToPrompt`; `execPromptHook.ts:35`).
-        prompt: String,
+        #[serde(
+            serialize_with = "hook_if_pattern_source::serialize",
+            deserialize_with = "hook_if_pattern_source::deserialize"
+        )]
+        prompt: Utf16JsonProjection,
         /// Optional model override (`schemas/hooks.ts:81-86`). When `None` the
         /// runner falls back to its default small-fast model
         /// (`getSmallFastModel()`; `execPromptHook.ts:79`).
@@ -274,18 +360,22 @@ pub enum HookExecutor {
     /// executor arm returns the same structured "not wired" error the
     /// [`Self::Command`] and [`Self::Prompt`] arms return when THEIR runner is
     /// absent — it never blocks a turn. The `${path}` interpolation of the
-    /// variant's `input` map belongs to that invocation step and is therefore
+    /// variant's `input` object belongs to that invocation step and is therefore
     /// also deferred rather than implemented with no call site.
     McpTool {
         /// `server`: name of an already-configured MCP server to invoke.
         server: String,
         /// `tool`: name of the tool on that server to call.
         tool: String,
-        /// `input`: arguments passed to the MCP tool. String values support
+        /// `input`: object of arguments passed to the MCP tool. String values support
         /// `${path}` interpolation from the hook input JSON (e.g.
         /// `"${tool_input.file_path}"`), applied at invocation time.
-        #[serde(default)]
-        input: HashMap<String, Value>,
+        #[serde(
+            default = "empty_mcp_tool_input",
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize",
+            deserialize_with = "deserialize_mcp_tool_input"
+        )]
+        input: Utf16JsonProjection,
     },
     /// Dispatch to an in-process Rust handler registered via
     /// [`crate::HookExecutorImpl::register_builtin`].
@@ -316,10 +406,14 @@ pub enum HookExecutor {
 /// (`if`-condition) are INDEPENDENT — a hook may carry both, and both must pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookCondition {
-    /// Pattern text of the B3 tool-name matcher, evaluated when
+    /// Exact source string of the B3 tool-name matcher, evaluated when
     /// `match_tool_name` is `true`. (The `if`-condition lives in
     /// [`Self::if_pattern`], not here.)
-    pub pattern: String,
+    #[serde(
+        serialize_with = "hook_if_pattern_source::serialize",
+        deserialize_with = "hook_if_pattern_source::deserialize"
+    )]
+    pub pattern: Utf16JsonProjection,
     /// If `true` [`Self::pattern`] is the B3 tool-name matcher (evaluated).
     pub match_tool_name: bool,
     /// If `true` an [`Self::if_pattern`] permission-rule string is present and
@@ -332,8 +426,13 @@ pub struct HookCondition {
     /// (`#[serde(default)]`) so existing serialized hooks deserialize unchanged,
     /// and `skip_serializing_if` keeps a `None` byte-identical to the pre-`if`
     /// serialization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub if_pattern: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "hook_if_pattern_source::serialize_option",
+        deserialize_with = "hook_if_pattern_source::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub if_pattern: Option<Utf16JsonProjection>,
 }
 
 /// Origin of a hook definition. Used by the engine to display trust info to

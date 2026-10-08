@@ -3,7 +3,8 @@
 //!
 //! Arms a background monitor on a shell `command`; in the binary each stdout line
 //! becomes a live `TaskNotification` (token-bucket rate-limited, with suppression),
-//! bounded by `timeout_ms` (default 5m, max 1h) unless `persistent`.
+//! bounded by `timeout_ms` (default 5m, capped to 30m, or 10m in single-prompt
+//! mode). The legacy persistent branch remains behind the rollout kill switch.
 //!
 //! **Gated off by default.** `isEnabled = Eq() && mu()` where
 //! `Eq() = nt("tengu_amber_sentinel", false)` (no live GrowthBook → false) and
@@ -18,6 +19,7 @@
 //! and remains addressable through `TaskOutput` / `TaskStop`.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -27,8 +29,10 @@ use lingxi_core::host::task_registry::{MonitorRegistration, WebSocketMonitorRegi
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, PromptOptions, Tool, ToolCallResult,
+    ToolError, ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+    ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -142,33 +146,34 @@ Prefer this over `command: 'websocat wss://…'` — it avoids the extra process
 #[path = "monitor_schema.rs"]
 mod native_schema;
 
-fn websocket_host(ws: &Value) -> Result<String, ValidationError> {
-    let invalid = || {
-        ValidationError(
-            "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace".into(),
-        )
-    };
-    let raw = ws.get("url").and_then(Value::as_str).ok_or_else(invalid)?;
+fn websocket_host(ws: JsonValueView<'_>) -> Result<String, &'static str> {
+    const INVALID_URL: &str =
+        "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace";
+    let raw = ws
+        .get_property("url")
+        .and_then(JsonValueView::as_str)
+        .ok_or(INVALID_URL)?;
     if native_schema::hidden_control(raw) {
-        return Err(invalid());
+        return Err(INVALID_URL);
     }
-    let host = permission::monitor_websocket_url_host(raw).ok_or_else(invalid)?;
-    if let Some(protocols) = ws.get("protocols") {
-        let values = protocols
-            .as_array()
-            .ok_or_else(|| ValidationError("protocols must be an array".into()))?;
+    let host = permission::monitor_websocket_url_host(raw).ok_or(INVALID_URL)?;
+    if let Some(protocols) = ws.get_property("protocols") {
+        let values = protocols.array_len().ok_or("protocols must be an array")?;
         let mut seen = std::collections::HashSet::new();
-        for value in values {
-            let token = value.as_str().unwrap_or("");
+        for index in 0..values {
+            let token = protocols
+                .get_index(index)
+                .and_then(JsonValueView::as_str)
+                .unwrap_or("");
             if token.is_empty()
                 || !token
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
             {
-                return Err(ValidationError("protocol must be an RFC 6455 token".into()));
+                return Err("protocol must be an RFC 6455 token");
             }
             if !seen.insert(token) {
-                return Err(ValidationError("protocols must be unique".into()));
+                return Err("protocols must be unique");
             }
         }
     }
@@ -320,6 +325,521 @@ fn bounded_input_schema(max_ms: u64) -> Value {
 static BOUNDED_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| bounded_input_schema(1_800_000));
 static SINGLE_SHOT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| bounded_input_schema(600_000));
 
+static SOURCE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&INPUT_SCHEMA));
+static SOURCE_BOUNDED_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&BOUNDED_INPUT_SCHEMA));
+static SOURCE_SINGLE_SHOT_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&SINGLE_SHOT_INPUT_SCHEMA));
+
+static SOURCE_OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&OUTPUT_SCHEMA));
+
+fn monitor_custom_error(
+    path: Vec<Utf16JsonProjection>,
+    message: &str,
+) -> tool_api::native_schema::NativeSchemaError {
+    monitor_schema_error(vec![monitor_issue(vec![
+        ("code", source_text_projection("custom")),
+        ("path", monitor_path(path)),
+        ("message", source_text_projection(message)),
+    ])])
+}
+
+fn monitor_source_type(value: Option<JsonValueView<'_>>) -> &'static str {
+    let Some(value) = value else {
+        return "undefined";
+    };
+    if value.is_null() {
+        "null"
+    } else if value.as_bool().is_some() {
+        "boolean"
+    } else if value.as_number().is_some() {
+        "number"
+    } else if value.code_units().is_some() {
+        "string"
+    } else if value.array_len().is_some() {
+        "array"
+    } else {
+        "object"
+    }
+}
+
+fn hidden_control_units(units: &[u16]) -> bool {
+    units.iter().any(|unit| {
+        *unit != u16::from(b'\t')
+            && *unit != u16::from(b'\n')
+            && (*unit < 32 || (127..=159).contains(unit))
+    })
+}
+
+fn valid_protocol_units(units: &[u16]) -> bool {
+    !units.is_empty()
+        && units.iter().all(|unit| {
+            *unit <= 0x7f
+                && ((*unit as u8).is_ascii_alphanumeric()
+                    || b"!#$%&'*+.^_`|~-".contains(&(*unit as u8)))
+        })
+}
+
+fn empty_source_string() -> Utf16JsonProjection {
+    source_text_projection("")
+}
+
+fn text_encoder_string(value: &Utf16JsonProjection) -> String {
+    // Native TextEncoder replaces unpaired UTF-16 surrogates with U+FFFD at
+    // the point command text is prepared for process execution. Keep the
+    // original UJP in MonitorRegistration for task/notification metadata.
+    let units = value
+        .string_units("")
+        .expect("Monitor command is a source string");
+    String::from_utf16_lossy(&units)
+}
+
+fn monitor_issue(fields: Vec<(&str, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("Monitor schema issue is valid JSON")
+}
+
+fn monitor_path(parts: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(parts).expect("Monitor issue path is valid JSON")
+}
+
+fn monitor_type_issue(
+    expected: &str,
+    value: Option<JsonValueView<'_>>,
+    path: Vec<Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    monitor_issue(vec![
+        ("expected", source_text_projection(expected)),
+        ("code", source_text_projection("invalid_type")),
+        ("path", monitor_path(path)),
+        (
+            "message",
+            source_text_projection(&format!(
+                "Invalid input: expected {expected}, received {}",
+                monitor_source_type(value)
+            )),
+        ),
+    ])
+}
+
+fn monitor_schema_error(
+    issues: Vec<Utf16JsonProjection>,
+) -> tool_api::native_schema::NativeSchemaError {
+    let issues_value = Utf16JsonProjection::array(issues.clone())
+        .expect("Monitor schema issue array is valid JSON");
+    let raw = issues_value
+        .to_pretty_json_string()
+        .expect("Monitor schema issues stringify as JSON");
+    tool_api::native_schema::NativeSchemaError {
+        display: tool_api::native_schema::format_issues("Monitor", &issues),
+        raw: source_text_projection(&raw),
+    }
+}
+
+fn parse_monitor_input(
+    input: &Utf16JsonProjection,
+    bounded: bool,
+) -> Result<Utf16JsonProjection, tool_api::native_schema::NativeSchemaError> {
+    let input =
+        tool_api::native_schema::normalize_flat_input(input).unwrap_or_else(|| input.clone());
+    let Some(root) = input.at_pointer("") else {
+        return Err(monitor_schema_error(vec![monitor_type_issue(
+            "object",
+            None,
+            vec![],
+        )]));
+    };
+    let Some(entries) = root.object_entries() else {
+        return Err(monitor_schema_error(vec![monitor_type_issue(
+            "object",
+            Some(root),
+            vec![],
+        )]));
+    };
+
+    let mut issues = Vec::<Utf16JsonProjection>::new();
+    let mut parsed = Vec::<(String, Utf16JsonProjection)>::new();
+    let mut parsed_timeout = DEFAULT_TIMEOUT_MS as f64;
+    let mut parsed_persistent = false;
+    let mut has_command = false;
+    let mut has_ws = false;
+
+    let description = root.get_property("description");
+    if description.and_then(JsonValueView::code_units).is_none() {
+        issues.push(monitor_type_issue(
+            "string",
+            description,
+            vec![source_text_projection("description")],
+        ));
+    } else {
+        parsed.push((
+            "description".into(),
+            input
+                .subprojection("/description")
+                .expect("string description is present"),
+        ));
+    }
+
+    let timeout = root.get_property("timeout_ms");
+    if let Some(value) = timeout {
+        if let Some(number) = value.as_number() {
+            parsed_timeout = number;
+            parsed.push((
+                "timeout_ms".into(),
+                input
+                    .subprojection("/timeout_ms")
+                    .expect("number timeout is present"),
+            ));
+            if number < 1000.0 {
+                issues.push(monitor_issue(vec![
+                    ("origin", source_text_projection("number")),
+                    ("code", source_text_projection("too_small")),
+                    ("minimum", generated_builtin_result(&json!(1000))),
+                    ("inclusive", generated_builtin_result(&json!(true))),
+                    (
+                        "path",
+                        monitor_path(vec![source_text_projection("timeout_ms")]),
+                    ),
+                    (
+                        "message",
+                        source_text_projection("Too small: expected number to be >=1000"),
+                    ),
+                ]));
+            }
+            if bounded && number > MAX_TIMEOUT_MS as f64 {
+                issues.push(monitor_issue(vec![
+                    ("origin", source_text_projection("number")),
+                    ("code", source_text_projection("too_big")),
+                    ("maximum", generated_builtin_result(&json!(MAX_TIMEOUT_MS))),
+                    ("inclusive", generated_builtin_result(&json!(true))),
+                    (
+                        "path",
+                        monitor_path(vec![source_text_projection("timeout_ms")]),
+                    ),
+                    (
+                        "message",
+                        source_text_projection("timeout_ms must be ≤ 3600000"),
+                    ),
+                ]));
+            }
+        } else {
+            issues.push(monitor_type_issue(
+                "number",
+                Some(value),
+                vec![source_text_projection("timeout_ms")],
+            ));
+        }
+    } else {
+        parsed.push((
+            "timeout_ms".into(),
+            generated_builtin_result(&json!(DEFAULT_TIMEOUT_MS)),
+        ));
+    }
+
+    if !bounded {
+        let persistent = root.get_property("persistent");
+        if let Some(value) = persistent {
+            if let Some(value) = value.as_bool() {
+                parsed_persistent = value;
+                parsed.push((
+                    "persistent".into(),
+                    input
+                        .subprojection("/persistent")
+                        .expect("boolean persistent is present"),
+                ));
+            } else {
+                issues.push(monitor_type_issue(
+                    "boolean",
+                    Some(value),
+                    vec![source_text_projection("persistent")],
+                ));
+            }
+        } else {
+            parsed.push(("persistent".into(), generated_builtin_result(&json!(false))));
+        }
+    }
+
+    if let Some(command) = root.get_property("command") {
+        if let Some(command_units) = command.code_units() {
+            has_command = !command_units.is_empty();
+            parsed.push((
+                "command".into(),
+                input
+                    .subprojection("/command")
+                    .expect("string command is present"),
+            ));
+            if hidden_control_units(command_units) {
+                issues.push(monitor_issue(vec![
+                    ("code", source_text_projection("custom")),
+                    (
+                        "path",
+                        monitor_path(vec![source_text_projection("command")]),
+                    ),
+                    (
+                        "message",
+                        source_text_projection(
+                            "command contains control characters that would be hidden in the approval dialog",
+                        ),
+                    ),
+                ]));
+            }
+        } else {
+            issues.push(monitor_type_issue(
+                "string",
+                Some(command),
+                vec![source_text_projection("command")],
+            ));
+        }
+    }
+
+    if let Some(ws) = root.get_property("ws") {
+        has_ws = true;
+        if ws.object_entries().is_none() {
+            issues.push(monitor_type_issue(
+                "object",
+                Some(ws),
+                vec![source_text_projection("ws")],
+            ));
+        } else {
+            let mut ws_fields = Vec::<(String, Utf16JsonProjection)>::new();
+            let url = ws.get_property("url");
+            if let Some(url_units) = url.and_then(JsonValueView::code_units) {
+                ws_fields.push((
+                    "url".into(),
+                    input
+                        .subprojection("/ws/url")
+                        .expect("string ws URL is present"),
+                ));
+                if hidden_control_units(url_units) {
+                    issues.push(monitor_issue(vec![
+                        ("code", source_text_projection("custom")),
+                        (
+                            "path",
+                            monitor_path(vec![
+                                source_text_projection("ws"),
+                                source_text_projection("url"),
+                            ]),
+                        ),
+                        (
+                            "message",
+                            source_text_projection(
+                                "url contains control characters that would be hidden in the approval dialog",
+                            ),
+                        ),
+                    ]));
+                }
+                if url.and_then(JsonValueView::as_str).is_none_or(|url_value| {
+                    permission::monitor_websocket_url_host(url_value).is_none()
+                }) {
+                    issues.push(monitor_issue(vec![
+                        ("code", source_text_projection("custom")),
+                        (
+                            "path",
+                            monitor_path(vec![
+                                source_text_projection("ws"),
+                                source_text_projection("url"),
+                            ]),
+                        ),
+                        (
+                            "message",
+                            source_text_projection(
+                                "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace",
+                            ),
+                        ),
+                    ]));
+                }
+            } else {
+                issues.push(monitor_type_issue(
+                    "string",
+                    url,
+                    vec![source_text_projection("ws"), source_text_projection("url")],
+                ));
+            }
+
+            if let Some(protocols) = ws.get_property("protocols") {
+                if let Some(count) = protocols.array_len() {
+                    let mut strings_only = true;
+                    let mut seen = std::collections::HashSet::<Vec<u16>>::new();
+                    for index in 0..count {
+                        let protocol = protocols.get_index(index).expect("array item exists");
+                        let path = vec![
+                            source_text_projection("ws"),
+                            source_text_projection("protocols"),
+                            generated_builtin_result(&json!(index)),
+                        ];
+                        if let Some(token_units) = protocol.code_units() {
+                            if !valid_protocol_units(token_units) {
+                                issues.push(monitor_issue(vec![
+                                    ("origin", source_text_projection("string")),
+                                    ("code", source_text_projection("invalid_format")),
+                                    ("format", source_text_projection("regex")),
+                                    (
+                                        "pattern",
+                                        source_text_projection("/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/"),
+                                    ),
+                                    ("path", monitor_path(path)),
+                                    (
+                                        "message",
+                                        source_text_projection(
+                                            "protocol must be an RFC 6455 token",
+                                        ),
+                                    ),
+                                ]));
+                            }
+                            seen.insert(token_units.to_vec());
+                        } else {
+                            strings_only = false;
+                            issues.push(monitor_type_issue("string", Some(protocol), path));
+                        }
+                    }
+                    if strings_only && seen.len() != count {
+                        issues.push(monitor_issue(vec![
+                            ("code", source_text_projection("custom")),
+                            (
+                                "path",
+                                monitor_path(vec![
+                                    source_text_projection("ws"),
+                                    source_text_projection("protocols"),
+                                ]),
+                            ),
+                            (
+                                "message",
+                                source_text_projection("protocols must be unique"),
+                            ),
+                        ]));
+                    }
+                    ws_fields.push((
+                        "protocols".into(),
+                        input
+                            .subprojection("/ws/protocols")
+                            .expect("protocol array is present"),
+                    ));
+                } else {
+                    issues.push(monitor_type_issue(
+                        "array",
+                        Some(protocols),
+                        vec![
+                            source_text_projection("ws"),
+                            source_text_projection("protocols"),
+                        ],
+                    ));
+                }
+            }
+            if !ws_fields.is_empty() {
+                parsed.push((
+                    "ws".into(),
+                    Utf16JsonProjection::object(ws_fields)
+                        .expect("parsed WebSocket fields form an object"),
+                ));
+            }
+        }
+    }
+
+    if !bounded {
+        let mut unknown = entries
+            .iter()
+            .filter(|entry| {
+                ![
+                    "description",
+                    "timeout_ms",
+                    "persistent",
+                    "command",
+                    "ws",
+                    "__proto__",
+                ]
+                .iter()
+                .any(|key| entry.code_units == key.encode_utf16().collect::<Vec<_>>())
+            })
+            .map(|entry| entry.code_units.to_vec())
+            .collect::<Vec<_>>();
+        unknown.sort_by_key(|key| {
+            String::from_utf16(key)
+                .ok()
+                .and_then(|key| key.parse::<u32>().ok())
+                .filter(|value| {
+                    *value != u32::MAX
+                        && value.to_string().encode_utf16().collect::<Vec<_>>() == *key
+                })
+                .map_or((1, 0), |value| (0, value))
+        });
+        if !unknown.is_empty() {
+            let mut message = format!(
+                "Unrecognized key{}: ",
+                if unknown.len() == 1 { "" } else { "s" }
+            )
+            .encode_utf16()
+            .collect::<Vec<_>>();
+            for (index, key) in unknown.iter().enumerate() {
+                if index > 0 {
+                    message.extend(", ".encode_utf16());
+                }
+                message.extend("\"".encode_utf16());
+                message.extend(key);
+                message.extend("\"".encode_utf16());
+            }
+            issues.push(monitor_issue(vec![
+                ("code", source_text_projection("unrecognized_keys")),
+                (
+                    "keys",
+                    Utf16JsonProjection::array(
+                        unknown
+                            .iter()
+                            .map(|key| source_text_projection_units(key))
+                            .collect(),
+                    )
+                    .expect("Monitor unknown-key list is valid JSON"),
+                ),
+                ("path", monitor_path(Vec::new())),
+                ("message", source_text_projection_units(&message)),
+            ]));
+        }
+    }
+
+    let aborted = issues.iter().any(|issue| {
+        matches!(
+            issue.string_at("/code"),
+            Some("invalid_type" | "unrecognized_keys")
+        )
+    });
+    if !aborted {
+        if has_command == has_ws {
+            issues.push(monitor_issue(vec![
+                ("code", source_text_projection("custom")),
+                ("path", monitor_path(Vec::new())),
+                (
+                    "message",
+                    source_text_projection("exactly one of command or ws"),
+                ),
+            ]));
+        }
+        if !bounded && !parsed_persistent && parsed_timeout > MAX_TIMEOUT_MS as f64 {
+            issues.push(monitor_issue(vec![
+                ("code", source_text_projection("custom")),
+                (
+                    "path",
+                    monitor_path(vec![source_text_projection("timeout_ms")]),
+                ),
+                (
+                    "message",
+                    source_text_projection("timeout_ms must be ≤ 3600000"),
+                ),
+            ]));
+        }
+    }
+    if !issues.is_empty() {
+        return Err(monitor_schema_error(issues));
+    }
+    Utf16JsonProjection::object(parsed)
+        .map_err(|_| monitor_custom_error(vec![], "could not construct parsed Monitor input"))
+}
+
 fn started_message(task_id: &str, timeout_ms: f64, persistent: bool) -> String {
     let deadline = if persistent {
         "persistent — runs until TaskStop or session end".into()
@@ -328,7 +848,9 @@ fn started_message(task_id: &str, timeout_ms: f64, persistent: bool) -> String {
     } else {
         format!(
             "timeout {}ms",
-            tool_api::native_schema::js_json(&json!(timeout_ms), false)
+            generated_builtin_result(&json!(timeout_ms))
+                .to_json_string()
+                .expect("generated timeout is valid JSON")
         )
     };
     format!("Monitor started (task {task_id}, {deadline}). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.")
@@ -367,21 +889,29 @@ impl Tool for MonitorTool {
         MONITOR_TOOL_NAME
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("watch, monitor, or keep an eye on a process/log/command or WebSocket — stream each stdout line as a live notification")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("watch, monitor, or keep an eye on a process/log/command or WebSocket — stream each stdout line as a live notification".into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
         Some(MONITOR_TOOL_NAME)
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         if !cron::bounded_monitors_enabled() {
-            &INPUT_SCHEMA
+            &SOURCE_INPUT_SCHEMA
         } else if cron::bounded_monitor_timeout_ms() == 600_000 {
-            &SINGLE_SHOT_INPUT_SCHEMA
+            &SOURCE_SINGLE_SHOT_INPUT_SCHEMA
         } else {
-            &BOUNDED_INPUT_SCHEMA
+            &SOURCE_BOUNDED_INPUT_SCHEMA
+        }
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
         }
     }
 
@@ -391,16 +921,41 @@ impl Tool for MonitorTool {
 
     fn parse_native_input(
         &self,
-        input: &Value,
-    ) -> Option<Result<Value, tool_api::native_schema::NativeSchemaError>> {
-        Some(native_schema::parse(
-            input,
-            cron::bounded_monitors_enabled(),
-        ))
+        input: &Utf16JsonProjection,
+    ) -> Option<Result<Utf16JsonProjection, tool_api::native_schema::NativeSchemaError>> {
+        Some(parse_monitor_input(input, cron::bounded_monitors_enabled()))
     }
 
-    fn output_schema(&self) -> Option<&Value> {
-        Some(&OUTPUT_SCHEMA)
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&SOURCE_OUTPUT_SCHEMA)
+    }
+
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        tool_api::native_output::parse_object(
+            output,
+            MONITOR_TOOL_NAME,
+            &[
+                tool_api::native_output::OutputField {
+                    name: "taskId",
+                    kind: tool_api::native_output::OutputFieldType::String,
+                    required: true,
+                },
+                tool_api::native_output::OutputField {
+                    name: "timeoutMs",
+                    kind: tool_api::native_output::OutputFieldType::Number,
+                    required: true,
+                },
+                tool_api::native_output::OutputField {
+                    name: "persistent",
+                    kind: tool_api::native_output::OutputFieldType::Boolean,
+                    required: false,
+                },
+            ],
+            tool_api::native_output::UnknownOutputKeys::Strip,
+        )
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -417,34 +972,38 @@ impl Tool for MonitorTool {
         10_000
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         // Monitor spawns a command (side effects) — not read-only.
         false
     }
 
     async fn validate_input(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // Structural checks/refinements belong to safeParse, before this hook.
         Ok(())
     }
 
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        if let Some(ws) = input.get("ws") {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
+        if let Some(ws) = input.get_property("ws") {
             let host = match websocket_host(ws) {
                 Ok(host) => host,
-                Err(error) => {
+                Err(message) => {
                     return PermissionResult::Deny {
                         reason: PermissionDecisionReason::Other {
-                            reason: error.0.clone(),
+                            reason: message.into(),
                         },
-                        explanation: Some(error.0),
+                        explanation: Some(message.into()),
                         metadata: PermissionMetadata::default(),
                     }
                 }
@@ -455,7 +1014,7 @@ impl Tool for MonitorTool {
             {
                 return PermissionResult::Deny {
                     reason: PermissionDecisionReason::Other { reason: "SSRF-blocked address range".into() },
-                    explanation: Some(format!("Monitor cannot open a WebSocket to {host}: the address is in a private, link-local, or cloud-metadata range.")),
+                    explanation: Some(format!("Monitor cannot open a WebSocket to {host}: the address is in a private, link-local, or cloud-metadata range.").into()),
                     metadata: PermissionMetadata::default(),
                 };
             }
@@ -475,23 +1034,29 @@ impl Tool for MonitorTool {
                     reason: PermissionDecisionReason::Other {
                         reason: "sandbox network policy".into(),
                     },
-                    explanation: Some(format!(
-                        "Monitor cannot open a WebSocket to {host}: denied by network policy."
-                    )),
+                    explanation: Some(
+                        format!(
+                            "Monitor cannot open a WebSocket to {host}: denied by network policy."
+                        )
+                        .into(),
+                    ),
                     metadata: PermissionMetadata::default(),
                 };
             }
             let suffix = ws
-                .get("protocols")
-                .and_then(Value::as_array)
-                .filter(|protocols| !protocols.is_empty())
-                .map(|protocols| {
+                .get_property("protocols")
+                .and_then(|protocols| {
+                    let len = protocols.array_len()?;
+                    (len > 0).then_some((protocols, len))
+                })
+                .map(|(protocols, len)| {
                     // .270 RYe: bounded permission preview, not a JSON array.
-                    let shown = protocols
-                        .iter()
-                        .take(4)
-                        .map(|protocol| {
-                            let value = protocol.as_str().unwrap_or_default();
+                    let shown = (0..len.min(4))
+                        .map(|index| {
+                            let value = protocols
+                                .get_index(index)
+                                .and_then(JsonValueView::as_str)
+                                .unwrap_or_default();
                             // Measure in the SAME unit the cut uses. `str::len`
                             // is bytes while `chars().take(48)` is scalar
                             // values, so a 20-character CJK protocol (60 bytes)
@@ -509,7 +1074,7 @@ impl Tool for MonitorTool {
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let rest = protocols.len().saturating_sub(4);
+                    let rest = len.saturating_sub(4);
                     let overflow = if rest > 0 {
                         format!(" (+{rest} more)")
                     } else {
@@ -520,15 +1085,17 @@ impl Tool for MonitorTool {
                 .unwrap_or_default();
             let message = format!(
                 "Monitor will open a WebSocket to {}{suffix}",
-                ws["url"].as_str().unwrap_or("")
+                ws.get_property("url")
+                    .and_then(JsonValueView::as_str)
+                    .unwrap_or("")
             );
             return PermissionResult::Ask {
                 reason: PermissionDecisionReason::Other {
-                    reason: message.clone(),
+                    reason: message.clone().into(),
                 },
                 prompt: permission::result::PermissionPrompt {
                     title: "Monitor".into(),
-                    message,
+                    message: message.into(),
                     options: vec!["Allow".into(), "Deny".into()],
                 },
                 pending_classifier_check: None,
@@ -552,19 +1119,23 @@ impl Tool for MonitorTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // PARITY: `description(){return cJr+lJr()}`.
         format!("{}{}{}", cjr(), WS_DESCRIPTION, ljr())
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
         // PARITY: `prompt(){return cJr+lJr()}` (identical to description).
-        format!("{}{}{}", cjr(), WS_DESCRIPTION, ljr())
+        format!("{}{}{}", cjr(), WS_DESCRIPTION, ljr()).into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -572,68 +1143,81 @@ impl Tool for MonitorTool {
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
             if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
-                return Err(ToolError::InvalidInput(
+                return Err(invalid_tool_input(
                     lingxi_core::host::agent_processes::stop_pending_refusal("start monitors."),
                 ));
             }
         }
 
         let description = input
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+            .subprojection("/description")
+            .expect("validated description subtree");
         let requested_timeout = input
-            .get("timeout_ms")
-            .and_then(Value::as_f64)
+            .number_at("/timeout_ms")
             .unwrap_or(DEFAULT_TIMEOUT_MS as f64);
         let requested_persistent = input
-            .get("persistent")
-            .and_then(Value::as_bool)
+            .at_pointer("/persistent")
+            .and_then(JsonValueView::as_bool)
             .unwrap_or(false);
 
         // PARITY: `Mnl(t)` — CCR timeout cap.
         let (timeout_ms, persistent) =
             apply_ccr_timeout_cap_number(requested_timeout, requested_persistent);
         let reported_timeout = if persistent {
-            json!(0)
+            generated_builtin_result(&json!(0))
         } else if timeout_ms.fract() == 0.0 {
-            json!(timeout_ms as u64)
+            generated_builtin_result(&json!(timeout_ms as u64))
         } else {
-            json!(timeout_ms)
+            generated_builtin_result(&json!(timeout_ms))
         };
 
-        if let Some(ws) = input.get("ws") {
-            websocket_host(ws).map_err(|error| ToolError::InvalidInput(error.0))?;
-            if native_schema::has_command(input.get("command")) {
-                return Err(ToolError::InvalidInput(
-                    "exactly one of command or ws".into(),
-                ));
+        if let Some(ws) = input.get_property("ws") {
+            websocket_host(ws).map_err(invalid_tool_input)?;
+            if input
+                .string_units("/command")
+                .is_some_and(|command| !command.is_empty())
+            {
+                return Err(invalid_tool_input("exactly one of command or ws"));
             }
             let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
                 ToolError::Internal("Monitor: task registry is not configured".into())
             })?;
             self.ctx
                 .http
-                .preflight_monitor_websocket(ws["url"].as_str().unwrap_or_default())
+                .preflight_monitor_websocket(
+                    ws.get_property("url")
+                        .and_then(JsonValueView::as_str)
+                        .unwrap_or_default(),
+                )
                 .await
-                .map_err(|error| ToolError::InvalidInput(format!("Monitor: {error}")))?;
+                .map_err(|error| invalid_tool_input(format!("Monitor: {error}")))?;
             let timeout_field = if persistent { 0 } else { timeout_ms as u64 };
             let task_id = registry
                 .spawn_websocket_monitor(
                     WebSocketMonitorRegistration {
-                        url: ws["url"].as_str().unwrap_or_default().into(),
+                        url: ws
+                            .get_property("url")
+                            .and_then(JsonValueView::as_str)
+                            .unwrap_or_default()
+                            .into(),
                         protocols: ws
-                            .get("protocols")
-                            .and_then(Value::as_array)
-                            .map(|v| {
-                                v.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_string)
+                            .get_property("protocols")
+                            .and_then(|protocols| protocols.array_len().map(|len| (protocols, len)))
+                            .map(|(protocols, len)| {
+                                (0..len)
+                                    .filter_map(|index| {
+                                        protocols
+                                            .get_index(index)
+                                            .and_then(JsonValueView::as_str)
+                                            .map(str::to_owned)
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default(),
                         task: MonitorRegistration {
+                            command: input
+                                .subprojection("/command")
+                                .unwrap_or_else(|_| empty_source_string()),
                             description,
                             timeout_ms: timeout_field,
                             persistent,
@@ -649,20 +1233,30 @@ impl Tool for MonitorTool {
                 .await
                 .map_err(|error| ToolError::Internal(format!("Monitor: {error}")))?;
             return Ok(ToolCallResult {
-                data: json!({"taskId":task_id,"timeoutMs":reported_timeout,"persistent":persistent}),
-                model_content: Some(started_message(&task_id, timeout_ms, persistent)),
+                data: Utf16JsonProjection::object(vec![
+                    ("taskId".into(), source_text_projection(&task_id)),
+                    ("timeoutMs".into(), reported_timeout),
+                    (
+                        "persistent".into(),
+                        generated_builtin_result(&json!(persistent)),
+                    ),
+                ])
+                .expect("Monitor result is valid JSON"),
+                model_content: Some(source_text_projection(&started_message(
+                    &task_id, timeout_ms, persistent,
+                ))),
                 is_error: false,
                 new_messages: vec![],
+                subagent_hooks_fired: false,
                 context_modifier: None,
                 mcp_meta: None,
             });
         }
 
-        let command = input
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let command_source = input
+            .subprojection("/command")
+            .expect("validated command subtree");
+        let command = text_encoder_string(&command_source);
         let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
             ToolError::Internal("Monitor: task registry is not configured".into())
         })?;
@@ -738,10 +1332,10 @@ impl Tool for MonitorTool {
                     // monitor that cannot be confined must not fall back to
                     // running unconfined.
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(message)) => {
-                        return Err(ToolError::InvalidInput(message))
+                        return Err(invalid_tool_input(message))
                     }
                     Err(sandbox::wrap::SandboxWrapError::SbplWrite(message)) => {
-                        return Err(ToolError::Io(message))
+                        return Err(ToolError::Io(message.into()))
                     }
                 }
             }
@@ -750,7 +1344,7 @@ impl Tool for MonitorTool {
         let timeout_field = if persistent { 0 } else { timeout_ms as u64 };
         let task_id = registry
             .spawn_monitor(MonitorRegistration {
-                command,
+                command: command_source,
                 spawn_command,
                 description,
                 timeout_ms: timeout_field,
@@ -767,18 +1361,90 @@ impl Tool for MonitorTool {
         let model_content = started_message(&task_id, timeout_ms, persistent);
 
         Ok(ToolCallResult {
-            data: json!({
-                "taskId": task_id,
-                "timeoutMs": reported_timeout,
-                "persistent": persistent,
-            }),
-            model_content: Some(model_content),
+            data: Utf16JsonProjection::object(vec![
+                ("taskId".into(), source_text_projection(&task_id)),
+                ("timeoutMs".into(), reported_timeout),
+                (
+                    "persistent".into(),
+                    generated_builtin_result(&json!(persistent)),
+                ),
+            ])
+            .expect("Monitor result is valid JSON"),
+            model_content: Some(source_text_projection(&model_content)),
             is_error: false,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+#[cfg(test)]
+struct TestMonitorCallResult {
+    data: Value,
+    model_content: Option<String>,
+    is_error: bool,
+}
+
+#[cfg(test)]
+impl MonitorTool {
+    fn input_schema(&self) -> &Value {
+        if !cron::bounded_monitors_enabled() {
+            &INPUT_SCHEMA
+        } else if cron::bounded_monitor_timeout_ms() == 600_000 {
+            &SINGLE_SHOT_INPUT_SCHEMA
+        } else {
+            &BOUNDED_INPUT_SCHEMA
+        }
+    }
+
+    fn parse_native_input(
+        &self,
+        input: &Value,
+    ) -> Option<Result<Value, tool_api::native_schema::NativeSchemaError>> {
+        Tool::parse_native_input(self, &generated_builtin_result(input)).map(|result| {
+            result.and_then(|parsed| {
+                serde_json::from_str(
+                    &parsed
+                        .to_json_string()
+                        .expect("test input projection serializes"),
+                )
+                .map_err(|error| monitor_custom_error(vec![], &error.to_string()))
+            })
+        })
+    }
+
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestMonitorCallResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection serializes"),
+        )
+        .expect("test result JSON parses");
+        let model_content = result
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .map(str::to_owned);
+        Ok(TestMonitorCallResult {
+            data,
+            model_content,
+            is_error: result.is_error,
+        })
+    }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -873,7 +1539,7 @@ mod tests {
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
         lingxi_core::host::session_flags::set_single_shot_print_session(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
         lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
@@ -1177,7 +1843,7 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(launched.command, "tail -f log");
-        assert_eq!(launched.description, "ci");
+        assert_eq!(launched.description.string_at(""), Some("ci"));
         assert!(launched.persistent);
         assert_eq!(launched.timeout_ms, 0);
         assert_eq!(
@@ -1212,9 +1878,13 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,
                 parent_agent_id: None,
+                native_query_depth: None,
                 origin_session_id: None,
+                instruction_context: None,
+                fork_context: None,
                 tool_execution_policy: ToolExecutionPolicy::Ordinary,
                 agent_name: None,
                 team_name: None,
@@ -1228,6 +1898,11 @@ mod tests {
                 observer: None,
                 parent_model: None,
                 parent_model_profile: None,
+                agent_spawn_provenance: Default::default(),
+                tool_context_state: None,
+                assistant_message: None,
+                same_turn_tool_uses: Vec::new(),
+                current_history: Vec::new(),
                 mode_override: None,
                 request_source: None,
                 frozen_command_denies: Vec::new(),
@@ -1253,10 +1928,10 @@ mod tests {
                 assert_eq!(parsed.unwrap(), case["normalized"], "parsed {index}");
             } else {
                 let error = parsed.unwrap_err();
-                assert_eq!(error.raw, case["raw"].as_str().unwrap(), "raw {index}");
+                assert_eq!(error.raw.string_at(""), case["raw"].as_str(), "raw {index}");
                 assert_eq!(
-                    error.display,
-                    case["display"].as_str().unwrap(),
+                    error.display.string_at(""),
+                    case["display"].as_str(),
                     "display {index}"
                 );
                 let error = invoker
@@ -1273,7 +1948,7 @@ mod tests {
                 );
             }
         }
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
         let tasks = Arc::new(RecordingRegistry::default());
         let tool = tool_with_registry(tasks.clone());
         let input =
@@ -1288,6 +1963,40 @@ mod tests {
         assert_eq!(
             tasks.monitor.lock().unwrap().as_ref().unwrap().timeout_ms,
             1000
+        );
+    }
+
+    #[test]
+    fn monitor_schema_preserves_unpaired_command_and_description_units() {
+        let input =
+            Utf16JsonProjection::parse(r#"{"description":"note \udfff","command":"\ud800echo"}"#)
+                .expect("input with escaped unpaired units is valid JSON");
+        let parsed = parse_monitor_input(&input, false).expect("JS strings satisfy string schema");
+
+        assert_eq!(
+            parsed.string_units("/description"),
+            Some(vec![
+                u16::from(b'n'),
+                u16::from(b'o'),
+                u16::from(b't'),
+                u16::from(b'e'),
+                u16::from(b' '),
+                0xDFFF,
+            ])
+        );
+        assert_eq!(
+            parsed.string_units("/command"),
+            Some(vec![
+                0xD800,
+                u16::from(b'e'),
+                u16::from(b'c'),
+                u16::from(b'h'),
+                u16::from(b'o')
+            ])
+        );
+        assert_eq!(
+            text_encoder_string(&parsed.subprojection("/command").unwrap()),
+            "\u{FFFD}echo"
         );
     }
 
@@ -1427,6 +2136,28 @@ mod tests {
         assert!(result.is_err());
         assert!(registry.websocket.lock().unwrap().is_none());
     }
+    #[test]
+    fn bounded_monitors_are_enabled_by_default_in_286() {
+        let _g = guard();
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+        let monitor = tool();
+        assert!(cron::bounded_monitors_enabled());
+        assert_eq!(*monitor.input_schema(), *BOUNDED_INPUT_SCHEMA);
+        let parsed = monitor
+            .parse_native_input(&json!({
+                "description": "watch", "command": "tail -f log", "persistent": true
+            }))
+            .unwrap()
+            .unwrap();
+        assert!(parsed.get("persistent").is_none());
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (1_800_000, false));
+        lingxi_core::host::session_flags::set_single_shot_print_session(true);
+        assert_eq!(*monitor.input_schema(), *SINGLE_SHOT_INPUT_SCHEMA);
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (600_000, false));
+        lingxi_core::host::session_flags::set_single_shot_print_session(false);
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
+    }
+
     #[tokio::test]
     async fn bounded_monitor_schema_cap_and_result_match_270() {
         let _guard = guard();
@@ -1462,7 +2193,7 @@ mod tests {
             .unwrap()
             .contains("expires in 10m unless the source ends first"));
         lingxi_core::host::session_flags::set_single_shot_print_session(false);
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
     }
     #[test]
     fn legacy_remote_cap_uses_javascript_environment_truthiness() {

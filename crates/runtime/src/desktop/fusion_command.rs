@@ -11,6 +11,7 @@ use lingxi_core::host::{
     FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionRunId,
     FusionStatus, OrchestratorHandle,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
@@ -72,7 +73,7 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
         if seen.contains(&key) {
             return FusionPublicationReceipt::published();
         }
-        let xml = tasks::fusion_result_xml(result);
+        let xml: Utf16JsonProjection = tasks::fusion_result_xml(result).into();
         if let Err(err) = self
             .handle
             .append_meta_user_message_to_session(conversation_id, &xml)
@@ -87,9 +88,8 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
             // skipped too — the user got nothing until the next turn's task
             // notification. Fire the notice anyway, worded so it does not
             // point at a durable record that does not exist.
-            self.handle
-                .emit_background_system_notice(&fusion_completion_notice_unrecorded())
-                .await;
+            let notice: Utf16JsonProjection = fusion_completion_notice_unrecorded().into();
+            self.handle.emit_background_system_notice(&notice).await;
             return FusionPublicationReceipt::storage_failure(err.to_string());
         }
         // F006: before this, a finished background run's only trace was the
@@ -116,6 +116,7 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
         } else {
             fusion_completion_notice_other_session_for_status(result.status, conversation_id)
         };
+        let body: Utf16JsonProjection = body.into();
         self.handle.emit_background_system_notice(&body).await;
         seen.insert(key);
         FusionPublicationReceipt::published()
@@ -376,16 +377,21 @@ fn publication_retry_run_id(args: &ParsedSlashCommand) -> Result<Option<FusionRu
     let contains_retry = args
         .positional_args
         .iter()
-        .any(|token| token == "--retry-publication");
+        .enumerate()
+        .any(|(index, _)| args.positional_arg_utf8(index) == Some("--retry-publication"));
     if !contains_retry {
         return Ok(None);
     }
-    if args.positional_args.len() != 2 || args.positional_args[0] != "--retry-publication" {
+    if args.positional_args.len() != 2 || args.positional_arg_utf8(0) != Some("--retry-publication")
+    {
         return Err(format!(
             "--retry-publication cannot be combined with a prompt or Fusion flags\n{FUSION_ARGUMENT_HINT}"
         ));
     }
-    FusionRunId::parse(args.positional_args[1].clone())
+    let run_id = args.positional_arg_utf8(1).ok_or_else(|| {
+        format!("--retry-publication requires a valid Unicode run ID\n{FUSION_ARGUMENT_HINT}")
+    })?;
+    FusionRunId::parse(run_id)
         .map(Some)
         .map_err(|error| format!("{error}\n{FUSION_ARGUMENT_HINT}"))
 }
@@ -400,7 +406,7 @@ impl DesktopFusionCommandHandler {
             Ok(retry) => retry,
             Err(message) => {
                 return CommandResult::Done {
-                    display: Some(message),
+                    display: Some(message.into()),
                 }
             }
         };
@@ -431,23 +437,31 @@ impl DesktopFusionCommandHandler {
                 ),
             };
             return CommandResult::Done {
-                display: Some(display),
+                display: Some(display.into()),
             };
         }
-        if args.raw_args.trim().eq_ignore_ascii_case("setup") {
+        if args
+            .raw_args_utf8()
+            .is_some_and(|raw| raw.trim().eq_ignore_ascii_case("setup"))
+        {
             return CommandResult::Done {
-                display: Some(FUSION_SETUP_ELSEWHERE.to_string()),
+                display: Some(FUSION_SETUP_ELSEWHERE.into()),
             };
         }
-        if args.raw_args.trim().eq_ignore_ascii_case("clean") {
+        if args
+            .raw_args_utf8()
+            .is_some_and(|raw| raw.trim().eq_ignore_ascii_case("clean"))
+        {
             return CommandResult::Done {
-                display: Some(self.clean_worktrees().await),
+                display: Some(self.clean_worktrees().await.into()),
             };
         }
         let parsed = match parse_fusion_slash(args) {
             Ok(parsed) => parsed,
             Err(msg) => {
-                return CommandResult::Done { display: Some(msg) };
+                return CommandResult::Done {
+                    display: Some(msg.into()),
+                };
             }
         };
         let snapshot = self.handle.get_status_snapshot().await;
@@ -484,7 +498,8 @@ impl DesktopFusionCommandHandler {
         } else {
             preset_word
         };
-        let description = fusion_task_description(preset_word, scope_word, &request.prompt);
+        let description: Utf16JsonProjection =
+            fusion_task_description(preset_word, scope_word, &request.prompt).into();
         let display = match self
             .registry
             .spawn(
@@ -501,7 +516,7 @@ impl DesktopFusionCommandHandler {
             Err(err) => format!("fusion failed to start: {err}"),
         };
         CommandResult::Done {
-            display: Some(display),
+            display: Some(display.into()),
         }
     }
 }
@@ -513,17 +528,21 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
         // Keep the same target even if the live conversation changes meanwhile.
         if !self.durable_publication_available {
             return CommandResult::Done {
-                display: Some(format!(
-                    "fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}"
-                )),
+                display: Some(
+                    format!("fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}").into(),
+                ),
             };
         }
         let session_id = self.handle.current_session_id().await;
         let conversation_id = session_id.to_string();
-        let raw_request = if args.raw_args.is_empty() {
-            "/fusion".to_string()
+        let raw_args = args.raw_args.string_units("").unwrap_or_default();
+        let raw_request = if raw_args.is_empty() {
+            Utf16JsonProjection::from("/fusion")
         } else {
-            format!("/fusion {}", args.raw_args)
+            let mut units = "/fusion ".encode_utf16().collect::<Vec<_>>();
+            units.extend_from_slice(&raw_args);
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("Fusion command source is a root string")
         };
         if let Err(error) = self
             .handle
@@ -531,7 +550,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             .await
         {
             return CommandResult::Done {
-                display: Some(format!("fusion failed to start: {error}")),
+                display: Some(format!("fusion failed to start: {error}").into()),
             };
         }
         let result = self.execute(args, session_id).await;
@@ -545,7 +564,10 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                 .await
             {
                 Ok(()) => display,
-                Err(error) => format!("{display}\nCould not save the Fusion reply: {error}"),
+                Err(error) => append_generated_text(
+                    &display,
+                    &format!("\nCould not save the Fusion reply: {error}"),
+                ),
             };
             CommandResult::Done {
                 display: Some(display),
@@ -566,6 +588,13 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
     fn argument_hint(&self) -> Option<&str> {
         Some(FUSION_ARGUMENT_HINT)
     }
+}
+
+fn append_generated_text(source: &Utf16JsonProjection, suffix: &str) -> Utf16JsonProjection {
+    let mut units = source.string_units("").unwrap_or_default();
+    units.extend(suffix.encode_utf16());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("appended command display is a root string")
 }
 
 #[cfg(test)]
@@ -698,7 +727,12 @@ mod tests {
             else {
                 panic!("expected a persistence failure")
             };
-            assert!(display.contains(FUSION_PERSISTENCE_REQUIRED), "{display}");
+            assert!(
+                display
+                    .string_at("")
+                    .is_some_and(|text| text.contains(FUSION_PERSISTENCE_REQUIRED)),
+                "{display:?}"
+            );
         }
         assert_eq!(
             std::fs::read_to_string(&transcript_path)
@@ -900,7 +934,7 @@ mod tests {
         async fn append_meta_user_message_to_session(
             &self,
             session_id: &str,
-            _text: &str,
+            _text: &Utf16JsonProjection,
         ) -> Result<(), lingxi_core::host::HandleError> {
             self.appended_to
                 .lock()
@@ -908,7 +942,7 @@ mod tests {
                 .push(session_id.to_string());
             Ok(())
         }
-        async fn emit_background_system_notice(&self, body: &str) {
+        async fn emit_background_system_notice(&self, body: &Utf16JsonProjection) {
             self.inner.emit_background_system_notice(body).await;
         }
         async fn current_session_id(&self) -> lingxi_core::types::SessionId {

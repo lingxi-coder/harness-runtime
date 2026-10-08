@@ -90,9 +90,9 @@ pub(crate) async fn execute_operation(
 
 pub(crate) fn map_audio_error(error: AudioError) -> ToolError {
     match error.kind {
-        AudioErrorKind::PermissionDenied => ToolError::PermissionDenied(error.message),
+        AudioErrorKind::PermissionDenied => ToolError::PermissionDenied(error.message.into()),
         AudioErrorKind::Cancelled => ToolError::Aborted,
-        AudioErrorKind::InvalidRequest => ToolError::InvalidInput(error.message),
+        AudioErrorKind::InvalidRequest => ToolError::InvalidInput(error.message.into()),
         kind => ToolError::Internal(format!("{kind}: {}", error.message)),
     }
 }

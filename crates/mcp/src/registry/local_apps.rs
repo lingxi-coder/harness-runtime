@@ -316,10 +316,13 @@ impl McpRegistry {
                     .map(|entry| entry.app_id.as_str())
                     .collect();
                 pinned.sort_unstable();
-                return Err(McpError::Internal(format!(
-                    "exposure_capacity_reached: pinned apps [{}]",
-                    pinned.join(",")
-                )));
+                return Err(McpError::Internal(
+                    format!(
+                        "exposure_capacity_reached: pinned apps [{}]",
+                        pinned.join(",")
+                    )
+                    .into(),
+                ));
             };
             state.entries.remove(&evict);
             evicted_app_id = Some(evict);

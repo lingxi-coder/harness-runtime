@@ -1,3 +1,4 @@
+use super::json_payload;
 use crate::upstream::codec_fixtures::HistoryFixture;
 use crate::upstream::codec_fixtures::{FixtureCodec, OpenAiResponsesCodec};
 use base64::Engine as _;
@@ -55,7 +56,9 @@ fn automatic_reasoning_omits_provider_override() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("reasoning").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("reasoning")
+        .is_none());
 }
 
 #[test]
@@ -69,7 +72,7 @@ fn disabled_reasoning_encodes_explicit_none_effort() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["reasoning"],
+        super::json_payload_value(&provider_request.body_json)["reasoning"],
         serde_json::json!({"effort": "none"})
     );
 }
@@ -86,7 +89,10 @@ fn system_blocks_join_into_instructions() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["instructions"], "a\n\nb");
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["instructions"],
+        "a\n\nb"
+    );
 }
 
 #[test]
@@ -95,7 +101,9 @@ fn empty_system_omits_instructions() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("instructions").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("instructions")
+        .is_none());
 }
 
 // ── input items: messages ─────────────────────────────────────────────────────
@@ -107,7 +115,7 @@ fn user_text_message_encodes_input_text_message_item() {
         .unwrap();
 
     assert_eq!(
-        provider_request.body_json["input"],
+        super::json_payload_value(&provider_request.body_json)["input"],
         serde_json::json!([{
             "type": "message",
             "role": "user",
@@ -124,13 +132,14 @@ fn assistant_text_message_encodes_output_text_parts() {
         content: vec![ContentBlock::Text {
             text: "answer".to_string(),
             cache_control: None,
+            citations: None,
         }],
     });
 
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["input"],
+        super::json_payload_value(&provider_request.body_json)["input"],
         serde_json::json!([{
             "type": "message",
             "role": "assistant",
@@ -148,18 +157,20 @@ fn tool_call_block_encodes_top_level_function_call_item() {
             ContentBlock::Text {
                 text: "running it".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
-                input: serde_json::json!({"command": "ls"}),
+                input: super::json_payload(serde_json::json!({"command": "ls"})),
             },
         ],
     });
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    let input = provider_request.body_json["input"].as_array().unwrap();
+    let body = super::json_payload_value(&provider_request.body_json);
+    let input = body["input"].as_array().unwrap();
     assert_eq!(input.len(), 2);
     assert_eq!(
         input[0],
@@ -188,8 +199,8 @@ fn tool_result_block_encodes_function_call_output_item() {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_1".to_string(),
-            output: serde_json::json!("done"),
-            is_error: false,
+            output: super::json_payload(serde_json::json!("done")),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -198,7 +209,7 @@ fn tool_result_block_encodes_function_call_output_item() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["input"],
+        super::json_payload_value(&provider_request.body_json)["input"],
         serde_json::json!([{
             "type": "function_call_output",
             "call_id": "call_1",
@@ -214,8 +225,8 @@ fn tool_result_non_string_output_is_stringified() {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_2".to_string(),
-            output: serde_json::json!({"exit_code": 0}),
-            is_error: false,
+            output: super::json_payload(serde_json::json!({"exit_code": 0})),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -224,7 +235,7 @@ fn tool_result_non_string_output_is_stringified() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["input"][0]["output"],
+        super::json_payload_value(&provider_request.body_json)["input"][0]["output"],
         "{\"exit_code\":0}"
     );
 }
@@ -247,7 +258,7 @@ fn image_bytes_encode_input_image_data_uri() {
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     assert_eq!(
-        provider_request.body_json["input"],
+        super::json_payload_value(&provider_request.body_json)["input"],
         serde_json::json!([{
             "type": "message",
             "role": "user",
@@ -272,7 +283,7 @@ fn image_url_encodes_input_image_url() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["input"][0]["content"][0],
+        super::json_payload_value(&provider_request.body_json)["input"][0]["content"][0],
         serde_json::json!({
             "type": "input_image",
             "image_url": "https://example.com/img.png",
@@ -296,7 +307,7 @@ fn document_encodes_input_file_data_uri() {
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);
     assert_eq!(
-        provider_request.body_json["input"][0]["content"][0],
+        super::json_payload_value(&provider_request.body_json)["input"][0]["content"][0],
         serde_json::json!({
             "type": "input_file",
             "filename": "document",
@@ -314,6 +325,7 @@ fn mixed_text_and_image_stay_one_message_item_in_order() {
             ContentBlock::Text {
                 text: "look".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::ImageUrl {
                 url: "https://example.com/a.png".to_string(),
@@ -323,7 +335,8 @@ fn mixed_text_and_image_stay_one_message_item_in_order() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    let input = provider_request.body_json["input"].as_array().unwrap();
+    let body = super::json_payload_value(&provider_request.body_json);
+    let input = body["input"].as_array().unwrap();
     assert_eq!(input.len(), 1);
     let content = input[0]["content"].as_array().unwrap();
     assert_eq!(content.len(), 2);
@@ -338,8 +351,8 @@ fn tools_encode_flattened_responses_shape() {
     let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
-        description: "read a file".to_string(),
-        input_schema: serde_json::json!({"type": "object"}),
+        description: "read a file".into(),
+        input_schema: json_payload(serde_json::json!({"type": "object"})),
         ..Default::default()
     }];
 
@@ -347,7 +360,7 @@ fn tools_encode_flattened_responses_shape() {
 
     // Flattened Responses shape — NOT nested under "function" (that is Chat).
     assert_eq!(
-        provider_request.body_json["tools"],
+        super::json_payload_value(&provider_request.body_json)["tools"],
         serde_json::json!([{
             "type": "function",
             "name": "Read",
@@ -364,7 +377,9 @@ fn no_tools_omits_tools_key() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("tools").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("tools")
+        .is_none());
 }
 
 #[test]
@@ -373,7 +388,9 @@ fn default_tool_choice_is_auto_for_responses_parity() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("tool_choice").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("tool_choice")
+        .is_none());
 }
 
 #[test]
@@ -393,12 +410,16 @@ fn tool_choice_variants_encode() {
         let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
         request.tools.push(ToolDeclaration {
             name: "Read".into(),
-            input_schema: serde_json::json!({"type":"object"}),
+            description: json_payload(serde_json::json!("Read a file")),
+            input_schema: json_payload(serde_json::json!({"type":"object"})),
             ..Default::default()
         });
         request.request.set_tool_choice(Some(tool_choice));
         let provider_request = codec().encode_request(&request).unwrap();
-        assert_eq!(provider_request.body_json["tool_choice"], expected);
+        assert_eq!(
+            super::json_payload_value(&provider_request.body_json)["tool_choice"],
+            expected
+        );
     }
 }
 
@@ -411,8 +432,13 @@ fn max_tokens_maps_to_max_output_tokens() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["max_output_tokens"], 1024);
-    assert!(provider_request.body_json.get("max_tokens").is_none());
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["max_output_tokens"],
+        1024
+    );
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("max_tokens")
+        .is_none());
 }
 
 #[test]
@@ -423,15 +449,27 @@ fn temperature_and_top_p_pass_through() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["temperature"], 0.5);
-    assert_eq!(provider_request.body_json["top_p"], 0.9);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["temperature"],
+        0.5
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["top_p"],
+        0.9
+    );
 
     let bare = codec()
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
-    assert!(bare.body_json.get("max_output_tokens").is_none());
-    assert!(bare.body_json.get("temperature").is_none());
-    assert!(bare.body_json.get("top_p").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("max_output_tokens")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("temperature")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("top_p")
+        .is_none());
 }
 
 #[test]
@@ -469,8 +507,12 @@ fn no_reasoning_config_omits_reasoning_key() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("reasoning").is_none());
-    assert!(provider_request.body_json.get("include").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("reasoning")
+        .is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("include")
+        .is_none());
 }
 
 // ── response_format → text.format ─────────────────────────────────────────────
@@ -483,7 +525,7 @@ fn response_format_json_object_encodes_text_format() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["text"],
+        super::json_payload_value(&provider_request.body_json)["text"],
         serde_json::json!({"format": {"type": "json_object"}})
     );
 }
@@ -498,14 +540,14 @@ fn response_format_json_schema_encodes_text_format() {
     request.request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
         name: "response".into(),
         strict: true,
-        schema: schema.clone(),
+        schema: super::json_payload(schema.clone()),
     };
 
     let provider_request = codec().encode_request(&request).unwrap();
 
     // Shape pinned to codex codex-api common.rs TextFormat {type, strict, schema, name}.
     assert_eq!(
-        provider_request.body_json["text"],
+        super::json_payload_value(&provider_request.body_json)["text"],
         serde_json::json!({
             "format": {
                 "type": "json_schema",
@@ -523,7 +565,9 @@ fn no_response_format_omits_text_key() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("text").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("text")
+        .is_none());
 }
 
 // ── stream / store ────────────────────────────────────────────────────────────
@@ -535,7 +579,10 @@ fn stream_true_sets_stream_in_body() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["stream"], true);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["stream"],
+        true
+    );
 }
 
 #[test]
@@ -544,7 +591,9 @@ fn stream_false_omits_stream_key() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("stream").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("stream")
+        .is_none());
 }
 
 #[test]
@@ -553,7 +602,10 @@ fn store_defaults_false_for_non_azure() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert_eq!(provider_request.body_json["store"], false);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["store"],
+        false
+    );
 }
 
 #[test]
@@ -563,7 +615,10 @@ fn store_defaults_false_for_every_responses_connection() {
         .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert_eq!(provider_request.body_json["store"], false);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["store"],
+        false
+    );
 }
 
 #[test]
@@ -574,7 +629,10 @@ fn explicit_store_override_wins_over_azure_detection() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["store"], false);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["store"],
+        false
+    );
 }
 
 #[test]
@@ -595,15 +653,24 @@ fn codex_responses_options_encode_extra_request_fields() {
 
     let provider_request = codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["parallel_tool_calls"], true);
     assert_eq!(
-        provider_request.body_json["include"],
+        super::json_payload_value(&provider_request.body_json)["parallel_tool_calls"],
+        true
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["include"],
         serde_json::json!(["file_search_call.results"])
     );
-    assert_eq!(provider_request.body_json["service_tier"], "priority");
-    assert_eq!(provider_request.body_json["prompt_cache_key"], "cache-key");
     assert_eq!(
-        provider_request.body_json["client_metadata"],
+        super::json_payload_value(&provider_request.body_json)["service_tier"],
+        "priority"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["prompt_cache_key"],
+        "cache-key"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["client_metadata"],
         serde_json::json!({"session_id": "sess_1"})
     );
 }
@@ -621,7 +688,7 @@ fn reasoning_adds_encrypted_content_include_once() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["include"],
+        super::json_payload_value(&provider_request.body_json)["include"],
         serde_json::json!(["reasoning.encrypted_content"])
     );
 }
@@ -656,7 +723,8 @@ fn reasoning_history_blocks_are_skipped_not_rejected() {
         let encoded = codec()
             .encode_request(&request)
             .expect("reasoning history no longer rejected");
-        let input = encoded.body_json["input"].as_array().expect("input array");
+        let body = super::json_payload_value(&encoded.body_json);
+        let input = body["input"].as_array().expect("input array");
         // The reasoning/thinking block produced no input item; the user text did.
         assert!(
             !input.iter().any(|it| it["type"] == "reasoning"),
@@ -675,7 +743,7 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
         ContentBlock::ServerToolUse {
             id: "srvtool_1".to_string(),
             name: "web_search".to_string(),
-            input: serde_json::json!({}),
+            input: super::json_payload(serde_json::json!({})),
         },
         ContentBlock::ConnectorText {
             connector_text: "ct".to_string(),
@@ -683,7 +751,7 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
         },
         ContentBlock::AdvisorToolResult {
             tool_use_id: "srvtool_1".to_string(),
-            content: serde_json::json!({}),
+            content: super::json_payload(serde_json::json!({})),
             is_error: false,
         },
     ] {
@@ -697,7 +765,8 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
         );
         let original = request.clone();
         let encoded = codec().encode_request(&request).unwrap();
-        let input = encoded.body_json["input"].as_array().unwrap();
+        let body = super::json_payload_value(&encoded.body_json);
+        let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["content"][0]["text"], "hello");
         assert_eq!(request, original);
@@ -714,8 +783,8 @@ fn encode_request_full_body_golden() {
     request.request.input.max_tokens = Some(4096);
     request.tools = vec![ToolDeclaration {
         name: "Bash".to_string(),
-        description: "run a command".to_string(),
-        input_schema: serde_json::json!({"type": "object"}),
+        description: "run a command".into(),
+        input_schema: json_payload(serde_json::json!({"type": "object"})),
         ..Default::default()
     }];
     request.request.set_tool_choice(Some(ToolChoice::Auto));
@@ -727,7 +796,7 @@ fn encode_request_full_body_golden() {
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json,
+        super::json_payload_value(&provider_request.body_json),
         serde_json::json!({
             "model": "gpt-5",
             "instructions": "sys",
@@ -801,11 +870,13 @@ fn decode_response_message_output_text_parts_become_text_blocks() {
         vec![
             ContentBlock::Text {
                 text: "hello".to_string(),
-                cache_control: None
+                cache_control: None,
+                citations: None
             },
             ContentBlock::Text {
                 text: "world".to_string(),
-                cache_control: None
+                cache_control: None,
+                citations: None
             },
         ]
     );
@@ -824,7 +895,7 @@ fn decode_response_function_call_becomes_tool_call_with_parsed_arguments() {
         vec![ContentBlock::ToolCall {
             id: "call_7".to_string(),
             name: "Bash".to_string(),
-            input: serde_json::json!({"command": "ls"}),
+            input: super::json_payload(serde_json::json!({"command": "ls"})),
         }]
     );
 }
@@ -860,7 +931,7 @@ fn native_reasoning_and_display_summary_are_both_preserved() {
     let native = serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"first"},{"type":"summary_text","text":"second"}]});
     let response = decode(completed_body(&serde_json::json!([native.clone()])));
     assert!(
-        matches!(&response.content[0],ContentBlock::ProviderContent { value, .. } if value == &native)
+        matches!(&response.content[0],ContentBlock::ProviderContent { value, .. } if value == &super::json_payload(native.clone()))
     );
     let texts: Vec<_> = response
         .content
@@ -876,7 +947,8 @@ fn native_reasoning_and_display_summary_are_both_preserved() {
         role: "assistant".into(),
         content: response.content,
     });
-    let body = codec().encode_request(&request).unwrap().body_json;
+    let encoded = codec().encode_request(&request).unwrap();
+    let body = super::json_payload_value(&encoded.body_json);
     assert_eq!(body["input"], serde_json::json!([native]));
 }
 
@@ -885,7 +957,7 @@ fn encrypted_reasoning_without_summary_survives_replay() {
     let native = serde_json::json!({"type":"reasoning","id":"rs","encrypted_content":"opaque"});
     let response = decode(completed_body(&serde_json::json!([native.clone()])));
     assert!(
-        matches!(response.content.as_slice(),[ContentBlock::ProviderContent { value, .. }] if value == &native)
+        matches!(response.content.as_slice(),[ContentBlock::ProviderContent { value, .. }] if value == &super::json_payload(native.clone()))
     );
 }
 
@@ -908,15 +980,16 @@ fn decode_response_preserves_hosted_and_unknown_output_items() {
         vec![
             ContentBlock::ProviderContent {
                 protocol: "open_ai_responses".into(),
-                value: web_search,
+                value: super::json_payload(web_search),
             },
             ContentBlock::ProviderContent {
                 protocol: "open_ai_responses".into(),
-                value: future_output,
+                value: super::json_payload(future_output),
             },
             ContentBlock::Text {
                 text: "hi".to_string(),
                 cache_control: None,
+                citations: None
             },
         ]
     );
@@ -946,12 +1019,13 @@ fn decode_response_preserves_output_item_order() {
             },
             ContentBlock::Text {
                 text: "I'll run it".to_string(),
-                cache_control: None
+                cache_control: None,
+                citations: None
             },
             ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
-                input: serde_json::json!({}),
+                input: super::json_payload(serde_json::json!({})),
             },
         ]
     );
@@ -1087,7 +1161,7 @@ fn decode_response_cost_is_none_and_metadata_is_body() {
     });
     let decoded = decode(body.clone());
     assert!(decoded.cost.is_none());
-    assert_eq!(decoded.provider_metadata, body);
+    assert_eq!(decoded.provider_metadata, super::json_payload(body));
 }
 
 #[test]
@@ -1221,15 +1295,18 @@ fn stream_provider_metadata_is_retained_on_start_and_terminal_usage() {
         metadata.clone(),
     );
 
+    let metadata_payload = super::json_payload(metadata.clone());
     assert!(matches!(
         &events[0],
         HistoryEvent::MessageStart { response }
-            if response.provider_metadata == metadata
+            if response.provider_metadata == metadata_payload
     ));
     assert!(matches!(
         &events[1],
         HistoryEvent::MessageDelta { usage: Some(usage), .. }
-            if usage.provider_metadata["stream"] == metadata && usage.counts().input_tokens == 2 && usage.counts().output_tokens == 3
+            if usage.provider_metadata.payload_at("/stream") == Some(metadata_payload.clone())
+                && usage.counts().input_tokens == 2
+                && usage.counts().output_tokens == 3
     ));
 }
 
@@ -1248,7 +1325,8 @@ fn stream_created_emits_message_start_snapshot() {
                 stop_details: None,
                 usage: ExecutionUsage::default(),
                 cost: None,
-                provider_metadata: serde_json::Value::Null,
+                provider_metadata: super::json_payload(serde_json::Value::Null),
+                resumable: None,
             }),
         }]
     );
@@ -1278,6 +1356,7 @@ fn stream_text_delta_opens_block_once_then_deltas() {
             content_block: ContentBlock::Text {
                 text: String::new(),
                 cache_control: None,
+                citations: None
             },
         }
     );
@@ -1319,7 +1398,7 @@ fn stream_function_call_added_starts_tool_block_with_empty_input() {
             content_block: ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
-                input: serde_json::Value::Object(serde_json::Map::new()),
+                input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),
             },
         }
     );
@@ -1352,13 +1431,13 @@ fn stream_function_call_arguments_delta_emits_input_json_delta() {
             HistoryEvent::ContentBlockDelta {
                 index: 0,
                 delta: HistoryContentDelta::InputJsonDelta {
-                    partial_json: "{\"command\":".to_string(),
+                    partial_json: "{\"command\":".into(),
                 },
             },
             HistoryEvent::ContentBlockDelta {
                 index: 0,
                 delta: HistoryContentDelta::InputJsonDelta {
-                    partial_json: "\"ls\"}".to_string(),
+                    partial_json: "\"ls\"}".into(),
                 },
             },
         ]
@@ -1501,6 +1580,7 @@ fn stream_output_index_keys_block_mapping() {
             content_block: ContentBlock::Text {
                 text: String::new(),
                 cache_control: None,
+                citations: None
             },
         }
     );
@@ -1549,6 +1629,7 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
                 delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".to_string()),
                     stop_details: None,
+                    resumable: None,
                 },
                 usage: Some(ExecutionUsage {
                     report: lingxi_llm_client::protocol::UsageReport::measured(
@@ -1564,7 +1645,9 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
 
                     context_tokens: Some(150),
                     provider_reported_total_tokens: Some(150),
-                    provider_metadata: serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}}),
+                    provider_metadata: super::json_payload(
+                        serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}})
+                    ),
                     ..Default::default()
                 }),
             },
@@ -1623,6 +1706,7 @@ fn stream_incomplete_max_output_tokens_maps_max_tokens() {
                 delta: HistoryMessageDelta {
                     stop_reason: Some("max_tokens".to_string()),
                     stop_details: None,
+                    resumable: None,
                 },
                 usage: None,
             },
@@ -1909,7 +1993,8 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
                     stop_details: None,
                     usage: ExecutionUsage::default(),
                     cost: None,
-                    provider_metadata: serde_json::Value::Null,
+                    provider_metadata: super::json_payload(serde_json::Value::Null),
+                    resumable: None,
                 }),
             },
             HistoryEvent::ContentBlockStart {
@@ -1917,6 +2002,7 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None
                 },
             },
         ]
@@ -2052,7 +2138,8 @@ fn stream_happy_path_exact_event_sequence() {
                     stop_details: None,
                     usage: ExecutionUsage::default(),
                     cost: None,
-                    provider_metadata: serde_json::Value::Null,
+                    provider_metadata: super::json_payload(serde_json::Value::Null),
+                    resumable: None,
                 }),
             },
             HistoryEvent::ContentBlockStart {
@@ -2060,6 +2147,7 @@ fn stream_happy_path_exact_event_sequence() {
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None
                 },
             },
             HistoryEvent::ContentBlockDelta {
@@ -2080,19 +2168,19 @@ fn stream_happy_path_exact_event_sequence() {
                 content_block: ContentBlock::ToolCall {
                     id: "call_1".to_string(),
                     name: "Bash".to_string(),
-                    input: serde_json::Value::Object(serde_json::Map::new()),
+                    input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),
                 },
             },
             HistoryEvent::ContentBlockDelta {
                 index: 1,
                 delta: HistoryContentDelta::InputJsonDelta {
-                    partial_json: "{\"command\":".to_string(),
+                    partial_json: "{\"command\":".into(),
                 },
             },
             HistoryEvent::ContentBlockDelta {
                 index: 1,
                 delta: HistoryContentDelta::InputJsonDelta {
-                    partial_json: "\"ls\"}".to_string(),
+                    partial_json: "\"ls\"}".into(),
                 },
             },
             HistoryEvent::ContentBlockStop { index: 1 },
@@ -2100,6 +2188,7 @@ fn stream_happy_path_exact_event_sequence() {
                 delta: HistoryMessageDelta {
                     stop_reason: Some("tool_use".to_string()),
                     stop_details: None,
+                    resumable: None,
                 },
                 usage: Some(ExecutionUsage {
                     report: lingxi_llm_client::protocol::UsageReport::measured(
@@ -2115,7 +2204,9 @@ fn stream_happy_path_exact_event_sequence() {
 
                     context_tokens: Some(150),
                     provider_reported_total_tokens: Some(150),
-                    provider_metadata: serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}}),
+                    provider_metadata: super::json_payload(
+                        serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}})
+                    ),
                     ..Default::default()
                 }),
             },
@@ -2150,6 +2241,12 @@ async fn native_reasoning_received_at_completion_keeps_its_replay_position() {
         content: response.content,
     });
     let encoded = codec().encode_request(&request).unwrap();
-    assert_eq!(encoded.body_json["input"][0], native);
-    assert_eq!(encoded.body_json["input"][1]["type"], "function_call");
+    assert_eq!(
+        super::json_payload_value(&encoded.body_json)["input"][0],
+        native
+    );
+    assert_eq!(
+        super::json_payload_value(&encoded.body_json)["input"][1]["type"],
+        "function_call"
+    );
 }

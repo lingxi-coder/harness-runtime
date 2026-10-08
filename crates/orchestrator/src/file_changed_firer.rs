@@ -96,7 +96,9 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
         let mut out: Vec<PathBuf> = Vec::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for raw in agg.watch_paths {
-            let p = std::path::Path::new(&raw);
+            // Watch paths reach the filesystem API here; retain exact hook
+            // text until this OS path boundary, where Rust paths require UTF-8.
+            let p = std::path::Path::new(&raw.display);
             let resolved = if p.is_absolute() {
                 p.to_path_buf()
             } else {

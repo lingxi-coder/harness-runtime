@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -44,9 +45,12 @@ use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
+#[cfg(test)]
+use tool_api::tool_trait::source_text_projection_units;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::DeferralState;
 // The registry-view surface (`ToolSearchEntry` / `ToolRegistryView` /
@@ -80,13 +84,11 @@ const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferre
 
 /// `qZh` — default sentence appended when `Qbc()` is `false` (the binary
 /// default, and LingXi's fixed value).
-const TOOL_SEARCH_DESC_DEFAULT_SENTENCE: &str =
-    " Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked.";
+const TOOL_SEARCH_DESC_DEFAULT_SENTENCE: &str = " Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked.";
 
 /// `jZh` — sentence appended when `Qbc()` (juniper_shoal.gorse_hollow /
 /// `toolSearchFetchRule`) is enabled. Register-but-disabled in LingXi.
-const TOOL_SEARCH_DESC_FETCH_RULE_SENTENCE: &str =
-    " Until fetched, only the name is known \u{2014} there is no parameter schema, so calling the tool fails with InputValidationError. When any instruction, system reminder, or other tool's description names a deferred tool, fetch it with query \"select:<name>\" before calling it.";
+const TOOL_SEARCH_DESC_FETCH_RULE_SENTENCE: &str = " Until fetched, only the name is known \u{2014} there is no parameter schema, so calling the tool fails with InputValidationError. When any instruction, system reminder, or other tool's description names a deferred tool, fetch it with query \"select:<name>\" before calling it.";
 
 /// `WZh` — body (real `\n\n` / `\n- ` bullets; em-dashes are U+2014).
 const TOOL_SEARCH_DESC_BODY: &str = " This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
@@ -174,6 +176,8 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
+
 /// Parsed tool name, mirroring TS `parseToolName`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedName {
@@ -246,6 +250,140 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+fn decode_source_char(units: &[u16], index: usize) -> (Option<char>, usize) {
+    let Some(first) = units.get(index).copied() else {
+        return (None, 0);
+    };
+    if (0xD800..=0xDBFF).contains(&first) {
+        if let Some(second) = units
+            .get(index + 1)
+            .copied()
+            .filter(|second| (0xDC00..=0xDFFF).contains(second))
+        {
+            let scalar =
+                0x10000 + ((u32::from(first) - 0xD800) << 10) + (u32::from(second) - 0xDC00);
+            return (char::from_u32(scalar), 2);
+        }
+        return (None, 1);
+    }
+    if (0xDC00..=0xDFFF).contains(&first) {
+        return (None, 1);
+    }
+    (char::from_u32(u32::from(first)), 1)
+}
+
+fn lowercase_source_units(units: &[u16]) -> Vec<u16> {
+    let mut lowered = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let (character, width) = decode_source_char(units, index);
+        if let Some(character) = character {
+            for lowered_char in character.to_lowercase() {
+                let mut buffer = [0; 2];
+                lowered.extend_from_slice(lowered_char.encode_utf16(&mut buffer));
+            }
+        } else {
+            lowered.push(units[index]);
+        }
+        index += width;
+    }
+    lowered
+}
+
+fn source_whitespace(character: char) -> bool {
+    character.is_whitespace() || character == '\u{feff}'
+}
+
+fn trim_source_units(mut units: &[u16]) -> &[u16] {
+    let mut start = 0;
+    while start < units.len() {
+        let (character, width) = decode_source_char(units, start);
+        if !character.is_some_and(source_whitespace) {
+            break;
+        }
+        start += width;
+    }
+    units = &units[start..];
+    let mut end = units.len();
+    while end > 0 {
+        let low = units[end - 1];
+        let (character, width) = if (0xDC00..=0xDFFF).contains(&low) && end > 1 {
+            let high = units[end - 2];
+            if (0xD800..=0xDBFF).contains(&high) {
+                let scalar =
+                    0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
+                (char::from_u32(scalar), 2)
+            } else {
+                (None, 1)
+            }
+        } else if (0xD800..=0xDFFF).contains(&low) {
+            (None, 1)
+        } else {
+            (char::from_u32(u32::from(low)), 1)
+        };
+        if !character.is_some_and(source_whitespace) {
+            break;
+        }
+        end -= width;
+    }
+    &units[..end]
+}
+
+fn split_source_whitespace(units: &[u16]) -> Vec<Vec<u16>> {
+    let mut terms = Vec::new();
+    let mut current = Vec::new();
+    let mut index = 0;
+    while index < units.len() {
+        let (character, width) = decode_source_char(units, index);
+        if character.is_some_and(source_whitespace) {
+            if !current.is_empty() {
+                terms.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.extend_from_slice(&units[index..index + width]);
+        }
+        index += width;
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
+}
+
+fn source_contains(haystack: &[u16], needle: &[u16]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|part| part == needle)
+}
+
+fn ascii_word_unit(unit: u16) -> bool {
+    matches!(unit, 0x30..=0x39 | 0x41..=0x5A | 0x61..=0x7A | 0x5F)
+}
+
+fn word_boundary_contains_units(haystack: &[u16], needle: &[u16]) -> bool {
+    if needle.is_empty() {
+        return haystack.iter().copied().any(ascii_word_unit);
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let leading_word = ascii_word_unit(needle[0]);
+    let trailing_word = ascii_word_unit(*needle.last().expect("non-empty needle"));
+    for start in 0..=(haystack.len() - needle.len()) {
+        if &haystack[start..start + needle.len()] != needle {
+            continue;
+        }
+        let before_word = start > 0 && ascii_word_unit(haystack[start - 1]);
+        if before_word == leading_word {
+            continue;
+        }
+        let end = start + needle.len();
+        let after_word = end < haystack.len() && ascii_word_unit(haystack[end]);
+        if after_word != trailing_word {
+            return true;
+        }
+    }
+    false
+}
+
 /// Faithful port of `new RegExp('\\b' + escapeRegExp(needle) + '\\b').test(hay)`.
 ///
 /// `escapeRegExp` makes the needle a literal, so this is a literal substring
@@ -309,28 +447,33 @@ struct SearchResult {
 /// case-insensitive exact match in the view (the whole view is the candidate
 /// set — there is no deferred/loaded split in Rust).
 #[must_use]
-pub(crate) fn handle_select(query: &str, entries: &[ToolSearchEntry]) -> Option<Vec<String>> {
-    // /^select:(.+)$/i — case-insensitive prefix; `(.+)` requires at least one
-    // char after the colon, and `.` does not match a newline, so a bare
-    // `select:` (or a `select:\n…` whose remainder begins at a newline) is not
-    // a select query.
-    let lower = query.to_lowercase();
-    let rest = lower.strip_prefix("select:")?;
-    let first = rest.chars().next()?;
+fn handle_select_source(
+    query: &Utf16JsonProjection,
+    entries: &[ToolSearchEntry],
+) -> Option<Vec<String>> {
+    let query_units = query.string_units("")?;
+    let lower = lowercase_source_units(&query_units);
+    let prefix = "select:".encode_utf16().collect::<Vec<_>>();
+    if !lower.starts_with(&prefix) {
+        return None;
+    }
+    let rest = &lower[prefix.len()..];
+    let first = decode_source_char(rest, 0).0?;
     if first == '\n' || first == '\r' {
         return None;
     }
-    // Slice the original (case-preserving) query at the same byte offset so we
-    // resolve names against their real casing-insensitive view lookup.
-    let original_rest = &query["select:".len()..];
+    let original_rest = &query_units[prefix.len()..];
 
-    let mut found: Vec<String> = Vec::new();
-    for raw in original_rest.split(',') {
-        let name = raw.trim();
+    let mut found = Vec::<String>::new();
+    for raw in original_rest.split(|unit| *unit == u16::from(b',')) {
+        let name = trim_source_units(raw);
         if name.is_empty() {
             continue;
         }
-        if let Some(entry) = entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)) {
+        let lower_name = lowercase_source_units(name);
+        if let Some(entry) = entries.iter().find(|entry| {
+            lowercase_source_units(&entry.name.encode_utf16().collect::<Vec<_>>()) == lower_name
+        }) {
             if !found.contains(&entry.name) {
                 found.push(entry.name.clone());
             }
@@ -339,58 +482,61 @@ pub(crate) fn handle_select(query: &str, entries: &[ToolSearchEntry]) -> Option<
     Some(found)
 }
 
-/// Weighted keyword scorer, mirroring `searchToolsWithKeywords`
-/// (`ToolSearchTool.ts:186-302`). `entries` is the candidate set (no
-/// deferred/loaded split in Rust).
-#[must_use]
-pub(crate) fn search_tools_with_keywords(
-    query: &str,
+#[cfg(test)]
+pub(crate) fn handle_select(query: &str, entries: &[ToolSearchEntry]) -> Option<Vec<String>> {
+    handle_select_source(&source_text_projection(query), entries)
+}
+
+fn search_tools_with_keywords_source(
+    query: &Utf16JsonProjection,
     entries: &[ToolSearchEntry],
     max_results: usize,
 ) -> Vec<String> {
-    let query_lower = query.to_lowercase();
-    let query_lower = query_lower.trim();
+    let Some(query_units) = query.string_units("") else {
+        return Vec::new();
+    };
+    let lowered_query = lowercase_source_units(&query_units);
+    let query_lower = trim_source_units(&lowered_query);
 
     // Fast path: exact tool-name match (case-insensitive).
-    if let Some(entry) = entries
-        .iter()
-        .find(|e| e.name.to_lowercase() == query_lower)
-    {
+    if let Some(entry) = entries.iter().find(|entry| {
+        lowercase_source_units(&entry.name.encode_utf16().collect::<Vec<_>>()) == query_lower
+    }) {
         return vec![entry.name.clone()];
     }
 
     // mcp__server prefix match.
-    if query_lower.starts_with("mcp__") && query_lower.len() > 5 {
+    let mcp_prefix = "mcp__".encode_utf16().collect::<Vec<_>>();
+    if query_lower.starts_with(&mcp_prefix) && query_lower.len() > mcp_prefix.len() {
         let prefix_matches: Vec<String> = entries
             .iter()
-            .filter(|e| e.name.to_lowercase().starts_with(query_lower))
+            .filter(|entry| {
+                lowercase_source_units(&entry.name.encode_utf16().collect::<Vec<_>>())
+                    .starts_with(query_lower)
+            })
             .take(max_results)
-            .map(|e| e.name.clone())
+            .map(|entry| entry.name.clone())
             .collect();
         if !prefix_matches.is_empty() {
             return prefix_matches;
         }
     }
 
-    // Tokenize the query on whitespace, drop empties.
-    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
-
-    // Partition into required (+prefixed) and optional terms.
-    let mut required_terms: Vec<String> = Vec::new();
-    let mut optional_terms: Vec<String> = Vec::new();
+    let query_terms = split_source_whitespace(query_lower);
+    let mut required_terms = Vec::<Vec<u16>>::new();
+    let mut optional_terms = Vec::<Vec<u16>>::new();
     for term in &query_terms {
-        if let Some(stripped) = term.strip_prefix('+') {
+        if term.first() == Some(&u16::from(b'+')) {
+            let stripped = &term[1..];
             if !stripped.is_empty() {
-                required_terms.push(stripped.to_string());
+                required_terms.push(stripped.to_vec());
                 continue;
             }
         }
-        optional_terms.push((*term).to_string());
+        optional_terms.push(term.clone());
     }
-
-    // allScoringTerms = required.length > 0 ? [...required, ...optional] : queryTerms
-    let all_scoring_terms: Vec<String> = if required_terms.is_empty() {
-        query_terms.iter().map(|t| (*t).to_string()).collect()
+    let all_scoring_terms = if required_terms.is_empty() {
+        query_terms
     } else {
         required_terms
             .iter()
@@ -399,81 +545,91 @@ pub(crate) fn search_tools_with_keywords(
             .collect()
     };
 
-    // Pre-filter to entries matching ALL required terms in name/desc/hint.
+    let entry_text =
+        |value: &Utf16JsonProjection| value.string_units("").unwrap_or_default().to_vec();
+    let entry_matches_term = |entry: &ToolSearchEntry, term: &[u16]| {
+        let parsed = parse_tool_name(&entry.name);
+        let desc = lowercase_source_units(&entry_text(&entry.description));
+        let hint = entry
+            .search_hint
+            .as_ref()
+            .map(|value| entry_text(value))
+            .map(|text| lowercase_source_units(&text))
+            .unwrap_or_default();
+        parsed.parts.iter().any(|part| {
+            let part = lowercase_source_units(&part.encode_utf16().collect::<Vec<_>>());
+            part == term || source_contains(&part, term)
+        }) || word_boundary_contains_units(&desc, term)
+            || (!hint.is_empty() && word_boundary_contains_units(&hint, term))
+    };
+
     let candidates: Vec<&ToolSearchEntry> = if required_terms.is_empty() {
         entries.iter().collect()
     } else {
         entries
             .iter()
             .filter(|entry| {
-                let parsed = parse_tool_name(&entry.name);
-                let desc = entry.description.to_lowercase();
-                let hint = entry
-                    .search_hint
-                    .as_deref()
-                    .map(str::to_lowercase)
-                    .unwrap_or_default();
-                required_terms.iter().all(|term| {
-                    parsed.parts.iter().any(|p| p == term)
-                        || parsed.parts.iter().any(|p| p.contains(term))
-                        || word_boundary_contains(&desc, term)
-                        || (!hint.is_empty() && word_boundary_contains(&hint, term))
-                })
+                required_terms
+                    .iter()
+                    .all(|term| entry_matches_term(entry, term))
             })
             .collect()
     };
 
-    // Score each candidate.
     let mut scored: Vec<(String, i64)> = candidates
         .iter()
         .map(|entry| {
             let parsed = parse_tool_name(&entry.name);
-            let desc = entry.description.to_lowercase();
+            let desc = lowercase_source_units(&entry_text(&entry.description));
             let hint = entry
                 .search_hint
-                .as_deref()
-                .map(str::to_lowercase)
+                .as_ref()
+                .map(|value| entry_text(value))
+                .map(|text| lowercase_source_units(&text))
                 .unwrap_or_default();
+            let parts = parsed
+                .parts
+                .iter()
+                .map(|part| lowercase_source_units(&part.encode_utf16().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            let full = lowercase_source_units(&parsed.full.encode_utf16().collect::<Vec<_>>());
 
             let mut score: i64 = 0;
             for term in &all_scoring_terms {
-                // Exact part match (high weight for MCP/tool-name parts).
-                if parsed.parts.iter().any(|p| p == term) {
+                if parts.iter().any(|part| part == term) {
                     score += if parsed.is_mcp { 12 } else { 10 };
-                } else if parsed.parts.iter().any(|p| p.contains(term)) {
+                } else if parts.iter().any(|part| source_contains(part, term)) {
                     score += if parsed.is_mcp { 6 } else { 5 };
                 }
-
-                // Full-name fallback (only while still scoreless).
-                if score == 0 && parsed.full.contains(term) {
+                if score == 0 && source_contains(&full, term) {
                     score += 3;
                 }
-
-                // searchHint match — curated phrase, higher signal.
-                if !hint.is_empty() && word_boundary_contains(&hint, term) {
+                if !hint.is_empty() && word_boundary_contains_units(&hint, term) {
                     score += 4;
                 }
-
-                // Description match (word boundary to avoid false positives).
-                if word_boundary_contains(&desc, term) {
+                if word_boundary_contains_units(&desc, term) {
                     score += 2;
                 }
             }
-
             (entry.name.clone(), score)
         })
-        .filter(|(_, s)| *s > 0)
+        .filter(|(_, score)| *score > 0)
         .collect();
-
-    // sort((a, b) => b.score - a.score) — JS sort is stable, so candidates of
-    // equal score keep their original (registry) order. Rust's sort_by is also
-    // stable, so a key on `-score` reproduces that ordering exactly.
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by(|left, right| right.1.cmp(&left.1));
     scored
         .into_iter()
         .take(max_results)
         .map(|(name, _)| name)
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn search_tools_with_keywords(
+    query: &str,
+    entries: &[ToolSearchEntry],
+    max_results: usize,
+) -> Vec<String> {
+    search_tools_with_keywords_source(&source_text_projection(query), entries, max_results)
 }
 
 fn pii_str(s: &str) -> AnalyticsValue {
@@ -497,13 +653,25 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 /// Resolve the effective `max_results` from input: TS default 5, bounded by
 /// the hard ceiling guard. Non-integer / out-of-range values fall back to the
 /// default (the schema would reject them, but stay defensive).
-fn resolve_max_results(input: &Value) -> usize {
+fn resolve_max_results(input: &Utf16JsonProjection) -> usize {
     let raw = input
-        .get("max_results")
-        .and_then(Value::as_u64)
+        .get_property("max_results")
+        .and_then(JsonValueView::as_number)
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .map(|value| value as u64)
         .map_or(TOOL_SEARCH_DEFAULT_MAX_RESULTS, |n| n as usize);
     let raw = raw.max(1);
     raw.min(TOOL_SEARCH_MAX_RESULTS)
+}
+
+fn text_array_projection(values: impl IntoIterator<Item = String>) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(
+        values
+            .into_iter()
+            .map(|value| source_text_projection(&value))
+            .collect(),
+    )
+    .expect("ToolSearch text list is valid JSON")
 }
 
 #[async_trait]
@@ -511,8 +679,15 @@ impl Tool for ToolSearchTool {
     fn name(&self) -> &str {
         TOOL_SEARCH_TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -520,23 +695,27 @@ impl Tool for ToolSearchTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ToolSearch is a read-only registry query".into(),
@@ -547,56 +726,71 @@ impl Tool for ToolSearchTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // Binary wires `FGn()` into both surfaces; gate `Qbc()` defaults `false`
         // (juniper_shoal.gorse_hollow / toolSearchFetchRule).
         tool_search_description(false)
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        tool_search_description(false)
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+        tool_search_description(false).into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let q = input
-            .get("query")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("ToolSearch: missing or non-string query".into()))?;
+        let q = input.string_units("/query").ok_or_else(|| {
+            ValidationError(source_text_projection(
+                "ToolSearch: missing or non-string query",
+            ))
+        })?;
         if q.is_empty() {
-            return Err(ValidationError("ToolSearch: query is empty".into()));
+            return Err(ValidationError(source_text_projection(
+                "ToolSearch: query is empty",
+            )));
         }
         Ok(())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
-        let query = match input.get("query").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let query_source = match input
+            .subprojection("/query")
+            .ok()
+            .filter(|value| value.string_units("").is_some())
+        {
+            Some(value) => value,
             None => {
                 emit_failed(&bus, "missing_query", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "ToolSearch: missing or non-string query".into(),
+                return Err(invalid_tool_input(
+                    "ToolSearch: missing or non-string query",
                 ));
             }
         };
-        if query.is_empty() {
+        let query_units = query_source
+            .string_units("")
+            .expect("query source is a string");
+        if query_units.is_empty() {
             emit_failed(&bus, "empty_query", started.elapsed().as_millis() as u64).await;
-            return Err(ToolError::InvalidInput("ToolSearch: query is empty".into()));
+            return Err(invalid_tool_input("ToolSearch: query is empty"));
         }
         let max_results = resolve_max_results(&input);
 
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("_PROTO_query".into(), pii_str(&query));
+        // Telemetry's string API cannot represent an unpaired UTF-16 code
+        // unit. Keep the query exact in ranking and the returned projection;
+        // omit only this optional display/log field when it has no Rust str.
+        if let Some(query) = query_source.string_at("") {
+            md.insert("_PROTO_query".into(), pii_str(query));
+        }
         bus.log_event(TOOL_SEARCH_STARTED, md).await;
 
         let entries = self.view.entries();
@@ -604,13 +798,13 @@ impl Tool for ToolSearchTool {
         let SearchResult {
             matches,
             query_type,
-        } = match handle_select(&query, &entries) {
+        } = match handle_select_source(&query_source, &entries) {
             Some(found) => SearchResult {
                 matches: found,
                 query_type: "select",
             },
             None => SearchResult {
-                matches: search_tools_with_keywords(&query, &entries, max_results),
+                matches: search_tools_with_keywords_source(&query_source, &entries, max_results),
                 query_type: "keyword",
             },
         };
@@ -674,32 +868,89 @@ impl Tool for ToolSearchTool {
             None
         };
 
-        let mut data = json!({
-            "matches": matches,
-            "query": query,
-            "total_deferred_tools": entries.len(),
-            "max_results": max_results,
-        });
+        let mut data = vec![
+            ("matches".into(), text_array_projection(matches.clone())),
+            (
+                "query".into(),
+                input.subprojection("/query").expect("query was validated"),
+            ),
+            (
+                "total_deferred_tools".into(),
+                generated_builtin_result(&json!(entries.len())),
+            ),
+            (
+                "max_results".into(),
+                generated_builtin_result(&json!(max_results)),
+            ),
+        ];
         if !pending_mcp_servers.is_empty() {
-            data["pending_mcp_servers"] = json!(pending_mcp_servers);
+            data.push((
+                "pending_mcp_servers".into(),
+                text_array_projection(pending_mcp_servers.clone()),
+            ));
         }
         if !failed_mcp_servers.is_empty() {
-            data["failed_mcp_servers"] = json!(failed_mcp_servers
+            let server_results = failed_mcp_servers
                 .iter()
-                .map(|(name, error)| match error {
-                    Some(error) => json!({ "name": name, "error": error }),
-                    None => json!({ "name": name }),
+                .map(|(name, error)| {
+                    let mut fields = vec![("name".into(), source_text_projection(name))];
+                    if let Some(error) = error {
+                        fields.push(("error".into(), source_text_projection(error)));
+                    }
+                    Utf16JsonProjection::object(fields)
+                        .expect("ToolSearch server error is valid JSON")
                 })
-                .collect::<Vec<_>>());
+                .collect();
+            data.push((
+                "failed_mcp_servers".into(),
+                Utf16JsonProjection::array(server_results)
+                    .expect("ToolSearch server error list is valid JSON"),
+            ));
         }
 
         Ok(ToolCallResult {
-            data,
-            model_content,
+            data: Utf16JsonProjection::object(data).expect("ToolSearch result is valid JSON"),
+            model_content: model_content.map(|text| source_text_projection(&text)),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
+        })
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestToolSearchResult {
+    data: Value,
+    model_content: Option<String>,
+}
+
+#[cfg(test)]
+impl ToolSearchTool {
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestToolSearchResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection serializes"),
+        )
+        .expect("test result JSON parses");
+        let model_content = result
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .map(str::to_owned);
+        Ok(TestToolSearchResult {
+            data,
+            model_content,
         })
     }
 }
@@ -811,6 +1062,11 @@ fn empty_result_model_content(pending: &[String], failed: &[(String, Option<Stri
     text
 }
 
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,7 +1085,7 @@ mod tests {
     fn entry(name: &str, desc: &str) -> ToolSearchEntry {
         ToolSearchEntry {
             name: name.into(),
-            description: desc.into(),
+            description: source_text_projection(desc),
             search_hint: None,
         }
     }
@@ -837,8 +1093,8 @@ mod tests {
     fn entry_hint(name: &str, desc: &str, hint: &str) -> ToolSearchEntry {
         ToolSearchEntry {
             name: name.into(),
-            description: desc.into(),
-            search_hint: Some(hint.into()),
+            description: source_text_projection(desc),
+            search_hint: Some(source_text_projection(hint)),
         }
     }
 
@@ -895,10 +1151,7 @@ mod tests {
     #[test]
     fn empty_result_policy_note_is_byte_exact() {
         assert_eq!(
-            empty_result_model_content(
-                &[],
-                &[failed("acme", Some(MCP_POLICY_ERROR_ENTERPRISE))]
-            ),
+            empty_result_model_content(&[], &[failed("acme", Some(MCP_POLICY_ERROR_ENTERPRISE))]),
             "No matching deferred tools found. Note: these configured MCP servers are blocked by the organization's managed policy, so their tools are unavailable: acme. This is an administrative block, not a connection failure \u{2014} retrying will not help; an administrator manages this setting."
         );
     }
@@ -1121,6 +1374,18 @@ mod tests {
     }
 
     #[test]
+    fn source_description_matching_distinguishes_unpaired_surrogate_from_replacement_char() {
+        let description = source_text_projection_units(&[0xD800]);
+        let view = vec![ToolSearchEntry {
+            name: "ToolA".into(),
+            description,
+            search_hint: None,
+        }];
+        let query = source_text_projection("\u{fffd}");
+        assert!(search_tools_with_keywords_source(&query, &view, 5).is_empty());
+    }
+
+    #[test]
     fn max_results_caps_keyword() {
         let v: Vec<ToolSearchEntry> = (0..10)
             .map(|i| entry(&format!("Tool{i:02}"), "match me please"))
@@ -1152,33 +1417,31 @@ mod tests {
 
     // ---- resolve_max_results ----
 
+    fn test_max_results(input: Value) -> usize {
+        super::resolve_max_results(&generated_builtin_result(&input))
+    }
+
     #[test]
     fn max_results_defaults_to_five() {
-        assert_eq!(resolve_max_results(&json!({"query": "x"})), 5);
+        assert_eq!(test_max_results(json!({"query": "x"})), 5);
     }
 
     #[test]
     fn max_results_honors_input() {
-        assert_eq!(
-            resolve_max_results(&json!({"query": "x", "max_results": 3})),
-            3
-        );
+        assert_eq!(test_max_results(json!({"query": "x", "max_results": 3})), 3);
     }
 
     #[test]
     fn max_results_clamped_to_ceiling() {
         assert_eq!(
-            resolve_max_results(&json!({"query": "x", "max_results": 9999})),
+            test_max_results(json!({"query": "x", "max_results": 9999})),
             TOOL_SEARCH_MAX_RESULTS
         );
     }
 
     #[test]
     fn max_results_floor_one() {
-        assert_eq!(
-            resolve_max_results(&json!({"query": "x", "max_results": 0})),
-            1
-        );
+        assert_eq!(test_max_results(json!({"query": "x", "max_results": 0})), 1);
     }
 
     // ---- call() ----
@@ -1204,6 +1467,25 @@ mod tests {
         assert_eq!(out.data["query"], json!("select:Read,Write"));
         assert_eq!(out.data["total_deferred_tools"], json!(2));
         assert_eq!(out.data["max_results"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn call_preserves_unpaired_query_units_in_result() {
+        let tool = ToolSearchTool::with_view(shell_test_ctx(dummy_out()), mk_view(Vec::new()));
+        let input = Utf16JsonProjection::object(vec![(
+            "query".into(),
+            source_text_projection_units(&[0xD800]),
+        )])
+        .expect("query object is valid JSON");
+
+        Tool::validate_input(&tool, &input, &fresh_ctx())
+            .await
+            .expect("a non-empty JavaScript string is a valid query");
+        let result = Tool::call(&tool, input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("search returns a source-native result");
+
+        assert_eq!(result.data.string_units("/query"), Some(vec![0xD800]));
     }
 
     #[tokio::test]
@@ -1308,14 +1590,14 @@ mod tests {
             &self,
             _conn: &lingxi_core::host::McpRawConnection,
             _tool: &str,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
         ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
             _conn: &lingxi_core::host::McpRawConnection,
-            _uri: &str,
+            _uri: &Utf16JsonProjection,
         ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
             unreachable!()
         }
@@ -1480,13 +1762,17 @@ mod tests {
         let tool = ToolSearchTool::new(shell_test_ctx(dummy_out()));
         let desc = tool
             .description(
-                &json!({}),
+                &generated_builtin_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
             )
             .await;
-        let prompt = tool.prompt(&PromptOptions::default()).await;
+        let prompt = tool
+            .prompt(&PromptOptions::default())
+            .await
+            .string_at("")
+            .expect("generated prompt is a root string");
         assert_eq!(desc, prompt);
         assert_eq!(desc, EXPECTED_DEFAULT_DESC);
         // Regression guard: no longer the old one-sentence stub.

@@ -202,26 +202,32 @@ pub async fn discover_oidc(
     let resp = http
         .request(req)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: OIDC discovery transport: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: OIDC discovery transport: {e}").into()))?;
     if !(200..300).contains(&resp.status) {
-        return Err(McpError::OAuth(format!(
-            "XAA IdP: OIDC discovery failed: HTTP {} at {url}",
-            resp.status
-        )));
+        return Err(McpError::OAuth(
+            format!(
+                "XAA IdP: OIDC discovery failed: HTTP {} at {url}",
+                resp.status
+            )
+            .into(),
+        ));
     }
     let meta: OidcMetadata = serde_json::from_str(&resp.body).map_err(|_| {
-        McpError::OAuth(format!(
-            "XAA IdP: OIDC discovery returned invalid/non-JSON metadata at {url}"
-        ))
+        McpError::OAuth(
+            format!("XAA IdP: OIDC discovery returned invalid/non-JSON metadata at {url}").into(),
+        )
     })?;
     if url::Url::parse(&meta.token_endpoint)
         .ok()
         .is_none_or(|endpoint| endpoint.scheme() != "https")
     {
-        return Err(McpError::OAuth(format!(
-            "XAA IdP: refusing non-HTTPS token endpoint: {}",
-            meta.token_endpoint
-        )));
+        return Err(McpError::OAuth(
+            format!(
+                "XAA IdP: refusing non-HTTPS token endpoint: {}",
+                meta.token_endpoint
+            )
+            .into(),
+        ));
     }
     Ok(meta)
 }
@@ -277,7 +283,7 @@ pub async fn get_cached_id_token(
     let data = storage
         .retrieve(XAA_IDP_SERVICE, &key)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache retrieve: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache retrieve: {e}").into()))?;
     let Some(data) = data else { return Ok(None) };
     let cached: CachedIdToken = match serde_json::from_slice(data.expose_secret_bytes()) {
         Ok(c) => c,
@@ -309,7 +315,7 @@ async fn set_cached_id_token(
             .as_secs(),
     };
     let bytes = serde_json::to_vec(&cached)
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode id_token: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode id_token: {e}").into()))?;
     let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
@@ -319,7 +325,7 @@ async fn set_cached_id_token(
     storage
         .store(XAA_IDP_SERVICE, &issuer_key(issuer), data)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache store: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache store: {e}").into()))?;
     Ok(())
 }
 
@@ -361,7 +367,7 @@ pub async fn clear_cached_id_token(
     storage
         .delete(XAA_IDP_SERVICE, &issuer_key(issuer))
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache delete: {e}")))
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: id_token cache delete: {e}").into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +410,7 @@ pub async fn save_idp_client_secret(
     client_secret: &str,
 ) -> Result<(), McpError> {
     let bytes = serde_json::to_vec(&serde_json::json!({ "clientSecret": client_secret }))
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode secret: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode secret: {e}").into()))?;
     let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
@@ -414,7 +420,7 @@ pub async fn save_idp_client_secret(
     storage
         .store(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer), data)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret store: {e}")))
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret store: {e}").into()))
 }
 
 /// Remove the IdP client secret for `issuer` (`clearIdpClientSecret`).
@@ -429,7 +435,7 @@ pub async fn clear_idp_client_secret(
     storage
         .delete(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer))
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret delete: {e}")))
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret delete: {e}").into()))
 }
 
 /// Read the AS confidential-client secret for a server
@@ -449,13 +455,12 @@ async fn read_client_secret(
     service: &str,
     account: &str,
 ) -> Result<Option<String>, McpError> {
-    let data = storage
-        .retrieve(service, account)
-        .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret retrieve ({service}): {e}")))?;
+    let data = storage.retrieve(service, account).await.map_err(|e| {
+        McpError::OAuth(format!("XAA IdP: secret retrieve ({service}): {e}").into())
+    })?;
     let Some(data) = data else { return Ok(None) };
     let parsed: StoredClientSecret = serde_json::from_slice(data.expose_secret_bytes())
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode secret ({service}): {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode secret ({service}): {e}").into()))?;
     Ok(Some(parsed.client_secret))
 }
 
@@ -520,7 +525,7 @@ pub async fn acquire_idp_id_token(
     //    the authorize URL is built. A configured callback_port pins it.
     let listener = oauth::CallbackListener::bind(settings.callback_port.unwrap_or(0))
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: callback bind: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: callback bind: {e}").into()))?;
     let port = listener.port();
     let redirect_uri = format!("http://localhost:{port}/callback");
 
@@ -534,7 +539,7 @@ pub async fn acquire_idp_id_token(
     let params = listener
         .accept(&state, &redirect_uri)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: callback: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: callback: {e}").into()))?;
 
     // 5. Exchange the code for tokens, extracting the id_token. We POST the same
     //    authorization_code grant oauth::exchange_code does, but parse our own
@@ -607,15 +612,14 @@ async fn exchange_code_for_id_token(
     let resp = http
         .request(req)
         .await
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: token exchange transport: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: token exchange transport: {e}").into()))?;
     if !(200..300).contains(&resp.status) {
-        return Err(McpError::OAuth(format!(
-            "XAA IdP: token exchange failed: HTTP {}",
-            resp.status
-        )));
+        return Err(McpError::OAuth(
+            format!("XAA IdP: token exchange failed: HTTP {}", resp.status).into(),
+        ));
     }
     let parsed: OidcTokenResponse = serde_json::from_str(&resp.body)
-        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode token response: {e}")))?;
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: decode token response: {e}").into()))?;
     let id_token = parsed.id_token.ok_or_else(|| {
         McpError::OAuth("XAA IdP: token response missing id_token (check scope=openid)".into())
     })?;
@@ -704,10 +708,13 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         // → can't run the confidential jwt-bearer leg; treat as not provisioned
         // (auth.ts:691-711 raises; we surface the actionable error to the user).
         let Some(as_client_secret) = get_as_client_secret(&self.storage, &server_key).await? else {
-            return Err(McpError::OAuth(format!(
-                "XAA: AS client secret not found for '{server_name}'. \
+            return Err(McpError::OAuth(
+                format!(
+                    "XAA: AS client secret not found for '{server_name}'. \
                  Re-add the server with its --client-secret."
-            )));
+                )
+                .into(),
+            ));
         };
 
         // IdP client secret lives in its own slot, keyed by IdP issuer (a
@@ -749,9 +756,12 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         // in `xaa_inputs` keeps the trait seam stateless while preserving that
         // observable ordering.
         let Some((_as_client_id, server_key)) = self.server_lookup.lookup(server_name).await else {
-            return Err(McpError::OAuth(format!(
-                "XAA: server '{server_name}' is not XAA-provisioned (no AS client config)."
-            )));
+            return Err(McpError::OAuth(
+                format!(
+                    "XAA: server '{server_name}' is not XAA-provisioned (no AS client config)."
+                )
+                .into(),
+            ));
         };
         if get_as_client_secret(&self.storage, &server_key)
             .await?
@@ -759,7 +769,7 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
         {
             return Err(McpError::OAuth(format!(
                 "XAA: AS client secret not found for '{server_name}'. Re-add the server with its --client-secret."
-            )));
+            ).into()));
         }
         let _ = get_idp_client_secret(&self.storage, &self.settings.issuer).await?;
         Ok(

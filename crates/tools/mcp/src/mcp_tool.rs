@@ -21,7 +21,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lingxi_core::host::{McpPermissionCeiling, McpTransportSpec};
-use mcp::registry::McpRegistry;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
+use mcp::registry::{McpRegistry, McpToolOutputSchemaParserHandle};
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -42,7 +43,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::{ToolProgress, ToolProgressSender};
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 
 // -- Wire identifier locks (spec §7 lines 685-700) ---------------------------
@@ -78,26 +79,32 @@ pub(crate) fn parse_full_name(full_name: &str) -> Result<(&str, &str), ToolError
     let rest = full_name
         .strip_prefix(MCP_TOOL_FULL_NAME_PREFIX)
         .ok_or_else(|| {
-            ToolError::InvalidInput(format!(
-                "MCPTool: full_name {full_name:?} does not match mcp__<server>__<tool> pattern"
-            ))
+            ToolError::InvalidInput(
+                format!(
+                    "MCPTool: full_name {full_name:?} does not match mcp__<server>__<tool> pattern"
+                )
+                .into(),
+            )
         })?;
     let idx = rest.find(MCP_TOOL_FULL_NAME_SEPARATOR).ok_or_else(|| {
-        ToolError::InvalidInput(format!(
-            "MCPTool: full_name {full_name:?} does not match mcp__<server>__<tool> pattern"
-        ))
+        ToolError::InvalidInput(
+            format!(
+                "MCPTool: full_name {full_name:?} does not match mcp__<server>__<tool> pattern"
+            )
+            .into(),
+        )
     })?;
     let server = &rest[..idx];
     let tool = &rest[idx + MCP_TOOL_FULL_NAME_SEPARATOR.len()..];
     if server.is_empty() {
-        return Err(ToolError::InvalidInput(format!(
-            "MCPTool: full_name {full_name:?} has empty server segment"
-        )));
+        return Err(ToolError::InvalidInput(
+            format!("MCPTool: full_name {full_name:?} has empty server segment").into(),
+        ));
     }
     if tool.is_empty() {
-        return Err(ToolError::InvalidInput(format!(
-            "MCPTool: full_name {full_name:?} has empty tool segment"
-        )));
+        return Err(ToolError::InvalidInput(
+            format!("MCPTool: full_name {full_name:?} has empty tool segment").into(),
+        ));
     }
     Ok((server, tool))
 }
@@ -107,15 +114,19 @@ pub(crate) fn parse_full_name(full_name: &str) -> Result<(&str, &str), ToolError
 /// those arguments as a JSON-encoded string; decode that one transport artifact
 /// before forwarding the value to the MCP server. A non-empty schema retains
 /// the provider value verbatim, and malformed JSON remains a string.
-fn normalize_empty_schema_arguments(schema: Option<&Value>, input: Value) -> Value {
-    let has_empty_schema = matches!(schema, Some(Value::Object(object)) if object.is_empty());
+fn normalize_empty_schema_arguments(schema: Option<&UJP>, input: UJP) -> UJP {
+    let has_empty_schema = schema.is_some_and(|schema| {
+        schema
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty())
+    });
     if !has_empty_schema {
         return input;
     }
 
-    match input {
-        Value::String(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Value::String(raw)),
-        other => other,
+    match input.string_units("") {
+        Some(units) => UJP::parse_utf16_json(&units).unwrap_or(input),
+        None => input,
     }
 }
 
@@ -126,229 +137,29 @@ fn normalize_empty_schema_arguments(schema: Option<&Value>, input: Value) -> Val
 /// one of `_meta` / `structuredContent`, and that object contains ONLY the
 /// keys that were present (no empty-object, no `null` placeholders). The JSON
 /// values are forwarded byte-for-byte with no transformation.
-fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Option<Value> {
+fn build_mcp_meta(
+    meta: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    structured_content: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
     if meta.is_none() && structured_content.is_none() {
         return None;
     }
-    let mut obj = serde_json::Map::new();
+    let mut fields = Vec::with_capacity(2);
     if let Some(m) = meta {
-        obj.insert("_meta".to_string(), m);
+        fields.push(("_meta".to_string(), m));
     }
     if let Some(sc) = structured_content {
-        obj.insert("structuredContent".to_string(), sc);
+        fields.push(("structuredContent".to_string(), sc));
     }
-    Some(Value::Object(obj))
-}
-
-const MAX_OUTPUT_SCHEMA_ERRORS: usize = 8;
-
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-fn push_schema_error(errors: &mut Vec<String>, message: String) {
-    if errors.len() < MAX_OUTPUT_SCHEMA_ERRORS {
-        errors.push(message);
-    }
-}
-
-fn value_matches_type(value: &Value, expected: &str) -> bool {
-    match expected {
-        "null" => value.is_null(),
-        "boolean" => value.is_boolean(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "number" => value.as_f64().is_some(),
-        "string" => value.is_string(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        _ => true,
-    }
-}
-
-fn validate_schema_value(schema: &Value, value: &Value, path: &str, errors: &mut Vec<String>) {
-    let Some(object) = schema.as_object() else {
-        return;
-    };
-
-    if let Some(expected) = object.get("const") {
-        if value != expected {
-            push_schema_error(errors, format!("at '{path}': expected const {expected}"));
-            return;
-        }
-    }
-    if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
-        if !enum_values.iter().any(|candidate| candidate == value) {
-            push_schema_error(errors, format!("at '{path}': value is not in enum"));
-        }
-    }
-    if let Some(type_value) = object.get("type") {
-        let matches = match type_value {
-            Value::String(expected) => value_matches_type(value, expected),
-            Value::Array(items) => items
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|expected| value_matches_type(value, expected)),
-            _ => true,
-        };
-        if !matches {
-            push_schema_error(
-                errors,
-                format!(
-                    "at '{path}': expected {type_value}, got {}",
-                    json_type_name(value)
-                ),
-            );
-            return;
-        }
-    }
-    if let Some(min) = object.get("minimum").and_then(Value::as_f64) {
-        if value.as_f64().is_some_and(|actual| actual < min) {
-            push_schema_error(errors, format!("at '{path}': value is below minimum {min}"));
-        }
-    }
-    if let Some(max) = object.get("maximum").and_then(Value::as_f64) {
-        if value.as_f64().is_some_and(|actual| actual > max) {
-            push_schema_error(errors, format!("at '{path}': value exceeds maximum {max}"));
-        }
-    }
-    if let Some(min) = object.get("minLength").and_then(Value::as_u64) {
-        if value
-            .as_str()
-            .is_some_and(|actual| actual.chars().count() < min as usize)
-        {
-            push_schema_error(
-                errors,
-                format!("at '{path}': string shorter than minLength {min}"),
-            );
-        }
-    }
-    if let Some(max) = object.get("maxLength").and_then(Value::as_u64) {
-        if value
-            .as_str()
-            .is_some_and(|actual| actual.chars().count() > max as usize)
-        {
-            push_schema_error(
-                errors,
-                format!("at '{path}': string exceeds maxLength {max}"),
-            );
-        }
-    }
-    if let Some(min) = object.get("minItems").and_then(Value::as_u64) {
-        if value
-            .as_array()
-            .is_some_and(|actual| actual.len() < min as usize)
-        {
-            push_schema_error(
-                errors,
-                format!("at '{path}': array shorter than minItems {min}"),
-            );
-        }
-    }
-    if let Some(max) = object.get("maxItems").and_then(Value::as_u64) {
-        if value
-            .as_array()
-            .is_some_and(|actual| actual.len() > max as usize)
-        {
-            push_schema_error(errors, format!("at '{path}': array exceeds maxItems {max}"));
-        }
-    }
-    if let Some(items_schema) = object.get("items") {
-        if let Some(items) = value.as_array() {
-            for (index, item) in items.iter().enumerate() {
-                validate_schema_value(items_schema, item, &format!("{path}/{index}"), errors);
-            }
-        }
-    }
-    let properties = object.get("properties").and_then(Value::as_object);
-    // `required` is valid even when `properties` is omitted (for example a
-    // schema that only constrains a closed object or uses additional
-    // properties).  Keep this check independent of the properties map.
-    if let Some(required) = object.get("required").and_then(Value::as_array) {
-        for key in required.iter().filter_map(Value::as_str) {
-            if !value.as_object().is_some_and(|map| map.contains_key(key)) {
-                push_schema_error(
-                    errors,
-                    format!("at '{path}': missing required property {key:?}"),
-                );
-            }
-        }
-    }
-    if let Some(map) = value.as_object() {
-        let closed = object.get("additionalProperties").and_then(Value::as_bool) == Some(false);
-        let additional_schema = object
-            .get("additionalProperties")
-            .filter(|schema| schema.is_object());
-        for (key, item) in map {
-            if properties.is_none_or(|known| !known.contains_key(key)) {
-                if closed {
-                    push_schema_error(errors, format!("at '{path}': unexpected property {key:?}"));
-                } else if let Some(schema) = additional_schema {
-                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
-                }
-            }
-        }
-        if let Some(properties) = properties {
-            for (key, schema) in properties {
-                if let Some(item) = map.get(key) {
-                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
-                }
-            }
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf"] {
-        let Some(variants) = object.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        let mut matched = 0usize;
-        for variant in variants {
-            let mut scratch = Vec::new();
-            validate_schema_value(variant, value, path, &mut scratch);
-            if scratch.is_empty() {
-                matched += 1;
-            }
-        }
-        match key {
-            "allOf" if matched != variants.len() => {
-                push_schema_error(errors, format!("at '{path}': allOf branch mismatch"));
-            }
-            "anyOf" if matched == 0 => {
-                push_schema_error(errors, format!("at '{path}': anyOf branch mismatch"));
-            }
-            "oneOf" if matched != 1 => {
-                push_schema_error(errors, format!("at '{path}': oneOf branch mismatch"));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn validate_structured_content_against_output_schema(
-    schema: &Value,
-    structured_content: Option<&Value>,
-) -> Result<(), String> {
-    let Some(value) = structured_content else {
-        return Err("missing structuredContent for outputSchema-bound MCP result".into());
-    };
-    let mut errors = Vec::new();
-    validate_schema_value(schema, value, "(root)", &mut errors);
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    Some(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields)
+            .expect("fixed MCP metadata keys are unique"),
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct MissingRequiredInputPreflight {
-    missing_keys: Vec<String>,
+    missing_keys: Vec<Vec<u16>>,
     required_count: u64,
     missing_count: u64,
     present_key_count: u64,
@@ -357,59 +168,91 @@ struct MissingRequiredInputPreflight {
 }
 
 fn inspect_missing_required_input(
-    input: &Value,
-    schema: Option<&Value>,
+    input: &UJP,
+    schema: Option<&UJP>,
 ) -> Option<MissingRequiredInputPreflight> {
-    let Value::Object(map) = input else {
-        return None;
-    };
-    let schema = schema?.as_object()?;
-    let required = schema.get("required")?.as_array()?;
-    let required_keys: Vec<String> = required
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
+    let input_entries = input.object_entries()?;
+    let schema = schema?;
+    let required = schema.at_pointer("/required")?;
+    let required_length = required.array_len()?;
+    let required_keys: Vec<Vec<u16>> = (0..required_length)
+        .filter_map(|index| required.get_index(index)?.code_units().map(<[u16]>::to_vec))
         .collect();
     if required_keys.is_empty() {
         return None;
     }
 
-    let missing_keys: Vec<String> = required_keys
+    let missing_keys: Vec<Vec<u16>> = required_keys
         .iter()
-        .filter(|key| !map.contains_key(key.as_str()))
+        .filter(|key| {
+            !input_entries
+                .iter()
+                .any(|entry| entry.code_units == key.as_slice())
+        })
         .cloned()
         .collect();
     if missing_keys.is_empty() {
         return None;
     }
 
-    let suspicious_closing_tags: Vec<String> = schema
-        .get("properties")
-        .and_then(Value::as_object)
+    let mut suspicious_names: Vec<Vec<u16>> = schema
+        .at_pointer("/properties")
+        .and_then(|properties| properties.object_entries())
         .into_iter()
-        .flat_map(|properties| properties.keys())
-        .chain(required_keys.iter())
-        .filter(|key| js_string_len(key) >= 4)
-        .map(|key| format!("</{}>", key.to_lowercase()))
+        .flatten()
+        .map(|entry| entry.code_units.to_vec())
+        .chain(required_keys.iter().cloned())
+        .filter(|key| key.len() >= 4)
+        .map(|key| {
+            let mut lower = b"</"
+                .iter()
+                .map(|unit| u16::from(*unit))
+                .collect::<Vec<_>>();
+            lower.extend(key.into_iter().map(|unit| {
+                if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+                    unit + (b'a' - b'A') as u16
+                } else {
+                    unit
+                }
+            }));
+            lower.push(b'>' as u16);
+            lower
+        })
         .collect();
+    suspicious_names.sort();
+    suspicious_names.dedup();
 
     let mut max_string_value_len = 0_u64;
     let mut has_pseudo_tag_debris = false;
-    for value in map.values() {
-        let Some(text) = value.as_str() else {
+    for entry in &input_entries {
+        let Some(text_units) = entry.value.code_units() else {
             continue;
         };
-        max_string_value_len = max_string_value_len.max(js_string_len(text));
+        max_string_value_len = max_string_value_len.max(text_units.len() as u64);
         if has_pseudo_tag_debris {
             continue;
         }
-        let lower = text.to_lowercase();
-        if lower.contains("</parameter>")
-            || lower.contains("<parameter name=")
-            || lower.contains("</invoke>")
-            || suspicious_closing_tags
-                .iter()
-                .any(|needle| lower.contains(needle))
+        let lower_units = text_units
+            .iter()
+            .map(|unit| {
+                if (b'A' as u16..=b'Z' as u16).contains(unit) {
+                    unit + (b'a' - b'A') as u16
+                } else {
+                    *unit
+                }
+            })
+            .collect::<Vec<_>>();
+        let contains_units = |needle: &[u16]| {
+            needle.len() <= lower_units.len()
+                && lower_units
+                    .windows(needle.len())
+                    .any(|window| window == needle)
+        };
+        let fixed_tags = ["</parameter>", "<parameter name=", "</invoke>"];
+        if fixed_tags.iter().any(|tag| {
+            let needle = tag.encode_utf16().collect::<Vec<_>>();
+            contains_units(&needle)
+        }) || suspicious_names.iter().any(|needle| contains_units(needle))
         {
             has_pseudo_tag_debris = true;
         }
@@ -418,11 +261,24 @@ fn inspect_missing_required_input(
     Some(MissingRequiredInputPreflight {
         required_count: required_keys.len() as u64,
         missing_count: missing_keys.len() as u64,
-        present_key_count: map.len() as u64,
+        present_key_count: input_entries.len() as u64,
         max_string_value_len,
         has_pseudo_tag_debris,
         missing_keys,
     })
+}
+
+/// Native 2.1.290 `Urn` returns the organization ceiling as an `other` reason
+/// with this exact user-facing message (`Rrn` + `zl(name, reason)`).
+fn native_organization_ask_result(mut result: PermissionResult) -> PermissionResult {
+    if let PermissionResult::Ask { reason, prompt, .. } = &mut result {
+        let message = "Your organization requires approval for this tool".to_string();
+        *reason = PermissionDecisionReason::Other {
+            reason: message.clone().into(),
+        };
+        prompt.message = message.into();
+    }
+    result
 }
 
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
@@ -431,20 +287,31 @@ fn inspect_missing_required_input(
 /// `{ type:'mcp_progress', status:'progress', serverName, toolName, progress,
 /// total?, progressMessage? }` — the optional `total` / `progressMessage` keys
 /// are omitted when the server left them absent.
-fn mcp_progress_event_data(server: &str, tool: &str, ev: &mcp::client::McpProgressEvent) -> Value {
-    let mut data = serde_json::Map::new();
-    data.insert("type".into(), json!("mcp_progress"));
-    data.insert("status".into(), json!("progress"));
-    data.insert("serverName".into(), json!(server));
-    data.insert("toolName".into(), json!(tool));
-    data.insert("progress".into(), json!(ev.progress));
+fn mcp_progress_event_data(
+    server: &str,
+    tool: &str,
+    ev: &mcp::client::McpProgressEvent,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let number_projection = |number: f64| {
+        let encoded = serde_json::to_string(&number).expect("finite JSON number encoding");
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&encoded)
+            .expect("serde_json emits valid JSON numbers")
+    };
+    let mut fields = vec![
+        ("type".to_string(), "mcp_progress".into()),
+        ("status".to_string(), "progress".into()),
+        ("serverName".to_string(), server.into()),
+        ("toolName".to_string(), tool.into()),
+        ("progress".to_string(), number_projection(ev.progress)),
+    ];
     if let Some(total) = ev.total {
-        data.insert("total".into(), json!(total));
+        fields.push(("total".to_string(), number_projection(total)));
     }
     if let Some(message) = &ev.message {
-        data.insert("progressMessage".into(), json!(message));
+        fields.push(("progressMessage".to_string(), message.clone()));
     }
-    Value::Object(data)
+    lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields)
+        .expect("fixed MCP progress keys are unique")
 }
 
 /// Lift the first content block's `text` out of an MCP result, mirroring the TS
@@ -452,13 +319,16 @@ fn mcp_progress_event_data(server: &str, tool: &str, ev: &mcp::client::McpProgre
 /// (`services/mcp/client.ts:3124-3142`). Returns `None` unless `content` is a
 /// non-empty array whose first element is an object carrying a string `text`
 /// (the caller falls back to `"Unknown error"`).
-fn first_content_block_text(content: &Value) -> Option<String> {
+fn first_content_block_text(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    if content.array_len("")? == 0 {
+        return None;
+    }
     content
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|block| block.get("text"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+        .subprojection("/0/text")
+        .ok()
+        .filter(|text| text.string_units("").is_some())
 }
 
 /// Render an MCP result `content` value to a model-facing string IFF it is a
@@ -468,20 +338,28 @@ fn first_content_block_text(content: &Value) -> Option<String> {
 /// block (image / resource — carrying those faithfully needs the block-array
 /// protocol change). A single text block (the common MCP result) renders to
 /// exactly its text, matching claude-code's single-block tool_result content.
-fn mcp_all_text_content_to_string(content: &Value) -> Option<String> {
-    let arr = content.as_array()?;
-    if arr.is_empty() {
+fn mcp_all_text_content_to_string(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let length = content.array_len("")?;
+    if length == 0 {
         return None;
     }
-    let mut parts = Vec::with_capacity(arr.len());
-    for block in arr {
-        let obj = block.as_object()?;
-        if obj.get("type").and_then(Value::as_str) != Some("text") {
+    let mut units = Vec::new();
+    for index in 0..length {
+        let index = u32::try_from(index).ok()?;
+        let base = format!("/{index}");
+        if content.string_at(&format!("{base}/type")) != Some("text") {
             return None;
         }
-        parts.push(obj.get("text").and_then(Value::as_str)?.to_string());
+        let text = content.subprojection(&format!("{base}/text")).ok()?;
+        units.extend(text.string_units("")?);
+        if index as usize + 1 < length {
+            units.push(b'\n' as u16);
+        }
     }
-    Some(parts.join("\n"))
+    let display = String::from_utf16_lossy(&units);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(display, units).ok()
 }
 
 /// Inspect an [`McpTransportSpec`] and return `(transport_kind, auth_kind)`.
@@ -536,6 +414,43 @@ fn verified_str(s: &str) -> AnalyticsValue {
 /// bytes or Unicode scalar values.
 fn js_string_len(s: &str) -> u64 {
     u64::try_from(s.encode_utf16().count()).unwrap_or(u64::MAX)
+}
+
+fn source_string_at(input: &UJP, pointer: &str) -> Option<String> {
+    String::from_utf16(&input.string_units(pointer)?).ok()
+}
+
+fn source_null() -> UJP {
+    UJP::parse("null").expect("null is valid JSON")
+}
+
+fn source_bool(value: bool) -> UJP {
+    UJP::parse(if value { "true" } else { "false" }).expect("boolean literal is valid JSON")
+}
+
+fn source_object(fields: Vec<(String, UJP)>) -> UJP {
+    UJP::object(fields).expect("MCP source object keys are unique")
+}
+
+fn source_array(values: Vec<UJP>) -> UJP {
+    UJP::array(values).expect("MCP source array is valid")
+}
+
+fn source_text_units(units: Vec<u16>) -> UJP {
+    let display = String::from_utf16_lossy(&units);
+    UJP::root_string(display, units).expect("a UTF-16 sequence is a valid source string")
+}
+
+fn stringify_source_value(value: &UJP) -> UJP {
+    let serialized = value
+        .to_json_string()
+        .expect("MCP source projection serializes to JSON");
+    UJP::from(serialized)
+}
+
+fn serialized_source_projection<T: serde::Serialize>(value: &T) -> UJP {
+    let raw = serde_json::to_string(value).expect("MCP DTO serializes as JSON");
+    UJP::parse(&raw).expect("MCP DTO serializer emits valid JSON")
 }
 
 async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, AnalyticsValue)]) {
@@ -774,14 +689,16 @@ pub struct MCPTool {
     full_name: Option<String>,
     /// The server's own `inputSchema` for a per-tool wire entry; `None`
     /// falls back to the generic `{full_name, arguments}` schema.
-    bound_schema: Option<Value>,
+    bound_schema: Option<UJP>,
     /// The server's (truncated) description for a per-tool wire entry; `None`
     /// falls back to the generic dispatcher blurb.
-    bound_desc: Option<String>,
+    bound_desc: Option<UJP>,
     /// Optional per-tool structured output schema from the MCP wire definition.
-    bound_output_schema: Option<Value>,
+    bound_output_schema: Option<UJP>,
+    /// Parser bound to this tool's owning MCP connection and compiled schema plan.
+    output_schema_parser: Option<Arc<McpToolOutputSchemaParserHandle>>,
     /// Optional server-provided search hint used by ToolSearch ranking.
-    search_hint: Option<String>,
+    search_hint: Option<UJP>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
     always_load: bool,
     /// `_meta.anthropic/requiresUserInteraction` (§27b). `true` means this
@@ -792,6 +709,10 @@ pub struct MCPTool {
     /// Tighten-only ceiling resolved from the MCP server/config policy. Kept
     /// separate from the wire DTO so discovery-cache entries remain unchanged.
     effective_max_permission: Option<McpToolMaxPermission>,
+    /// Organization ceiling only. Native `mcpInfo.effectiveMaxPermission`
+    /// excludes ordinary `permission_policy` rules; this separate provenance
+    /// feeds the Mod `tool.check` `ceiling` field without changing enforcement.
+    organization_max_permission: Option<McpToolMaxPermission>,
     /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
     /// entry. `None` (every existing construction site) preserves today's
     /// behaviour exactly: the server is derived from `full_name`'s parsed
@@ -838,10 +759,12 @@ impl MCPTool {
             bound_schema: None,
             bound_desc: None,
             bound_output_schema: None,
+            output_schema_parser: None,
             search_hint: None,
             always_load: true,
             requires_user_interaction: false,
             effective_max_permission: None,
+            organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
         }
@@ -860,28 +783,33 @@ impl MCPTool {
     pub fn new_for_tool(
         ctx: tool_api::BuiltinToolContext,
         full_name: String,
-        description: String,
-        input_schema: Value,
-        output_schema: Option<Value>,
+        description: UJP,
+        input_schema: UJP,
+        output_schema: Option<UJP>,
         effective_max_permission: Option<McpPermissionCeiling>,
-        search_hint: Option<String>,
+        search_hint: Option<UJP>,
         always_load: bool,
         requires_user_interaction: bool,
     ) -> Self {
+        let output_schema_parser = ctx.mcp_registry.as_ref().and_then(|registry| {
+            parse_full_name(&full_name)
+                .ok()
+                .map(|(server_key, _)| registry.output_schema_parser_handle(server_key, &full_name))
+        });
         Self {
             ctx,
             full_name: Some(full_name),
             bound_schema: Some(input_schema),
-            // Truncate to the TS limit (client.ts:1786-1794). The DTO is
-            // already truncated on receipt (client.rs:54-55), so this is a
-            // defensive no-op for in-band descriptions but keeps the per-tool
-            // wire entry within the documented bound for any out-of-band source.
-            bound_desc: Some(mcp::truncate_description(&description).into_owned()),
+            // `McpClient::list_tools` applies the Native UTF-16 description cap
+            // before this typed tool boundary. Keep the exact source projection.
+            bound_desc: Some(description),
             bound_output_schema: output_schema,
+            output_schema_parser,
             search_hint,
             always_load,
             requires_user_interaction,
             effective_max_permission: effective_max_permission.map(max_permission_from_ceiling),
+            organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
         }
@@ -892,6 +820,19 @@ impl MCPTool {
     #[must_use]
     pub fn with_effective_max_permission(mut self, ceiling: McpToolMaxPermission) -> Self {
         self.effective_max_permission = Some(ceiling);
+        self
+    }
+
+    /// Preserve the organization-only permission ceiling used by Native
+    /// `mcpInfo.effectiveMaxPermission`. Local `permission_policy` remains in
+    /// `effective_max_permission` for enforcement but must not create a Mod
+    /// `ceiling` property.
+    #[must_use]
+    pub fn with_organization_max_permission(
+        mut self,
+        ceiling: lingxi_core::host::McpPermissionCeiling,
+    ) -> Self {
+        self.organization_max_permission = Some(max_permission_from_ceiling(ceiling));
         self
     }
 
@@ -916,7 +857,22 @@ impl MCPTool {
     /// use `key`.
     #[must_use]
     pub fn with_bound_server_key(mut self, key: String) -> Self {
+        self.output_schema_parser = self.ctx.mcp_registry.as_ref().and_then(|registry| {
+            self.full_name
+                .as_deref()
+                .map(|full_name| registry.output_schema_parser_handle(&key, full_name))
+        });
         self.bound_server_key = Some(key);
+        self
+    }
+
+    /// Bind the output parser to a registry-owned connection slot.
+    #[must_use]
+    pub fn with_output_schema_parser_handle(
+        mut self,
+        handle: Arc<McpToolOutputSchemaParserHandle>,
+    ) -> Self {
+        self.output_schema_parser = Some(handle);
         self
     }
 
@@ -958,7 +914,28 @@ impl MCPTool {
         })
     }
 
-    async fn generic_input_schema(&self, full_name: &str) -> Option<Value> {
+    async fn generic_organization_max_permission(
+        &self,
+        full_name: &str,
+    ) -> Option<McpToolMaxPermission> {
+        let registry = self.mcp_registry()?;
+        let connections = registry.connections.read().await;
+        connections.iter().find_map(|(table_key, state)| {
+            let (config, tools) = match state {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => return None,
+            };
+            if table_key != &config.name {
+                return None;
+            }
+            let dto = tools.iter().find(|dto| dto.full_name == full_name)?;
+            configured_organization_max_permission(config, &dto.tool_name)
+                .map(max_permission_from_ceiling)
+        })
+    }
+
+    async fn generic_input_schema(&self, full_name: &str) -> Option<UJP> {
         let registry = self.mcp_registry()?;
         let connections = registry.connections.read().await;
         connections.iter().find_map(|(table_key, state)| {
@@ -1005,48 +982,59 @@ impl ReadMcpResourceTool {
 
 // -- Schemas -----------------------------------------------------------------
 
-// H4.inputSchema = c({}).passthrough(); inputJSONSchema is wire-only.
-static MCP_RUNTIME_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| json!({"type":"object"}));
+fn generated_json_projection(value: &Value) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("generated static JSON is serializable");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("generated static JSON is valid")
+}
 
-static MCP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+// H4.inputSchema = c({}).passthrough(); inputJSONSchema is wire-only.
+static MCP_RUNTIME_INPUT_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+    Lazy::new(|| generated_json_projection(&json!({"type":"object"})));
+
+static MCP_TOOL_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+    Lazy::new(|| {
+        generated_json_projection(&json!({
         "type": "object",
         "properties": {
             "full_name": { "type": "string" },
             "arguments": { "type": "object" }
         },
         "required": ["full_name"]
-    })
-});
+        }))
+    });
 
-static MCP_AUTH_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": { "server_name": { "type": "string", "minLength": 1 } },
-        "required": ["server_name"]
-    })
-});
+static MCP_AUTH_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+    Lazy::new(|| {
+        generated_json_projection(&json!({
+            "type": "object",
+            "properties": { "server_name": { "type": "string", "minLength": 1 } },
+            "required": ["server_name"]
+        }))
+    });
 
-static LIST_MCP_RESOURCES_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    // `server_name` is OPTIONAL (Batch 5c): absent → list EVERY connected
-    // server's resources, each tagged with its `server`. Mirrors
-    // `ListMcpResourcesTool.ts:15-22` (`server: z.string().optional()`).
-    json!({
-        "type": "object",
-        "properties": { "server_name": { "type": "string", "minLength": 1 } }
-    })
-});
+static LIST_MCP_RESOURCES_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+    Lazy::new(|| {
+        // `server_name` is OPTIONAL (Batch 5c): absent → list EVERY connected
+        // server's resources, each tagged with its `server`. Mirrors
+        // `ListMcpResourcesTool.ts:15-22` (`server: z.string().optional()`).
+        generated_json_projection(&json!({
+            "type": "object",
+            "properties": { "server_name": { "type": "string", "minLength": 1 } }
+        }))
+    });
 
-static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "server_name": { "type": "string", "minLength": 1 },
-            "uri":         { "type": "string", "minLength": 1 }
-        },
-        "required": ["server_name", "uri"]
-    })
-});
+static READ_MCP_RESOURCE_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+    Lazy::new(|| {
+        generated_json_projection(&json!({
+            "type": "object",
+            "properties": {
+                "server_name": { "type": "string", "minLength": 1 },
+                "uri":         { "type": "string", "minLength": 1 }
+            },
+            "required": ["server_name", "uri"]
+        }))
+    });
 
 /// Transform a settled `tools/call` result into the model-facing
 /// [`ToolCallResult`] (or [`ToolError`]).
@@ -1064,7 +1052,6 @@ async fn process_mcp_call_result(
     output_dir: std::path::PathBuf,
     token_counter: Option<Arc<dyn tool_api::McpTokenCounter>>,
     default_model: String,
-    output_schema: Option<Value>,
     server: String,
     tool: String,
     tool_use_id: Option<lingxi_core::types::ToolUseId>,
@@ -1084,7 +1071,7 @@ async fn process_mcp_call_result(
             // the TS throw — instead of silently embedding `is_error` as data.
             if dto.is_error {
                 let error_details = first_content_block_text(&dto.content)
-                    .unwrap_or_else(|| "Unknown error".to_string());
+                    .unwrap_or_else(|| "Unknown error".into());
                 emit(
                     &bus,
                     MCP_FAILED,
@@ -1095,27 +1082,11 @@ async fn process_mcp_call_result(
                     ],
                 )
                 .await;
-                return Err(ToolError::Io(error_details));
-            }
-            if let Some(schema) = output_schema.as_ref() {
-                if let Err(detail) = validate_structured_content_against_output_schema(
-                    schema,
-                    dto.structured_content.as_ref(),
-                ) {
-                    emit(
-                        &bus,
-                        MCP_FAILED,
-                        &[
-                            ("_PROTO_server_name", pii(&server)),
-                            ("_PROTO_tool_name", pii(&tool)),
-                            ("error_kind", verified_str("output_schema_mismatch")),
-                        ],
-                    )
-                    .await;
-                    return Err(ToolError::Io(format!(
-                        "mcp_output_schema_mismatch: {detail}"
-                    )));
-                }
+                return Err(ToolError::McpFailure {
+                    server: server.into(),
+                    tool: tool.into(),
+                    detail: error_details,
+                });
             }
 
             emit(
@@ -1140,13 +1111,17 @@ async fn process_mcp_call_result(
             if let Some(tuid) = tool_use_id {
                 let _ = progress.try_send(ToolProgress {
                     tool_use_id: tuid,
-                    data: json!({
-                        "type": "mcp_progress",
-                        "status": "completed",
-                        "serverName": server,
-                        "toolName": tool,
-                        "elapsedTimeMs": started.elapsed().as_millis() as u64,
-                    }),
+                    data: source_object(vec![
+                        ("type".into(), "mcp_progress".into()),
+                        ("status".into(), "completed".into()),
+                        ("serverName".into(), server.clone().into()),
+                        ("toolName".into(), tool.clone().into()),
+                        (
+                            "elapsedTimeMs".into(),
+                            UJP::parse(&started.elapsed().as_millis().to_string())
+                                .expect("elapsed milliseconds are a JSON integer"),
+                        ),
+                    ]),
                 });
             }
 
@@ -1171,56 +1146,55 @@ async fn process_mcp_call_result(
             };
             let (model_content, large_result_type) = match &dto.structured_content {
                 Some(sc) => {
-                    let sc_json = serde_json::to_string(sc).unwrap_or_default();
-                    // jqd (binary @198966347): when the result ALSO carries
-                    // non-`text` content blocks (images, audio, resources),
-                    // those survive ALONGSIDE the structured JSON as a
-                    // contentArray `[...transformed-non-text, {text:<json>}]`.
-                    // Original `text` blocks are dropped (the JSON represents
-                    // them). Only a structured-only result collapses to the
-                    // bare JSON string. Previously the non-text blocks (e.g.
-                    // images) were silently dropped.
-                    let non_text: Vec<Value> = dto
-                        .content
-                        .as_array()
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter(|b| {
-                                    b.get("type")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|t| t != "text")
-                                })
-                                .cloned()
-                                .collect()
+                    let sc_json = sc
+                        .to_json_string()
+                        .expect("MCP structuredContent serializes to JSON");
+                    // jqd (binary @198966347): non-text blocks survive alongside
+                    // structured JSON; source projections retain their original
+                    // UTF-16 strings and keys through transform/persistence.
+                    let non_text = (0..dto.content.array_len("").unwrap_or(0))
+                        .filter_map(|index| {
+                            let index = u32::try_from(index).ok()?;
+                            let pointer = format!("/{index}");
+                            let block = dto.content.subprojection(&pointer).ok()?;
+                            let kind = block.string_at("/type");
+                            (kind != Some("text")).then_some(block)
                         })
-                        .unwrap_or_default();
+                        .collect::<Vec<_>>();
                     if non_text.is_empty() {
                         (
-                            Value::String(sc_json),
+                            UJP::from(sc_json),
                             crate::large_output::McpLargeResultType::StructuredContent,
                         )
                     } else {
-                        let transformed = crate::transform_result::transform_result_content(
-                            &Value::Array(non_text),
+                        let transformed = crate::transform_result::transform_result_content_source(
+                            &source_array(non_text),
                             &server,
                             persist_ctx,
                         );
-                        let mut arr = transformed.as_array().cloned().unwrap_or_default();
-                        arr.push(json!({ "type": "text", "text": sc_json }));
+                        let mut values = (0..transformed.array_len("").unwrap_or(0))
+                            .filter_map(|index| {
+                                let index = u32::try_from(index).ok()?;
+                                transformed.subprojection(&format!("/{index}")).ok()
+                            })
+                            .collect::<Vec<_>>();
+                        values.push(source_object(vec![
+                            ("type".into(), "text".into()),
+                            ("text".into(), sc_json.into()),
+                        ]));
                         (
-                            Value::Array(arr),
+                            source_array(values),
                             crate::large_output::McpLargeResultType::ContentArray,
                         )
                     }
                 }
                 None => {
-                    let transformed = crate::transform_result::transform_result_content(
+                    let transformed = crate::transform_result::transform_result_content_source(
                         &dto.content,
                         &server,
                         persist_ctx,
                     );
-                    let result_type = if transformed.is_array() {
+                    let result_type = if transformed.array_len("").is_some() {
                         crate::large_output::McpLargeResultType::ContentArray
                     } else {
                         crate::large_output::McpLargeResultType::ToolResult
@@ -1240,7 +1214,7 @@ async fn process_mcp_call_result(
             // results). The count route drives which fallback the large-output
             // handler applies (see `ExactCountOutcome`).
             let exact_token_count =
-                if crate::large_output::mcp_content_needs_exact_count(&model_content) {
+                if crate::large_output::mcp_content_needs_exact_count_source(&model_content) {
                     match match token_counter.as_ref() {
                         Some(counter) => {
                             counter
@@ -1264,7 +1238,7 @@ async fn process_mcp_call_result(
                 } else {
                     crate::large_output::ExactCountOutcome::Unsupported
                 };
-            let processed = crate::large_output::process_mcp_result_detailed(
+            let processed = crate::large_output::process_mcp_result_detailed_source(
                 &model_content,
                 &server,
                 &tool,
@@ -1309,8 +1283,8 @@ async fn process_mcp_call_result(
             // result) or the bare string here via `ToolCallResult.model_content`
             // (a non-text array carries its structure via the egress
             // `content_blocks` instead, leaving `model_content` as `None`).
-            let model_content =
-                mcp_all_text_content_to_string(&data).or_else(|| data.as_str().map(str::to_string));
+            let model_content = mcp_all_text_content_to_string(&data)
+                .or_else(|| data.string_units("").map(source_text_units));
             Ok(ToolCallResult {
                 data,
                 model_content,
@@ -1321,13 +1295,15 @@ async fn process_mcp_call_result(
                 // The dispatch reads this onto the block's is_error.
                 is_error: dto.is_error,
                 mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
+                subagent_hooks_fired: false,
             })
         }
         Err(e) => {
+            let source_diagnostic = e.source_diagnostic();
             let kind = match &e {
-                // Both the overall (`BHs`) and idle (`GLd`) timeouts are
-                // timeout-family aborts (parity 2.1.207 P2-01 remainder).
                 McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => "timeout",
+                McpClientError::OutputSchemaInvalid { .. }
+                | McpClientError::OutputSchemaCompileInvalid { .. } => "output_schema_mismatch",
                 _ => "rpc",
             };
             emit(
@@ -1340,14 +1316,20 @@ async fn process_mcp_call_result(
                 ],
             )
             .await;
-            // For Timeout, the Display string IS the wire-locked literal
-            // (M2-02b lock); propagate verbatim. For other errors, wrap
-            // with a clear MCPTool prefix.
+            // Schema diagnostics are already source root strings. Keep their
+            // exact UTF-16 units as the model-facing tool error; generated
+            // transport diagnostics remain Rust-owned strings at this boundary.
             Err(match &e {
-                McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
-                    ToolError::Io(e.to_string())
+                McpClientError::OutputSchemaInvalid { detail, .. }
+                | McpClientError::OutputSchemaCompileInvalid { detail, .. } => {
+                    ToolError::InvalidInput(detail.clone())
                 }
-                _ => ToolError::Io(format!("MCPTool: server {server:?} rpc error: {e}")),
+                McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
+                    ToolError::Io(e.to_string().into())
+                }
+                _ => ToolError::Io(source_diagnostic.unwrap_or_else(|| {
+                    format!("MCPTool: server {server:?} rpc error: {e}").into()
+                })),
             })
         }
     }
@@ -1362,21 +1344,65 @@ impl Tool for MCPTool {
         // dispatcher → the constant `MCP` (client.ts:1768 `name = fqn`).
         self.full_name.as_deref().unwrap_or(MCP_TOOL_NAME)
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         // Per-tool wire entry → the server's own `inputSchema`
         // (client.ts:1808 `inputJSONSchema = tool.inputSchema`); generic
         // dispatcher → the `{full_name, arguments}` envelope schema.
         self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
     }
-    fn input_validation_schema(&self) -> &Value {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        if let Some(schema) = &self.bound_schema {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::SourceNative(schema.clone()),
+                schema_provenance: ToolInputSchemaProvenance::SourceNative,
+                exempt_top_level_keys: None,
+            }
+        } else {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+    }
+    fn input_validation_schema(&self) -> &UJP {
         if self.full_name.is_some() {
             &MCP_RUNTIME_INPUT_SCHEMA
         } else {
             &MCP_TOOL_SCHEMA
         }
     }
-    fn output_schema(&self) -> Option<&Value> {
+    fn output_schema(&self) -> Option<&UJP> {
         self.bound_output_schema.as_ref()
+    }
+    async fn parse_output(&self, output: &UJP) -> Result<UJP, ToolError> {
+        let Some(parser) = self.output_schema_parser.as_ref() else {
+            return if self.bound_output_schema.is_none() {
+                Ok(output.clone())
+            } else {
+                Err(ToolError::InvalidInput(
+                    format!(
+                        "MCPTool: output schema parser is not bound for '{}'",
+                        self.name()
+                    )
+                    .into(),
+                ))
+            };
+        };
+        parser
+            .parse_output(output)
+            .await
+            .map_err(|error| match error {
+                McpClientError::OutputSchemaInvalid { detail, .. }
+                | McpClientError::OutputSchemaCompileInvalid { detail, .. } => {
+                    ToolError::InvalidInput(detail)
+                }
+                other => ToolError::Io(
+                    other
+                        .source_diagnostic()
+                        .unwrap_or_else(|| other.to_string().into()),
+                ),
+            })
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -1384,9 +1410,21 @@ impl Tool for MCPTool {
     fn is_mcp(&self) -> bool {
         true
     }
+    async fn tool_check_permission_ceiling(&self, input: &UJP) -> Option<McpPermissionCeiling> {
+        let organization_ceiling = if self.full_name.is_none() {
+            let full_name = source_string_at(input, "/full_name")?;
+            self.generic_organization_max_permission(&full_name).await?
+        } else {
+            self.organization_max_permission?
+        };
+        match organization_ceiling {
+            McpToolMaxPermission::Ask => Some(McpPermissionCeiling::Ask),
+            McpToolMaxPermission::Allow | McpToolMaxPermission::Blocked => None,
+        }
+    }
     async fn on_input_schema_rejected(
         &self,
-        input: &Value,
+        input: &UJP,
         tool_use_id: Option<&str>,
         assistant_message_id: Option<&lingxi_core::types::MessageId>,
     ) {
@@ -1399,7 +1437,8 @@ impl Tool for MCPTool {
         };
         // Oracle `b(input).length`: JSON serialization followed by JavaScript
         // UTF-16 code-unit length, despite the historical `Bytes` suffix.
-        let tool_input_size_bytes = serde_json::to_string(input)
+        let tool_input_size_bytes = input
+            .to_json_string()
             .map(|json| js_string_len(&json))
             .unwrap_or(0);
         emit_mcp_input_missing_required(
@@ -1420,8 +1459,8 @@ impl Tool for MCPTool {
     fn always_load(&self) -> bool {
         self.always_load
     }
-    fn search_hint(&self) -> Option<&str> {
-        self.search_hint.as_deref()
+    fn search_hint(&self) -> Option<UJP> {
+        self.search_hint.clone()
     }
     /// §27b — `_meta.anthropic/requiresUserInteraction`. Oracle:
     /// `requiresUserInteraction(){return Ee}` (@182520425), where `Ee` is the
@@ -1456,16 +1495,16 @@ impl Tool for MCPTool {
     fn persistence_threshold(&self) -> Option<usize> {
         Some(100_000)
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &UJP) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &UJP) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
 
@@ -1493,24 +1532,30 @@ impl Tool for MCPTool {
     /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
     /// `turn_loop` only consults a tool's `check_permissions` when no rule
     /// matched, so an allow rule still bypasses this arm in the port.
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &UJP, _: &ToolUseContext) -> PermissionResult {
         if self.full_name.is_none() {
-            let Some(full_name) = input.get("full_name").and_then(Value::as_str) else {
+            let Some(full_name) = source_string_at(input, "/full_name") else {
                 return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
             };
             let Some((requires_user_interaction, effective_max_permission)) =
-                self.generic_permission_metadata(full_name).await
+                self.generic_permission_metadata(&full_name).await
             else {
                 return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
             };
-            return permission::clamp_mcp_permission_result(
+            let result = permission::clamp_mcp_permission_result(
                 allow_mcp("MCP server tool dispatch"),
-                full_name,
+                &full_name,
                 effective_max_permission,
                 None,
                 requires_user_interaction,
                 true,
             );
+            if self.generic_organization_max_permission(&full_name).await
+                == Some(McpToolMaxPermission::Ask)
+            {
+                return native_organization_ask_result(result);
+            }
+            return result;
         }
 
         // MCP client-side ceilings and tool-owned interaction requirements are
@@ -1518,37 +1563,41 @@ impl Tool for MCPTool {
         // this path, so capability authorization stays permissive until a
         // real host signal is available; treating absence as false would deny
         // every ordinary MCP tool.
-        permission::clamp_mcp_permission_result(
+        let result = permission::clamp_mcp_permission_result(
             allow_mcp("MCP server tool dispatch"),
             self.name(),
             self.effective_max_permission,
             None,
             self.requires_user_interaction,
             true,
-        )
+        );
+        if self.organization_max_permission == Some(McpToolMaxPermission::Ask) {
+            native_organization_ask_result(result)
+        } else {
+            result
+        }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         // Per-tool wire entry → the server's (truncated) description
         // (client.ts:1786-1794); generic dispatcher → the dispatcher blurb.
         match &self.bound_desc {
-            Some(d) => d.clone(),
+            Some(d) => d.string_at("").unwrap_or_default().to_owned(),
             None => "Invoke a tool on a registered MCP server via mcp__<server>__<tool> full-name."
                 .into(),
         }
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        // The system-prompt `<tools>` blurb is the same server description as
-        // `description()` for a per-tool wire entry (client.ts:1786-1794).
-        match &self.bound_desc {
-            Some(d) => d.clone(),
-            None => "Use MCP to dispatch to an MCP-server-provided tool.".into(),
-        }
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
+        // The system-prompt `<tools>` blurb is the same exact source description
+        // as the per-tool wire entry (client.ts:1786-1794).
+        self.bound_desc
+            .clone()
+            .unwrap_or_else(|| "Use MCP to dispatch to an MCP-server-provided tool.".into())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         ctx: ToolUseContext,
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1566,14 +1615,12 @@ impl Tool for MCPTool {
                 normalize_empty_schema_arguments(self.bound_schema.as_ref(), input),
             ),
             None => {
-                let fqn = input
-                    .get("full_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::InvalidInput("MCPTool: missing or non-string full_name".into())
-                    })?
-                    .to_string();
-                let args = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let fqn = source_string_at(&input, "/full_name").ok_or_else(|| {
+                    ToolError::InvalidInput("MCPTool: missing or invalid full_name".into())
+                })?;
+                let args = input
+                    .subprojection("/arguments")
+                    .unwrap_or_else(|_| source_object(Vec::new()));
                 (fqn, args)
             }
         };
@@ -1594,7 +1641,8 @@ impl Tool for MCPTool {
             .unwrap_or_else(|| server.clone());
         // Despite the oracle field's historical `Bytes` suffix, `W` is
         // `JSON.stringify(input).length`: JavaScript UTF-16 code units.
-        let tool_input_size_bytes = serde_json::to_string(&arguments)
+        let tool_input_size_bytes = arguments
+            .to_json_string()
             .map(|json| js_string_len(&json))
             .unwrap_or(0);
 
@@ -1626,9 +1674,9 @@ impl Tool for MCPTool {
                 ],
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
-                "MCPTool: MCP server {server:?} is not registered"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("MCPTool: MCP server {server:?} is not registered").into(),
+            ));
         }
 
         let generic_input_schema = if self.full_name.is_none() {
@@ -1699,12 +1747,12 @@ impl Tool for MCPTool {
         if let Some(tuid) = tool_use_id.clone() {
             let _ = progress.try_send(ToolProgress {
                 tool_use_id: tuid,
-                data: json!({
-                    "type": "mcp_progress",
-                    "status": "started",
-                    "serverName": server,
-                    "toolName": tool,
-                }),
+                data: source_object(vec![
+                    ("type".into(), "mcp_progress".into()),
+                    ("status".into(), "started".into()),
+                    ("serverName".into(), server.clone().into()),
+                    ("toolName".into(), tool.clone().into()),
+                ]),
             });
         }
 
@@ -1775,7 +1823,6 @@ impl Tool for MCPTool {
                 output_dir,
                 token_counter,
                 default_model,
-                self.bound_output_schema.clone(),
                 server,
                 tool,
                 tool_use_id,
@@ -1806,8 +1853,7 @@ impl Tool for MCPTool {
         // task with no cancel path at all.
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
-        let bound_output_schema = self.bound_output_schema.clone();
-        let task_raw_content = Arc::new(std::sync::Mutex::new(None));
+        let task_raw_content = Arc::new(std::sync::Mutex::new(None::<UJP>));
         let mut call_task = {
             let task_raw_content = task_raw_content.clone();
             let registry = registry.clone();
@@ -1822,7 +1868,6 @@ impl Tool for MCPTool {
             let progress = progress.clone();
             let dispatch_full_name = dispatch_full_name.clone();
             let tool_use_id_str = tool_use_id_str.clone();
-            let output_schema = bound_output_schema.clone();
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
@@ -1856,7 +1901,8 @@ impl Tool for MCPTool {
                     res = &mut call_fut => {
                         if let Ok(dto) = &res {
                             if !dto.is_error {
-                                *task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dto.structured_content.as_ref().map_or_else(|| dto.content.clone(), |value| Value::String(value.to_string())));
+                                *task_raw_content.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(dto.structured_content.clone().unwrap_or_else(|| dto.content.clone()));
                             }
                         }
                         process_mcp_call_result(
@@ -1864,7 +1910,6 @@ impl Tool for MCPTool {
                             output_dir,
                             token_counter,
                             default_model,
-                            output_schema,
                             server,
                             tool,
                             tool_use_id,
@@ -1903,7 +1948,7 @@ impl Tool for MCPTool {
                         Ok(result) => result,
                         Err(join_err) => Err(ToolError::Internal(format!(
                             "MCPTool: background task join error: {join_err}"
-                        ))),
+                        ).into())),
                     };
                 }
                 () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
@@ -1942,9 +1987,9 @@ impl Tool for MCPTool {
             Err(_) => {
                 return match call_task.await {
                     Ok(result) => result,
-                    Err(join_err) => Err(ToolError::Internal(format!(
-                        "MCPTool: background task join error: {join_err}"
-                    ))),
+                    Err(join_err) => Err(ToolError::Internal(
+                        format!("MCPTool: background task join error: {join_err}").into(),
+                    )),
                 };
             }
         };
@@ -1979,15 +2024,17 @@ impl Tool for MCPTool {
                                 result
                                     .model_content
                                     .clone()
-                                    .unwrap_or_else(|| result.data.to_string()),
+                                    .unwrap_or_else(|| stringify_source_value(&result.data)),
                                 result.is_error,
                                 AutoBackgroundOutcome::Completed,
                             ),
-                            Ok(Err(e)) => {
-                                (e.to_string(), true, AutoBackgroundOutcome::ToolError)
-                            }
+                            Ok(Err(error)) => (
+                                error.model_facing_message(),
+                                true,
+                                AutoBackgroundOutcome::ToolError,
+                            ),
                             Err(join_err) => (
-                                format!("background task join error: {join_err}"),
+                                format!("background task join error: {join_err}").into(),
                                 true,
                                 AutoBackgroundOutcome::CallFailed,
                             ),
@@ -2005,7 +2052,7 @@ impl Tool for MCPTool {
                         } else { None };
                         let (text, hint) = receipt.map_or((text, None), |receipt| (receipt.text, receipt.saved_hint));
                         if let Ok(true) =
-                            task_registry.settle_mcp_task_with_hint(&task_id, &text, failed, hint.as_deref()).await
+                            task_registry.settle_mcp_task_with_hint(&task_id, &text, failed, hint.as_ref()).await
                         {
                             emit_auto_background_outcome(&bus, outcome).await;
                         }
@@ -2025,12 +2072,16 @@ impl Tool for MCPTool {
             elapsed_secs,
         );
         Ok(ToolCallResult {
-            data: json!([{ "type": "text", "text": message }]),
-            model_content: Some(message),
+            data: source_array(vec![source_object(vec![
+                ("type".into(), "text".into()),
+                ("text".into(), message.clone().into()),
+            ])]),
+            model_content: Some(message.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2042,8 +2093,15 @@ impl Tool for McpAuthTool {
     fn name(&self) -> &str {
         MCP_AUTH_TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         &MCP_AUTH_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -2051,44 +2109,40 @@ impl Tool for McpAuthTool {
     fn max_result_size_chars(&self) -> usize {
         4_096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &UJP) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &UJP) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _: &UJP, _: &ToolUseContext) -> PermissionResult {
         allow_mcp("MCP auth inspection")
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         "Inspect the configured auth/transport surface of a registered MCP server.".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
         "Use McpAuth to read an MCP server's transport+auth config.".into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
-        let server_name = input
-            .get("server_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput("McpAuthTool: missing or non-string server_name".into())
-            })?
-            .to_string();
+        let server_name = source_string_at(&input, "/server_name").ok_or_else(|| {
+            ToolError::InvalidInput("McpAuthTool: missing or invalid server_name".into())
+        })?;
         let bus = &self.ctx.bus;
         emit(
             bus,
@@ -2127,9 +2181,9 @@ impl Tool for McpAuthTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "McpAuthTool: MCP server {server_name:?} is not registered"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("McpAuthTool: MCP server {server_name:?} is not registered").into(),
+                ));
             }
         };
         let (kind, auth_kind) = auth_kind_from_spec(&cfg.spec);
@@ -2193,21 +2247,33 @@ impl Tool for McpAuthTool {
         .await;
 
         Ok(ToolCallResult {
-            data: json!({
-                "server_name": server_name,
-                "transport_kind": kind,
-                "auth_kind": auth_kind,
-                "client_id": client_id,
-                "callback_port": callback_port,
-                "auth_server_metadata_url": auth_meta_url,
-                "has_static_headers": has_headers,
-                "has_headers_helper": has_helper,
-            }),
+            data: source_object(vec![
+                ("server_name".into(), server_name.into()),
+                ("transport_kind".into(), kind.into()),
+                ("auth_kind".into(), auth_kind.into()),
+                (
+                    "client_id".into(),
+                    client_id.map_or_else(source_null, UJP::from),
+                ),
+                (
+                    "callback_port".into(),
+                    callback_port.map_or_else(source_null, |port| {
+                        UJP::parse(&port.to_string()).expect("u16 is a JSON integer")
+                    }),
+                ),
+                (
+                    "auth_server_metadata_url".into(),
+                    auth_meta_url.map_or_else(source_null, UJP::from),
+                ),
+                ("has_static_headers".into(), source_bool(has_headers)),
+                ("has_headers_helper".into(), source_bool(has_helper)),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2220,11 +2286,18 @@ impl Tool for ListMcpResourcesTool {
         LIST_MCP_RESOURCES_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("list resources from connected MCP servers")
+    fn search_hint(&self) -> Option<UJP> {
+        Some("list resources from connected MCP servers".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         &LIST_MCP_RESOURCES_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -2232,33 +2305,33 @@ impl Tool for ListMcpResourcesTool {
     fn max_result_size_chars(&self) -> usize {
         4_096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &UJP) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &UJP) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _: &UJP, _: &ToolUseContext) -> PermissionResult {
         allow_mcp("list MCP resources")
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         "List resources advertised by a registered MCP server.".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
         "Use ListMcpResourcesTool to enumerate an MCP server's resources.".into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -2267,10 +2340,13 @@ impl Tool for ListMcpResourcesTool {
         // resources (legacy behavior). Absent → list EVERY connected server's
         // resources, error-isolated per server. Mirrors
         // `ListMcpResourcesTool.ts:66-101` (`targetServer` filter vs all clients).
-        let target_server = input
-            .get("server_name")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let target_server = if input.contains_property("server_name") {
+            Some(source_string_at(&input, "/server_name").ok_or_else(|| {
+                ToolError::InvalidInput("ListMcpResourcesTool: invalid server_name".into())
+            })?)
+        } else {
+            None
+        };
 
         let bus = &self.ctx.bus;
         emit(
@@ -2317,9 +2393,10 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: MCP server {requested:?} is not registered"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("ListMcpResourcesTool: MCP server {requested:?} is not registered")
+                            .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::NotConnected { raw_name }) => {
                     emit(
@@ -2331,9 +2408,10 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: MCP server {raw_name:?} is not connected"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("ListMcpResourcesTool: MCP server {raw_name:?} is not connected")
+                            .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::NoResources { raw_name }) => {
                     emit(
@@ -2345,9 +2423,12 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
+                    return Err(ToolError::InvalidInput(
+                        format!(
                         "ListMcpResourcesTool: MCP server {raw_name:?} does not support resources"
-                    )));
+                    )
+                        .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::Ambiguous {
                     requested,
@@ -2362,10 +2443,13 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: {}",
-                        ambiguous_resource_server_message(&requested, &candidates)
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!(
+                            "ListMcpResourcesTool: {}",
+                            ambiguous_resource_server_message(&requested, &candidates)
+                        )
+                        .into(),
+                    ));
                 }
             };
 
@@ -2381,9 +2465,12 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::Io(format!(
+                    return Err(ToolError::Io(
+                        format!(
                         "ListMcpResourcesTool: MCP server {server_name:?} connection error: {e}"
-                    )));
+                    )
+                        .into(),
+                    ));
                 }
             };
             let server_name = match resolve_live_resource_server_name(registry, &server_name).await
@@ -2399,9 +2486,12 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: MCP server {server_name:?} is not registered"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!(
+                            "ListMcpResourcesTool: MCP server {server_name:?} is not registered"
+                        )
+                        .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::NotConnected { raw_name }) => {
                     emit(
@@ -2413,9 +2503,10 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: MCP server {raw_name:?} is not connected"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("ListMcpResourcesTool: MCP server {raw_name:?} is not connected")
+                            .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::NoResources { raw_name }) => {
                     emit(
@@ -2427,9 +2518,12 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
+                    return Err(ToolError::InvalidInput(
+                        format!(
                         "ListMcpResourcesTool: MCP server {raw_name:?} does not support resources"
-                    )));
+                    )
+                        .into(),
+                    ));
                 }
                 Err(ResourceServerLookupError::Ambiguous {
                     requested,
@@ -2444,14 +2538,17 @@ impl Tool for ListMcpResourcesTool {
                         ],
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: {}",
-                        ambiguous_resource_server_message(&requested, &candidates)
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!(
+                            "ListMcpResourcesTool: {}",
+                            ambiguous_resource_server_message(&requested, &candidates)
+                        )
+                        .into(),
+                    ));
                 }
             };
 
-            let mut resources: Vec<Value> = Vec::new();
+            let mut resources: Vec<UJP> = Vec::new();
             match client.list_resources().await {
                 Ok(list) => {
                     for r in list {
@@ -2485,19 +2582,26 @@ impl Tool for ListMcpResourcesTool {
             )
             .await;
             return Ok(ToolCallResult {
-                data: json!({ "server_name": target_server, "resources": resources }),
+                data: source_object(vec![
+                    (
+                        "server_name".into(),
+                        target_server.clone().map_or_else(source_null, UJP::from),
+                    ),
+                    ("resources".into(), source_array(resources)),
+                ]),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
 
         // All-servers path: enumerate every `Connected` OR `Cached`
         // resource-capable server, then fetch best-effort per server.
         let servers = resource_capable_server_names(registry).await;
-        let mut resources: Vec<Value> = Vec::new();
+        let mut resources: Vec<UJP> = Vec::new();
         for server in &servers {
             let client = match registry.ensure_connected_client(server).await {
                 Ok(client) => client,
@@ -2577,12 +2681,19 @@ impl Tool for ListMcpResourcesTool {
             // `resources` is now a flat array of `{uri, name, mimeType?, server}`
             // objects (matches `ListMcpResourcesTool.ts:26-34` output rows). The
             // optional `server_name` echo is retained for the single-server path.
-            data: json!({ "server_name": target_server, "resources": resources }),
+            data: source_object(vec![
+                (
+                    "server_name".into(),
+                    target_server.map_or_else(source_null, UJP::from),
+                ),
+                ("resources".into(), source_array(resources)),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2762,15 +2873,16 @@ async fn resource_capable_server_names(registry: &McpRegistry) -> Vec<String> {
 /// frozen `McpResourceDto` is untouched. Field names mirror
 /// `ListMcpResourcesTool.ts:26-34` (`uri`, `name`, `mimeType`, `server`); a
 /// `None` `mime_type` is omitted (the TS field is `optional`).
-fn tag_resource_with_server(r: &lingxi_core::host::McpResourceDto, server: &str) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("uri".into(), json!(r.uri));
-    obj.insert("name".into(), json!(r.name));
+fn tag_resource_with_server(r: &lingxi_core::host::McpResourceDto, server: &str) -> UJP {
+    let mut fields = vec![
+        ("uri".to_string(), r.uri.clone()),
+        ("name".to_string(), r.name.clone()),
+    ];
     if let Some(mime) = &r.mime_type {
-        obj.insert("mimeType".into(), json!(mime));
+        fields.push(("mimeType".to_string(), mime.as_str().into()));
     }
-    obj.insert("server".into(), json!(server));
-    Value::Object(obj)
+    fields.push(("server".to_string(), server.into()));
+    source_object(fields)
 }
 
 // -- impl Tool for ReadMcpResourceTool ---------------------------------------
@@ -2781,11 +2893,18 @@ impl Tool for ReadMcpResourceTool {
         READ_MCP_RESOURCE_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("read a specific MCP resource by URI")
+    fn search_hint(&self) -> Option<UJP> {
+        Some("read a specific MCP resource by URI".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         &READ_MCP_RESOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -2793,60 +2912,55 @@ impl Tool for ReadMcpResourceTool {
     fn max_result_size_chars(&self) -> usize {
         30_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &UJP) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &UJP) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _: &UJP, _: &ToolUseContext) -> PermissionResult {
         allow_mcp("read MCP resource")
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         "Read a single resource from a registered MCP server by URI.".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
         "Use ReadMcpResourceTool to fetch an MCP resource's contents.".into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
-        let server_name = input
-            .get("server_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "ReadMcpResourceTool: missing or non-string server_name".into(),
-                )
-            })?
-            .to_string();
+        let server_name = source_string_at(&input, "/server_name").ok_or_else(|| {
+            ToolError::InvalidInput("ReadMcpResourceTool: missing or invalid server_name".into())
+        })?;
         let uri = input
-            .get("uri")
-            .and_then(|v| v.as_str())
+            .subprojection("/uri")
+            .ok()
+            .filter(|uri| uri.string_units("").is_some())
             .ok_or_else(|| {
-                ToolError::InvalidInput("ReadMcpResourceTool: missing or non-string uri".into())
-            })?
-            .to_string();
+                ToolError::InvalidInput("ReadMcpResourceTool: missing or invalid uri".into())
+            })?;
+        let uri_display = uri.string_at("").unwrap_or_default();
         let bus = &self.ctx.bus;
         emit(
             bus,
             READ_MCP_RESOURCE_STARTED,
             &[
                 ("_PROTO_server_name", pii(&server_name)),
-                ("_PROTO_resource_uri", pii(&uri)),
+                ("_PROTO_resource_uri", pii(uri_display)),
             ],
         )
         .await;
@@ -2881,9 +2995,10 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {server_name:?} is not registered"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("ReadMcpResourceTool: MCP server {server_name:?} is not registered")
+                        .into(),
+                ));
             }
             Err(ResourceServerLookupError::NotConnected { raw_name }) => {
                 emit(
@@ -2895,9 +3010,9 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {raw_name:?} is not connected"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("ReadMcpResourceTool: MCP server {raw_name:?} is not connected").into(),
+                ));
             }
             Err(ResourceServerLookupError::NoResources { raw_name }) => {
                 emit(
@@ -2909,9 +3024,12 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
+                    )
+                    .into(),
+                ));
             }
             Err(ResourceServerLookupError::Ambiguous {
                 requested,
@@ -2926,10 +3044,13 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: {}",
-                    ambiguous_resource_server_message(&requested, &candidates)
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "ReadMcpResourceTool: {}",
+                        ambiguous_resource_server_message(&requested, &candidates)
+                    )
+                    .into(),
+                ));
             }
         };
 
@@ -2941,14 +3062,15 @@ impl Tool for ReadMcpResourceTool {
                     READ_MCP_RESOURCE_FAILED,
                     &[
                         ("_PROTO_server_name", pii(&server_name)),
-                        ("_PROTO_resource_uri", pii(&uri)),
+                        ("_PROTO_resource_uri", pii(uri_display)),
                         ("error_kind", verified_str("rpc")),
                     ],
                 )
                 .await;
-                return Err(ToolError::Io(format!(
-                    "ReadMcpResourceTool: server {server_name:?} read_resource error: {e}"
-                )));
+                return Err(ToolError::Io(
+                    format!("ReadMcpResourceTool: server {server_name:?} read_resource error: {e}")
+                        .into(),
+                ));
             }
         };
         let server_name = match resolve_live_resource_server_name(registry, &server_name).await {
@@ -2963,9 +3085,10 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {server_name:?} is not registered"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("ReadMcpResourceTool: MCP server {server_name:?} is not registered")
+                        .into(),
+                ));
             }
             Err(ResourceServerLookupError::NotConnected { raw_name }) => {
                 emit(
@@ -2977,9 +3100,9 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {raw_name:?} is not connected"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("ReadMcpResourceTool: MCP server {raw_name:?} is not connected").into(),
+                ));
             }
             Err(ResourceServerLookupError::NoResources { raw_name }) => {
                 emit(
@@ -2991,9 +3114,12 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
+                    )
+                    .into(),
+                ));
             }
             Err(ResourceServerLookupError::Ambiguous {
                 requested,
@@ -3008,10 +3134,13 @@ impl Tool for ReadMcpResourceTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ReadMcpResourceTool: {}",
-                    ambiguous_resource_server_message(&requested, &candidates)
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "ReadMcpResourceTool: {}",
+                        ambiguous_resource_server_message(&requested, &candidates)
+                    )
+                    .into(),
+                ));
             }
         };
 
@@ -3030,7 +3159,7 @@ impl Tool for ReadMcpResourceTool {
                     READ_MCP_RESOURCE_COMPLETED,
                     &[
                         ("_PROTO_server_name", pii(&server_name)),
-                        ("_PROTO_resource_uri", pii(&uri)),
+                        ("_PROTO_resource_uri", pii(uri_display)),
                         ("bytes", verified_int(bytes_approx)),
                         (
                             "duration_ms",
@@ -3044,16 +3173,17 @@ impl Tool for ReadMcpResourceTool {
                     // `{ contents: [{uri, mimeType?, text?, blobSavedTo?}] }`,
                     // wrapped with the existing `{server_name, uri}` envelope the
                     // Rust tool surfaces.
-                    data: json!({
-                        "server_name": server_name,
-                        "uri": uri,
-                        "contents": contents,
-                    }),
+                    data: source_object(vec![
+                        ("server_name".into(), server_name.into()),
+                        ("uri".into(), uri),
+                        ("contents".into(), serialized_source_projection(&contents)),
+                    ]),
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(e) => {
@@ -3062,14 +3192,16 @@ impl Tool for ReadMcpResourceTool {
                     READ_MCP_RESOURCE_FAILED,
                     &[
                         ("_PROTO_server_name", pii(&server_name)),
-                        ("_PROTO_resource_uri", pii(&uri)),
+                        ("_PROTO_resource_uri", pii(uri_display)),
                         ("error_kind", verified_str("rpc")),
                     ],
                 )
                 .await;
-                Err(ToolError::Io(format!(
-                    "ReadMcpResourceTool: server {server_name:?} read_resource error: {e}"
-                )))
+                let detail = e.source_diagnostic().unwrap_or_else(|| {
+                    format!("ReadMcpResourceTool: server {server_name:?} read_resource error: {e}")
+                        .into()
+                });
+                Err(ToolError::Io(detail))
             }
         }
     }
@@ -3158,6 +3290,27 @@ fn max_permission_from_ceiling(
     }
 }
 
+/// Resolve the organization-side MCP ceiling used by Native
+/// `effectiveMaxPermission`. `tool_permissions` is the host's normalized org
+/// map (Native's `jt(tools[].org_max_permission)` producer); per-tool
+/// `permission_policy` is a local rule and is intentionally excluded.
+pub fn configured_organization_max_permission(
+    config: &mcp::McpServerConfig,
+    tool_name: &str,
+) -> Option<lingxi_core::host::McpPermissionCeiling> {
+    let mut ceiling = config.tool_permissions.get(tool_name).copied();
+    for configured in config
+        .tools
+        .iter()
+        .filter(|configured| configured.name == tool_name)
+    {
+        if let Some(org_ceiling) = configured.org_max_permission {
+            ceiling = Some(ceiling.map_or(org_ceiling, |current| current.strictest(org_ceiling)));
+        }
+    }
+    ceiling
+}
+
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
@@ -3213,11 +3366,21 @@ pub async fn build_registered_mcp_tools(
                         dto.search_hint.clone(),
                         config.always_load || dto.always_load.unwrap_or(false),
                         dto.requires_user_interaction,
+                    )
+                    .with_output_schema_parser_handle(
+                        registry.output_schema_parser_handle(table_key, &dto.full_name),
                     );
                     let tool = if let Some(ceiling) =
                         configured_permission_ceiling(config, &dto.tool_name)
                     {
                         tool.with_mcp_permission_ceiling(ceiling)
+                    } else {
+                        tool
+                    };
+                    let tool = if let Some(ceiling) =
+                        configured_organization_max_permission(config, &dto.tool_name)
+                    {
+                        tool.with_organization_max_permission(ceiling)
                     } else {
                         tool
                     };
@@ -3243,9 +3406,59 @@ pub async fn build_registered_mcp_tools(
 }
 
 #[cfg(test)]
+fn source_fixture(value: &Value) -> UJP {
+    UJP::from_serde_value(value).expect("ordinary test fixture is representable as source JSON")
+}
+
+#[cfg(test)]
+fn source_field_json(value: &UJP, pointer: &str) -> Option<String> {
+    value.subprojection(pointer).ok()?.to_json_string().ok()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap as StdHashMap;
+
+    fn fixture_projection(value: &Value) -> UJP {
+        UJP::from_serde_value(value).expect("ordinary test fixture is representable as source JSON")
+    }
+
+    fn fixture_json(source: &str) -> UJP {
+        UJP::parse(source).expect("test JSON source is valid")
+    }
+
+    #[tokio::test]
+    async fn mcp_output_parser_requires_a_bound_plan_when_a_schema_exists() {
+        let input = fixture_json(r#"{"x":1}"#);
+        let schema = fixture_json(r#"{"type":"object"}"#);
+        let make_tool = |output_schema| {
+            MCPTool::new_for_tool(
+                tool_api::test_support::ctx_for_file_tools(
+                    tool_api::test_support::make_dummy_fs(),
+                    std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                    vec![std::path::PathBuf::from("/tmp")],
+                ),
+                "mcp__srv__tool".into(),
+                "description".into(),
+                fixture_json(r#"{"type":"object"}"#),
+                output_schema,
+                None,
+                None,
+                true,
+                false,
+            )
+        };
+
+        let schema_less = make_tool(None);
+        assert_eq!(schema_less.parse_output(&input).await.unwrap(), input);
+
+        let schema_bearing = make_tool(Some(schema));
+        assert!(matches!(
+            schema_bearing.parse_output(&input).await,
+            Err(ToolError::InvalidInput(_))
+        ));
+    }
 
     /// MCP results persist above the folded 50 000 threshold.
     ///
@@ -3313,7 +3526,7 @@ mod tests {
             ctx(),
             "mcp__srv__interactive".into(),
             "d".into(),
-            serde_json::json!({}),
+            fixture_projection(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3321,7 +3534,7 @@ mod tests {
             true,
         );
         let decision = interactive
-            .check_permissions(&serde_json::json!({}), &use_ctx)
+            .check_permissions(&fixture_projection(&serde_json::json!({})), &use_ctx)
             .await;
         let PermissionResult::Ask { reason, prompt, .. } = decision else {
             panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
@@ -3338,7 +3551,7 @@ mod tests {
             ctx(),
             "mcp__srv__plain".into(),
             "d".into(),
-            serde_json::json!({}),
+            fixture_projection(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3347,7 +3560,7 @@ mod tests {
         );
         assert!(matches!(
             plain
-                .check_permissions(&serde_json::json!({}), &use_ctx)
+                .check_permissions(&fixture_projection(&serde_json::json!({})), &use_ctx)
                 .await,
             PermissionResult::Allow { .. }
         ));
@@ -3364,7 +3577,7 @@ mod tests {
             ctx,
             "mcp__srv__blocked".into(),
             "blocked".into(),
-            serde_json::json!({"type": "object"}),
+            fixture_projection(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -3373,8 +3586,11 @@ mod tests {
         )
         .with_mcp_permission_ceiling(lingxi_core::host::McpPermissionCeiling::Deny);
         assert!(matches!(
-            tool.check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
-                .await,
+            tool.check_permissions(
+                &fixture_projection(&serde_json::json!({})),
+                &tool_api::test_support::fresh_ctx()
+            )
+            .await,
             PermissionResult::Deny { .. }
         ));
     }
@@ -3396,7 +3612,7 @@ mod tests {
             ctx(),
             "mcp__srv__plain".into(),
             "d".into(),
-            serde_json::json!({}),
+            fixture_projection(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3409,7 +3625,7 @@ mod tests {
             ctx(),
             "mcp__srv__interactive".into(),
             "d".into(),
-            serde_json::json!({}),
+            fixture_projection(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3445,7 +3661,10 @@ mod tests {
         let err = parse_full_name("filesystem__read").unwrap_err();
         match err {
             ToolError::InvalidInput(s) => {
-                assert!(s.contains("does not match mcp__<server>__<tool> pattern"));
+                assert!(s
+                    .string_at("")
+                    .unwrap()
+                    .contains("does not match mcp__<server>__<tool> pattern"));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -3453,48 +3672,48 @@ mod tests {
 
     #[test]
     fn empty_schema_decodes_json_encoded_argument_types() {
-        let schema = json!({});
-
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&schema), json!(r#"[1,2]"#)),
-            json!([1, 2])
-        );
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&schema), json!("42")),
-            json!(42)
-        );
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&schema), json!("true")),
-            json!(true)
-        );
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&schema), json!([1, 2])),
-            json!([1, 2]),
-            "already typed arguments remain unchanged"
-        );
+        let schema = fixture_json("{}");
+        for (input, expected) in [
+            (r#""[1,2]""#, "[1,2]"),
+            (r#""42""#, "42"),
+            (r#""true""#, "true"),
+            ("[1,2]", "[1,2]"),
+        ] {
+            let output = normalize_empty_schema_arguments(Some(&schema), fixture_json(input));
+            assert_eq!(output.to_json_string().as_deref(), Some(expected));
+        }
     }
 
     #[test]
     fn empty_schema_preserves_invalid_json_and_nonempty_schema_strings() {
-        let empty_schema = json!({});
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&empty_schema), json!("not-json")),
-            json!("not-json")
-        );
+        let empty_schema = fixture_json("{}");
+        let invalid =
+            normalize_empty_schema_arguments(Some(&empty_schema), fixture_json(r#""not-json""#));
+        assert_eq!(invalid.to_json_string().as_deref(), Some(r#""not-json""#));
 
-        let object_schema = json!({"type":"object","properties":{}});
-        assert_eq!(
-            normalize_empty_schema_arguments(Some(&object_schema), json!(r#"[1,2]"#)),
-            json!(r#"[1,2]"#),
-            "only the literal empty schema relaxes argument typing"
-        );
+        let object_schema = fixture_json(r#"{"type":"object","properties":{}}"#);
+        let unchanged =
+            normalize_empty_schema_arguments(Some(&object_schema), fixture_json(r#""[1,2]""#));
+        assert_eq!(unchanged.to_json_string().as_deref(), Some(r#""[1,2]""#));
+    }
+
+    #[test]
+    fn empty_schema_decode_preserves_lone_utf16_from_json_encoded_input() {
+        let empty_schema = fixture_json("{}");
+        let decoded =
+            normalize_empty_schema_arguments(Some(&empty_schema), fixture_json(r#""\ud800""#));
+        assert_eq!(decoded.string_units(""), Some(vec![0xd800]));
+        assert_eq!(decoded.to_json_string().as_deref(), Some(r#""\ud800""#));
     }
 
     #[test]
     fn parse_full_name_rejects_empty_server() {
         let err = parse_full_name("mcp____read").unwrap_err();
         match err {
-            ToolError::InvalidInput(s) => assert!(s.contains("has empty server segment")),
+            ToolError::InvalidInput(s) => assert!(s
+                .string_at("")
+                .unwrap()
+                .contains("has empty server segment")),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -3503,7 +3722,9 @@ mod tests {
     fn parse_full_name_rejects_empty_tool() {
         let err = parse_full_name("mcp__fs__").unwrap_err();
         match err {
-            ToolError::InvalidInput(s) => assert!(s.contains("has empty tool segment")),
+            ToolError::InvalidInput(s) => {
+                assert!(s.string_at("").unwrap().contains("has empty tool segment"))
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -3513,7 +3734,10 @@ mod tests {
         let err = parse_full_name("mcp__filesystem").unwrap_err();
         match err {
             ToolError::InvalidInput(s) => {
-                assert!(s.contains("does not match mcp__<server>__<tool> pattern"));
+                assert!(s
+                    .string_at("")
+                    .unwrap()
+                    .contains("does not match mcp__<server>__<tool> pattern"));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -3668,251 +3892,254 @@ mod tests {
 
     #[test]
     fn build_mcp_meta_both_present_byte_faithful() {
-        let meta = json!({ "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } });
-        let sc = json!({ "rows": [{ "id": 7 }], "total": 1 });
-        let out = build_mcp_meta(Some(meta.clone()), Some(sc.clone())).expect("Some when present");
-        // Mirrors claude-code `{ _meta, structuredContent }` with verbatim values.
-        assert_eq!(out, json!({ "_meta": meta, "structuredContent": sc }));
+        let meta = fixture_json(r#"{"anthropic/trace":"abc","nested":{"k":[1,2,3]}}"#);
+        let structured = fixture_json(r#"{"rows":[{"id":7}],"total":1}"#);
+        let out = build_mcp_meta(Some(meta), Some(structured)).expect("Some when present");
+        assert_eq!(
+            out.to_json_string().as_deref(),
+            Some(
+                r#"{"_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#
+            )
+        );
     }
 
     #[test]
     fn build_mcp_meta_only_meta() {
-        let meta = json!({ "x": 1 });
-        let out = build_mcp_meta(Some(meta.clone()), None).expect("Some when _meta present");
-        // Only the present key is included — no `structuredContent` placeholder.
-        assert_eq!(out, json!({ "_meta": meta }));
-        assert!(out
-            .as_object()
-            .expect("object")
-            .get("structuredContent")
-            .is_none());
+        let meta = fixture_json(r#"{"x":1}"#);
+        let out = build_mcp_meta(Some(meta), None).expect("Some when _meta present");
+        assert_eq!(
+            out.to_json_string().as_deref(),
+            Some(r#"{"_meta":{"x":1}}"#)
+        );
+        assert!(!out.contains_property("structuredContent"));
     }
 
     #[test]
     fn build_mcp_meta_only_structured_content() {
-        let sc = json!({ "y": 2 });
-        let out =
-            build_mcp_meta(None, Some(sc.clone())).expect("Some when structuredContent present");
-        assert_eq!(out, json!({ "structuredContent": sc }));
-        assert!(out.as_object().expect("object").get("_meta").is_none());
+        let structured = fixture_json(r#"{"y":2}"#);
+        let out = build_mcp_meta(None, Some(structured)).expect("Some when present");
+        assert_eq!(
+            out.to_json_string().as_deref(),
+            Some(r#"{"structuredContent":{"y":2}}"#)
+        );
+        assert!(!out.contains_property("_meta"));
     }
 
     #[test]
     fn build_mcp_meta_both_absent_is_none() {
-        // No `_meta`/`structuredContent` → `None` (never an empty object).
         assert!(build_mcp_meta(None, None).is_none());
     }
 
     #[test]
-    fn build_mcp_meta_preserves_explicit_null_values() {
-        // A present-but-`null` member is still "present" on the wire and is
-        // forwarded verbatim (claude-code keys off truthiness; in Rust the
-        // serde layer already distinguishes absent (`None`) from `null`
-        // (`Some(Value::Null)`), so an explicit null is carried through).
-        let out = build_mcp_meta(Some(Value::Null), None).expect("Some when key present");
-        assert_eq!(out, json!({ "_meta": Value::Null }));
+    fn tag_resource_with_server_keeps_exact_uri_and_name_units() {
+        let resource = lingxi_core::host::McpResourceDto {
+            uri: fixture_json(r#""uri-\ud800""#),
+            name: fixture_json(r#""name-\udfff""#),
+            description: None,
+            mime_type: None,
+            meta: None,
+        };
+        let tagged = tag_resource_with_server(&resource, "server");
+        assert_eq!(
+            tagged.string_units("/uri"),
+            Some(vec![
+                b'u' as u16,
+                b'r' as u16,
+                b'i' as u16,
+                b'-' as u16,
+                0xd800,
+            ])
+        );
+        assert_eq!(
+            tagged.string_units("/name"),
+            Some(vec![
+                b'n' as u16,
+                b'a' as u16,
+                b'm' as u16,
+                b'e' as u16,
+                b'-' as u16,
+                0xdfff,
+            ])
+        );
     }
 
-    // -- MCP.4: progress-event payload shaping --------------------------------
+    #[test]
+    fn build_mcp_meta_preserves_explicit_null_and_lone_source_units() {
+        let out = build_mcp_meta(Some(fixture_json("null")), None).expect("explicit null present");
+        assert_eq!(out.to_json_string().as_deref(), Some(r#"{"_meta":null}"#));
+
+        let raw = fixture_json(r#"{"unknown":"\ud800","\udfff":1}"#);
+        let out = build_mcp_meta(Some(raw), Some(fixture_json("null"))).unwrap();
+        assert_eq!(
+            out.to_json_string().as_deref(),
+            Some(r#"{"_meta":{"unknown":"\ud800","\udfff":1},"structuredContent":null}"#)
+        );
+    }
 
     #[test]
-    fn mcp_progress_event_data_full_payload() {
-        // All optional fields present → full `mcp_progress`/`progress` payload
-        // (client.ts:3104-3112).
-        let ev = mcp::client::McpProgressEvent {
+    fn mcp_progress_event_data_keeps_source_message_projection() {
+        let event = mcp::client::McpProgressEvent {
             progress: 3.0,
             total: Some(10.0),
-            message: Some("halfway".into()),
+            message: Some(fixture_json(r#""\ud800 halfway""#)),
         };
-        let out = mcp_progress_event_data("srv", "tool", &ev);
+        let out = mcp_progress_event_data("srv", "tool", &event);
         assert_eq!(
-            out,
-            json!({
-                "type": "mcp_progress",
-                "status": "progress",
-                "serverName": "srv",
-                "toolName": "tool",
-                "progress": 3.0,
-                "total": 10.0,
-                "progressMessage": "halfway",
-            }),
+            out.string_units("/progressMessage"),
+            Some(vec![
+                0xd800,
+                b' ' as u16,
+                b'h' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'f' as u16,
+                b'w' as u16,
+                b'a' as u16,
+                b'y' as u16
+            ])
         );
     }
 
     #[test]
-    fn mcp_progress_event_data_omits_absent_optional_fields() {
-        // No `total` / `message` → those keys are omitted entirely (the TS
-        // payload simply carries `undefined`, which serializes away).
-        let ev = mcp::client::McpProgressEvent {
-            progress: 1.0,
-            total: None,
-            message: None,
-        };
-        let out = mcp_progress_event_data("srv", "tool", &ev);
-        assert_eq!(
-            out,
-            json!({
-                "type": "mcp_progress",
-                "status": "progress",
-                "serverName": "srv",
-                "toolName": "tool",
-                "progress": 1.0,
-            }),
+    fn first_content_block_text_lifts_exact_source_string() {
+        let content = fixture_json(
+            r#"[{"type":"text","text":"\ud800boom"},{"type":"text","text":"second"}]"#,
         );
-        let obj = out.as_object().expect("object");
-        assert!(obj.get("total").is_none());
-        assert!(obj.get("progressMessage").is_none());
-    }
-
-    // -- MCP.1: isError → tool error (first content block text lift) ----------
-
-    #[test]
-    fn first_content_block_text_lifts_first_text() {
-        // Mirrors the TS `result.content[0].text` lookup (client.ts:3124-3142):
-        // the FIRST block's text wins.
-        let content = json!([
-            { "type": "text", "text": "boom" },
-            { "type": "text", "text": "second" },
-        ]);
-        assert_eq!(first_content_block_text(&content).as_deref(), Some("boom"));
+        assert_eq!(
+            first_content_block_text(&content).unwrap().string_units(""),
+            Some(vec![
+                0xd800,
+                b'b' as u16,
+                b'o' as u16,
+                b'o' as u16,
+                b'm' as u16
+            ])
+        );
     }
 
     #[test]
     fn first_content_block_text_none_for_non_text_shapes() {
-        // A bare string, an empty array, or a first block without a string `text`
-        // all yield None → the caller falls back to "Unknown error".
-        assert!(first_content_block_text(&json!("a bare string")).is_none());
-        assert!(first_content_block_text(&json!([])).is_none());
-        assert!(first_content_block_text(&json!([{ "type": "image" }])).is_none());
-        assert!(first_content_block_text(&json!([{ "text": 7 }])).is_none());
+        assert!(first_content_block_text(&fixture_json(r#""a bare string""#)).is_none());
+        assert!(first_content_block_text(&fixture_json("[]")).is_none());
+        assert!(first_content_block_text(&fixture_json(r#"[{"type":"image"}]"#)).is_none());
+        assert!(first_content_block_text(&fixture_json(r#"[{"text":7}]"#)).is_none());
     }
 
     #[test]
-    fn mcp_all_text_content_renders_model_facing_string() {
-        // Single text block (the common MCP result) → exactly its text, matching
-        // claude-code's single-block tool_result content (NOT a JSON dump).
+    fn all_text_content_projection_keeps_lone_units() {
+        let content =
+            fixture_json(r#"[{"type":"text","text":"a\ud800"},{"type":"text","text":"b"}]"#);
         assert_eq!(
-            mcp_all_text_content_to_string(&json!([{ "type": "text", "text": "result" }]))
-                .as_deref(),
-            Some("result")
+            mcp_all_text_content_to_string(&content)
+                .unwrap()
+                .string_units(""),
+            Some(vec![b'a' as u16, 0xd800, b'\n' as u16, b'b' as u16])
         );
-        // Multiple text blocks → newline-joined.
-        assert_eq!(
-            mcp_all_text_content_to_string(&json!([
-                { "type": "text", "text": "a" },
-                { "type": "text", "text": "b" },
-            ]))
-            .as_deref(),
-            Some("a\nb")
-        );
-        // Bare string / empty / image-bearing / resource-bearing → None (left for
-        // the `content` key or the block-array protocol change).
-        assert!(mcp_all_text_content_to_string(&json!("bare")).is_none());
-        assert!(mcp_all_text_content_to_string(&json!([])).is_none());
-        assert!(mcp_all_text_content_to_string(
-            &json!([{ "type": "text", "text": "a" }, { "type": "image", "source": {} }])
-        )
+        assert!(mcp_all_text_content_to_string(&fixture_json(r#""bare""#)).is_none());
+        assert!(mcp_all_text_content_to_string(&fixture_json("[]")).is_none());
+        assert!(mcp_all_text_content_to_string(&fixture_json(
+            r#"[{"type":"text","text":"a"},{"type":"image","source":{}}]"#
+        ))
         .is_none());
     }
 
     #[test]
-    fn is_error_maps_to_io_error_with_first_text() {
-        // The MCP.1 mapping: an isError:true result becomes ToolError::Io carrying
-        // the first block's text (the orchestrator then prepends "Error: ").
-        let content = json!([{ "type": "text", "text": "kaboom" }]);
-        let details =
-            first_content_block_text(&content).unwrap_or_else(|| "Unknown error".to_string());
-        match ToolError::Io(details) {
-            ToolError::Io(s) => assert_eq!(s, "kaboom"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn is_error_unknown_when_no_text() {
-        let details =
-            first_content_block_text(&json!([])).unwrap_or_else(|| "Unknown error".to_string());
-        assert_eq!(details, "Unknown error");
-    }
-
-    // -- MCP.2: structuredContent priority → compact JSON string --------------
-
-    #[test]
-    fn structured_only_model_content_is_compact_json_string() {
-        // MCP.2: when only structuredContent is present the model-facing content is
-        // `serde_json::to_string(sc)` (compact JSON), run through the large-output
-        // guard, which forwards under-threshold content verbatim. This is the exact
-        // expression the Ok(dto) arm builds for the structured-content branch.
-        let sc = json!({ "rows": [{ "id": 7 }], "total": 1 });
-        let model_content = Value::String(serde_json::to_string(&sc).expect("serialize sc"));
-        let out = crate::large_output::process_mcp_result(
-            &model_content,
-            "srv",
-            "tool",
-            &std::env::temp_dir(),
-            0,
+    fn structured_content_compact_json_text_keeps_original_source_object() {
+        let structured = fixture_json(r#"{"rows":[{"id":7}],"text":"\ud800"}"#);
+        assert_eq!(
+            stringify_source_value(&structured).string_units(""),
+            Some(r#"{"rows":[{"id":7}],"text":"\ud800"}"#.encode_utf16().collect())
         );
-        // The model sees the JSON string (NOT content:null, NOT pretty-printed).
-        assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
     }
 
     #[test]
-    fn output_schema_requires_structured_content() {
-        let schema = json!({
-            "type":"object",
-            "properties":{"ok":{"type":"boolean"}},
-            "required":["ok"],
-            "additionalProperties":false
-        });
-        let err = validate_structured_content_against_output_schema(&schema, None).unwrap_err();
-        assert!(err.contains("missing structuredContent"));
+    fn organization_ceiling_projection_excludes_local_permission_policy() {
+        let mut config = super::resource_tool_gating_tests::config("srv");
+        config
+            .tools
+            .push(lingxi_core::host::McpConfiguredToolPolicyDto {
+                name: "write".into(),
+                permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk),
+                org_max_permission: None,
+            });
+        assert_eq!(
+            configured_organization_max_permission(&config, "write"),
+            None
+        );
+
+        config.tools[0].org_max_permission = Some(McpPermissionCeiling::Ask);
+        assert_eq!(
+            configured_organization_max_permission(&config, "write"),
+            Some(McpPermissionCeiling::Ask),
+            "Native effectiveMaxPermission is sourced from organization caps"
+        );
     }
 
-    #[test]
-    fn output_schema_mismatch_is_reported_as_tool_error_detail() {
-        let schema = json!({
-            "type":"object",
-            "properties":{"ok":{"type":"boolean"}},
-            "required":["ok"],
-            "additionalProperties":false
-        });
-        let err =
-            validate_structured_content_against_output_schema(&schema, Some(&json!({"ok":"nope"})))
-                .unwrap_err();
-        assert!(err.contains("/ok") || err.contains("expected"));
-    }
+    #[tokio::test]
+    async fn native_org_ask_ceiling_projects_ask_and_exact_reason() {
+        let context = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let local_only = MCPTool::new_for_tool(
+            context(),
+            "mcp__srv__write".into(),
+            "write".into(),
+            fixture_projection(&json!({"type":"object"})),
+            None,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            true,
+            false,
+        );
+        assert_eq!(
+            local_only
+                .tool_check_permission_ceiling(&fixture_projection(&json!({})))
+                .await,
+            None,
+            "an enforcement ceiling alone is not organization provenance"
+        );
 
-    #[test]
-    fn output_schema_required_does_not_need_properties() {
-        let schema = json!({
-            "type": "object",
-            "required": ["token"],
-            "additionalProperties": {"type": "string"}
-        });
-        let err = validate_structured_content_against_output_schema(
-            &schema,
-            Some(&json!({"other": "ok"})),
+        let org_capped = MCPTool::new_for_tool(
+            context(),
+            "mcp__srv__write".into(),
+            "write".into(),
+            fixture_projection(&json!({"type":"object"})),
+            None,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            true,
+            false,
         )
-        .unwrap_err();
-        assert!(err.contains("missing required property \"token\""));
-    }
-
-    #[test]
-    fn output_schema_validates_schema_valued_additional_properties_recursively() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"known": {"type": "boolean"}},
-            "additionalProperties": {
-                "type": "object",
-                "additionalProperties": {"type": "integer"}
-            }
-        });
-        let err = validate_structured_content_against_output_schema(
-            &schema,
-            Some(&json!({"known": true, "extra": {"count": "one"}})),
-        )
-        .unwrap_err();
-        assert!(err.contains("/extra/count"));
+        .with_organization_max_permission(McpPermissionCeiling::Ask);
+        assert_eq!(
+            org_capped
+                .tool_check_permission_ceiling(&fixture_projection(&json!({})))
+                .await,
+            Some(McpPermissionCeiling::Ask)
+        );
+        let result = native_organization_ask_result(permission::clamp_mcp_permission_result(
+            allow_mcp("test"),
+            org_capped.name(),
+            Some(McpToolMaxPermission::Ask),
+            None,
+            false,
+            true,
+        ));
+        let PermissionResult::Ask { reason, prompt, .. } = result else {
+            panic!("an explicit organization ask must remain Ask");
+        };
+        let PermissionDecisionReason::Other { reason } = reason else {
+            panic!("organization Ask must use the Native Other decision reason");
+        };
+        assert_eq!(reason, "Your organization requires approval for this tool");
+        assert_eq!(
+            prompt.message,
+            "Your organization requires approval for this tool"
+        );
     }
 
     #[tokio::test]
@@ -3926,7 +4153,7 @@ mod tests {
             ctx,
             "mcp__srv__write".into(),
             "write".into(),
-            json!({"type": "object"}),
+            fixture_projection(&json!({"type": "object"})),
             None,
             Some(McpPermissionCeiling::Ask),
             None,
@@ -3934,8 +4161,11 @@ mod tests {
             false,
         );
         assert!(matches!(
-            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
-                .await,
+            tool.check_permissions(
+                &fixture_projection(&json!({})),
+                &tool_api::test_support::fresh_ctx()
+            )
+            .await,
             PermissionResult::Ask { .. }
         ));
 
@@ -3943,7 +4173,7 @@ mod tests {
             tool.ctx.clone(),
             "mcp__srv__interactive".into(),
             "interactive".into(),
-            json!({"type": "object"}),
+            fixture_projection(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -3952,7 +4182,7 @@ mod tests {
         );
         assert!(matches!(
             interaction_tool
-                .check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .check_permissions(&fixture_projection(&json!({})), &tool_api::test_support::fresh_ctx())
                 .await,
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::PermissionPromptTool { tool_name },
@@ -3964,7 +4194,7 @@ mod tests {
             tool.ctx.clone(),
             "mcp__srv__blocked".into(),
             "blocked".into(),
-            json!({"type": "object"}),
+            fixture_projection(&json!({"type": "object"})),
             None,
             Some(McpPermissionCeiling::Deny),
             None,
@@ -3972,8 +4202,11 @@ mod tests {
             false,
         );
         assert!(matches!(
-            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
-                .await,
+            tool.check_permissions(
+                &fixture_projection(&json!({})),
+                &tool_api::test_support::fresh_ctx()
+            )
+            .await,
             PermissionResult::Deny { .. }
         ));
     }
@@ -4141,8 +4374,8 @@ pub(crate) mod cached_resource_test_support {
                                 .iter()
                                 .map(|resource| {
                                     let mut obj = serde_json::Map::new();
-                                    obj.insert("uri".into(), json!(resource.uri));
-                                    obj.insert("name".into(), json!(resource.name));
+                                    obj.insert("uri".into(), json!(resource.uri.string_at("").unwrap_or_default()));
+                                    obj.insert("name".into(), json!(resource.name.string_at("").unwrap_or_default()));
                                     if let Some(mime_type) = &resource.mime_type {
                                         obj.insert("mimeType".into(), json!(mime_type));
                                     }
@@ -4288,10 +4521,10 @@ pub(crate) mod cached_resource_test_support {
             &self,
             _conn: &McpRawConnection,
             _tool: &str,
-            _input: Value,
+            _input: UJP,
         ) -> Result<McpToolResultDto, McpError> {
             Ok(McpToolResultDto {
-                content: json!("ok"),
+                content: source_fixture(&json!("ok")),
                 is_error: false,
                 ..Default::default()
             })
@@ -4300,7 +4533,7 @@ pub(crate) mod cached_resource_test_support {
         async fn read_resource(
             &self,
             _conn: &McpRawConnection,
-            _uri: &str,
+            _uri: &UJP,
         ) -> Result<McpResourceContentDto, McpError> {
             Err(McpError::Internal("not used in these tests".into()))
         }
@@ -4403,6 +4636,7 @@ pub(crate) mod cached_resource_test_support {
         registry.connections.write().await.insert(
             name.into(),
             McpConnectionState::Cached {
+                server_info: None,
                 config: cached_server_config(name),
                 connection_id: McpConnectionId::new(),
                 capabilities: behavior.cached_capabilities,
@@ -4476,14 +4710,14 @@ mod input_missing_required_preflight_tests {
             &self,
             _c: &McpRawConnection,
             _t: &str,
-            _i: Value,
+            _i: UJP,
         ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
             _c: &McpRawConnection,
-            _u: &str,
+            _u: &UJP,
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
@@ -4527,19 +4761,11 @@ mod input_missing_required_preflight_tests {
 
     #[test]
     fn inspect_missing_required_matches_oracle_summary_fields() {
-        let schema = json!({
-            "type": "object",
-            "required": ["token", "body"],
-            "properties": {
-                "token": { "type": "string" },
-                "body": { "type": "string" },
-                "note": { "type": "string" }
-            }
-        });
-        let input = json!({
-            "token": "ok",
-            "note": "payload </body>"
-        });
+        let schema = UJP::parse(
+            r#"{"type":"object","required":["token","body"],"properties":{"token":{"type":"string"},"body":{"type":"string"},"note":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let input = UJP::parse(r#"{"token":"ok","note":"payload </body>"}"#).unwrap();
 
         let preflight =
             inspect_missing_required_input(&input, Some(&schema)).expect("missing required");
@@ -4548,20 +4774,22 @@ mod input_missing_required_preflight_tests {
         assert_eq!(preflight.present_key_count, 2);
         assert_eq!(preflight.max_string_value_len, 15);
         assert!(preflight.has_pseudo_tag_debris);
-        assert_eq!(preflight.missing_keys, vec!["body".to_string()]);
+        assert_eq!(
+            preflight.missing_keys,
+            vec!["body".encode_utf16().collect::<Vec<_>>()]
+        );
     }
 
     #[test]
     fn inspect_missing_required_uses_javascript_utf16_lengths() {
-        let schema = json!({
-            "type": "object",
-            "required": ["token"],
-            "properties": { "token": { "type": "string" } }
-        });
-        let input = json!({ "note": "😀😀" });
+        let schema = UJP::parse(
+            r#"{"type":"object","required":["token"],"properties":{"token":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let input = UJP::parse(r#"{"note":"😀😀"}"#).unwrap();
         let preflight = inspect_missing_required_input(&input, Some(&schema)).unwrap();
         assert_eq!(preflight.max_string_value_len, 4);
-        assert_eq!(js_string_len(&serde_json::to_string(&input).unwrap()), 15);
+        assert_eq!(js_string_len(&input.to_json_string().unwrap()), 15);
     }
 
     #[tokio::test]
@@ -4582,16 +4810,16 @@ mod input_missing_required_preflight_tests {
 
         let tool = MCPTool::new_for_tool(
             ctx,
-            "mcp__slow__slowtool".to_string(),
-            "slow tool".to_string(),
-            json!({
+            "mcp__slow__slowtool".into(),
+            "slow tool".into(),
+            fixture_projection(&json!({
                 "type": "object",
                 "required": ["token"],
                 "properties": {
                     "token": { "type": "string" },
                     "note": { "type": "string" }
                 }
-            }),
+            })),
             None,
             None,
             None,
@@ -4617,7 +4845,7 @@ mod input_missing_required_preflight_tests {
             peer_tx.send(Bytes::from(bytes)).await.unwrap();
         });
         tool.call(
-            json!({"note":"leftover </token>"}),
+            fixture_projection(&json!({"note":"leftover </token>"})),
             use_ctx,
             tool_api::test_support::fresh_tx(),
         )
@@ -4681,7 +4909,9 @@ mod input_missing_required_preflight_tests {
             Arc::new(AnalyticsBus::new()),
             vec![std::env::temp_dir()],
         );
-        let schema = json!({"type":"object","$defs":{"token":{"type":"string"}},"allOf":[{"properties":{"token":{"$ref":"#/$defs/token"}},"required":["token"]}],"if":{"required":["flag"]},"then":{"required":["other"]}});
+        let schema = source_fixture(
+            &json!({"type":"object","$defs":{"token":{"type":"string"}},"allOf":[{"properties":{"token":{"$ref":"#/$defs/token"}},"required":["token"]}],"if":{"required":["flag"]},"then":{"required":["other"]}}),
+        );
         let tool = MCPTool::new_for_tool(
             ctx,
             "mcp__local__tool".into(),
@@ -4694,7 +4924,10 @@ mod input_missing_required_preflight_tests {
             false,
         );
         assert_eq!(tool.input_schema(), &schema);
-        assert_eq!(tool.input_validation_schema(), &json!({"type":"object"}));
+        assert_eq!(
+            tool.input_validation_schema().to_json_string().as_deref(),
+            Some(r#"{"type":"object"}"#)
+        );
     }
 
     #[tokio::test]
@@ -4709,13 +4942,13 @@ mod input_missing_required_preflight_tests {
         );
         let tool = MCPTool::new_for_tool(
             ctx,
-            "mcp__slow__slowtool".to_string(),
-            "slow tool".to_string(),
-            json!({
+            "mcp__slow__slowtool".into(),
+            "slow tool".into(),
+            source_fixture(&json!({
                 "type": "object",
                 "required": ["token"],
                 "properties": { "token": { "type": "string" } }
-            }),
+            })),
             None,
             None,
             None,
@@ -4725,7 +4958,7 @@ mod input_missing_required_preflight_tests {
         let assistant_message_id = lingxi_core::types::MessageId::new();
 
         tool.on_input_schema_rejected(
-            &json!({ "note": "😀" }),
+            &source_fixture(&json!({ "note": "😀" })),
             Some("tu-schema"),
             Some(&assistant_message_id),
         )
@@ -4860,14 +5093,14 @@ mod auto_background_race_tests {
             &self,
             _c: &McpRawConnection,
             _t: &str,
-            _i: Value,
+            _i: UJP,
         ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
             _c: &McpRawConnection,
-            _u: &str,
+            _u: &UJP,
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
@@ -4948,8 +5181,8 @@ mod auto_background_race_tests {
     #[derive(Default)]
     struct RecordingRegistry {
         registered: StdMutex<Vec<McpTaskRegistration>>,
-        settled: StdMutex<Vec<(String, String, bool)>>,
-        saved_hints: StdMutex<Vec<String>>,
+        settled: StdMutex<Vec<(String, UJP, bool)>>,
+        saved_hints: StdMutex<Vec<UJP>>,
         /// The cancel token handed to the most recent `register_mcp_task` — a
         /// test fires it to simulate a `TaskStop` (F3-2 regression).
         captured_cancel: StdMutex<Option<tokio_util::sync::CancellationToken>>,
@@ -4998,12 +5231,12 @@ mod auto_background_race_tests {
         async fn settle_mcp_task_with_hint(
             &self,
             id: &str,
-            text: &str,
+            text: &UJP,
             failed: bool,
-            hint: Option<&str>,
+            hint: Option<&UJP>,
         ) -> Result<bool, TaskRegistryError> {
             if let Some(hint) = hint {
-                self.saved_hints.lock().unwrap().push(hint.to_string());
+                self.saved_hints.lock().unwrap().push(hint.clone());
             }
             self.settle_mcp_task(id, text, failed).await
         }
@@ -5011,13 +5244,13 @@ mod auto_background_race_tests {
         async fn settle_mcp_task(
             &self,
             id: &str,
-            result_text: &str,
+            result_text: &UJP,
             failed: bool,
         ) -> Result<bool, TaskRegistryError> {
             self.settled
                 .lock()
                 .unwrap()
-                .push((id.to_string(), result_text.to_string(), failed));
+                .push((id.to_string(), result_text.clone(), failed));
             // The mock always "wins" the terminal transition (it has no prior
             // state), so the caller emits the `mcp_auto_background` outcome — the
             // real registry returns `Ok(false)` for an already-terminal task.
@@ -5038,8 +5271,8 @@ mod auto_background_race_tests {
         ctx
     }
 
-    fn call_input() -> Value {
-        json!({ "full_name": "mcp__slow__slowtool", "arguments": {} })
+    fn call_input() -> UJP {
+        fixture_projection(&json!({ "full_name": "mcp__slow__slowtool", "arguments": {} }))
     }
 
     // Drive the peer: read the client's `tools/call` request frame and answer it
@@ -5107,13 +5340,16 @@ mod auto_background_race_tests {
             .expect("auto-background returns Ok(message), never an error");
 
         let text = result.model_content.expect("background message present");
+        let text_display = text
+            .string_at("")
+            .expect("background message is a root string");
         assert!(
-            text.contains("It was moved to the background as task ktest0001"),
-            "returns the byte-exact background message: {text}"
+            text_display.contains("It was moved to the background as task ktest0001"),
+            "returns the byte-exact background message: {text_display}"
         );
         assert!(
-            text.starts_with("MCP tool \"slow/slowtool\" is still running after"),
-            "message names the server/tool: {text}"
+            text_display.starts_with("MCP tool \"slow/slowtool\" is still running after"),
+            "message names the server/tool: {text_display}"
         );
 
         let regd = recorder.registered.lock().unwrap();
@@ -5154,7 +5390,13 @@ mod auto_background_race_tests {
             .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
             .await
             .expect("direct await returns the real result");
-        assert_eq!(result.model_content.as_deref(), Some("ok"));
+        assert_eq!(
+            result
+                .model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("ok")
+        );
         assert!(
             recorder.registered.lock().unwrap().is_empty(),
             "auto_bg_ms == 0 never backgrounds"
@@ -5193,9 +5435,9 @@ mod auto_background_race_tests {
         let ctx = ctx_with(registry, None);
         let tool = MCPTool::new_for_tool(
             ctx,
-            "mcp__docs__search".to_string(),
-            "search docs".to_string(),
-            json!({"type": "object"}),
+            "mcp__docs__search".into(),
+            "search docs".into(),
+            source_fixture(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -5208,11 +5450,14 @@ mod auto_background_race_tests {
         use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-scoped"));
 
         let result = tool
-            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
             .await
             .expect("scoped dispatch succeeds");
         assert_eq!(
-            result.model_content.as_deref(),
+            result
+                .model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
             Some("scoped-answered"),
             "bound_server_key must route dispatch to the SCOPED client, not a same-named plain one"
         );
@@ -5234,9 +5479,9 @@ mod auto_background_race_tests {
         let ctx = ctx_with(registry, None);
         let tool = MCPTool::new_for_tool(
             ctx,
-            "mcp__docs__search".to_string(),
-            "search docs".to_string(),
-            json!({"type": "object"}),
+            "mcp__docs__search".into(),
+            "search docs".into(),
+            source_fixture(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -5249,10 +5494,16 @@ mod auto_background_race_tests {
         use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-plain"));
 
         let result = tool
-            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
             .await
             .expect("unbound dispatch succeeds");
-        assert_eq!(result.model_content.as_deref(), Some("plain-answered"));
+        assert_eq!(
+            result
+                .model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("plain-answered")
+        );
     }
 
     // Threshold enabled but NO task registry wired on the context → the seam is
@@ -5279,7 +5530,13 @@ mod auto_background_race_tests {
             .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
             .await
             .expect("unwired seam falls back to a direct await");
-        assert_eq!(result.model_content.as_deref(), Some("ok"));
+        assert_eq!(
+            result
+                .model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("ok")
+        );
     }
 
     // F3-2: once a slow call auto-backgrounds, firing the mcp_task cancel token
@@ -5322,8 +5579,9 @@ mod auto_background_race_tests {
         assert!(
             result
                 .model_content
-                .as_deref()
-                .is_some_and(|t| t.contains("moved to the background as task ktest0001")),
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .is_some_and(|text| text.contains("moved to the background as task ktest0001")),
             "call auto-backgrounded"
         );
 
@@ -5482,8 +5740,9 @@ mod auto_background_race_tests {
             .expect("auto-background returns Ok(message)");
         assert!(result
             .model_content
-            .as_deref()
-            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+            .as_ref()
+            .and_then(|text| text.string_at(""))
+            .is_some_and(|text| text.contains("moved to the background as task ktest0001")));
 
         // The call now RESOLVES successfully; the settle-waiter settles + emits.
         answer_call(
@@ -5549,8 +5808,13 @@ mod auto_background_race_tests {
         }
         let hints = recorder.saved_hints.lock().unwrap();
         assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("complete 30000-character output was saved"));
+        assert!(hints[0]
+            .string_at("")
+            .unwrap()
+            .contains("complete 30000-character output was saved"));
         let path = hints[0]
+            .string_at("")
+            .unwrap()
             .split("output was saved to ")
             .nth(1)
             .unwrap()
@@ -5561,6 +5825,8 @@ mod auto_background_race_tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
         assert!(recorder.settled.lock().unwrap()[0]
             .1
+            .string_at("")
+            .unwrap()
             .ends_with("… [truncated]"));
         std::fs::remove_file(path).unwrap();
     }
@@ -5596,8 +5862,9 @@ mod auto_background_race_tests {
             .expect("auto-background returns Ok(message)");
         assert!(result
             .model_content
-            .as_deref()
-            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+            .as_ref()
+            .and_then(|text| text.string_at(""))
+            .is_some_and(|text| text.contains("moved to the background as task ktest0001")));
 
         // The call resolves with an `isError:true` tool result → tool_error.
         answer_call(
@@ -5685,14 +5952,14 @@ mod resource_tool_gating_tests {
             &self,
             _c: &McpRawConnection,
             _t: &str,
-            _i: Value,
+            _i: UJP,
         ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
             _c: &McpRawConnection,
-            _u: &str,
+            _u: &UJP,
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
@@ -5723,7 +5990,7 @@ mod resource_tool_gating_tests {
         }
     }
 
-    fn config(name: &str) -> McpServerConfig {
+    pub(super) fn config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.into(),
             spec: McpTransportSpec::InProcess {
@@ -5757,8 +6024,8 @@ mod resource_tool_gating_tests {
         McpToolDto {
             server_name: server_name.into(),
             tool_name: tool_name.into(),
-            description: format!("{tool_name} tool"),
-            input_schema: serde_json::json!({"type":"object"}),
+            description: format!("{tool_name} tool").into(),
+            input_schema: source_fixture(&json!({"type":"object"})),
             output_schema: None,
             annotations: None,
             icons: Vec::new(),
@@ -5832,19 +6099,28 @@ mod resource_tool_gating_tests {
 
         assert!(matches!(
             registered[0]
-                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .check_permissions(
+                    &source_fixture(&serde_json::json!({})),
+                    &tool_api::test_support::fresh_ctx()
+                )
                 .await,
             PermissionResult::Allow { .. }
         ));
         assert!(matches!(
             registered[1]
-                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .check_permissions(
+                    &source_fixture(&serde_json::json!({})),
+                    &tool_api::test_support::fresh_ctx()
+                )
                 .await,
             PermissionResult::Ask { .. }
         ));
         assert!(matches!(
             registered[2]
-                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .check_permissions(
+                    &source_fixture(&serde_json::json!({})),
+                    &tool_api::test_support::fresh_ctx()
+                )
                 .await,
             PermissionResult::Deny { .. }
         ));
@@ -5857,13 +6133,13 @@ mod resource_tool_gating_tests {
         let mut server_config = config("srv");
         server_config.always_load = true;
         let mut advertised = dto("srv", "structured");
-        let output_schema = serde_json::json!({
+        let output_schema = source_fixture(&serde_json::json!({
             "type": "object",
             "required": ["ok"],
             "properties": { "ok": { "type": "boolean" } }
-        });
+        }));
         advertised.output_schema = Some(output_schema.clone());
-        advertised.search_hint = Some("structured lookup".into());
+        advertised.search_hint = Some(source_fixture(&json!("structured lookup")));
         // Server-level alwaysLoad forces the tool on even when its own
         // metadata explicitly says false.
         advertised.always_load = Some(false);
@@ -5894,7 +6170,10 @@ mod resource_tool_gating_tests {
         let built = build_registered_mcp_tools(&registry, ctx).await;
         let tool = &built[0].1[0];
         assert_eq!(tool.output_schema(), Some(&output_schema));
-        assert_eq!(tool.search_hint(), Some("structured lookup"));
+        assert_eq!(
+            tool.search_hint().unwrap().string_at(""),
+            Some("structured lookup")
+        );
         assert!(tool.always_load());
         assert!(!tool.should_defer());
     }
@@ -5947,10 +6226,10 @@ mod resource_tool_gating_tests {
 
         let denied = dispatcher
             .check_permissions(
-                &serde_json::json!({
+                &source_fixture(&serde_json::json!({
                     "full_name": "mcp__srv__write",
                     "arguments": {}
-                }),
+                })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -5958,10 +6237,10 @@ mod resource_tool_gating_tests {
 
         let interactive = dispatcher
             .check_permissions(
-                &serde_json::json!({
+                &source_fixture(&serde_json::json!({
                     "full_name": "mcp__srv__interactive",
                     "arguments": {}
-                }),
+                })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -5975,10 +6254,10 @@ mod resource_tool_gating_tests {
 
         let unknown = dispatcher
             .check_permissions(
-                &serde_json::json!({
+                &source_fixture(&serde_json::json!({
                     "full_name": "mcp__srv__not_advertised",
                     "arguments": {}
-                }),
+                })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -6070,6 +6349,7 @@ mod resource_tool_gating_tests {
         registry.connections.write().await.insert(
             "cached".into(),
             McpConnectionState::Cached {
+                server_info: None,
                 config: cached_config,
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: caps(false),
@@ -6360,7 +6640,7 @@ mod cached_resource_tool_tests {
 
     async fn call_list_tool(
         registry: Arc<McpRegistry>,
-        input: Value,
+        input: UJP,
     ) -> Result<ToolCallResult, ToolError> {
         ListMcpResourcesTool::new(ctx_with_registry(registry))
             .call(
@@ -6373,7 +6653,7 @@ mod cached_resource_tool_tests {
 
     async fn call_read_tool(
         registry: Arc<McpRegistry>,
-        input: Value,
+        input: UJP,
     ) -> Result<ToolCallResult, ToolError> {
         ReadMcpResourceTool::new(ctx_with_registry(registry))
             .call(
@@ -6422,30 +6702,28 @@ mod cached_resource_tool_tests {
 
         let result = call_list_tool(
             registry.clone(),
-            json!({ "server_name": mcp::normalization::normalize_name_for_mcp("my.server") }),
+            source_fixture(&json!({
+                "server_name": mcp::normalization::normalize_name_for_mcp("my.server")
+            })),
         )
         .await
         .expect("normalized cached list succeeds");
         assert_eq!(
-            result.data["resources"],
-            json!([{
-                "uri": "cached://guide",
-                "name": "guide.md",
-                "mimeType": "text/markdown",
-                "server": "my.server"
-            }])
+            source_field_json(&result.data, "/resources").as_deref(),
+            Some(
+                r#"[{"uri":"cached://guide","name":"guide.md","mimeType":"text/markdown","server":"my.server"}]"#
+            )
         );
 
-        let result = call_list_tool(registry, json!({ "server_name": "claude.ai Linear" }))
-            .await
-            .expect("raw cached list succeeds");
+        let result = call_list_tool(
+            registry,
+            source_fixture(&json!({ "server_name": "claude.ai Linear" })),
+        )
+        .await
+        .expect("raw cached list succeeds");
         assert_eq!(
-            result.data["resources"],
-            json!([{
-                "uri": "cached://linear",
-                "name": "linear.md",
-                "server": "claude.ai Linear"
-            }])
+            source_field_json(&result.data, "/resources").as_deref(),
+            Some(r#"[{"uri":"cached://linear","name":"linear.md","server":"claude.ai Linear"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(transport.connect_calls("claude.ai Linear"), 1);
@@ -6471,7 +6749,7 @@ mod cached_resource_tool_tests {
 
         let err = ListMcpResourcesTool::new(ctx)
             .call(
-                json!({ "server_name": "cached" }),
+                source_fixture(&json!({ "server_name": "cached" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -6514,9 +6792,12 @@ mod cached_resource_tool_tests {
         )
         .await;
 
-        let err = call_list_tool(registry, json!({ "server_name": "cached" }))
-            .await
-            .expect_err("live capability downgrade must fail named list");
+        let err = call_list_tool(
+            registry,
+            source_fixture(&json!({ "server_name": "cached" })),
+        )
+        .await
+        .expect_err("live capability downgrade must fail named list");
         assert!(format!("{err}").contains("does not support resources"));
         assert_eq!(transport.connect_calls("cached"), 1);
         assert_eq!(
@@ -6575,7 +6856,7 @@ mod cached_resource_tool_tests {
         let tool = ListMcpResourcesTool::new(ctx_with_registry(registry));
         let result = tool
             .call(
-                json!({}),
+                source_fixture(&json!({})),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -6583,11 +6864,10 @@ mod cached_resource_tool_tests {
             .expect("best-effort all-server listing succeeds");
 
         assert_eq!(
-            result.data["resources"],
-            json!([
-                { "uri": "live://a", "name": "alpha.txt", "server": "alpha" },
-                { "uri": "cached://b", "name": "beta.txt", "server": "beta" }
-            ])
+            source_field_json(&result.data, "/resources").as_deref(),
+            Some(
+                r#"[{"uri":"live://a","name":"alpha.txt","server":"alpha"},{"uri":"cached://b","name":"beta.txt","server":"beta"}]"#
+            )
         );
         assert_eq!(transport.connect_calls("alpha"), 1, "connected seed dial");
         assert_eq!(
@@ -6637,12 +6917,12 @@ mod cached_resource_tool_tests {
         )
         .await;
 
-        let result = call_list_tool(registry, json!({}))
+        let result = call_list_tool(registry, source_fixture(&json!({})))
             .await
             .expect("all-server list keeps best-effort semantics");
         assert_eq!(
-            result.data["resources"],
-            json!([{ "uri": "live://a", "name": "alpha.txt", "server": "alpha" }])
+            source_field_json(&result.data, "/resources").as_deref(),
+            Some(r#"[{"uri":"live://a","name":"alpha.txt","server":"alpha"}]"#)
         );
         assert_eq!(transport.connect_calls("beta"), 1);
         assert_eq!(
@@ -6660,6 +6940,7 @@ mod cached_resource_tool_tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
@@ -6676,14 +6957,17 @@ mod cached_resource_tool_tests {
             },
         );
 
-        let err = call_list_tool(registry.clone(), json!({ "server_name": "shared" }))
-            .await
-            .expect_err("scoped-only entry must not satisfy shared lookup");
+        let err = call_list_tool(
+            registry.clone(),
+            source_fixture(&json!({ "server_name": "shared" })),
+        )
+        .await
+        .expect_err("scoped-only entry must not satisfy shared lookup");
         assert!(format!("{err}").contains("is not registered"));
 
         let err = call_read_tool(
             registry,
-            json!({ "server_name": "shared", "uri": "cached://shared" }),
+            source_fixture(&json!({ "server_name": "shared", "uri": "cached://shared" })),
         )
         .await
         .expect_err("scoped-only entry must not satisfy shared lookup");
@@ -6726,12 +7010,15 @@ mod cached_resource_tool_tests {
         )
         .await;
 
-        let dot = call_list_tool(registry.clone(), json!({ "server_name": "my.server" }))
-            .await
-            .expect("exact raw dot name should resolve to dot server");
+        let dot = call_list_tool(
+            registry.clone(),
+            source_fixture(&json!({ "server_name": "my.server" })),
+        )
+        .await
+        .expect("exact raw dot name should resolve to dot server");
         assert_eq!(
-            dot.data["resources"],
-            json!([{ "uri": "cached://dot", "name": "dot.md", "server": "my.server" }])
+            source_field_json(&dot.data, "/resources").as_deref(),
+            Some(r#"[{"uri":"cached://dot","name":"dot.md","server":"my.server"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(
@@ -6742,12 +7029,15 @@ mod cached_resource_tool_tests {
         assert_eq!(transport.rpc_call_count("my.server", "resources/list"), 1);
         assert_eq!(transport.rpc_call_count("my_server", "resources/list"), 0);
 
-        let underscore = call_list_tool(registry, json!({ "server_name": "my_server" }))
-            .await
-            .expect("exact raw underscore name should resolve to underscore server");
+        let underscore = call_list_tool(
+            registry,
+            source_fixture(&json!({ "server_name": "my_server" })),
+        )
+        .await
+        .expect("exact raw underscore name should resolve to underscore server");
         assert_eq!(
-            underscore.data["resources"],
-            json!([{ "uri": "cached://underscore", "name": "underscore.md", "server": "my_server" }])
+            source_field_json(&underscore.data, "/resources").as_deref(),
+            Some(r#"[{"uri":"cached://underscore","name":"underscore.md","server":"my_server"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(transport.connect_calls("my_server"), 1);
@@ -6762,9 +7052,12 @@ mod cached_resource_tool_tests {
             seed_cached_server(&registry, &transport, name, CachedServerBehavior::default()).await;
         }
 
-        let err = call_list_tool(registry, json!({ "server_name": "my/server" }))
-            .await
-            .expect_err("colliding normalized alias must fail closed");
+        let err = call_list_tool(
+            registry,
+            source_fixture(&json!({ "server_name": "my/server" })),
+        )
+        .await
+        .expect_err("colliding normalized alias must fail closed");
         let err_text = format!("{err}");
         assert!(err_text.contains("ambiguous"));
         assert!(err_text.contains("my.server"));
@@ -6799,6 +7092,7 @@ mod cached_resource_tool_tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
@@ -6821,18 +7115,15 @@ mod cached_resource_tool_tests {
             },
         );
 
-        let result = call_list_tool(registry, json!({}))
+        let result = call_list_tool(registry, source_fixture(&json!({})))
             .await
             .expect("same-named scoped row must not duplicate shared listing");
 
         assert_eq!(
-            result.data["resources"],
-            json!([{
-                "uri": "cached://shared",
-                "name": "shared.md",
-                "mimeType": "text/markdown",
-                "server": "shared"
-            }])
+            source_field_json(&result.data, "/resources").as_deref(),
+            Some(
+                r#"[{"uri":"cached://shared","name":"shared.md","mimeType":"text/markdown","server":"shared"}]"#
+            )
         );
         assert_eq!(transport.connect_calls("shared"), 1);
         assert_eq!(
@@ -6875,31 +7166,27 @@ mod cached_resource_tool_tests {
 
         let result = call_read_tool(
             registry.clone(),
-            json!({
+            source_fixture(&json!({
                 "server_name": mcp::normalization::normalize_name_for_mcp("my.server"),
                 "uri": "cached://guide"
-            }),
+            })),
         )
         .await
         .expect("normalized cached read succeeds");
         assert_eq!(
-            result.data["contents"],
-            json!([{
-                "uri": "cached://guide",
-                "mimeType": "text/markdown",
-                "text": "# Cached"
-            }])
+            source_field_json(&result.data, "/contents").as_deref(),
+            Some(r##"[{"uri":"cached://guide","mimeType":"text/markdown","text":"# Cached"}]"##)
         );
 
         let result = call_read_tool(
             registry,
-            json!({ "server_name": "claude.ai Linear", "uri": "cached://linear" }),
+            source_fixture(&json!({ "server_name": "claude.ai Linear", "uri": "cached://linear" })),
         )
         .await
         .expect("raw cached read succeeds");
         assert_eq!(
-            result.data["contents"],
-            json!([{ "uri": "cached://linear", "text": "linear" }])
+            source_field_json(&result.data, "/contents").as_deref(),
+            Some(r#"[{"uri":"cached://linear","text":"linear"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(transport.connect_calls("claude.ai Linear"), 1);
@@ -6937,13 +7224,13 @@ mod cached_resource_tool_tests {
 
         let dot = call_read_tool(
             registry.clone(),
-            json!({ "server_name": "my.server", "uri": "cached://dot" }),
+            source_fixture(&json!({ "server_name": "my.server", "uri": "cached://dot" })),
         )
         .await
         .expect("exact raw dot name should resolve to dot server");
         assert_eq!(
-            dot.data["contents"],
-            json!([{ "uri": "cached://dot", "text": "dot" }])
+            source_field_json(&dot.data, "/contents").as_deref(),
+            Some(r#"[{"uri":"cached://dot","text":"dot"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(
@@ -6956,13 +7243,13 @@ mod cached_resource_tool_tests {
 
         let underscore = call_read_tool(
             registry,
-            json!({ "server_name": "my_server", "uri": "cached://underscore" }),
+            source_fixture(&json!({ "server_name": "my_server", "uri": "cached://underscore" })),
         )
         .await
         .expect("exact raw underscore name should resolve to underscore server");
         assert_eq!(
-            underscore.data["contents"],
-            json!([{ "uri": "cached://underscore", "text": "underscore" }])
+            source_field_json(&underscore.data, "/contents").as_deref(),
+            Some(r#"[{"uri":"cached://underscore","text":"underscore"}]"#)
         );
         assert_eq!(transport.connect_calls("my.server"), 1);
         assert_eq!(transport.connect_calls("my_server"), 1);
@@ -6979,7 +7266,7 @@ mod cached_resource_tool_tests {
 
         let err = call_read_tool(
             registry,
-            json!({ "server_name": "my/server", "uri": "cached://ambiguous" }),
+            source_fixture(&json!({ "server_name": "my/server", "uri": "cached://ambiguous" })),
         )
         .await
         .expect_err("colliding normalized alias must fail closed");
@@ -7013,7 +7300,7 @@ mod cached_resource_tool_tests {
 
         let err = call_read_tool(
             registry,
-            json!({ "server_name": "cached", "uri": "cached://guide" }),
+            source_fixture(&json!({ "server_name": "cached", "uri": "cached://guide" })),
         )
         .await
         .expect_err("live capability downgrade must fail read");

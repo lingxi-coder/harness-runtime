@@ -396,8 +396,18 @@ pub fn powershell_content_is_destructive(content: &str) -> bool {
 /// other list's business (it is a classifier bypass), and `Zsy` has already
 /// filtered those out before this runs.
 #[must_use]
-pub fn is_destructive_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
+pub fn is_destructive_permission(
+    tool_name: &str,
+    rule_content: &Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> bool {
     let Some(content) = rule_content else {
+        return false;
+    };
+    let Some(content) = content
+        .at_pointer("")
+        .and_then(crate::source_input::exact_string)
+    else {
+        // This UTF-8 classifier cannot inspect arbitrary UTF-16 rule text.
         return false;
     };
     if content.is_empty() {
@@ -416,21 +426,21 @@ mod tests {
     use super::*;
 
     fn bash(c: &str) -> bool {
-        is_destructive_permission("Bash", &Some(c.to_string()))
+        is_destructive_permission("Bash", &Some(c.into()))
     }
     fn pwsh(c: &str) -> bool {
-        is_destructive_permission("PowerShell", &Some(c.to_string()))
+        is_destructive_permission("PowerShell", &Some(c.into()))
     }
     fn read(c: &str) -> bool {
-        is_destructive_permission("Read", &Some(c.to_string()))
+        is_destructive_permission("Read", &Some(c.into()))
     }
 
     #[test]
     fn a_tool_wide_or_empty_grant_is_not_this_lists_business() {
         // Those are classifier BYPASSES; `Zsy` filters them out before this runs.
         assert!(!is_destructive_permission("Bash", &None));
-        assert!(!is_destructive_permission("Bash", &Some(String::new())));
-        assert!(!is_destructive_permission("Edit", &Some("**".to_string())));
+        assert!(!is_destructive_permission("Bash", &Some("".into())));
+        assert!(!is_destructive_permission("Edit", &Some("**".into())));
     }
 
     #[test]

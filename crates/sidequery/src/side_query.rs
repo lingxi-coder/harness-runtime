@@ -11,12 +11,31 @@
 
 use crate::purposes::QuerySource;
 use async_trait::async_trait;
-use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
+use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::time::Duration;
 use thiserror::Error;
+
+fn deserialize_optional_string_source<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let source = Option::<Utf16JsonProjection>::deserialize(deserializer)?;
+    if source
+        .as_ref()
+        .is_some_and(|value| value.string_units("").is_none())
+    {
+        return Err(serde::de::Error::custom(
+            "system_prompt must be a JSON string",
+        ));
+    }
+    Ok(source)
+}
 
 /// Parameters for one side-query LLM call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,11 +53,16 @@ pub struct SideQueryRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Optional system prompt; when `None` the provider default applies.
-    pub system_prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_source")]
+    pub system_prompt: Option<Utf16JsonProjection>,
+    /// Host-captured provider system structure for forked requests; not part of
+    /// the serialized model-facing side-query payload.
+    #[serde(skip)]
+    pub system_prompt_input: Option<SystemPromptInput>,
     /// Conversation messages to feed the model.
     pub messages: Vec<ConversationMessage>,
     /// Tool schemas exposed to the model (may be empty).
-    pub tools: Vec<Value>,
+    pub tools: Vec<llm_runtime::ToolDeclaration>,
     /// Tool-choice control (e.g. force a specific tool / json mode).
     pub tool_choice: Option<Value>,
     /// Structured-output schema (e.g. JSON Schema for `response_format`).
@@ -72,12 +96,13 @@ pub struct SideQueryRequest {
 /// Decoded outcome of one side-query call.
 #[derive(Debug, Clone)]
 pub struct SideQueryResponse {
-    /// Best-effort flattened plain-text response when present.
-    pub text: Option<String>,
+    /// Best-effort flattened plain-text response when present, retaining exact
+    /// provider UTF-16 units through downstream WebFetch/tool consumers.
+    pub text: Option<Utf16JsonProjection>,
     /// Structured-output payload when the model returned JSON.
-    pub structured: Option<Value>,
+    pub structured: Option<Utf16JsonProjection>,
     /// Tool calls emitted by the model (typically empty for side queries).
-    pub tool_calls: Vec<Value>,
+    pub tool_calls: Vec<Utf16JsonProjection>,
     /// Token / cost usage for COGS attribution.
     pub usage: cost::Usage,
     /// Stop-reason as reported by the provider (`end_turn`, `tool_use`, ...).
@@ -231,6 +256,64 @@ pub trait SideQueryClient: Send + Sync {
                 serialized_bytes,
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod source_system_prompt_tests {
+    use super::*;
+
+    fn request(system_prompt: Option<Utf16JsonProjection>) -> SideQueryRequest {
+        SideQueryRequest {
+            model_attempt: None,
+            model: "model".into(),
+            profile: None,
+            system_prompt,
+            system_prompt_input: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            output_format: None,
+            max_tokens: 16,
+            max_retries: 0,
+            temperature: None,
+            thinking: None,
+            effort: None,
+            stop_sequences: Vec::new(),
+            query_source: QuerySource::Custom("test".into()),
+            skip_system_prompt_prefix: false,
+        }
+    }
+
+    #[test]
+    fn system_prompt_serializes_as_a_json_string_and_keeps_lone_units() {
+        let units = "before".encode_utf16().chain([0xD800]).collect::<Vec<_>>();
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let serialized = serde_json::to_string(&request(Some(source))).unwrap();
+        assert!(serialized.contains(r#""system_prompt":"before\ud800""#));
+        assert!(!serialized.contains("\"nodes\""));
+
+        let decoded: SideQueryRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            decoded
+                .system_prompt
+                .as_ref()
+                .and_then(|source| source.string_units("")),
+            Some(units)
+        );
+    }
+
+    #[test]
+    fn system_prompt_rejects_non_string_source() {
+        let error = serde_json::from_str::<SideQueryRequest>(
+            r#"{"model":"model","system_prompt":{"value":"wrong"}}"#,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("system_prompt must be a JSON string"));
     }
 }
 

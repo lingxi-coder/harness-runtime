@@ -1,5 +1,16 @@
 use super::*;
 
+fn projected_value(
+    source: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> serde_json::Value {
+    serde_json::from_str(
+        &source
+            .to_json_string()
+            .expect("source result serializes as JSON"),
+    )
+    .expect("test result is a generated JSON-compatible value")
+}
+
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
 /// through it. Hoisted here so every caller in the module can reuse it.
@@ -48,7 +59,7 @@ fn assert_only_real_tool_names(contract: &str, label: &str) {
     // planted bad name behind an innocuous one. Fail loudly and specifically
     // instead of scanning a text this gate cannot actually parse.
     assert!(
-        contract.matches('`').count() % 2 == 0,
+        contract.matches('`').count().is_multiple_of(2),
         "{label} has an ODD number of backticks, so this scanner cannot pair them \
          into spans without silently shifting every one after the stray mark: {contract}"
     );
@@ -177,7 +188,7 @@ use async_trait::async_trait;
 use client::adapter::{ClientEventSink, MockSink};
 use futures_util::stream;
 use local_apps::test_support::FixedClock;
-use local_apps::{storage, AppState, NoopAppEventObserver};
+use local_apps::{AppState, NoopAppEventObserver, storage};
 use mobile_linux_api::{
     LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
@@ -1069,12 +1080,14 @@ async fn host_qa_fixture_with_mobile_linux(
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Phone,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone,
+            ))
+            .is_ok()
+    );
     let app_id = create_app_fixture(&root, &service, "Host QA").await;
     let layout = AppLayout::new(root.path(), &app_id).expect("layout");
     let mut manifest = load_manifest(&layout).expect("manifest");
@@ -1380,6 +1393,7 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         })
         .await
         .expect("perform page bridge mutation");
+    let bridge_result = projected_value(bridge_result);
     assert_eq!(bridge_result["results"][0]["recordId"], "row-1");
     assert_eq!(bridge_result["results"][0]["revision"], 1);
     let second_bridge_result = fixture
@@ -1398,6 +1412,7 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         })
         .await
         .expect("perform second page bridge mutation");
+    let second_bridge_result = projected_value(second_bridge_result);
     assert_eq!(second_bridge_result["results"][0]["recordId"], "note-1");
     assert_eq!(second_bridge_result["results"][0]["revision"], 1);
     let after_write = fixture
@@ -1698,9 +1713,11 @@ async fn host_qa_roundtrip_publishes_only_after_terminal_commit_and_survives_sto
         .await
         .expect("verifier reads actual capture");
     assert_eq!(image["content"]["type"], "image");
-    assert!(image["content"]["data"]
-        .as_str()
-        .is_some_and(|data| !data.is_empty()));
+    assert!(
+        image["content"]["data"]
+            .as_str()
+            .is_some_and(|data| !data.is_empty())
+    );
 
     assert_eq!(
         fixture
@@ -2255,6 +2272,7 @@ async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
         })
         .await
         .expect("real page bridge write");
+    let bridge_result = projected_value(bridge_result);
     assert_eq!(
         bridge_result["results"][0]["recordId"],
         "real-roundtrip-row"
@@ -2507,16 +2525,19 @@ async fn dropped_real_act_on_ui_future_deactivates_attribution_and_keeps_page_wr
         })
         .await
         .expect("page write completes while native UI is pending");
+    let bridge_result = projected_value(bridge_result);
     assert_eq!(
         bridge_result["results"][0]["recordId"],
         "cancelled-tool-row"
     );
 
     action_task.abort();
-    assert!(action_task
-        .await
-        .expect_err("aborted tool future must not complete")
-        .is_cancelled());
+    assert!(
+        action_task
+            .await
+            .expect_err("aborted tool future must not complete")
+            .is_cancelled()
+    );
     assert!(
         !fixture
             .broker
@@ -2615,6 +2636,7 @@ async fn qa_attribution_overflow_does_not_change_page_write_results_or_errors() 
         })
         .await
         .expect("attribution overflow must not replace the business response");
+    let bridge_result = projected_value(bridge_result);
     assert_eq!(bridge_result["results"][0]["recordId"], "overflow-row");
     assert_eq!(bridge_result["results"][0]["revision"], 1);
     let stored = fixture
@@ -2718,6 +2740,7 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
         })
         .await
         .expect("first awaited bridge request remains inside action window");
+    let first_bridge = projected_value(first_bridge);
     assert_eq!(first_bridge["records"], json!([]));
     // This begins after the original native-success grace. The preceding
     // bridge activity is what keeps the chained handler window alive.
@@ -2742,6 +2765,7 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
         })
         .await
         .expect("late page bridge write remains inside bounded action window");
+    let bridge_result = projected_value(bridge_result);
     assert_eq!(bridge_result["results"][0]["recordId"], "late-row");
     let before_commit = fixture
         .broker
@@ -3824,12 +3848,14 @@ async fn scaffolded_lingxi(
 async fn scaffold_records_the_host_device_context() {
     let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
+            ))
+            .is_ok()
+    );
     let record = service
         .create_app(Some("Scaffolded"), "a test app", None)
         .await
@@ -3946,12 +3972,16 @@ async fn persisted_lingxi_does_not_bake_in_toolchain_availability() {
             .expect("read LINGXI.md");
 
     assert!(lingxi.contains("do not run a package manager in this local-app workspace"));
-    assert!(broker
-        .create_next_step()
-        .contains("Do not recreate the app"));
-    assert!(broker
-        .create_next_step()
-        .contains("do not install dependencies yet"));
+    assert!(
+        broker
+            .create_next_step()
+            .contains("Do not recreate the app")
+    );
+    assert!(
+        broker
+            .create_next_step()
+            .contains("do not install dependencies yet")
+    );
 }
 
 // ---- §C.1 `LocalAppScaffold` — the create transaction --------------
@@ -4167,7 +4197,7 @@ async fn approved_create_receipt_with_design(
     assert_eq!(
         stage
             .get("design_spec_sha256")
-            .map_or(false, |v| !v.is_null()),
+            .is_some_and(|v| !v.is_null()),
         has_design_spec,
         "design_spec_sha256 presence must track whether a design spec was staged: {stage}"
     );
@@ -5251,8 +5281,8 @@ async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_f
 /// with a named `create_approval_in_flight:` error, so no answer is
 /// solicited and then discarded.
 #[tokio::test]
-async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet(
-) {
+async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet()
+ {
     let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
     let (_root, _service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &_service).await;
@@ -6294,13 +6324,15 @@ async fn runtime_profile_dependency_status_distinguishes_seed_and_shared_cache()
     // the provenance changes to cached. The selector must not keep
     // claiming that it will use the device bundle.
     let snapshot = broker.dependency_snapshot_root(&lock_digest, PNPM_TOOLCHAIN_KEY);
-    assert!(LocalAppsHostBroker::adopt_bundled_dependency_seed(
-        &runtime_root,
-        &lock_digest,
-        &snapshot,
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("adopt matching seed"));
+    assert!(
+        LocalAppsHostBroker::adopt_bundled_dependency_seed(
+            &runtime_root,
+            &lock_digest,
+            &snapshot,
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("adopt matching seed")
+    );
     assert_eq!(
         broker.runtime_profile_dependency_availability(
             AppRuntimeProfile::ReactDom,
@@ -7830,12 +7862,14 @@ async fn dependency_update_warm_snapshot_skips_frozen_install() {
         PNPM_TOOLCHAIN_KEY,
     )
     .expect("preseed exact verified dependency snapshot");
-    assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        &lock_digest,
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("preseeded snapshot readiness"));
+    assert!(
+        LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            &lock_digest,
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("preseeded snapshot readiness")
+    );
 
     let dependency_record = service
         .dependency_record(&shell.id)
@@ -8604,9 +8638,11 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
     assert!(!node_modules_backup.exists());
     assert!(!build_backup.exists());
     assert!(!LocalAppsHostBroker::dependency_update_recovery_path(&layout).exists());
-    assert!(!workspace
-        .join(".lingxi-build-state/dependency-staging")
-        .exists());
+    assert!(
+        !workspace
+            .join(".lingxi-build-state/dependency-staging")
+            .exists()
+    );
 }
 
 /// The whole point of the flow: what the user confirmed in the interview
@@ -8715,9 +8751,11 @@ async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
         manifest.dependency_snapshot.is_some(),
         "the commit point must not expose a scaffolded app without a verified dependency snapshot"
     );
-    assert!(workspace_of(&root, &shell.id)
-        .join("app/screens/game-screen.jsx")
-        .is_file());
+    assert!(
+        workspace_of(&root, &shell.id)
+            .join("app/screens/game-screen.jsx")
+            .is_file()
+    );
     assert_eq!(
         service
             .dependency_record(&shell.id)
@@ -9921,21 +9959,25 @@ fn dependency_snapshot_is_atomic_and_reusable() {
         PNPM_TOOLCHAIN_KEY,
     )
     .expect("publish snapshot");
-    assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("validate snapshot"));
+    assert!(
+        LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate snapshot")
+    );
     let marker = snapshot.join(DEPENDENCY_SNAPSHOT_READY_FILE);
     fs::remove_file(&marker).expect("remove marker for malformed-cache probe");
     fs::write(&marker, [0xff]).expect("write malformed snapshot marker");
-    assert!(!LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("malformed marker is a safe miss"));
+    assert!(
+        !LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("malformed marker is a safe miss")
+    );
     LocalAppsHostBroker::publish_dependency_snapshot(
         &source,
         &snapshot,
@@ -9963,12 +10005,14 @@ fn dependency_snapshot_is_atomic_and_reusable() {
         PNPM_TOOLCHAIN_KEY,
     )
     .expect("rebuild modified snapshot");
-    assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("validate rebuilt snapshot"));
+    assert!(
+        LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate rebuilt snapshot")
+    );
     let invalid_package = snapshot.join("node_modules/untrusted");
     fs::create_dir_all(&invalid_package).expect("invalid cached package directory");
     fs::write(
@@ -9992,12 +10036,14 @@ fn dependency_snapshot_is_atomic_and_reusable() {
         PNPM_TOOLCHAIN_KEY,
     )
     .expect("rebuild invalid cached tree");
-    assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("validate tree after invalid-cache rebuild"));
+    assert!(
+        LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate tree after invalid-cache rebuild")
+    );
     fs::write(source.join("react.js"), b"replacement source").expect("change later source tree");
     LocalAppsHostBroker::publish_dependency_snapshot(
         &source,
@@ -10034,13 +10080,15 @@ fn dependency_snapshot_is_atomic_and_reusable() {
         dependency_attestation("lock-digest", &tree_digest, PNPM_TOOLCHAIN_KEY),
     )
     .expect("workspace attestation");
-    assert!(LocalAppsHostBroker::workspace_dependencies_match_snapshot(
-        &workspace,
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("match attested workspace dependencies"));
+    assert!(
+        LocalAppsHostBroker::workspace_dependencies_match_snapshot(
+            &workspace,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("match attested workspace dependencies")
+    );
 }
 
 #[test]
@@ -10422,7 +10470,7 @@ fn dependency_versions_reject_non_registry_and_alias_protocols() {
 
 #[tokio::test]
 async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
-    use crate::mobile::local_apps_build::{scaffold_workspace, LocalAppBuildTarget};
+    use crate::mobile::local_apps_build::{LocalAppBuildTarget, scaffold_workspace};
     for target in [
         LocalAppBuildTarget::ReactDomR4,
         LocalAppBuildTarget::Canvas2dR4,
@@ -10470,12 +10518,14 @@ async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
         );
         let snapshot =
             broker.dependency_snapshot_root(&completion.lockfile_sha256, toolchain.key());
-        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-            &snapshot,
-            &completion.lockfile_sha256,
-            toolchain.key()
-        )
-        .unwrap());
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                &completion.lockfile_sha256,
+                toolchain.key()
+            )
+            .unwrap()
+        );
         let other = "unrecognized-toolchain";
         assert_ne!(
             snapshot,
@@ -10685,12 +10735,14 @@ fn dependency_snapshot_accepts_internal_bin_shims() {
         PNPM_TOOLCHAIN_KEY,
     )
     .expect("a pnpm tree with internal bin shims must publish");
-    assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
-        &snapshot,
-        "lock-digest",
-        PNPM_TOOLCHAIN_KEY
-    )
-    .expect("validate snapshot"));
+    assert!(
+        LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate snapshot")
+    );
 
     let staging = root.path().join("staging");
     fs::create_dir_all(&staging).expect("staging");
@@ -12088,12 +12140,14 @@ async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Phone,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone,
+            ))
+            .is_ok()
+    );
     let app_id = create_app_fixture(&root, &service, "Device").await;
 
     let result = broker
@@ -12126,12 +12180,14 @@ async fn the_host_stamps_the_android_tablet_device_context() {
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Android,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Tablet,
+            ))
+            .is_ok()
+    );
     let app_id = create_app_fixture(&root, &service, "Tablet").await;
 
     let result = broker
@@ -12157,12 +12213,14 @@ async fn an_unclassified_host_records_no_device_context() {
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Unknown,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Unknown,
+            ))
+            .is_ok()
+    );
     let app_id = create_app_fixture(&root, &service, "Unclassified").await;
 
     let result = broker
@@ -12187,12 +12245,14 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_host_environment(host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
-        .is_ok());
+    assert!(
+        broker
+            .attach_host_environment(host_environment(
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
+            ))
+            .is_ok()
+    );
     let app_id = create_app_fixture(&root, &service, "Ignored").await;
 
     let result = broker
@@ -12463,9 +12523,11 @@ fn static_accept_errors_are_retried_but_not_forever() {
             .expect("the accept loop gives up instead of spinning at 20 Hz forever")
             .expect("the static server task did not panic")
     });
-    assert!(outcome
-        .expect("a listener that can never accept is a fatal exit, not a clean shutdown")
-        .contains("stopped accepting connections"),);
+    assert!(
+        outcome
+            .expect("a listener that can never accept is a fatal exit, not a clean shutdown")
+            .contains("stopped accepting connections"),
+    );
 }
 
 #[test]
@@ -12556,10 +12618,12 @@ fn a_dead_static_server_fails_the_runtime_record_and_frees_the_entry() {
             .await
             .expect("runtime record");
         assert_eq!(record.state, AppRuntimeState::Failed);
-        assert!(record
-            .last_error
-            .expect("the accept failure is preserved")
-            .contains("stopped accepting connections"));
+        assert!(
+            record
+                .last_error
+                .expect("the accept failure is preserved")
+                .contains("stopped accepting connections")
+        );
     });
 }
 
@@ -12713,12 +12777,14 @@ async fn pinned_shell() -> PinnedShell {
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_session_catalog(SessionCatalog {
-            lingxi_home: lingxi_home.clone(),
-            fs: fs_impl.clone(),
-        })
-        .is_ok());
+    assert!(
+        broker
+            .attach_session_catalog(SessionCatalog {
+                lingxi_home: lingxi_home.clone(),
+                fs: fs_impl.clone(),
+            })
+            .is_ok()
+    );
 
     let record = service
         .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
@@ -12980,14 +13046,16 @@ async fn reconciliation_waits_for_the_scaffold_commit_before_renaming() {
     // The same record, one field later: the commit is the only thing that
     // was missing.
     record.scaffolded = true;
-    assert!(reconcile_app_init_session_title(
-        &shell.lingxi_home,
-        shell.root.path(),
-        shell.fs.clone(),
-        &record,
-    )
-    .await
-    .expect("reconcile"));
+    assert!(
+        reconcile_app_init_session_title(
+            &shell.lingxi_home,
+            shell.root.path(),
+            shell.fs.clone(),
+            &record,
+        )
+        .await
+        .expect("reconcile")
+    );
     assert_eq!(shell.title(), "打飞机");
 }
 

@@ -14,12 +14,12 @@
 //! user cleared by hand — and a goal replaced by a newer one emitted nothing at
 //! all.
 
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
-use crate::turn_loop::{clear_goal_after_unrecoverable_error, GoalClearReason};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
+use crate::turn_loop::{GoalClearReason, clear_goal_after_unrecoverable_error};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;

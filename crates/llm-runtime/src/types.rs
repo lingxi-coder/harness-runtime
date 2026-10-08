@@ -1,7 +1,7 @@
 //! Provider-neutral public types.
 
+use lingxi_llm_client::protocol::JsonPayload;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Explicit provider identity resolved before request execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ pub struct ExecutionUsage {
     /// Provider total retained for historical presentation.
     pub provider_reported_total_tokens: Option<u64>,
     /// Redacted presentation metadata retained for transcript consumers.
-    pub provider_metadata: Value,
+    pub provider_metadata: JsonPayload,
     /// Host-only estimate frozen from the completed physical stream. It is
     /// transferred to accounting and never serialized as provider metadata.
     pub cost_estimate: Option<CostEstimate>,

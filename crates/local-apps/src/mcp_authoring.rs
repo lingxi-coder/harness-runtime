@@ -5,6 +5,7 @@ use crate::{
     CapabilityTransport, FlowDefinition, APPS_SCHEMA_VERSION,
 };
 use lingxi_core::host::{McpPermissionCeiling, McpToolDefinitionDto};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection as Source};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -788,11 +789,17 @@ impl AppMcpProposal {
                     "proposal contains duplicate tool names",
                 ));
             }
-            let candidate = McpToolDefinitionDto::new(tool.name.clone(), tool.input_schema.clone());
+            let candidate = McpToolDefinitionDto::new(
+                tool.name.clone(),
+                Source::from_serde_value(&tool.input_schema).expect("typed Local App schema"),
+            );
             let mut candidate = candidate;
-            candidate.title = tool.title.clone();
-            candidate.description = tool.description.clone();
-            candidate.output_schema = tool.output_schema.clone();
+            candidate.title = tool.title.as_ref().map(Source::from);
+            candidate.description = tool.description.as_ref().map(Source::from);
+            candidate.output_schema = tool
+                .output_schema
+                .as_ref()
+                .map(|value| Source::from_serde_value(value).expect("typed Local App schema"));
             validate_generated_mcp_catalog(&[candidate])?;
         }
         Ok(())
@@ -824,11 +831,16 @@ pub fn validate_app_mcp_proposal(
             result: tool.result.clone(),
         };
         validate_app_mcp_flow_binding(&flow, expected_app_id, context, registry)?;
-        let mut definition =
-            McpToolDefinitionDto::new(tool.name.clone(), tool.input_schema.clone());
-        definition.title = tool.title.clone();
-        definition.description = tool.description.clone();
-        definition.output_schema = tool.output_schema.clone();
+        let mut definition = McpToolDefinitionDto::new(
+            tool.name.clone(),
+            Source::from_serde_value(&tool.input_schema).expect("typed Local App schema"),
+        );
+        definition.title = tool.title.as_ref().map(Source::from);
+        definition.description = tool.description.as_ref().map(Source::from);
+        definition.output_schema = tool
+            .output_schema
+            .as_ref()
+            .map(|value| Source::from_serde_value(value).expect("typed Local App schema"));
         let context_flow = &context.flow;
         let ceiling = derive_local_app_mcp_ceiling(registry, context_flow);
         if ceiling == McpPermissionCeiling::Deny {
@@ -1326,12 +1338,14 @@ fn canonical_tool_name(name: &str) -> bool {
     !name.ends_with('_')
 }
 
-fn schema_bytes(schema: &Value) -> Result<usize, serde_json::Error> {
-    serde_json::to_vec(schema).map(|bytes| bytes.len())
+fn schema_bytes(
+    schema: &Source,
+) -> Result<usize, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    schema.to_json_string().map(|text| text.len())
 }
 
 fn validate_schema_node(
-    schema: &Value,
+    schema: JsonValueView<'_>,
     depth: usize,
     at_root: bool,
     issues: &mut Vec<GeneratedMcpIssue>,
@@ -1345,7 +1359,7 @@ fn validate_schema_node(
         });
         return;
     }
-    let Some(object) = schema.as_object() else {
+    if schema.object_entries().is_none() {
         issues.push(GeneratedMcpIssue {
             tool_name: Some(tool_name.into()),
             code: "schema_not_object",
@@ -1354,12 +1368,17 @@ fn validate_schema_node(
         return;
     };
     if at_root {
-        let closed = matches!(object.get("additionalProperties"), Some(Value::Bool(false)));
-        let object_root = object.get("type").is_some_and(|value| {
-            value == "object"
-                || value
-                    .as_array()
-                    .is_some_and(|items| items.iter().any(|item| item == "object"))
+        let closed = schema
+            .get_property("additionalProperties")
+            .and_then(JsonValueView::as_bool)
+            == Some(false);
+        let object_root = schema.get_property("type").is_some_and(|value| {
+            value.as_str() == Some("object")
+                || value.array_len().is_some_and(|len| {
+                    (0..len).any(|index| {
+                        value.get_index(index).and_then(JsonValueView::as_str) == Some("object")
+                    })
+                })
         });
         if !object_root || !closed {
             issues.push(GeneratedMcpIssue {
@@ -1371,7 +1390,7 @@ fn validate_schema_node(
             });
         }
     }
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+    if let Some(reference) = schema.get_property("$ref").and_then(JsonValueView::as_str) {
         if !reference.starts_with('#') {
             issues.push(GeneratedMcpIssue {
                 tool_name: Some(tool_name.into()),
@@ -1383,11 +1402,11 @@ fn validate_schema_node(
         }
     }
     for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(value) = object.get(key) {
-            match value.as_array() {
-                Some(items) if !items.is_empty() && items.len() <= MAX_COMBINATOR_VARIANTS => {
-                    for item in items {
-                        validate_schema_node(item, depth + 1, false, issues, tool_name);
+        if let Some(value) = schema.get_property(key) {
+            match value.array_len() {
+                Some(len) if len > 0 && len <= MAX_COMBINATOR_VARIANTS => {
+                    for index in 0..len {
+                        validate_schema_node(value.get_index(index).expect("schema variant"), depth + 1, false, issues, tool_name);
                     }
                 }
                 _ => issues.push(GeneratedMcpIssue {
@@ -1401,13 +1420,16 @@ fn validate_schema_node(
         }
     }
     for key in ["properties", "$defs", "definitions"] {
-        if let Some(Value::Object(children)) = object.get(key) {
-            for child in children.values() {
-                validate_schema_node(child, depth + 1, false, issues, tool_name);
+        if let Some(children) = schema
+            .get_property(key)
+            .and_then(JsonValueView::object_entries)
+        {
+            for child in children {
+                validate_schema_node(child.value, depth + 1, false, issues, tool_name);
             }
         }
     }
-    if let Some(items) = object.get("items") {
+    if let Some(items) = schema.get_property("items") {
         validate_schema_node(items, depth + 1, false, issues, tool_name);
     }
 }
@@ -1445,7 +1467,8 @@ pub fn validate_generated_mcp_catalog(
         }
         if tool
             .title
-            .as_deref()
+            .as_ref()
+            .and_then(|value| value.string_at(""))
             .is_some_and(|title| title.chars().count() > MAX_TOOL_TITLE_CHARS)
         {
             issues.push(GeneratedMcpIssue {
@@ -1459,7 +1482,8 @@ pub fn validate_generated_mcp_catalog(
         }
         if tool
             .description
-            .as_deref()
+            .as_ref()
+            .and_then(|value| value.string_at(""))
             .is_some_and(|description| description.chars().count() > MAX_TOOL_DESCRIPTION_CHARS)
         {
             issues.push(GeneratedMcpIssue {
@@ -1472,14 +1496,12 @@ pub fn validate_generated_mcp_catalog(
             });
         }
 
-        for (label, schema) in [
-            ("inputSchema", &tool.input_schema),
-            (
-                "outputSchema",
-                tool.output_schema.as_ref().unwrap_or(&Value::Null),
-            ),
-        ] {
-            if matches!(schema, Value::Null) {
+        for (label, schema) in std::iter::once(("inputSchema", &tool.input_schema)).chain(
+            tool.output_schema
+                .as_ref()
+                .map(|value| ("outputSchema", value)),
+        ) {
+            if schema.at_pointer("").expect("schema root").is_null() {
                 continue;
             }
             match schema_bytes(schema) {
@@ -1498,12 +1520,25 @@ pub fn validate_generated_mcp_catalog(
                     message: format!("tool {} {label} failed to serialize: {error}", tool.name),
                 }),
             }
-            validate_schema_node(schema, 1, true, &mut issues, &tool.name);
+            validate_schema_node(
+                schema.at_pointer("").expect("schema root"),
+                1,
+                true,
+                &mut issues,
+                &tool.name,
+            );
         }
 
-        let schema_json = tool.input_schema.to_string();
+        let schema_json = tool
+            .input_schema
+            .to_json_string()
+            .expect("validated source schema");
         let budget_utf16 = utf16_units(&tool.name)
-            + utf16_units(tool.description.as_deref().unwrap_or(""))
+            + tool
+                .description
+                .as_ref()
+                .and_then(|text| text.string_units(""))
+                .map_or(0, |units| units.len())
             + utf16_units(&schema_json);
         let budget_tokens = estimated_tokens(budget_utf16);
         per_tool_utf16.insert(tool.name.clone(), budget_utf16);
@@ -1632,6 +1667,12 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            super::Source::from_serde_value(&json!($($tokens)*)).unwrap()
+        };
+    }
+
     #[test]
     fn zero_tool_catalog_is_valid() {
         let budget = validate_generated_mcp_catalog(&[]).expect("zero tools allowed");
@@ -1643,7 +1684,7 @@ mod tests {
     fn invalid_generated_tool_name_is_rejected() {
         let tool = McpToolDefinitionDto::new(
             "Bad-Name",
-            json!({"type":"object","additionalProperties":false}),
+            source_json!({"type":"object","additionalProperties":false}),
         );
         let issues = validate_generated_mcp_catalog(&[tool]).expect_err("invalid name");
         assert!(issues.iter().any(|issue| issue.code == "invalid_tool_name"));
@@ -1653,13 +1694,13 @@ mod tests {
     fn open_root_and_remote_ref_are_rejected() {
         let mut tool = McpToolDefinitionDto::new(
             "good_name",
-            json!({
+            source_json!({
                 "type":"object",
                 "properties":{"x":{"$ref":"https://example.com/schema.json"}},
                 "additionalProperties":true
             }),
         );
-        tool.output_schema = Some(json!({
+        tool.output_schema = Some(source_json!({
             "type":"object",
             "properties":{"y":{"type":"string"}},
             "additionalProperties":false
@@ -1675,7 +1716,7 @@ mod tests {
     fn closed_root_requires_additional_properties_false() {
         let valid = McpToolDefinitionDto::new(
             "good_name",
-            json!({
+            source_json!({
                 "type":"object",
                 "properties":{"x":{"type":"string"}},
                 "additionalProperties":false
@@ -1685,7 +1726,7 @@ mod tests {
 
         let open_true = McpToolDefinitionDto::new(
             "good_name",
-            json!({
+            source_json!({
                 "type":"object",
                 "properties":{"x":{"type":"string"}},
                 "additionalProperties":true
@@ -1696,7 +1737,7 @@ mod tests {
 
         let missing_flag = McpToolDefinitionDto::new(
             "good_name",
-            json!({
+            source_json!({
                 "type":"object",
                 "properties":{"x":{"type":"string"}}
             }),
@@ -1720,7 +1761,7 @@ mod tests {
     fn per_tool_definition_budget_is_enforced() {
         let mut tool = McpToolDefinitionDto::new(
             "budget_name",
-            json!({
+            source_json!({
                 "type":"object",
                 "properties":{"x":{"type":"string","description":"y".repeat(6000)}},
                 "additionalProperties":false

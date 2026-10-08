@@ -45,5 +45,8 @@ telemetry = { path = "../../telemetry" }
 # `tool-api` itself already pins (already resolved in the lockfile).
 image = { version = "=0.24.9", default-features = false, features = ["png"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+platform-macos-computer-control = { path = "../../platforms/macos-computer-control" }
+
 [lints]
 workspace = true

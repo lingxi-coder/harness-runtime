@@ -1,3 +1,4 @@
+use super::json_payload;
 use crate::upstream::codec_fixtures::HistoryFixture;
 use crate::upstream::codec_fixtures::{FixtureCodec, GeminiCodec};
 
@@ -20,7 +21,7 @@ fn encode_image_bytes_as_inline_data() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    let part = &super::json_payload_value(&provider_request.body_json)["contents"][0]["parts"][0];
     assert_eq!(part["inlineData"]["mimeType"], "image/png");
     let b64 = part["inlineData"]["data"].as_str().unwrap();
     assert!(!b64.is_empty());
@@ -38,7 +39,7 @@ fn encode_document_bytes_as_inline_data() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    let part = &super::json_payload_value(&provider_request.body_json)["contents"][0]["parts"][0];
     assert_eq!(part["inlineData"]["mimeType"], "application/pdf");
     assert!(part["inlineData"]["data"].as_str().is_some());
 }
@@ -56,7 +57,7 @@ fn encode_image_url_produces_file_data_part() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    let part = &super::json_payload_value(&provider_request.body_json)["contents"][0]["parts"][0];
     assert_eq!(part["fileData"]["fileUri"], "https://example.com/img.png");
     // mime_type intentionally absent — Gemini infers it for https file_uri values.
     assert!(
@@ -73,13 +74,15 @@ fn encode_tool_choice_auto() {
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: json_payload(serde_json::json!("Look up a value")),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
     request.request.set_tool_choice(Some(ToolChoice::Auto));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
-        provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
+        super::json_payload_value(&provider_request.body_json)["toolConfig"]
+            ["functionCallingConfig"]["mode"],
         "AUTO"
     );
 }
@@ -90,13 +93,15 @@ fn encode_tool_choice_none() {
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: json_payload(serde_json::json!("Look up a value")),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
     request.request.set_tool_choice(Some(ToolChoice::None));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
-        provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
+        super::json_payload_value(&provider_request.body_json)["toolConfig"]
+            ["functionCallingConfig"]["mode"],
         "NONE"
     );
 }
@@ -107,13 +112,15 @@ fn encode_tool_choice_required_maps_to_any() {
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: json_payload(serde_json::json!("Look up a value")),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
     request.request.set_tool_choice(Some(ToolChoice::Required));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
-        provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
+        super::json_payload_value(&provider_request.body_json)["toolConfig"]
+            ["functionCallingConfig"]["mode"],
         "ANY"
     );
 }
@@ -124,14 +131,16 @@ fn encode_tool_choice_specific_tool() {
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: json_payload(serde_json::json!("Look up a value")),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
     request.request.set_tool_choice(Some(ToolChoice::Tool {
         name: "Bash".to_string(),
     }));
     let provider_request = codec.encode_request(&request).unwrap();
-    let config = &provider_request.body_json["toolConfig"]["functionCallingConfig"];
+    let config = &super::json_payload_value(&provider_request.body_json)["toolConfig"]
+        ["functionCallingConfig"];
     assert_eq!(config["mode"], "ANY");
     assert_eq!(config["allowedFunctionNames"][0], "Bash");
 }
@@ -141,7 +150,9 @@ fn omit_tool_config_when_no_tool_choice() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let request = HistoryFixture::new("gemini-2.0-flash");
     let provider_request = codec.encode_request(&request).unwrap();
-    assert!(provider_request.body_json.get("toolConfig").is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("toolConfig")
+        .is_none());
 }
 
 #[test]
@@ -151,8 +162,8 @@ fn encode_request_shape_is_gemini_generate_content() {
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
-        description: "d".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: "d".into(),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     }];
 
@@ -160,11 +171,13 @@ fn encode_request_shape_is_gemini_generate_content() {
 
     assert!(provider_request.url.contains(":generateContent"));
     assert_eq!(
-        provider_request.body_json["systemInstruction"]["parts"][0]["text"],
+        super::json_payload_value(&provider_request.body_json)["systemInstruction"]["parts"][0]
+            ["text"],
         "sys"
     );
     assert_eq!(
-        provider_request.body_json["tools"][0]["functionDeclarations"][0]["name"],
+        super::json_payload_value(&provider_request.body_json)["tools"][0]["functionDeclarations"]
+            [0]["name"],
         "Read"
     );
 }
@@ -222,7 +235,7 @@ fn encode_generation_config_from_sampling_controls() {
     request.request.input.stop_sequences = vec!["END".to_string()];
 
     let provider_request = codec.encode_request(&request).unwrap();
-    let config = &provider_request.body_json["generationConfig"];
+    let config = &super::json_payload_value(&provider_request.body_json)["generationConfig"];
 
     assert_eq!(config["maxOutputTokens"], 1024);
     assert_eq!(config["temperature"], 0.5);
@@ -232,7 +245,9 @@ fn encode_generation_config_from_sampling_controls() {
     let bare = codec
         .encode_request(&HistoryFixture::new("gemini-2.0-flash"))
         .unwrap();
-    assert!(bare.body_json.get("generationConfig").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("generationConfig")
+        .is_none());
 }
 
 #[test]
@@ -244,23 +259,23 @@ fn encode_tool_result_error_uses_error_response_shape() {
         content: vec![ContentBlock::ToolCall {
             id: "call_0".to_string(),
             name: "Bash".to_string(),
-            input: serde_json::json!({"command":"ls"}),
+            input: super::json_payload(serde_json::json!({"command":"ls"})),
         }],
     });
     request.messages.push(llm_runtime::Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_0".to_string(),
-            output: serde_json::json!("command failed"),
-            is_error: true,
+            output: super::json_payload(serde_json::json!("command failed")),
+            is_error: Some(true),
             cache_control: None,
             cache_reference: None,
         }],
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
-    let response =
-        &provider_request.body_json["contents"][1]["parts"][0]["functionResponse"]["response"];
+    let response = &super::json_payload_value(&provider_request.body_json)["contents"][1]["parts"]
+        [0]["functionResponse"]["response"];
 
     assert_eq!(response["error"], "command failed");
     assert!(response.get("result").is_none());
@@ -275,15 +290,15 @@ fn encode_tool_result_uses_prior_tool_call_name() {
         content: vec![ContentBlock::ToolCall {
             id: "call_1".to_string(),
             name: "Bash".to_string(),
-            input: serde_json::json!({"command":"ls"}),
+            input: super::json_payload(serde_json::json!({"command":"ls"})),
         }],
     });
     request.messages.push(llm_runtime::Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_1".to_string(),
-            output: serde_json::json!("done"),
-            is_error: false,
+            output: super::json_payload(serde_json::json!("done")),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -292,7 +307,8 @@ fn encode_tool_result_uses_prior_tool_call_name() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["contents"][1]["parts"][0]["functionResponse"]["name"],
+        super::json_payload_value(&provider_request.body_json)["contents"][1]["parts"][0]
+            ["functionResponse"]["name"],
         "Bash"
     );
 }
@@ -361,13 +377,13 @@ fn sse_stream_reassembles_text_then_thought_then_function_call() {
         matches!(events[5], HistoryEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { ref name, .. }, .. } if name == "Bash")
     );
     assert!(
-        matches!(events[6], HistoryEvent::ContentBlockDelta { delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json }, .. } if partial_json == "{\"command\":\"ls\"}")
+        matches!(events[6], HistoryEvent::ContentBlockDelta { delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json }, .. } if super::fragment_is_text(partial_json, "{\"command\":\"ls\"}"))
     );
     assert!(matches!(events[7], HistoryEvent::ContentBlockStop { .. }));
     assert!(matches!(events[8], HistoryEvent::ContentBlockStop { .. }));
     assert!(matches!(events[9], HistoryEvent::ContentBlockStop { .. }));
     assert!(
-        matches!(events[10], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use")
+        matches!(events[10], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None, resumable: None }, .. } if reason == "tool_use")
     );
     assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
 }
@@ -487,8 +503,8 @@ fn encode_tool_result_with_unknown_call_id_is_rejected() {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_unseen".to_string(),
-            output: serde_json::json!("done"),
-            is_error: false,
+            output: super::json_payload(serde_json::json!("done")),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -515,8 +531,11 @@ fn decode_blocked_prompt_reports_block_reason() {
 
     assert_eq!(response.stop_reason.as_deref(), Some("refusal"));
     assert_eq!(
-        response.provider_metadata["promptFeedback"]["blockReason"],
-        "SAFETY"
+        response
+            .provider_metadata
+            .string_at("/promptFeedback/blockReason")
+            .as_deref(),
+        Some("SAFETY")
     );
 }
 
@@ -533,7 +552,8 @@ fn encode_reasoning_budget_as_thinking_config() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        super::json_payload_value(&provider_request.body_json)["generationConfig"]
+            ["thinkingConfig"]["thinkingBudget"],
         2048
     );
 }
@@ -544,11 +564,11 @@ fn system_blocks_become_system_instruction_parts() {
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.system = vec![
         llm_runtime::SystemBlock {
-            text: "a".to_string(),
+            text: "a".into(),
             cache_control: None,
         },
         llm_runtime::SystemBlock {
-            text: "b".to_string(),
+            text: "b".into(),
             cache_control: Some(llm_runtime::CacheControl::Ephemeral),
         },
     ];
@@ -556,11 +576,13 @@ fn system_blocks_become_system_instruction_parts() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["systemInstruction"]["parts"][0]["text"],
+        super::json_payload_value(&provider_request.body_json)["systemInstruction"]["parts"][0]
+            ["text"],
         "a"
     );
     assert_eq!(
-        provider_request.body_json["systemInstruction"]["parts"][1]["text"],
+        super::json_payload_value(&provider_request.body_json)["systemInstruction"]["parts"][1]
+            ["text"],
         "b"
     );
 }
@@ -602,7 +624,7 @@ async fn signed_text_and_tools_survive_both_response_paths_and_replay_once() {
                     ContentBlock::ProviderContent { value, .. } => Some(value),
                     _ => None,
                 })
-                .all(|value| value["type"] == "lingxi_replay_metadata"),
+                .all(|value| value.string_at("/type").as_deref() == Some("lingxi_replay_metadata")),
             "partial output must not expose a metadata companion as another tool_use"
         );
         let calls: Vec<_> = response
@@ -627,13 +649,13 @@ async fn signed_text_and_tools_survive_both_response_paths_and_replay_once() {
             role: "user".into(),
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: calls[0].clone(),
-                output: serde_json::json!({"ok":true}),
-                is_error: false,
+                output: super::json_payload(serde_json::json!({"ok":true})),
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             }],
         });
-        let encoded = codec.encode_request(&request).unwrap().body_json;
+        let encoded = super::json_payload_value(&codec.encode_request(&request).unwrap().body_json);
         let parts = encoded["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "visible");

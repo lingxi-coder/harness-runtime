@@ -135,7 +135,7 @@ async fn orch_with_blocking_hook(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
             text: "unreached".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));

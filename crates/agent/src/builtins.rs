@@ -420,6 +420,7 @@ pub fn workflow_subagent_disallowed() -> Vec<String> {
 #[must_use]
 pub fn workflow_subagent_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_claude_md: false,
         cache_ttl: None,
         agent_type: WORKFLOW_SUBAGENT_TYPE.to_string(),
         when_to_use: "Internal subagent for workflow script orchestration.".to_string(),
@@ -431,7 +432,7 @@ pub fn workflow_subagent_definition() -> AgentDefinition {
         permission_mode: AgentPermissionMode::Bubble,
         source: AgentSource::BuiltIn,
         base_dir: "built-in".into(),
-        system_prompt: Some(WORKFLOW_SUBAGENT_PROMPT.to_string()),
+        system_prompt: Some(WORKFLOW_SUBAGENT_PROMPT.to_string().into()),
         mcp_servers: vec![],
         frontmatter_hooks: vec![],
         icon: None,
@@ -447,6 +448,7 @@ pub fn workflow_subagent_definition() -> AgentDefinition {
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -571,6 +573,7 @@ fn def(
     system_prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        omit_claude_md: false,
         cache_ttl: None,
         agent_type: agent_type.to_string(),
         when_to_use: when_to_use.to_string(),
@@ -582,7 +585,7 @@ fn def(
         permission_mode: AgentPermissionMode::Bubble,
         source: AgentSource::BuiltIn,
         base_dir: "built-in".into(),
-        system_prompt: Some(system_prompt.to_string()),
+        system_prompt: Some(system_prompt.to_string().into()),
         mcp_servers: vec![],
         frontmatter_hooks: vec![],
         icon: None,
@@ -600,6 +603,7 @@ fn def(
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -678,17 +682,15 @@ pub fn builtin_agent_definitions_with_gates(
     include_explore_plan: bool,
     safe_mode: bool,
 ) -> Vec<AgentDefinition> {
-    let mut defs = vec![
-        def(
-            "general-purpose",
-            "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
-            AgentToolPolicy::All {
-                use_exact_tools: false,
-            },
-            AgentModel::Inherit,
-            GENERAL_PURPOSE_PROMPT,
-        ),
-    ];
+    let mut defs = vec![def(
+        "general-purpose",
+        "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+        AgentToolPolicy::All {
+            use_exact_tools: false,
+        },
+        AgentModel::Inherit,
+        GENERAL_PURPOSE_PROMPT,
+    )];
     // `if(!Ir())n.push(xnn)` — safe mode withdraws the statusline-setup agent.
     if !safe_mode {
         defs.push({
@@ -777,6 +779,7 @@ pub fn builtin_agent_definitions_with_gates(
 #[must_use]
 pub fn fork_agent_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_claude_md: false,
         cache_ttl: None,
         agent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
         when_to_use:
@@ -807,6 +810,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -818,11 +822,13 @@ pub fn fork_agent_definition() -> AgentDefinition {
 #[must_use]
 pub fn fusion_panel_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_claude_md: false,
         cache_ttl: None,
         agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion panel — independent read-only deliberation. Not selectable via subagent_type."
-                .to_string(),
+                .to_string()
+                .into(),
         tools: AgentToolPolicy::Explicit(vec![
             "Read".into(),
             "Grep".into(),
@@ -846,7 +852,8 @@ Rules:
 The report must include a concise summary, a complete candidate_answer the parent could adopt, claims with evidence, explicit assumptions, risks, and unresolved questions.
 
 For file evidence, set locator to the workspace-relative path (optionally with :line or :start-end) and excerpt to 1-10 lines copied verbatim from that file, without line numbers. The host checks every excerpt against the workspace and flags claims whose cited code is not there."
-                .to_string(),
+                .to_string()
+                .into(),
         ),
         mcp_servers: vec![],
         frontmatter_hooks: vec![],
@@ -863,6 +870,7 @@ For file evidence, set locator to the workspace-relative path (optionally with :
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -880,7 +888,8 @@ pub fn fusion_implementer_definition() -> AgentDefinition {
         agent_type: lingxi_core::host::FUSION_IMPLEMENTER_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion implementer — implements a task in its own worktree. Not selectable via subagent_type."
-                .to_string(),
+                .to_string()
+                .into(),
         tools: AgentToolPolicy::Explicit(vec![
             "Read".into(),
             "Grep".into(),
@@ -907,7 +916,8 @@ Rules:
 In the report, candidate_answer describes the change: what you changed and why, and how you checked it. Do not paste the full diff; the host collects it. Report commands you ran as command evidence; the host runs its own verification and does not rely on your account.
 
 For file evidence about existing code, set locator to the path relative to the current directory (optionally with :line or :start-end) and excerpt to 1-10 lines copied verbatim from that file, without line numbers."
-                .to_string(),
+                .to_string()
+                .into(),
         ),
         ..fusion_panel_definition()
     }
@@ -941,7 +951,8 @@ Rules:
 - Stop checking when your remaining turns are few, and return what you have.
 - Do not mention provider names, model names, or that the reports come from a multi-model ensemble.
 - Return your analysis through the StructuredOutput tool."
-                .to_string(),
+                .to_string()
+                .into(),
         ),
         ..fusion_panel_definition()
     }
@@ -963,7 +974,12 @@ mod tests {
         assert!(!builtin_agent_definitions_gated(true)
             .iter()
             .any(|d| d.agent_type == def.agent_type));
-        assert!(def.system_prompt.unwrap().contains("untrusted"));
+        assert!(def
+            .system_prompt
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .contains("untrusted"));
     }
 
     #[test]
@@ -981,7 +997,7 @@ mod tests {
             assert!(!tools.iter().any(|t| t == tool), "{tool}");
         }
         assert!(matches!(def.permission_mode, AgentPermissionMode::Isolated));
-        let prompt = def.system_prompt.unwrap();
+        let prompt = def.system_prompt.unwrap().string_at("").unwrap();
         assert!(prompt.contains("git commit"));
         assert!(prompt.contains("current directory"));
         assert!(!builtin_agent_definitions_gated(true)
@@ -1177,7 +1193,7 @@ mod tests {
         assert!(d
             .when_to_use
             .ends_with("use `gh` or an authenticated MCP tool for those."));
-        let p = d.system_prompt.as_deref().unwrap();
+        let p = d.system_prompt.as_ref().unwrap().string_at("").unwrap();
         assert!(p.starts_with("You are a web-reading specialist for LingXi."));
         assert!(p.contains("inside <fetched-web-content> tags rather than a summary"));
         assert!(!p.contains("${"), "no unsubstituted template slots");
@@ -1198,7 +1214,12 @@ mod tests {
         let defs = builtin_agent_definitions();
         // The 3 static agents carry real prompt text (no placeholder marker).
         for ty in ["general-purpose", "Explore", "Plan"] {
-            let p = find(&defs, ty).system_prompt.as_deref().unwrap();
+            let p = find(&defs, ty)
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at("")
+                .unwrap();
             assert!(
                 !p.contains("[NOTE: This is a placeholder"),
                 "{ty} should be verbatim"
@@ -1207,7 +1228,12 @@ mod tests {
         // The dynamic agent is a real host-context prompt.
         {
             let ty = "statusline-setup";
-            let p = find(&defs, ty).system_prompt.as_deref().unwrap();
+            let p = find(&defs, ty)
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at("")
+                .unwrap();
             assert!(
                 !p.contains("[NOTE: This is a placeholder"),
                 "{ty} must not be a placeholder"
@@ -1223,7 +1249,12 @@ mod tests {
     fn task_builtins_are_lingxi_branded_and_shell_neutral() {
         let defs = builtin_agent_definitions();
         for ty in ["general-purpose", "Explore", "Plan"] {
-            let prompt = find(&defs, ty).system_prompt.as_deref().unwrap();
+            let prompt = find(&defs, ty)
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at("")
+                .unwrap();
             assert!(prompt.contains("LingXi"), "{ty} must identify LingXi");
             assert!(
                 !prompt.contains("Claude Code"),
@@ -1235,7 +1266,12 @@ mod tests {
             );
         }
         for ty in ["Explore", "Plan"] {
-            let prompt = find(&defs, ty).system_prompt.as_deref().unwrap();
+            let prompt = find(&defs, ty)
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .string_at("")
+                .unwrap();
             assert!(prompt.contains("registered shell tool"));
         }
     }
@@ -1349,7 +1385,8 @@ mod tests {
         let d = find(&defs, "workflow-subagent");
         let got = d
             .system_prompt
-            .as_deref()
+            .as_ref()
+            .and_then(|prompt| prompt.string_at(""))
             .expect("system_prompt must be Some");
         assert_eq!(
             got, expected,

@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use command_api::{
     FrontmatterShell, ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
@@ -264,11 +265,20 @@ fn disable_extglob(shell_path: &str) -> Option<String> {
 impl ShellRunner for PromptShellRunner {
     async fn run(
         &self,
-        command: &str,
+        command: &Utf16JsonProjection,
         _shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
         use lingxi_core::host::sandbox::ProcessCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
+
+        // This is the real host process boundary. TextEncoder replaces only
+        // unpaired UTF-16 units with U+FFFD; valid pairs and all other source
+        // units are preserved in the executable command.
+        let command_text = String::from_utf16_lossy(
+            &command
+                .string_units("")
+                .expect("shell runner receives a root-string command"),
+        );
 
         if self.mobile_shell && !self.shell_enabled {
             return Err(ShellRunError {
@@ -298,7 +308,7 @@ impl ShellRunner for PromptShellRunner {
         // Snapshot mode sources the captured aliases/functions/options and uses
         // `eval` so aliases expand. If snapshot creation/access failed, retain
         // the login-shell fallback.
-        let spawn_cmd = command_with_snapshot(command, shell_path, snapshot);
+        let spawn_cmd = command_with_snapshot(&command_text, shell_path, snapshot);
 
         // ===== Sandbox decision (mirror of `BashTool::call`) =====
         // A prompt `!command` has NO per-command `dangerouslyDisableSandbox` flag
@@ -307,7 +317,7 @@ impl ShellRunner for PromptShellRunner {
         // bash does — 1:1 with claude-code `shouldUseSandbox.ts`. `unsandboxed_allowed`
         // is the canonical `are_unsandboxed_commands_allowed()` accessor.
         let decision = should_use_sandbox(
-            command,
+            &command_text,
             self.sandbox_available,
             /* dangerously_disable_sandbox */ false,
             self.sandbox_runtime.are_unsandboxed_commands_allowed(),
@@ -464,7 +474,11 @@ struct PolicyShellPermissionGate {
 }
 
 impl ShellPermissionGate for PolicyShellPermissionGate {
-    fn check(&self, command: &str, shell: Option<FrontmatterShell>) -> ShellPermissionDecision {
+    fn check(
+        &self,
+        command: &Utf16JsonProjection,
+        shell: Option<FrontmatterShell>,
+    ) -> ShellPermissionDecision {
         if self.mobile_shell && !self.shell_enabled {
             return ShellPermissionDecision::Deny {
                 message: Some(
@@ -485,7 +499,8 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
                 _ => "Bash",
             }
         };
-        let input = serde_json::json!({ "command": command });
+        let input = Utf16JsonProjection::object(vec![("command".into(), command.clone())])
+            .expect("shell permission input is a JSON object");
         if let Some(decision) = self.live_gate.as_ref().and_then(|gate| {
             gate.check_noninteractive_with_allow_rules(
                 tool_name,
@@ -692,6 +707,7 @@ mod tests {
         prepare_calls: AtomicUsize,
         bypass_calls: AtomicUsize,
         last_network: Mutex<Option<mobile_linux_api::NetworkPolicy>>,
+        last_process_args: Mutex<Option<Vec<String>>>,
     }
 
     #[async_trait]
@@ -709,6 +725,7 @@ mod tests {
         ) -> Result<SandboxedCommand, SandboxError> {
             self.prepare_calls.fetch_add(1, Ordering::SeqCst);
             *self.last_network.lock().unwrap() = Some(policy.network);
+            *self.last_process_args.lock().unwrap() = Some(cmd.args.clone());
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::Wrapped {
@@ -723,6 +740,7 @@ mod tests {
         ) -> SandboxedCommand {
             let _ = reason;
             self.bypass_calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_process_args.lock().unwrap() = Some(cmd.args.clone());
             SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -775,12 +793,12 @@ mod tests {
         let ctx = provider.build(&[], None);
         // `git status` is read-only (roots-independent auto-allow).
         assert_eq!(
-            ctx.permission_gate.check("git status", None),
+            ctx.permission_gate.check(&"git status".into(), None),
             ShellPermissionDecision::Allow
         );
         // `git push` is a write, in no allow-list → mode `Ask` → folded to `Deny`.
         assert!(matches!(
-            ctx.permission_gate.check("git push", None),
+            ctx.permission_gate.check(&"git push".into(), None),
             ShellPermissionDecision::Deny { .. }
         ));
     }
@@ -804,14 +822,16 @@ mod tests {
         // Without the injected rule: `git commit` is a write, no rule → Deny.
         let bare = provider.build(&[], None);
         assert!(matches!(
-            bare.permission_gate.check("git commit -m x", None),
+            bare.permission_gate.check(&"git commit -m x".into(), None),
             ShellPermissionDecision::Deny { .. }
         ));
 
         // With the command's own `Bash(git commit:*)` injected: Allow.
         let with_rule = provider.build(&["Bash(git commit:*)".to_string()], None);
         assert_eq!(
-            with_rule.permission_gate.check("git commit -m x", None),
+            with_rule
+                .permission_gate
+                .check(&"git commit -m x".into(), None),
             ShellPermissionDecision::Allow
         );
     }
@@ -836,7 +856,7 @@ mod tests {
         // proving the previous injection did not persist onto the base policy.
         let fresh = provider.build(&[], None);
         assert!(matches!(
-            fresh.permission_gate.check("git commit -m x", None),
+            fresh.permission_gate.check(&"git commit -m x".into(), None),
             ShellPermissionDecision::Deny { .. }
         ));
     }
@@ -884,7 +904,7 @@ mod tests {
         // The mixed compound → Allow (rule-allowed `gh pr view` + read-only `true`).
         assert_eq!(
             gate.permission_gate
-                .check("gh pr view --json number 2>/dev/null || true", None),
+                .check(&"gh pr view --json number 2>/dev/null || true".into(), None),
             ShellPermissionDecision::Allow,
         );
     }
@@ -913,7 +933,7 @@ mod tests {
         let expansion = provider.build(&[], None);
         let out = expansion
             .runner
-            .run("printf ok", None)
+            .run(&"printf ok".into(), None)
             .await
             .expect("mobile prompt-shell run");
         assert_eq!(out.stdout, "ok");
@@ -923,6 +943,44 @@ mod tests {
             *sandbox.last_network.lock().unwrap(),
             Some(mobile_linux_api::NetworkPolicy::Disabled)
         );
+    }
+
+    #[tokio::test]
+    async fn process_boundary_replaces_only_unpaired_units_with_text_encoder_output() {
+        let mut ctx = test_ctx();
+        let sandbox = Arc::new(RecordingSandbox::default());
+        ctx.sandbox = sandbox.clone();
+        ctx.process = Arc::new(RecordingProcessRunner);
+        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+            true,
+            vec!["sh".into()],
+            None,
+        ));
+        let provider = build_prompt_shell_provider(&ctx);
+        let expansion = provider.build(&[], None);
+
+        let mut units = "printf 'A".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend("Z'".encode_utf16());
+        let command = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("raw process command fixture");
+        expansion
+            .runner
+            .run(&command, None)
+            .await
+            .expect("process boundary accepts raw UTF-16 command source");
+
+        let args = sandbox
+            .last_process_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("mobile sandbox received the command");
+        assert_eq!(args.first().map(String::as_str), Some("-c"));
+        assert!(args[1].contains("A\u{fffd}Z"));
+        assert!(args[1]
+            .encode_utf16()
+            .all(|unit| unit != 0xd800 && unit != 0xdfff));
     }
 
     #[tokio::test]
@@ -939,12 +997,12 @@ mod tests {
         let expansion = provider.build(&["Shell(*)".into()], None);
 
         assert!(matches!(
-            expansion.permission_gate.check("printf ok", None),
+            expansion.permission_gate.check(&"printf ok".into(), None),
             ShellPermissionDecision::Deny { .. }
         ));
         let error = expansion
             .runner
-            .run("printf ok", None)
+            .run(&"printf ok".into(), None)
             .await
             .expect_err("disabled mobile shell must fail closed");
         assert_eq!(
@@ -955,13 +1013,13 @@ mod tests {
 
     #[test]
     fn mobile_prompt_commands_authorize_as_shell_not_bash() {
-        struct RecordingGate(Mutex<Vec<String>>);
+        struct RecordingGate(Mutex<Vec<(String, Option<Vec<u16>>)>>);
         #[async_trait]
         impl lingxi_core::host::permission_gate::PermissionGate for RecordingGate {
             async fn check(
                 &self,
                 _tool_name: &str,
-                _input: &serde_json::Value,
+                _input: &Utf16JsonProjection,
             ) -> lingxi_core::host::permission_gate::PermissionDecision {
                 lingxi_core::host::permission_gate::PermissionDecision::Allow
             }
@@ -969,11 +1027,14 @@ mod tests {
             fn check_noninteractive_with_allow_rules(
                 &self,
                 tool_name: &str,
-                _input: &serde_json::Value,
+                input: &Utf16JsonProjection,
                 _allow_rules: &[String],
             ) -> Option<lingxi_core::host::permission_gate::NonInteractivePermissionDecision>
             {
-                self.0.lock().unwrap().push(tool_name.to_string());
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((tool_name.to_string(), input.string_units("/command")));
                 Some(lingxi_core::host::permission_gate::NonInteractivePermissionDecision::Allow)
             }
         }
@@ -989,10 +1050,18 @@ mod tests {
 
         let provider = build_prompt_shell_provider(&ctx);
         let expansion = provider.build(&[], None);
+        let command = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&[u16::from(b'p'), u16::from(b'r'), 0xd800]),
+            vec![u16::from(b'p'), u16::from(b'r'), 0xd800],
+        )
+        .expect("raw permission command fixture");
         assert_eq!(
-            expansion.permission_gate.check("printf ok", None),
+            expansion.permission_gate.check(&command, None),
             ShellPermissionDecision::Allow
         );
-        assert_eq!(*gate.0.lock().unwrap(), vec!["Shell"]);
+        assert_eq!(
+            *gate.0.lock().unwrap(),
+            vec![("Shell".to_string(), command.string_units(""))]
+        );
     }
 }

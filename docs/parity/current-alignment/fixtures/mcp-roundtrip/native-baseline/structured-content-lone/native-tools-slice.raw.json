@@ -1,0 +1,1 @@
+[{"name":"mcp__fixture__emit_payload","description":"Return a fixed multiple-content result and structuredContent with a lone UTF-16 unit.","input_schema":{"type":"object","properties":{"mode":{"type":"string","enum":["source-units"]}},"required":["mode"],"additionalProperties":false}}]

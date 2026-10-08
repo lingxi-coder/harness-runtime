@@ -1,6 +1,6 @@
 //! Regression tests for codec trait test.
 
-use lingxi_llm_client::{self as sdk, protocol as wire, WireCodec};
+use lingxi_llm_client::{self as sdk, WireCodec, protocol as wire};
 use llm_runtime::{ProviderRequest, ProviderResponse};
 use serde_json::json;
 
@@ -50,7 +50,10 @@ fn sdk_codec_works_through_trait_object_and_json_response() {
 fn provider_envelopes_round_trip_through_serde_with_headers_and_request_id() {
     let mut request = ProviderRequest::post_json(
         "https://example.test/v1/messages",
-        serde_json::json!({"model": "model-a"}),
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+            &serde_json::json!({"model": "model-a"}),
+        )
+        .expect("request body is valid JSON"),
     );
     request
         .headers
@@ -76,8 +79,11 @@ fn provider_envelopes_round_trip_through_serde_with_headers_and_request_id() {
 
 #[test]
 fn normalized_headers_keep_a_single_value_per_name() {
-    let mut request =
-        ProviderRequest::post_json("https://example.test/v1/messages", serde_json::json!({}));
+    let mut request = ProviderRequest::post_json(
+        "https://example.test/v1/messages",
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({}))
+            .expect("request body is valid JSON"),
+    );
     request
         .headers
         .insert("x-dup".to_string(), "one".to_string());

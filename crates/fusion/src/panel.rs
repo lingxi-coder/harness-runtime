@@ -1524,7 +1524,13 @@ fn spawn_request(
     index: usize,
     name_index: usize,
 ) -> SubagentSpawnRequest {
+    let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        prompt.clone(),
+        prompt.encode_utf16().collect(),
+    )
+    .expect("Fusion-generated panel prompt is a valid root string");
     SubagentSpawnRequest {
+        parent_native_query_depth: None,
         subagent_type: FUSION_PANEL_TYPE.to_string(),
         prompt,
         model: Some(panel.model.clone()),
@@ -1801,14 +1807,28 @@ fn finish_panel(
 /// (the runner's non-schema `!terminated_cleanly` path already emits it —
 /// see `runner_test.rs`'s `loop_exhausts_max_turns_when_never_terminal`),
 /// and deleting it would only trade one silent gap for another.
-fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
-    if content.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
+fn max_turns_exhausted_detail(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<String> {
+    if content.get_property("reason")?.as_str() != Some("max_turns_exhausted") {
         return None;
     }
-    Some(match content.get("max_turns").and_then(Value::as_u64) {
+    let max_turns = content
+        .get_property("max_turns")
+        .and_then(|value| value.as_number())
+        .and_then(finite_nonnegative_integer_u64);
+    Some(match max_turns {
         Some(n) => format!("panel exhausted its {n}-turn budget without a valid StructuredOutput"),
         None => "panel exhausted its turn budget without a valid StructuredOutput".into(),
     })
+}
+
+fn finite_nonnegative_integer_u64(value: f64) -> Option<u64> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < u64::MAX as f64 {
+        Some(value as u64)
+    } else {
+        None
+    }
 }
 
 /// [Round-4 review item 5] Extract the human-readable cause from the
@@ -1824,12 +1844,13 @@ fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
 /// blank-line separator — or `None` when `content` doesn't match this exact
 /// shape (so a caller can fall back to the generic "protocol" category
 /// instead of fabricating a cause for an unrelated malformed report).
-fn api_error_cutoff_detail(content: &Value) -> Option<String> {
+fn api_error_cutoff_detail(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<String> {
     let first_text = content
-        .get("content")?
-        .as_array()?
-        .first()?
-        .get("text")?
+        .get_property("content")?
+        .get_index(0)?
+        .get_property("text")?
         .as_str()?;
     let cause = first_text.strip_prefix("Agent terminated early due to an API error: ")?;
     Some(
@@ -1973,7 +1994,9 @@ fn sanitize_detail(input: &str) -> String {
 }
 
 /// Parse panel content as [`PanelReport`], then NUL-strip + output-guard.
-pub fn parse_and_sanitize(content: &Value) -> Result<PanelReport, String> {
+pub fn parse_and_sanitize(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<PanelReport, String> {
     let mut report = parse_panel_report(content)?;
     sanitize_report(&mut report);
     if report.candidate_answer.trim().is_empty() {
@@ -1987,11 +2010,15 @@ pub fn parse_and_sanitize(content: &Value) -> Result<PanelReport, String> {
     Ok(report)
 }
 
-fn parse_panel_report(content: &Value) -> Result<PanelReport, String> {
-    if let Ok(report) = serde_json::from_value::<PanelReport>(content.clone()) {
-        return Ok(report);
+fn parse_panel_report(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<PanelReport, String> {
+    if let Ok(source) = content.to_json_string() {
+        if let Ok(report) = serde_json::from_str::<PanelReport>(&source) {
+            return Ok(report);
+        }
     }
-    if let Some(raw) = content.as_str() {
+    if let Some(raw) = content.string_at("") {
         if let Ok(report) = serde_json::from_str::<PanelReport>(raw) {
             return Ok(report);
         }
@@ -2004,12 +2031,17 @@ fn parse_panel_report(content: &Value) -> Result<PanelReport, String> {
     Err("protocol".into())
 }
 
-fn flatten_text_blocks(content: &Value) -> Option<String> {
-    let blocks = content.get("content")?.as_array()?;
+fn flatten_text_blocks(
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<String> {
+    let blocks = content.get_property("content")?;
     let mut out = String::new();
-    for block in blocks {
-        if block.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(text) = block.get("text").and_then(Value::as_str) {
+    for index in 0..blocks.array_len()? {
+        let Some(block) = blocks.get_index(index) else {
+            continue;
+        };
+        if block.get_property("type").and_then(|kind| kind.as_str()) == Some("text") {
+            if let Some(text) = block.get_property("text").and_then(|text| text.as_str()) {
                 out.push_str(text);
             }
         }
@@ -2060,7 +2092,12 @@ fn sanitize_report(report: &mut PanelReport) {
 
 fn sanitize_text(input: &str) -> String {
     let stripped = input.replace('\0', "");
-    sanitize_blocks(&[stripped]).content.join("")
+    let sanitized = sanitize_blocks(&[stripped.encode_utf16().collect()])
+        .content
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    String::from_utf16(&sanitized).expect("Rust-owned panel text remains scalar")
 }
 
 /// Assign anonymous `P1..Pn` with a `run_id`-derived shuffle.
@@ -2556,12 +2593,17 @@ Everything below is PARTIAL output recovered from the agent before it was cut of
 did NOT finish its task \u{2014} treat these results as incomplete."
         );
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: serde_json::json!({
+            content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                &serde_json::json!({
                 "content": [{"type": "text", "text": cutoff_note}],
                 "text": cutoff_note,
                 "stop_reason": serde_json::Value::Null,
-            }),
+                })
+                .to_string(),
+            )
+            .expect("recovered completion fixture is valid JSON"),
             usage: SubagentUsage {
                 total_tokens: 900,
                 input_tokens: 700,
@@ -2637,8 +2679,12 @@ being silently discarded"
             "panel prompt".into(),
             Duration::from_secs(1),
             PanelFinish::Done(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: serde_json::json!({"not": "a valid panel report"}),
+                content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"not":"a valid panel report"}"#,
+                )
+                .unwrap(),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 1,
@@ -2721,10 +2767,10 @@ mod panels_dispatched_emission_tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
-            Ok(Value::Null)
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -3714,10 +3760,10 @@ mod cancel_drain_settlement_tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
-            Ok(Value::Null)
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -3768,18 +3814,21 @@ mod cancel_drain_settlement_tests {
     /// usage — the payload every spawner in this module hands back, so the
     /// two token constants above are stated exactly once.
     fn completed_with_real_usage() -> SubagentResult {
-        completed_with_real_usage_reporting(serde_json::json!({
-            "schema_version": 1,
-            "summary": "s",
-            "candidate_answer": "a",
-        }))
+        completed_with_real_usage_reporting(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"schema_version":1,"summary":"s","candidate_answer":"a"}"#,
+            )
+            .unwrap(),
+        )
     }
 
     /// The same real usage carrying an arbitrary `content` payload, so a
     /// test can spend real tokens and STILL fail `parse_and_sanitize` — the
     /// `finish_panel` shape that keeps `usage` while the status goes
     /// `Failed`.
-    fn completed_with_real_usage_reporting(content: Value) -> SubagentResult {
+    fn completed_with_real_usage_reporting(
+        content: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> SubagentResult {
         let usage = SubagentUsage {
             total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
             input_tokens: REAL_INPUT_TOKENS,
@@ -3789,6 +3838,7 @@ mod cancel_drain_settlement_tests {
             reasoning_output_tokens: 0,
         };
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content,
             usage: usage.clone(),
@@ -4346,9 +4396,12 @@ cancel commits exact $0 for real, already-billed spend"
             if request.model_profile.as_deref() == Some("openai") {
                 std::future::pending::<()>().await;
             }
-            Ok(completed_with_real_usage_reporting(serde_json::json!({
-                "not": "a valid panel report"
-            })))
+            Ok(completed_with_real_usage_reporting(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"not":"a valid panel report"}"#,
+                )
+                .unwrap(),
+            ))
         }
     }
 

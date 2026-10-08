@@ -121,4 +121,14 @@
 /// split voice/STT/TTS operation and result DTOs were replaced by a single
 /// owner-scoped request, targeted cancellation, structured outcomes, status,
 /// and capability snapshots; mobile bindings change positionally as well.
-pub const CLIENT_PROTOCOL_VERSION: &str = "17.0.0";
+/// Bumped to 18.0.0 for the current Mod UI control protocol: session-bound
+/// render/module/message/client-fault/client-press and host-local VM operation
+/// requests, correlated JSON results, client-module frames, and targeted site
+/// invalidations. The generated mobile bindings grow new command and event
+/// variants, so this release intentionally advances the protocol major.
+/// Bumped to 19.0.0 for UUID-addressable child transcript rows. Live messages
+/// require their row identity, snapshots retain original message indices and
+/// complete synthetic API-error metadata, and child tombstones delete by UUID.
+/// The snapshot element and native binding layouts change; no old row format
+/// is accepted by this current contract.
+pub const CLIENT_PROTOCOL_VERSION: &str = "19.0.0";

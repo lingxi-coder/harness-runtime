@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use crate::protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use crate::protocol::events::ClientEvent;
+use crate::protocol::text::ClientTextDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
@@ -20,7 +22,7 @@ const PUBLICATION_COMPLETE: u8 = 2;
 const PUBLICATION_REMOVED: u8 = 3;
 
 struct PendingAskUserQuestion {
-    resp_tx: oneshot::Sender<HashMap<String, String>>,
+    resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
     timeout_task: Option<JoinHandle<()>>,
     publication_state: AtomicU8,
     publication_complete: Arc<Notify>,
@@ -33,7 +35,7 @@ struct PendingAskUserQuestion {
 
 impl PendingAskUserQuestion {
     fn new(
-        resp_tx: oneshot::Sender<HashMap<String, String>>,
+        resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
         request: AskUserQuestionRequestDto,
     ) -> Self {
         Self {
@@ -82,16 +84,23 @@ impl PendingAskUserQuestion {
 
 fn lower_option(option: AskOption) -> AskOptionDto {
     AskOptionDto {
-        label: option.label,
-        description: option.description,
-        preview: option.preview,
+        label: ClientTextDto::from_projection(&option.label)
+            .expect("AskUserQuestion option labels are root strings"),
+        description: ClientTextDto::from_projection(&option.description)
+            .expect("AskUserQuestion option descriptions are root strings"),
+        preview: option.preview.as_ref().map(|preview| {
+            ClientTextDto::from_projection(preview)
+                .expect("AskUserQuestion previews are root strings")
+        }),
     }
 }
 
 fn lower_question(question: AskQuestion) -> AskQuestionDto {
     AskQuestionDto {
-        question: question.question,
-        header: question.header,
+        question: ClientTextDto::from_projection(&question.question)
+            .expect("AskUserQuestion questions are root strings"),
+        header: ClientTextDto::from_projection(&question.header)
+            .expect("AskUserQuestion headers are root strings"),
         options: question.options.into_iter().map(lower_option).collect(),
         multi_select: question.multi_select,
     }
@@ -199,7 +208,7 @@ impl AskUserQuestionBroker {
                     // The client supplied no confirmed answers. Preserve that
                     // fact instead of converting the highlighted first row into
                     // a user decision.
-                    let _ = entry.resp_tx.send(HashMap::new());
+                    let _ = entry.resp_tx.send(Vec::new());
                     sink.emit(ClientEvent::AskUserQuestionResolved { request_id })
                         .await;
                 });
@@ -215,7 +224,11 @@ impl AskUserQuestionBroker {
 
     /// Resolve one parked questionnaire. Unknown/already-resolved ids are safe
     /// no-ops and return `false`.
-    pub async fn resolve(&self, request_id: u64, answers: HashMap<String, String>) -> bool {
+    pub async fn resolve(
+        &self,
+        request_id: u64,
+        answers: Vec<(Utf16JsonProjection, Utf16JsonProjection)>,
+    ) -> bool {
         let Some(entry) = self.take_after_publication(request_id).await else {
             return false;
         };
@@ -480,7 +493,9 @@ mod tests {
         }
     }
 
-    fn an_exchange(resp_tx: oneshot::Sender<HashMap<String, String>>) -> AskUserQuestionExchange {
+    fn an_exchange(
+        resp_tx: oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
+    ) -> AskUserQuestionExchange {
         AskUserQuestionExchange {
             questions: vec![AskQuestion {
                 question: "Choose?".into(),
@@ -517,10 +532,19 @@ mod tests {
         let request_id = first_request_id(&sink).await;
         assert!(
             broker
-                .resolve(request_id, HashMap::from([("Choose?".into(), "A".into())]))
+                .resolve(
+                    request_id,
+                    vec![(
+                        Utf16JsonProjection::from("Choose?"),
+                        Utf16JsonProjection::from("A")
+                    )],
+                )
                 .await
         );
-        assert_eq!(resp_rx.await.unwrap()["Choose?"], "A");
+        let answers = resp_rx.await.unwrap();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].0.string_at(""), Some("Choose?"));
+        assert_eq!(answers[0].1.string_at(""), Some("A"));
         assert!(sink.events().await.into_iter().any(|event| matches!(
             event,
             ClientEvent::AskUserQuestionResolved { request_id: id } if id == request_id
@@ -698,8 +722,8 @@ mod tests {
             "the replay must reuse the original correlator, not mint a new one"
         );
         // The replayed request is still resolvable exactly once.
-        assert!(broker.resolve(original_id, HashMap::new()).await);
-        assert!(!broker.resolve(original_id, HashMap::new()).await);
+        assert!(broker.resolve(original_id, Vec::new()).await);
+        assert!(!broker.resolve(original_id, Vec::new()).await);
         drop(tx);
         task.await.unwrap();
     }
@@ -798,7 +822,7 @@ mod tests {
     async fn resolve_of_unknown_id_is_a_noop() {
         let sink = MockSink::arc();
         let broker = AskUserQuestionBroker::new(sink.clone());
-        assert!(!broker.resolve(999, HashMap::new()).await);
+        assert!(!broker.resolve(999, Vec::new()).await);
         assert!(!broker.cancel(999).await);
         assert_eq!(broker.replay_pending().await, 0);
     }

@@ -1,0 +1,7727 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "rK environment string and HIPAA gate",
+      "start": 179887684,
+      "end": 179887785,
+      "sha256": "322c4d71dcb498c61bf1d9593012b04dbcaf88939d52ddcf7e2c6bc5deec1325"
+    },
+    {
+      "label": "Le/gs boolean parsing",
+      "start": 177879549,
+      "end": 177879842,
+      "sha256": "1a9755d5ece5d9e8483a950c709548a1ec59d3a87e26a30cb9ea15b61c0b0bc1"
+    },
+    {
+      "label": "D typed environment parsers",
+      "start": 178162545,
+      "end": 178163226,
+      "sha256": "5e15c1491a365794c4b18be05d73ef68f719cbe986ff52a1f474eebabff1bf80"
+    },
+    {
+      "label": "experimental-beta bool schema",
+      "start": 178195448,
+      "end": 178195459,
+      "sha256": "41681d00f72760ca27e09df97f0dc8f4f68fd1d799b43afcdadb985c199fd2e9"
+    },
+    {
+      "label": "ZZe cached environment getter",
+      "start": 178228388,
+      "end": 178228722,
+      "sha256": "000c0d3ff5844fabe398581ab337f1a495ca35b4763f545def9cf2024fd20bd0"
+    },
+    {
+      "label": "structured-output beta registration",
+      "start": 179884929,
+      "end": 179884988,
+      "sha256": "9fe573e9513a0f9c0ec81f1b0fdcd03e261cb4c29f4a0fb2b870ac195f99478e"
+    },
+    {
+      "label": "own structured-output eligibility",
+      "start": 180998000,
+      "end": 180998103,
+      "sha256": "fe43a887a2d87e4f61e6f261ef92e1eabcecd1f19b940fc2c6f1e5bb6befb96f"
+    },
+    {
+      "label": "ZLo automatic main format",
+      "start": 187806335,
+      "end": 187806466,
+      "sha256": "084a620d5defbade7f43ecd7d704131ef714aba5eda79bca054fa60aabc32789"
+    },
+    {
+      "label": "side-query automatic format and beta",
+      "start": 187412894,
+      "end": 187412997,
+      "sha256": "cb9ed1b398ab2dd7f795b747334a6c247b6d592f9f33555911d675ddb26f995a"
+    },
+    {
+      "label": "side-query format and effort fields",
+      "start": 187413586,
+      "end": 187413683,
+      "sha256": "983b5d5e71865a4ea5b8495c1f3ca937ce17a6f8688db047ca555177b50003bf"
+    },
+    {
+      "label": "actual av/lr model-order comparison",
+      "start": 180993283,
+      "end": 180993583,
+      "sha256": "4b95d3dc220e5710744748fd2dac417d84a2f7761432b65bdef4eb7b1a163413"
+    }
+  ],
+  "scope": "Exact Le/D.bool/ZZe typed environment getter, rK, own, ZLo and side-query config. Model eligibility, capability and HIPAA taint are supplied inputs. This supersedes the previous raw-string environment stub.",
+  "cases": [
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": null,
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "1",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "0",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "false",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "true",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": " ",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ]
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": false,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": false,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "effort": "low"
+          },
+          "betas": [
+            "structured-outputs-2025-12-15"
+          ],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": false,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": false,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": false,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": false
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    },
+    {
+      "input": {
+        "env": "FALSE",
+        "hipaa": true,
+        "eligible": true,
+        "opus41": true,
+        "capability": true,
+        "explicit": true
+      },
+      "expected": {
+        "disabled": true,
+        "main": {
+          "config": {
+            "effort": "low",
+            "format": {
+              "type": "explicit_fixture"
+            }
+          },
+          "betas": []
+        },
+        "side": {
+          "config": {
+            "effort": "low"
+          },
+          "betas": [],
+          "hasConfig": true
+        }
+      }
+    }
+  ]
+}

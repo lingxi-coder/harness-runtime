@@ -28,7 +28,10 @@ fn counts_documents_and_images_across_user_and_assistant() {
         ConversationMessage::User {
             id: MessageId::new(),
             content: vec![
-                ContentBlock::Text { text: "hi".into() },
+                ContentBlock::Text {
+                    text: "hi".into(),
+                    citations: None,
+                },
                 image_block(),
                 document_block(),
             ],
@@ -40,6 +43,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
             id: MessageId::new(),
             content: vec![image_block()],
             stop_reason: None,
+            resumable: None,
         },
         // System messages carry a flat string — never counted.
         ConversationMessage::System {
@@ -47,6 +51,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
             content: "system".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         },
     ];

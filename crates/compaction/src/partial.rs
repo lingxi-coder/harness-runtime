@@ -157,8 +157,12 @@ mod tests {
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         }
     }
 
@@ -168,10 +172,14 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: tool.into(),
-                input: json!({}),
+                input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &json!({}),
+                )
+                .expect("empty object is valid JSON"),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 

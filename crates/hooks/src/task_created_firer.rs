@@ -28,6 +28,7 @@
 //!
 //! [`OrchestratorTaskCompletedFirer`]: ../../orchestrator/src/task_completed_firer.rs
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -42,9 +43,9 @@ pub struct TaskCreatedFire {
     /// Caller-supplied or engine-generated task ID (wire `task_id`).
     pub task_id: String,
     /// Task taxonomy bucket / subject (wire `task_subject`, required).
-    pub task_subject: String,
+    pub task_subject: Utf16JsonProjection,
     /// Task description (wire `task_description`, optional).
-    pub task_description: Option<String>,
+    pub task_description: Option<Utf16JsonProjection>,
     /// Name of the teammate creating the task (wire `teammate_name`, optional).
     pub teammate_name: Option<String>,
     /// Team the teammate belongs to (wire `team_name`, optional).

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"emit_payload","description":"Return a fixed multiple-content result and structuredContent with a lone UTF-16 unit.","inputSchema":{"type":"object","properties":{"mode":{"type":"string","enum":["source-units"]}},"required":["mode"],"additionalProperties":false}}]}}

@@ -95,8 +95,11 @@ impl Tool for DeniedTool {
     async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
         "denied".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -235,8 +238,11 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "ok".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,

@@ -48,7 +48,7 @@ use serde::Deserialize;
 /// runs this branch for allow, deny, and ask rules alike.
 #[must_use]
 pub fn permission_rule_file_warning(value: &PermissionRuleValue) -> Option<String> {
-    let content = value.rule_content.as_deref()?;
+    let content = value.rule_content_text()?;
     let covering = match value.tool_name.as_str() {
         "Write" | "NotebookEdit" | "MultiEdit" => "Edit",
         "Glob" => "Read",
@@ -64,7 +64,7 @@ pub fn permission_rule_file_warning(value: &PermissionRuleValue) -> Option<Strin
     };
     let suggested = PermissionRuleValue {
         tool_name: covering.to_string(),
-        rule_content: Some(content.to_string()),
+        rule_content: Some(content.into()),
     };
     Some(format!(
         "{} is not matched by file permission checks — only {covering}(path) rules are. \
@@ -88,7 +88,7 @@ fn permission_rule_bash_wildcard_warning(
     if value.tool_name != "Bash" || !matches!(behavior, PermissionBehavior::Allow) {
         return None;
     }
-    let content = value.rule_content.as_deref()?;
+    let content = value.rule_content_text()?;
     if content.ends_with(":*") {
         return None;
     }
@@ -288,7 +288,7 @@ pub fn permission_rule_startup_warning(
     source_display: &str,
 ) -> Option<String> {
     // `sks` loop guard: skip `identifier:`-prefixed contents (non-Windows-drive).
-    if let Some(content) = rule.value.rule_content.as_deref() {
+    if let Some(content) = rule.value.rule_content_text() {
         if is_identifier_colon_prefix(content) {
             return None;
         }
@@ -776,7 +776,7 @@ mod tests {
         let find = |tool: &str, content: Option<&str>| {
             rules
                 .iter()
-                .find(|r| r.value.tool_name == tool && r.value.rule_content.as_deref() == content)
+                .find(|r| r.value.tool_name == tool && r.value.rule_content_text() == content)
         };
         // allow → parsed rule_content.
         let bash = find("Bash", Some("npm run *")).expect("Bash(npm run *)");

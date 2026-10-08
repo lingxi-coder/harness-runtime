@@ -320,7 +320,7 @@ impl BuiltinCommandHandler for KeybindingsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let path = keybindings_path();
         CommandResult::Done {
-            display: Some(self.run_at(&path)),
+            display: Some((self.run_at(&path)).into()),
         }
     }
 
@@ -345,8 +345,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "keybindings".to_string(),
-            raw_args: String::new(),
+            name: "keybindings".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

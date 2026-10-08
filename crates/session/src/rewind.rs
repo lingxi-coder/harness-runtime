@@ -39,7 +39,8 @@ pub async fn rewind_conversation(
     let target = target_message.to_string();
     let mut kept: Vec<&str> = Vec::new();
     for line in content.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Ok(exact) = crate::jsonl::exact_json::parse_exact_json(line) {
+            let v = exact.value;
             if v.get("uuid").and_then(serde_json::Value::as_str) == Some(target.as_str()) {
                 break;
             }
@@ -67,6 +68,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn rewind_finds_native_exact_peer_target_and_keeps_prefix_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/native-fixture";
+        let session_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let fixture = include_str!("../tests/fixtures/handback_exact_utf16_2_1_286.jsonl");
+        let path = session_path(home.path(), cwd, &session_id.to_string());
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, fixture).await.unwrap();
+        let target = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2").unwrap();
+        rewind_conversation(home.path(), cwd, session_id, target)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            format!("{}\n", fixture.lines().next().unwrap())
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(path.with_extension("jsonl.rewind-bak"))
+                .await
+                .unwrap(),
+            fixture
+        );
     }
 
     #[tokio::test]

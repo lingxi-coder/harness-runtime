@@ -24,6 +24,7 @@ use crate::open_file_tracker::OpenFileTracker;
 use crate::passive_feedback::PassiveDiagnosticSubscriber;
 use crate::path_mapper::{DesktopLspPathMapper, LspDocumentPath, LspPathMapper};
 use lingxi_core::host::{LspError, LspServerConfig, LspTransport};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,13 @@ use tokio::sync::{watch, RwLock};
 /// the recorded error without another spawn. Mirrors claude-code's
 /// `t.maxRestarts ?? 3`; an explicit `maxRestarts` overrides this default.
 const DEFAULT_MAX_RESTARTS: u32 = 3;
+
+fn lsp_error_source(error: &LspError) -> Utf16JsonProjection {
+    match error {
+        LspError::ServerError(source) => source.clone(),
+        other => other.to_string().into(),
+    }
+}
 
 /// Host-wide policy controlling where registered language servers may run.
 ///
@@ -600,10 +608,10 @@ impl LspRegistry {
                         max_recovery_reported,
                     }) => {
                         if waited || (config.restart_on_crash == Some(false) && *restarts > 0) {
-                            Claim::Fail(LspError::ServerError(error.clone()))
+                            Claim::Fail(LspError::ServerError(error.clone().into()))
                         } else if *restarts > config.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS) {
                             if *max_recovery_reported {
-                                Claim::Fail(LspError::ServerError(error.clone()))
+                                Claim::Fail(LspError::ServerError(error.clone().into()))
                             } else {
                                 let max_restarts =
                                     config.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
@@ -616,12 +624,12 @@ impl LspRegistry {
                                     instance_key.clone(),
                                     LspConnectionState::Failed {
                                         config,
-                                        error: msg.clone(),
+                                        error: msg.clone().into(),
                                         restarts,
                                         max_recovery_reported: true,
                                     },
                                 );
-                                Claim::Fail(LspError::ServerError(msg))
+                                Claim::Fail(LspError::ServerError(msg.into()))
                             }
                         } else {
                             let (config, restarts) = (config.clone(), *restarts);
@@ -798,7 +806,7 @@ impl LspRegistry {
                         instance_key,
                         LspConnectionState::Failed {
                             config,
-                            error: e.to_string(),
+                            error: lsp_error_source(&e),
                             restarts: prior_failures + 1,
                             max_recovery_reported: false,
                         },
@@ -843,7 +851,7 @@ impl LspRegistry {
             name.to_string(),
             LspConnectionState::Failed {
                 config,
-                error,
+                error: error.into(),
                 restarts: restarts.saturating_add(1),
                 max_recovery_reported: false,
             },
@@ -1522,11 +1530,16 @@ mod routing_tests {
             &self,
             _c: &LspRawConnection,
             _m: &str,
-            _p: Value,
-        ) -> Result<Value, LspError> {
-            Ok(Value::Null)
+            _p: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, LspError> {
+            Ok(Utf16JsonProjection::parse("null").unwrap())
         }
-        async fn notify(&self, _c: &LspRawConnection, _m: &str, _p: Value) -> Result<(), LspError> {
+        async fn notify(
+            &self,
+            _c: &LspRawConnection,
+            _m: &str,
+            _p: Utf16JsonProjection,
+        ) -> Result<(), LspError> {
             Ok(())
         }
         async fn shutdown(&self, id: McpConnectionId) -> Result<(), LspError> {
@@ -2139,7 +2152,7 @@ mod routing_tests {
             .unwrap()
             .expect_err("waiter sees the recorded error");
         assert!(
-            matches!(&err_b, LspError::ServerError(msg) if msg.contains("mock failure")),
+            matches!(&err_b, LspError::ServerError(msg) if msg.string_at("").is_some_and(|text| text.contains("mock failure"))),
             "waiter returns the recorded failure, got: {err_b}"
         );
         assert_eq!(

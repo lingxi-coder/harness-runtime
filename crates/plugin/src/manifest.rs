@@ -15,6 +15,7 @@ use crate::PluginDependency;
 use hooks::HookDefinition;
 use indexmap::IndexMap;
 use lingxi_core::host::LspServerConfig;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::PluginId;
 use mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
@@ -303,6 +304,10 @@ pub struct PluginComponents {
     pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
+    /// The single programmatic hooks module declared by `hooks/hooks.json`.
+    /// Its path is resolved against that file and confined to the plugin root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_module: Option<PathBuf>,
     /// Whether `plugin.json` declared `hooks`, even if it normalized to zero
     /// live hook definitions.
     #[serde(default)]
@@ -483,35 +488,133 @@ impl<'de> Deserialize<'de> for UserConfigField {
 /// top-level non-sensitive userConfig values; `mcp_servers` holds per-server
 /// overrides keyed by logical server name. Sensitive values are NEVER stored
 /// here — they live in secure storage (see [`secret::CredentialManager`]).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PluginUserConfig {
-    /// Top-level non-sensitive userConfig values (`options`).
-    #[serde(default)]
-    pub options: serde_json::Map<String, serde_json::Value>,
-    /// Per-server non-sensitive overrides (`mcpServers[server]`).
-    #[serde(rename = "mcpServers", default)]
-    pub mcp_servers: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Top-level non-sensitive userConfig values (`options`) as their original
+    /// JSON object source.
+    pub options: Utf16JsonProjection,
+    /// Per-server non-sensitive overrides (`mcpServers[server]`) as original
+    /// JSON object sources.
+    pub mcp_servers: HashMap<String, Utf16JsonProjection>,
 }
 
 impl PluginUserConfig {
-    /// Extract the `pluginConfigs` map from a settings-file JSON object (the
-    /// shape [`migrations::settings_update::read_settings_map`] returns),
-    /// yielding `plugin-id -> PluginUserConfig`. Missing / malformed entries are
-    /// skipped. This is the read side of the settings `pluginConfigs` scope.
+    /// Parse one source-native `settings.pluginConfigs` object into plugin ids
+    /// and their source-backed config records. Missing or malformed records
+    /// retain the existing skip behavior.
     #[must_use]
-    pub fn from_settings_map(
-        settings: &serde_json::Map<String, serde_json::Value>,
+    pub fn from_plugin_configs_source(
+        configs: &Utf16JsonProjection,
     ) -> HashMap<String, PluginUserConfig> {
         let mut out = HashMap::new();
-        let Some(configs) = settings.get("pluginConfigs").and_then(|v| v.as_object()) else {
+        let Some(config_entries) = configs.object_entries() else {
             return out;
         };
-        for (plugin, entry) in configs {
-            if let Ok(parsed) = serde_json::from_value::<PluginUserConfig>(entry.clone()) {
-                out.insert(plugin.clone(), parsed);
+
+        for entry in config_entries {
+            let Some(plugin_id) = String::from_utf16(&entry.code_units).ok() else {
+                continue;
+            };
+            let Ok(config) = configs.subprojection_property_units(entry.code_units) else {
+                continue;
+            };
+            if config.object_entries().is_none() {
+                continue;
             }
+
+            let options = match config.get_property("options") {
+                None => empty_json_object_source(),
+                Some(value) if value.object_entries().is_some() => {
+                    let Ok(options) = config.subprojection("/options") else {
+                        continue;
+                    };
+                    options
+                }
+                Some(_) => continue,
+            };
+
+            let mut mcp_servers = HashMap::new();
+            if let Some(server_entries) = config.get_property("mcpServers") {
+                let Some(server_entries) = server_entries.object_entries() else {
+                    continue;
+                };
+                let mut valid = true;
+                for server in server_entries {
+                    let Some(server_name) = String::from_utf16(&server.code_units).ok() else {
+                        valid = false;
+                        break;
+                    };
+                    let Ok(server_source) =
+                        config.subprojection("/mcpServers").and_then(|servers| {
+                            servers.subprojection_property_units(server.code_units)
+                        })
+                    else {
+                        valid = false;
+                        break;
+                    };
+                    if server_source.object_entries().is_none() {
+                        valid = false;
+                        break;
+                    }
+                    mcp_servers.insert(server_name, server_source);
+                }
+                if !valid {
+                    continue;
+                }
+            }
+            out.insert(
+                plugin_id,
+                PluginUserConfig {
+                    options,
+                    mcp_servers,
+                },
+            );
         }
         out
+    }
+}
+
+impl Default for PluginUserConfig {
+    fn default() -> Self {
+        Self {
+            options: empty_json_object_source(),
+            mcp_servers: HashMap::new(),
+        }
+    }
+}
+
+fn empty_json_object_source() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty plugin config object is valid JSON")
+}
+
+#[cfg(test)]
+mod plugin_user_config_tests {
+    use super::PluginUserConfig;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn settings_source_retains_lone_utf16_units_in_options_and_server_overrides() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"plugin@local":{"options":{"region":"pre\ud800post"},"mcpServers":{"api":{"headers":{"x-label":"\ud800"}}}}}"#,
+        )
+        .unwrap();
+
+        let configs = PluginUserConfig::from_plugin_configs_source(&source);
+        let config = &configs["plugin@local"];
+        assert_eq!(
+            config.options.string_units("/region"),
+            Some(
+                "pre"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain("post".encode_utf16())
+                    .collect()
+            )
+        );
+        assert_eq!(
+            config.mcp_servers["api"].string_units("/headers/x-label"),
+            Some(vec![0xd800])
+        );
     }
 }
 

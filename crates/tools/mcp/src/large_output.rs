@@ -32,9 +32,9 @@
 
 use std::path::Path;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
 use mcp::normalization::normalize_name_for_mcp;
 use mcp::{decode_base64, persist_binary_content, PersistBinaryResult};
-use serde_json::Value;
 
 /// `DEFAULT_MAX_MCP_OUTPUT_TOKENS` (`mcpValidation.ts:16`): the MCP output token
 /// cap. claude-code lets `MAX_MCP_OUTPUT_TOKENS` / a GrowthBook flag override
@@ -65,21 +65,21 @@ pub const MCP_TRUNCATION_THRESHOLD_TOKENS: u64 = DEFAULT_MAX_MCP_OUTPUT_TOKENS /
 /// `now_millis` (the `persist_id_seed` wall clock) feeds the persisted-file id
 /// `mcp-<server>-<tool>-<now_millis>`, mirroring the TS `Date.now()` template.
 #[must_use]
-pub fn process_mcp_result(
-    content: &Value,
+pub fn process_mcp_result_source(
+    content: &UJP,
     server_name: &str,
     tool_name: &str,
     output_dir: &Path,
     now_millis: u128,
-) -> Value {
-    process_mcp_result_detailed(
+) -> UJP {
+    process_mcp_result_detailed_source(
         content,
         server_name,
         tool_name,
         output_dir,
         now_millis,
         ExactCountOutcome::Unsupported,
-        inferred_result_type(content),
+        inferred_result_type_source(content),
     )
     .content
 }
@@ -143,29 +143,29 @@ pub struct LargeResultHandledTelemetry {
 /// Detailed MCP large-result processing outcome.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessedMcpResult {
-    pub content: Value,
+    pub content: UJP,
     pub telemetry: Option<LargeResultHandledTelemetry>,
 }
 
 /// Process an MCP result with the provider's exact token count when available.
 /// See [`ExactCountOutcome`] for the three route states this handles.
 #[must_use]
-pub fn process_mcp_result_with_exact_count(
-    content: &Value,
+pub fn process_mcp_result_with_exact_count_source(
+    content: &UJP,
     server_name: &str,
     tool_name: &str,
     output_dir: &Path,
     now_millis: u128,
     exact_token_count: ExactCountOutcome,
-) -> Value {
-    process_mcp_result_detailed(
+) -> UJP {
+    process_mcp_result_detailed_source(
         content,
         server_name,
         tool_name,
         output_dir,
         now_millis,
         exact_token_count,
-        inferred_result_type(content),
+        inferred_result_type_source(content),
     )
     .content
 }
@@ -173,8 +173,8 @@ pub fn process_mcp_result_with_exact_count(
 /// Process an MCP result with exact-count routing and return both the content
 /// and any `tengu_mcp_large_result_handled` branch data.
 #[must_use]
-pub fn process_mcp_result_detailed(
-    content: &Value,
+pub fn process_mcp_result_detailed_source(
+    content: &UJP,
     server_name: &str,
     tool_name: &str,
     output_dir: &Path,
@@ -183,7 +183,7 @@ pub fn process_mcp_result_detailed(
     result_type: McpLargeResultType,
 ) -> ProcessedMcpResult {
     let large_output_files_setting = std::env::var("ENABLE_MCP_LARGE_OUTPUT_FILES").ok();
-    process_mcp_result_detailed_with_setting(
+    process_mcp_result_detailed_source_with_setting(
         content,
         server_name,
         tool_name,
@@ -195,8 +195,8 @@ pub fn process_mcp_result_detailed(
     )
 }
 
-fn process_mcp_result_detailed_with_setting(
-    content: &Value,
+fn process_mcp_result_detailed_source_with_setting(
+    content: &UJP,
     server_name: &str,
     tool_name: &str,
     output_dir: &Path,
@@ -214,7 +214,7 @@ fn process_mcp_result_detailed_with_setting(
     }
 
     // Under the large-output threshold → forward verbatim (client.ts:2733-2736).
-    if !mcp_content_needs_exact_count(content) {
+    if !mcp_content_needs_exact_count_source(content) {
         return ProcessedMcpResult {
             content: content.clone(),
             telemetry: None,
@@ -244,13 +244,13 @@ fn process_mcp_result_detailed_with_setting(
         // through to large-output handling.
         ExactCountOutcome::Counted(_) | ExactCountOutcome::Unsupported => {}
     }
-    let size_estimate_tokens = content_size_estimate(content);
+    let size_estimate_tokens = content_size_estimate_source(content);
 
     // Feature gate: an explicitly-falsy ENABLE_MCP_LARGE_OUTPUT_FILES reverts to
     // the old truncation behavior (client.ts:2741-2748). Unset → persist.
     if is_env_defined_falsy(large_output_files_setting) {
         return ProcessedMcpResult {
-            content: truncate_mcp_content(content),
+            content: truncate_mcp_content_source(content),
             telemetry: Some(LargeResultHandledTelemetry {
                 outcome: "truncated",
                 reason: "env_disabled",
@@ -265,9 +265,9 @@ fn process_mcp_result_detailed_with_setting(
 
     // Images: persisting as JSON defeats image compression / viewability, so
     // fall back to truncation (client.ts:2756-2765).
-    if content_contains_images(content) {
+    if content_contains_images_source(content) {
         return ProcessedMcpResult {
-            content: truncate_mcp_content(content),
+            content: truncate_mcp_content_source(content),
             telemetry: Some(LargeResultHandledTelemetry {
                 outcome: "truncated",
                 reason: "contains_images",
@@ -286,17 +286,17 @@ fn process_mcp_result_detailed_with_setting(
     // treated exactly like a bare string — persisted as plain text (.txt) with
     // line stats. Binary `processMCPResult`: `f = …d[0].text`, `h = typeof
     // d==="string"?d:f??Pe(d,null,2)`, `g = i==="toolResult" || f!==void 0`.
-    let unwrapped: Option<String> = singleton_text_unwrap(content);
-    let is_plain_text = unwrapped.is_some() || matches!(content, Value::String(_));
+    let unwrapped = singleton_text_unwrap_source(content);
+    let root_text = root_plain_text(content);
+    let is_plain_text = unwrapped.is_some() || root_text.is_some();
 
     // Serialize for persistence (client.ts:2771-2772): a bare string (or an
     // unwrapped singleton text block) is written as-is (.txt); other array
     // content is pretty-printed JSON (.json), matching `getToolResultPath`.
-    let (content_str, mime): (String, &str) = match (&unwrapped, content) {
-        (Some(text), _) => (text.clone(), "text/plain"),
-        (None, Value::String(s)) => (s.clone(), "text/plain"),
-        (None, other) => (
-            serde_json::to_string_pretty(other).unwrap_or_default(),
+    let (content_str, mime): (String, &str) = match (unwrapped.as_ref(), root_text.as_ref()) {
+        (Some(text), _) | (None, Some(text)) => (text.clone(), "text/plain"),
+        (None, None) => (
+            content.to_pretty_json_string().unwrap_or_default(),
             "application/json",
         ),
     };
@@ -324,19 +324,19 @@ fn process_mcp_result_detailed_with_setting(
                 None
             };
             ProcessedMcpResult {
-                content: Value::String(get_large_output_instructions(
+                content: get_large_output_instructions(
                     &filepath,
                     content_length,
-                    &format_description(content, is_plain_text),
+                    &format_description_source(content, is_plain_text),
                     line_stats.as_ref(),
-                )),
+                ),
                 telemetry: Some(LargeResultHandledTelemetry {
                     outcome: "persisted",
                     reason: "file_saved",
                     size_estimate_tokens,
                     persisted_size_chars: Some(content_length),
                     result_type: Some(result_type.wire_str()),
-                    block_count: content.as_array().map(|blocks| blocks.len() as u64),
+                    block_count: content.array_len("").map(|length| length as u64),
                     persisted_as: Some(if is_plain_text { "text" } else { "json" }),
                 }),
             }
@@ -344,7 +344,7 @@ fn process_mcp_result_detailed_with_setting(
         // Write failed → the persist-failed truncation-info message
         // (client.ts:2775-2784).
         PersistBinaryResult::Err { error } => ProcessedMcpResult {
-            content: Value::String(persist_failed_message(content_length, &error)),
+            content: generated_text(&persist_failed_message(content_length, &error)),
             telemetry: Some(LargeResultHandledTelemetry {
                 outcome: "truncated",
                 reason: "persist_failed",
@@ -365,8 +365,8 @@ fn process_mcp_result_detailed_with_setting(
 /// MCP_TOKEN_COUNT_THRESHOLD_FACTOR`. Callers then ask the active provider for
 /// an exact count before applying the 25 000-token cap.
 #[must_use]
-pub fn mcp_content_needs_exact_count(content: &Value) -> bool {
-    content_size_estimate(content) > MCP_TRUNCATION_THRESHOLD_TOKENS
+pub fn mcp_content_needs_exact_count_source(content: &UJP) -> bool {
+    content_size_estimate_source(content) > MCP_TRUNCATION_THRESHOLD_TOKENS
 }
 
 /// Whether any block in `content` is an image block.
@@ -375,17 +375,24 @@ pub fn mcp_content_needs_exact_count(content: &Value) -> bool {
 /// non-array) is never image-bearing; an array is scanned for a `type ==
 /// "image"` block.
 #[must_use]
-pub fn content_contains_images(content: &Value) -> bool {
-    content
-        .as_array()
-        .is_some_and(|blocks| blocks.iter().any(is_image_block))
+pub fn content_contains_images_source(content: &UJP) -> bool {
+    let Some(length) = content.array_len("") else {
+        return false;
+    };
+    (0..length).any(|index| {
+        u32::try_from(index)
+            .ok()
+            .is_some_and(|index| content.string_at(&format!("/{index}/type")) == Some("image"))
+    })
 }
 
-fn inferred_result_type(content: &Value) -> McpLargeResultType {
-    match content {
-        Value::Array(_) => McpLargeResultType::ContentArray,
-        Value::String(_) => McpLargeResultType::ToolResult,
-        _ => McpLargeResultType::ContentArray,
+fn inferred_result_type_source(content: &UJP) -> McpLargeResultType {
+    if content.array_len("").is_some() {
+        McpLargeResultType::ContentArray
+    } else if content.string_units("").is_some() {
+        McpLargeResultType::ToolResult
+    } else {
+        McpLargeResultType::ContentArray
     }
 }
 
@@ -397,29 +404,39 @@ fn inferred_result_type(content: &Value) -> McpLargeResultType {
 /// `roughTokenCountEstimation`; an array → sum of `roughTokenCountEstimation`
 /// over text blocks plus [`IMAGE_TOKEN_ESTIMATE`] per image block (other blocks
 /// contribute 0). Any other Value contributes 0 (not a valid `MCPToolResult`).
-fn content_size_estimate(content: &Value) -> u64 {
-    match content {
-        Value::String(s) => rough_token_count_estimation(s),
-        Value::Array(blocks) => blocks
-            .iter()
-            .map(|block| match block.get("type").and_then(Value::as_str) {
-                Some("text") => rough_token_count_estimation(
-                    block.get("text").and_then(Value::as_str).unwrap_or(""),
-                ),
+fn content_size_estimate_source(content: &UJP) -> u64 {
+    if content.string_units("").is_some() {
+        return source_string_rough_tokens(content, "");
+    }
+    let Some(length) = content.array_len("") else {
+        return 0;
+    };
+    (0..length)
+        .map(|index| {
+            let Ok(index) = u32::try_from(index) else {
+                return 0;
+            };
+            match content.string_at(&format!("/{index}/type")) {
+                Some("text") => source_string_rough_tokens(content, &format!("/{index}/text")),
                 Some("image") => IMAGE_TOKEN_ESTIMATE,
                 _ => 0,
-            })
-            .sum(),
-        _ => 0,
-    }
+            }
+        })
+        .sum()
 }
 
 /// `Math.round(content.length / 4)` (`tokenEstimation.ts:203-208`). Round-half-up
 /// over a nonnegative byte length is `(len + 2) / 4`. Uses the UTF-8 byte length
 /// (TS uses the UTF-16 string length); identical for ASCII, the same convention
 /// the microcompact port uses.
-fn rough_token_count_estimation(content: &str) -> u64 {
-    js_string_len(content).saturating_add(2) / 4
+fn source_string_rough_tokens(content: &UJP, pointer: &str) -> u64 {
+    let Some(units) = content.string_units(pointer) else {
+        return 0;
+    };
+    u64::try_from(units.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(2)
+        / 4
 }
 
 /// JavaScript `String.prototype.length` for valid Rust strings.
@@ -428,8 +445,8 @@ fn js_string_len(content: &str) -> u64 {
 }
 
 /// `block.type === 'image'`.
-fn is_image_block(block: &Value) -> bool {
-    block.get("type").and_then(Value::as_str) == Some("image")
+fn generated_text(value: &str) -> UJP {
+    value.into()
 }
 
 /// `getFormatDescription(type, schema)` (`mcpOutputStorage.ts:16-28`) for the
@@ -437,14 +454,14 @@ fn is_image_block(block: &Value) -> bool {
 /// a bare string OR an unwrapped singleton text block) is `"Plain text"`; other
 /// array content is `contentArray` → `"JSON array with schema: <schema>"` where
 /// `<schema>` comes from [`infer_compact_schema`].
-fn format_description(content: &Value, is_plain_text: bool) -> String {
+fn format_description_source(content: &UJP, is_plain_text: bool) -> UJP {
     if is_plain_text {
-        "Plain text".to_string()
+        generated_text("Plain text")
     } else {
-        format!(
-            "JSON array with schema: {}",
-            infer_compact_schema(content, 2)
-        )
+        concat_source_owned(vec![
+            generated_text("JSON array with schema: "),
+            infer_compact_schema_source(content, 2),
+        ])
     }
 }
 
@@ -454,51 +471,107 @@ fn format_description(content: &Value, is_plain_text: bool) -> String {
 /// as plain text), not the JSON array. Binary `processMCPResult`:
 /// `f = p && Array.isArray(d) && d.length===1 && d[0]?.type==="text"
 ///      && !("annotations" in d[0]) && !("_meta" in d[0]) ? d[0].text : void 0`.
-fn singleton_text_unwrap(content: &Value) -> Option<String> {
-    let arr = content.as_array()?;
-    if arr.len() != 1 {
+fn singleton_text_unwrap_source(content: &UJP) -> Option<String> {
+    if content.array_len("")? != 1 {
         return None;
     }
-    let obj = arr[0].as_object()?;
-    if obj.get("type").and_then(Value::as_str) != Some("text") {
+    if content.string_at("/0/type") != Some("text") {
         return None;
     }
-    if obj.contains_key("annotations") || obj.contains_key("_meta") {
+    if content.at_pointer("/0/annotations").is_some() || content.at_pointer("/0/_meta").is_some() {
         return None;
     }
-    obj.get("text").and_then(Value::as_str).map(String::from)
+    let units = content.string_units("/0/text")?;
+    String::from_utf16(&units).ok()
 }
 
 /// `inferCompactSchema(value, depth)` (`client.ts:2644-2660`): a compact,
 /// jq-friendly type signature, e.g. `{title: string, items: [{id: number}]}`.
-fn infer_compact_schema(value: &Value, depth: i32) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Array(items) => {
-            if items.is_empty() {
-                "[]".to_string()
-            } else {
-                format!("[{}]", infer_compact_schema(&items[0], depth - 1))
-            }
+fn infer_compact_schema_source(value: &UJP, depth: i32) -> UJP {
+    let Some(view) = value.at_pointer("") else {
+        return generated_text("null");
+    };
+    if view.is_null() {
+        generated_text("null")
+    } else if let Some(length) = view.array_len() {
+        if length == 0 {
+            generated_text("[]")
+        } else {
+            let child = value
+                .subprojection("/0")
+                .unwrap_or_else(|_| generated_text("null"));
+            concat_source_owned(vec![
+                generated_text("["),
+                infer_compact_schema_source(&child, depth - 1),
+                generated_text("]"),
+            ])
         }
-        Value::Object(map) => {
-            if depth <= 0 {
-                "{...}".to_string()
-            } else {
-                let props: Vec<String> = map
-                    .iter()
-                    .take(10)
-                    .map(|(k, v)| format!("{k}: {}", infer_compact_schema(v, depth - 1)))
-                    .collect();
-                let suffix = if map.len() > 10 { ", ..." } else { "" };
-                format!("{{{}{suffix}}}", props.join(", "))
+    } else if let Some(entries) = view.object_entries() {
+        if depth <= 0 {
+            generated_text("{...}")
+        } else {
+            let mut parts = vec![generated_text("{")];
+            for (index, entry) in entries.iter().take(10).enumerate() {
+                if index > 0 {
+                    parts.push(generated_text(", "));
+                }
+                parts.push(source_string_units(entry.code_units.to_vec()));
+                parts.push(generated_text(": "));
+                let child = projection_for_key(value, entry.code_units)
+                    .unwrap_or_else(|| generated_text("null"));
+                parts.push(infer_compact_schema_source(&child, depth - 1));
             }
+            if entries.len() > 10 {
+                if !parts.is_empty() && entries.iter().take(10).count() > 0 {
+                    parts.push(generated_text(", "));
+                }
+                parts.push(generated_text("..."));
+            }
+            parts.push(generated_text("}"));
+            concat_source_owned(parts)
         }
-        // JS `typeof`: string / number / boolean.
-        Value::String(_) => "string".to_string(),
-        Value::Number(_) => "number".to_string(),
-        Value::Bool(_) => "boolean".to_string(),
+    } else if view.as_str().is_some() {
+        generated_text("string")
+    } else if view.as_number().is_some() {
+        generated_text("number")
+    } else if view.as_bool().is_some() {
+        generated_text("boolean")
+    } else {
+        generated_text("null")
     }
+}
+
+fn projection_for_key(value: &UJP, key_units: &[u16]) -> Option<UJP> {
+    let mut pointer = vec![b'/' as u16];
+    for unit in key_units {
+        match *unit {
+            x if x == b'~' as u16 => pointer.extend([b'~' as u16, b'0' as u16]),
+            x if x == b'/' as u16 => pointer.extend([b'~' as u16, b'1' as u16]),
+            x => pointer.push(x),
+        }
+    }
+    value.subprojection_units(&pointer).ok()
+}
+
+fn source_string_units(units: Vec<u16>) -> UJP {
+    UJP::root_string(String::from_utf16_lossy(&units), units).expect("valid UTF-16 source string")
+}
+
+fn concat_source_owned(parts: Vec<UJP>) -> UJP {
+    let parts = parts.iter().collect::<Vec<_>>();
+    concat_source(&parts)
+}
+
+fn concat_source(parts: &[&UJP]) -> UJP {
+    let units = parts
+        .iter()
+        .flat_map(|part| part.string_units("").unwrap_or_default())
+        .collect::<Vec<_>>();
+    source_string_units(units)
+}
+
+fn root_plain_text(content: &UJP) -> Option<String> {
+    String::from_utf16(&content.string_units("")?).ok()
 }
 
 /// Per-line statistics for a persisted plain-text result: `{count, maxLen}`
@@ -557,9 +630,9 @@ fn file_read_max_output_tokens() -> u64 {
 fn get_large_output_instructions(
     raw_output_path: &str,
     content_length: u64,
-    format_description: &str,
+    format_description: &UJP,
     line_stats: Option<&LineStats>,
-) -> String {
+) -> UJP {
     // `Error: result (${o!==void 0 ? "${t} characters across ${o.count} line(s)"
     // : "${t} characters"})` (client.ts).
     let count_phrase = match line_stats {
@@ -578,14 +651,16 @@ fn get_large_output_instructions(
     let a = file_read_max_output_tokens().saturating_mul(16) / 5;
     let c = line_stats.is_some_and(|ls| ls.count > 1 && ls.max_len <= a);
     let lines_too_long = line_stats.is_some() && !c;
-    format!(
-        "Error: result ({count_phrase}) exceeds maximum allowed tokens. Output has been saved to {raw_output_path}.\n\
-         Format: {format_description}\n\
-         Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n\
-         REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
-         {requirements}",
-        requirements = summarization_requirements(raw_output_path, None, lines_too_long),
-    )
+    concat_source_owned(vec![
+        generated_text(&format!(
+            "Error: result ({count_phrase}) exceeds maximum allowed tokens. Output has been saved to {raw_output_path}.\nFormat: "
+        )),
+        format_description.clone(),
+        generated_text(&format!(
+            "\nUse offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\nREQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n{}",
+            summarization_requirements(raw_output_path, None, lines_too_long),
+        )),
+    ])
 }
 
 /// `$$d(rawOutputPath, maxReadLength, linesTooLong)` (`mcpOutputStorage`): the
@@ -632,18 +707,26 @@ fn persist_failed_message(content_length: u64, error: &str) -> String {
 /// `getMaxMcpOutputChars()` (= `maxTokens * 4`) and append [`truncation_message`].
 /// A string is sliced + suffixed; an array is run through
 /// [`truncate_content_blocks`] with the message appended as a final text block.
-fn truncate_mcp_content(content: &Value) -> Value {
+fn truncate_mcp_content_source(content: &UJP) -> UJP {
     let max_chars = usize::try_from(DEFAULT_MAX_MCP_OUTPUT_TOKENS * 4).unwrap_or(usize::MAX);
-    let message = truncation_message();
-    match content {
-        Value::String(s) => Value::String(format!("{}{message}", truncate_string(s, max_chars))),
-        Value::Array(blocks) => {
-            let mut out = truncate_content_blocks(blocks, max_chars);
-            out.push(text_block(&message));
-            Value::Array(out)
-        }
-        other => other.clone(),
+    let message = generated_text(&truncation_message());
+    if let Some(units) = content.string_units("") {
+        let mut retained = truncate_utf16_units(&units, max_chars);
+        retained.extend(message.string_units("").unwrap_or_default());
+        return source_string_units(retained);
     }
+    let Some(length) = content.array_len("") else {
+        return content.clone();
+    };
+    let blocks = (0..length)
+        .filter_map(|index| {
+            let index = u32::try_from(index).ok()?;
+            content.subprojection(&format!("/{index}")).ok()
+        })
+        .collect::<Vec<_>>();
+    let mut out = truncate_content_blocks_source(&blocks, max_chars);
+    out.push(text_block_source(message));
+    UJP::array(out).expect("truncated MCP content is a valid JSON array")
 }
 
 /// `getTruncationMessage()` (`mcpValidation.ts:81-85`). Byte-locked.
@@ -683,30 +766,55 @@ fn truncate_string_utf16(content: &str, max_code_units: usize) -> String {
     }
 }
 
+fn truncate_utf16_units(content: &[u16], max_code_units: usize) -> Vec<u16> {
+    let mut end: usize = 0;
+    let mut index = 0;
+    while index < content.len() {
+        let unit = content[index];
+        let width = if (0xD800..=0xDBFF).contains(&unit)
+            && content
+                .get(index + 1)
+                .is_some_and(|next| (0xDC00..=0xDFFF).contains(next))
+        {
+            2
+        } else {
+            1
+        };
+        if end.saturating_add(width) > max_code_units {
+            break;
+        }
+        end += width;
+        index += width;
+    }
+    content[..index].to_vec()
+}
+
 /// `truncateContentBlocks` (`mcpValidation.ts:94-149`): pack blocks into a
 /// `max_chars` budget — text blocks are kept whole or sliced to fit; image
 /// blocks cost `IMAGE_TOKEN_ESTIMATE * 4` chars and are compressed to the
 /// remaining budget when that estimate no longer fits; any other block passes
 /// through.
-fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
-    let mut result: Vec<Value> = Vec::new();
+fn truncate_content_blocks_source(blocks: &[UJP], max_chars: usize) -> Vec<UJP> {
+    let mut result: Vec<UJP> = Vec::new();
     let mut current_chars: usize = 0;
     let image_chars = usize::try_from(IMAGE_TOKEN_ESTIMATE).unwrap_or(usize::MAX) * 4;
 
     for block in blocks {
-        match block.get("type").and_then(Value::as_str) {
+        match block.string_at("/type") {
             Some("text") => {
                 let remaining = max_chars.saturating_sub(current_chars);
                 if remaining == 0 {
                     break;
                 }
-                let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                let text_len = usize::try_from(js_string_len(text)).unwrap_or(usize::MAX);
+                let text_units = block.string_units("/text").unwrap_or_default();
+                let text_len = text_units.len();
                 if text_len <= remaining {
                     result.push(block.clone());
                     current_chars += text_len;
                 } else {
-                    result.push(text_block(&truncate_string_utf16(text, remaining)));
+                    result.push(text_block_source(source_string_units(
+                        truncate_utf16_units(&text_units, remaining),
+                    )));
                     break;
                 }
             }
@@ -717,7 +825,7 @@ fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
                 } else {
                     let remaining = max_chars.saturating_sub(current_chars);
                     if let Some((compressed, chars)) =
-                        compress_image_block_to_budget(block, remaining)
+                        compress_image_block_to_budget_source(block, remaining)
                     {
                         result.push(compressed);
                         current_chars = current_chars.saturating_add(chars);
@@ -730,32 +838,36 @@ fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
     result
 }
 
-fn compress_image_block_to_budget(block: &Value, max_chars: usize) -> Option<(Value, usize)> {
-    let source = block.get("source")?.as_object()?;
-    if source.get("type").and_then(Value::as_str) != Some("base64") {
+fn compress_image_block_to_budget_source(block: &UJP, max_chars: usize) -> Option<(UJP, usize)> {
+    let mut source = block.subprojection("/source").ok()?;
+    if source.string_at("/type") != Some("base64") {
         return None;
     }
-    let data = source.get("data")?.as_str()?;
-    let bytes = decode_base64(data).ok()?;
+    let data = String::from_utf16(&source.string_units("/data")?).ok()?;
+    let bytes = decode_base64(&data).ok()?;
     let processed =
         tool_api::util::image_budget::process_image_with_base64_budget(bytes, max_chars).ok()?;
     if processed.base64.len() > max_chars {
         return None;
     }
     let chars = processed.base64.len();
+    source
+        .set_field("data", generated_text(&processed.base64))
+        .ok()?;
+    source
+        .set_field("media_type", generated_text(&processed.media_type))
+        .ok()?;
     let mut compressed = block.clone();
-    let compressed_source = compressed.get_mut("source")?.as_object_mut()?;
-    compressed_source.insert("data".to_string(), Value::String(processed.base64));
-    compressed_source.insert(
-        "media_type".to_string(),
-        Value::String(processed.media_type),
-    );
+    compressed.set_field("source", source).ok()?;
     Some((compressed, chars))
 }
 
-/// Build a `{"type":"text","text":<text>}` content block.
-fn text_block(text: &str) -> Value {
-    serde_json::json!({ "type": "text", "text": text })
+fn text_block_source(text: UJP) -> UJP {
+    UJP::object(vec![
+        ("type".into(), generated_text("text")),
+        ("text".into(), text),
+    ])
+    .expect("generated text block fields are unique")
 }
 
 /// `Number.prototype.toLocaleString()` for a nonnegative integer under the
@@ -785,9 +897,148 @@ fn is_env_defined_falsy(env_var: Option<&str>) -> bool {
 }
 
 #[cfg(test)]
+fn rough_token_count_estimation(content: &str) -> u64 {
+    u64::try_from(content.encode_utf16().count())
+        .unwrap_or(u64::MAX)
+        .saturating_add(2)
+        / 4
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+struct TestProcessedMcpResult {
+    content: serde_json::Value,
+    telemetry: Option<LargeResultHandledTelemetry>,
+}
+
+#[cfg(test)]
+fn test_source(value: &serde_json::Value) -> UJP {
+    UJP::parse(&value.to_string()).expect("test JSON fixture is valid")
+}
+
+#[cfg(test)]
+fn test_value(value: &UJP) -> serde_json::Value {
+    serde_json::from_str(&value.to_json_string().expect("projection is serializable"))
+        .expect("projection emits valid JSON")
+}
+
+#[cfg(test)]
+fn process_mcp_result(
+    content: &serde_json::Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+) -> serde_json::Value {
+    test_value(&process_mcp_result_source(
+        &test_source(content),
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+    ))
+}
+
+#[cfg(test)]
+fn process_mcp_result_with_exact_count(
+    content: &serde_json::Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: ExactCountOutcome,
+) -> serde_json::Value {
+    test_value(&process_mcp_result_with_exact_count_source(
+        &test_source(content),
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        exact_token_count,
+    ))
+}
+
+#[cfg(test)]
+fn process_mcp_result_detailed(
+    content: &serde_json::Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: ExactCountOutcome,
+    result_type: McpLargeResultType,
+) -> TestProcessedMcpResult {
+    let result = process_mcp_result_detailed_source(
+        &test_source(content),
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        exact_token_count,
+        result_type,
+    );
+    TestProcessedMcpResult {
+        content: test_value(&result.content),
+        telemetry: result.telemetry,
+    }
+}
+
+#[cfg(test)]
+fn process_mcp_result_detailed_with_setting(
+    content: &serde_json::Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: ExactCountOutcome,
+    result_type: McpLargeResultType,
+    setting: Option<&str>,
+) -> TestProcessedMcpResult {
+    let result = process_mcp_result_detailed_source_with_setting(
+        &test_source(content),
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        exact_token_count,
+        result_type,
+        setting,
+    );
+    TestProcessedMcpResult {
+        content: test_value(&result.content),
+        telemetry: result.telemetry,
+    }
+}
+
+#[cfg(test)]
+fn mcp_content_needs_exact_count(content: &serde_json::Value) -> bool {
+    mcp_content_needs_exact_count_source(&test_source(content))
+}
+
+#[cfg(test)]
+fn content_contains_images(content: &serde_json::Value) -> bool {
+    content_contains_images_source(&test_source(content))
+}
+
+#[cfg(test)]
+fn content_size_estimate(content: &serde_json::Value) -> u64 {
+    content_size_estimate_source(&test_source(content))
+}
+
+#[cfg(test)]
+fn truncate_mcp_content(content: &serde_json::Value) -> serde_json::Value {
+    test_value(&truncate_mcp_content_source(&test_source(content)))
+}
+
+#[cfg(test)]
+fn is_image_block(block: &serde_json::Value) -> bool {
+    block.get("type").and_then(serde_json::Value::as_str) == Some("image")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     /// A text block whose UTF-8 length yields `roughTokenCountEstimation`
     /// `(len + 2) / 4` tokens for the given char count.
@@ -847,6 +1098,15 @@ mod tests {
         );
         // Nothing persisted.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn under_limit_preserves_lone_utf16_surrogate_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let content =
+            UJP::parse(r#""\ud800""#).expect("escaped lone surrogate is valid JSON source");
+        let out = process_mcp_result_source(&content, "srv", "tool", dir.path(), 1700);
+        assert_eq!(out.string_units(""), Some(vec![0xd800]));
     }
 
     #[test]

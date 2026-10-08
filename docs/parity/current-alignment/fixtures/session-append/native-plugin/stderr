@@ -1,0 +1,3 @@
+NATIVE_APPEND_RESULT={"case":"source","input":{"message":{"type":"user","content":[{"type":"text","text":"\ud800x\udc00"}]},"door":"user","origin":{"kind":"core"},"uuid":"source"},"result":{"message":{"type":"user","content":[{"type":"text","text":"\ud800x\udc00"}]},"uuid":"source"}}
+NATIVE_APPEND_RESULT={"case":"rewrite","input":{"message":{"type":"user","content":[{"type":"text","text":"\ud800"}]},"door":"user","origin":{"kind":"core"},"uuid":"rewrite"},"result":{"message":{"type":"user","content":[{"type":"text","text":"prefix:\ud800"}]},"uuid":"rewrite"}}
+NATIVE_MOCK_SESSION_RESULT=[{"message":{"type":"user","content":[{"type":"text","text":"\udc00"}]},"door":"user","origin":{"kind":"core"},"uuid":"record"}]

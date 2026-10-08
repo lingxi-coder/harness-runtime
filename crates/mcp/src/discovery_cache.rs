@@ -83,11 +83,12 @@
 //!   refresh-grant rotation cannot cross-write catalogs. A gate reason that
 //!   [`CacheGateReason::purges_existing_entry`] flags (`HeadersHelper` or
 //!   `OptOut`) instead purges the server's entire on-disk family, best-effort.
-//! * **Strikes.** Only a failed `Stale` background revalidation increments
-//!   `consecutive_refresh_failures`, matching oracle `_6e`. The lazy-upgrade
-//!   slot retains the exact partition that served the stale hit, so a grant
-//!   rotation cannot move the strike to the new partition. Ordinary initial
-//!   connection failures never strike cached data.
+//! * **Strikes.** Failed fresh-cache lazy dials and stale background refreshes
+//!   increment `consecutive_refresh_failures`, deleting the entry at the
+//!   configured threshold (Claude Code 2.1.286 WRt). The single-flight owner
+//!   retains the served partition and verifies the current generation/config
+//!   and grant, so concurrent callers strike once and superseded attempts do
+//!   not mutate another identity's cache. Uncached failures never strike.
 //! * **Telemetry (MISS side).** Before every dial, [`crate::registry`] calls
 //!   [`decide`] and reports [`MissReason`]s that oracle `Ko` (2.1.251, same
 //!   chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
@@ -157,6 +158,7 @@ use lingxi_core::host::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sha2::{Digest, Sha256};
 
 /// Fixed byte-level compatibility domain used when reproducing Claude Code's
@@ -410,6 +412,9 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
     }
     if let Some(timeout) = config.timeout_ms {
         map.insert("timeout".into(), timeout.into());
+    }
+    if let Some(bare) = config.metadata.bare_elicitation_capability {
+        map.insert("bareElicitationCapability".into(), bare.into());
     }
     // Metadata is absent for ordinary servers, preserving their established
     // fixed vectors.  These fields are only identity-bearing when explicitly
@@ -910,12 +915,10 @@ pub fn now_ms() -> u64 {
 /// `serverInfo` sub-object — spread onto the served "cached" client only
 /// when present: `...v.serverInfo && {serverInfo:{name:...,version:...}}`).
 ///
-/// This port's [`lingxi_core::host::McpTransport::initialize`] returns only
-/// [`ServerCapabilitiesDto`] — the wire `serverInfo` block is discarded
-/// before it reaches `mcp::registry`, so nothing populates this field today.
-/// Kept as a real (rather than omitted) field so schema v2 is
-/// forward-compatible with whichever future change threads `serverInfo`
-/// through the transport trait.
+/// Live write-through reads this from the transport metadata using the actual
+/// connection id. Claude Code 2.1.286's normal write caller and cached-client
+/// constructor both project name/version, even though its low-level disk schema
+/// accepts the full implementation object. Other fields stay live-only here too.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryCacheServerInfo {
     /// Server name as reported at `initialize`.
@@ -959,8 +962,7 @@ pub struct DiscoveryCacheEntry {
     /// `k.capabilities.tools`).
     #[serde(default)]
     pub capabilities: ServerCapabilitiesDto,
-    /// `serverInfo`, when this port has one to store — see
-    /// [`DiscoveryCacheServerInfo`]'s doc (always `None` today).
+    /// Optional name/version `serverInfo` from the completed live handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_info: Option<DiscoveryCacheServerInfo>,
     /// The cached `tools/list` result. [`decide`]'s degenerate check reads
@@ -981,8 +983,7 @@ pub struct DiscoveryCacheEntry {
 impl DiscoveryCacheEntry {
     /// Build a fresh entry for `cache_key`, saved "now" (`saved_at_ms`),
     /// with `consecutive_refresh_failures` reset to 0 and no `server_info`
-    /// (see [`Self::with_server_info`] to attach one when a future change
-    /// makes that possible).
+    /// (see [`Self::with_server_info`] to attach the live handshake projection).
     #[must_use]
     pub fn new(
         cache_key: String,
@@ -1184,7 +1185,7 @@ pub fn decide_with_metadata(
         && entry
             .capabilities
             .extensions
-            .get("io.modelcontextprotocol/skills")
+            .get_property("io.modelcontextprotocol/skills")
             .is_some();
     if skills_capable {
         return Decision::Miss {
@@ -1194,8 +1195,8 @@ pub fn decide_with_metadata(
     let channel_capable = entry
         .capabilities
         .experimental
-        .get("claude/channel")
-        .and_then(serde_json::Value::as_bool)
+        .get_property("claude/channel")
+        .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if channel_capable {
         return Decision::Miss {
@@ -1774,8 +1775,8 @@ mod tests {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: std::collections::HashMap::new(),
-            extensions: std::collections::HashMap::new(),
+            experimental: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
+            extensions: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
         }
     }
 
@@ -1783,13 +1784,20 @@ mod tests {
     fn skills_flag_is_independent_and_skills_miss_precedes_channel_miss() {
         let mut capabilities = caps_tools(false);
         capabilities.resources = true;
-        capabilities.extensions.insert(
-            "io.modelcontextprotocol/skills".into(),
-            serde_json::json!({}),
-        );
+        capabilities
+            .extensions
+            .set_field(
+                "io.modelcontextprotocol/skills",
+                Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
+            )
+            .expect("extension field is valid");
         capabilities
             .experimental
-            .insert("claude/channel".into(), serde_json::json!(true));
+            .set_field(
+                "claude/channel",
+                Utf16JsonProjection::parse("true").expect("boolean is JSON"),
+            )
+            .expect("experimental field is valid");
         let entry = DiscoveryCacheEntry::new(
             "srv-key".into(),
             100,
@@ -1835,7 +1843,8 @@ mod tests {
             }
         ));
         let mut no_channel = entry.clone();
-        no_channel.capabilities.experimental.clear();
+        no_channel.capabilities.experimental =
+            Utf16JsonProjection::parse("{}").expect("empty object is JSON");
         assert!(matches!(
             decide_with_metadata(
                 &spec,
@@ -1852,7 +1861,8 @@ mod tests {
             ..policy
         };
         let mut no_channel = entry;
-        no_channel.capabilities.experimental.clear();
+        no_channel.capabilities.experimental =
+            Utf16JsonProjection::parse("{}").expect("empty object is JSON");
         assert!(matches!(
             decide_with_metadata(
                 &spec,
@@ -1897,8 +1907,8 @@ mod tests {
             .map(|i| McpToolDto {
                 server_name: "srv".into(),
                 tool_name: format!("t{i}"),
-                description: String::new(),
-                input_schema: serde_json::json!({}),
+                description: String::new().into(),
+                input_schema: Utf16JsonProjection::parse("{}").expect("empty schema is JSON"),
                 output_schema: None,
                 annotations: None,
                 icons: Vec::new(),
@@ -2302,8 +2312,14 @@ mod tests {
                 name: "tmpl".into(),
                 description: None,
                 mime_type: None,
-                annotations: Some(serde_json::json!({"vendor/rank": 7})),
-                meta: Some(serde_json::json!({"vendor/template": "opaque"})),
+                annotations: Some(
+                    Utf16JsonProjection::parse(r#"{"vendor/rank":7}"#)
+                        .expect("annotations are JSON"),
+                ),
+                meta: Some(
+                    Utf16JsonProjection::parse(r#"{"vendor/template":"opaque"}"#)
+                        .expect("template metadata is JSON"),
+                ),
             }],
             vec![lingxi_core::host::McpPromptDto {
                 name: "p".into(),
@@ -2742,6 +2758,27 @@ mod tests {
             *headers_helper = Some("./helper".into());
         }
         assert_ne!(base_key, logical_cache_key(&base));
+    }
+
+    #[test]
+    fn logical_cache_key_tracks_explicit_bare_flag_without_changing_oauth_identity() {
+        let mut config = crate::json_config::build_server_from_json_entry(
+            "srv",
+            &serde_json::json!({"type":"http","url":"https://mcp.test"}),
+            crate::connection::ConfigScope::Dynamic,
+        )
+        .unwrap();
+        let absent = logical_cache_key(&config);
+        let oauth = crate::oauth::server_key(&config.name, &config.spec);
+        config.metadata.bare_elicitation_capability = Some(false);
+        let explicit_false = logical_cache_key(&config);
+        assert_ne!(absent, explicit_false);
+        assert_eq!(crate::oauth::server_key(&config.name, &config.spec), oauth);
+        config.metadata.bare_elicitation_capability = Some(true);
+        let explicit_true = logical_cache_key(&config);
+        assert_ne!(absent, explicit_true);
+        assert_ne!(explicit_false, explicit_true);
+        assert_eq!(crate::oauth::server_key(&config.name, &config.spec), oauth);
     }
 
     #[test]

@@ -18,6 +18,7 @@
 //! loader is wired (tests / minimal builds) the runner skips skill preloading
 //! entirely, keeping the child's history byte-identical to legacy.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 
@@ -30,7 +31,7 @@ pub struct SkillLoad {
     /// The skill name to render in the loading-metadata block (claude passes the
     /// ORIGINAL `skillName` from the frontmatter list to
     /// `formatSkillLoadingMetadata`, runAgent.ts:634).
-    pub display_name: String,
+    pub display_name: Utf16JsonProjection,
     /// The skill's `progressMessage` frontmatter (claude
     /// `skill.progressMessage`); `None` ⇒ claude's default `"loading"`. Currently
     /// only carried for parity — `formatSkillLoadingMetadata` ignores it (the
@@ -56,11 +57,13 @@ pub trait SkillLoader: Send + Sync {
     /// `agent_type` is the child's `agentType` — its first `:`-segment is the
     /// plugin prefix the impl tries for the plugin-qualified resolution strategy.
     /// `cwd` overrides the parent session cwd for isolated/worktree children.
+    /// `model` is the child's selected model, including inherited resolution.
     /// Read/expansion failures return `Err`; they must not look like missing skills.
     async fn resolve_and_load(
         &self,
         skill_name: &str,
         agent_type: &str,
         cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String>;
 }

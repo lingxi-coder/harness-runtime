@@ -1,0 +1,513 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "8316ec924c19ec10dee9ee1960e4685a2b93f7c59809735fbfa273b1990807b4",
+  "stdio_server_sha256": "0bc9a1bd8487ee3a0eae11d94a650eb9deb2c2ea314b3ce82fa585c10f600687",
+  "fixture_sha256": "d94501c0552d5774ff3912c1490f6a8358e61cfe1a3d5410cca42b8a7723c548",
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000002943",
+    "model": "claude-sonnet-4-5",
+    "prompt": "Use the only available MCP tool once, then finish with the fixed final response.",
+    "mcp_server_name": "fixture",
+    "mcp_tool_name": "emit_payload",
+    "mcp_tool_input": {
+      "mode": "source-units"
+    }
+  },
+  "network_boundary": {
+    "anthropic_stub": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_and_config": true,
+    "empty_external_cwd": true,
+    "no_upstream_relay": true
+  },
+  "run_output_relative_path": "run-output/mcp-roundtrip-3vmsqapi",
+  "native_exit_code": 0,
+  "timed_out": false,
+  "native_result": {
+    "type": "result",
+    "is_error": false,
+    "terminal_reason": "completed",
+    "subtype": "success",
+    "result": "MCP fixture completed.",
+    "session_id": "00000000-0000-4000-8000-000000002943",
+    "num_turns": 2
+  },
+  "requests": [
+    {
+      "method": "POST",
+      "phase": "initial",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 29187,
+      "request_sha256": "c527fc08390d811fd010617be53d8f87c75d2892bf21b7ead42650b09c8c8ebc",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "mcp_tool_candidates": [
+        "mcp__fixture__emit_payload"
+      ]
+    },
+    {
+      "method": "POST",
+      "phase": "after-mcp-tool",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 29589,
+      "request_sha256": "e903feaac8201fc7d6ab9b2f305ac7b5cd42e4b8aafa20573c32178fbdac3195",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "tool_result_block_bytes": 255,
+      "tool_result_block_sha256": "8216a4b2f3aed0c5d46616b3988d792595d537614a50e12e5322c1319f0c0830"
+    }
+  ],
+  "mcp": {
+    "methods": [
+      "server/discover",
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "tools/call"
+    ],
+    "server_discover_probe_error": [
+      {
+        "id": "server-discover-probe-1",
+        "code": -32601,
+        "message": "fixture method not found"
+      }
+    ],
+    "tool_names_advertised_to_model": [
+      "mcp__fixture__emit_payload"
+    ],
+    "tool_name_called": "emit_payload",
+    "stdio_in": {
+      "path": "mcp-trace/stdio-in.raw.jsonl",
+      "bytes": 1099,
+      "sha256": "b401b231256a3ea6c8a1435972162d0a1cf25cc3b35eca52cf4cc72b18217331"
+    },
+    "stdio_out": {
+      "path": "mcp-trace/stdio-out.raw.jsonl",
+      "bytes": 818,
+      "sha256": "0ebc0f88874a9ea98869b4026458e18be3c1b0dc2d0102d624a5ef793801ccfe"
+    },
+    "tools_call_request": {
+      "path": "mcp-trace/tools-call-request.raw.jsonrpc",
+      "bytes": 196,
+      "sha256": "1aadb7c642b23ef649a4ccdc2edae6de77bc20a4d1052f8cd3a77d690e36bdde"
+    },
+    "tools_list_response": {
+      "path": "mcp-trace/tools-list-response.raw.jsonrpc",
+      "bytes": 317,
+      "sha256": "c4535f1bf83c48340242ad280ab2ed339d86ad423c84059a5d968a8977a8d51f"
+    },
+    "tools_call_response": {
+      "path": "mcp-trace/tools-call-response.raw.jsonrpc",
+      "bytes": 209,
+      "sha256": "59f83910871aa5fe6b847c43b53bea580a437120100548ceb7605535c6b78629"
+    },
+    "first_request_tools_slice": {
+      "path": "first-request-tools.raw.json",
+      "bytes": 287,
+      "sha256": "e896001875a68759efc76f3e802877548fc09ff840154da23999c74eb48fd78d"
+    },
+    "result_content_text_utf16_units": [
+      [
+        112,
+        114,
+        105,
+        109,
+        97,
+        114,
+        121,
+        45,
+        55296,
+        937
+      ],
+      [
+        115,
+        101,
+        99,
+        111,
+        110,
+        100,
+        97,
+        114,
+        121,
+        45,
+        99,
+        111,
+        110,
+        116,
+        101,
+        110,
+        116,
+        45,
+        98,
+        108,
+        111,
+        99,
+        107
+      ]
+    ],
+    "structured_content": {
+      "ok": true,
+      "label": "structured-\ud800\u03a9"
+    }
+  },
+  "model_tool_result": {
+    "path": "model-tool-result.raw.json",
+    "bytes": 255,
+    "sha256": "8216a4b2f3aed0c5d46616b3988d792595d537614a50e12e5322c1319f0c0830",
+    "content_kind": "str",
+    "content_text_utf16_units": [
+      [
+        123,
+        34,
+        111,
+        107,
+        34,
+        58,
+        116,
+        114,
+        117,
+        101,
+        44,
+        34,
+        108,
+        97,
+        98,
+        101,
+        108,
+        34,
+        58,
+        34,
+        115,
+        116,
+        114,
+        117,
+        99,
+        116,
+        117,
+        114,
+        101,
+        100,
+        45,
+        92,
+        117,
+        100,
+        56,
+        48,
+        48,
+        937,
+        34,
+        125,
+        10,
+        10,
+        60,
+        115,
+        121,
+        115,
+        116,
+        101,
+        109,
+        45,
+        114,
+        101,
+        109,
+        105,
+        110,
+        100,
+        101,
+        114,
+        62,
+        10,
+        60,
+        116,
+        111,
+        116,
+        97,
+        108,
+        95,
+        116,
+        111,
+        107,
+        101,
+        110,
+        115,
+        62,
+        49,
+        52,
+        57,
+        57,
+        57,
+        57,
+        56,
+        53,
+        32,
+        116,
+        111,
+        107,
+        101,
+        110,
+        115,
+        32,
+        108,
+        101,
+        102,
+        116,
+        60,
+        47,
+        116,
+        111,
+        116,
+        97,
+        108,
+        95,
+        116,
+        111,
+        107,
+        101,
+        110,
+        115,
+        62,
+        10,
+        60,
+        47,
+        115,
+        121,
+        115,
+        116,
+        101,
+        109,
+        45,
+        114,
+        101,
+        109,
+        105,
+        110,
+        100,
+        101,
+        114,
+        62
+      ]
+    ],
+    "primary_content_text_projection": "not_present_as_direct_text",
+    "first_line_literal_json_text": "{\"ok\":true,\"label\":\"structured-\\ud800\u03a9\"}",
+    "first_line_parsed_structured_content": {
+      "ok": true,
+      "label": "structured-\ud800\u03a9"
+    },
+    "structured_label_utf16_units": [
+      115,
+      116,
+      114,
+      117,
+      99,
+      116,
+      117,
+      114,
+      101,
+      100,
+      45,
+      55296,
+      937
+    ],
+    "system_reminder_present": true,
+    "is_error": null
+  },
+  "session": {
+    "present": true,
+    "ignored_full_jsonl_path": "run-output/mcp-roundtrip-3vmsqapi/config/projects/-private-tmp-native-mcp-roundtrip-cwd-293/00000000-0000-4000-8000-000000002943.jsonl",
+    "bytes": 64568,
+    "sha256": "760894847938d8dc5c1d3fdaf1bb29124c4a18b533dfff0cc4fa6a38c01d23f3",
+    "tool_related_rows_path": "tool-related-session-rows.raw.jsonl",
+    "tool_related_rows_bytes": 1987,
+    "row_summary": [
+      {
+        "index": 0,
+        "type": "queue-operation",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 1,
+        "type": "queue-operation",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 2,
+        "type": "user",
+        "role": "user",
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 3,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 4,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 5,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 6,
+        "type": "atis-latch",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 7,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 8,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 9,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 10,
+        "type": "assistant",
+        "role": "assistant",
+        "contains_fixture_tool_use_id": true
+      },
+      {
+        "index": 11,
+        "type": "user",
+        "role": "user",
+        "contains_fixture_tool_use_id": true
+      },
+      {
+        "index": 12,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 13,
+        "type": "attachment",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 14,
+        "type": "assistant",
+        "role": "assistant",
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 15,
+        "type": "last-prompt",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 16,
+        "type": "atis-latch",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      },
+      {
+        "index": 17,
+        "type": "cost-state",
+        "role": null,
+        "contains_fixture_tool_use_id": false
+      }
+    ]
+  },
+  "dynamic_fields": [
+    "Native-generated JSON-RPC IDs and request sequence numbers",
+    "Native-generated session/assistant/message UUIDs and timestamps",
+    "system-reminder total_tokens counter appended to tool_result text"
+  ],
+  "checks": {
+    "native_process_succeeded": true,
+    "mcp_initialize_observed": true,
+    "mcp_tools_list_response_observed": true,
+    "mcp_tools_list_discovered_fixture_tool": true,
+    "mcp_tools_call_observed_once": true,
+    "native_called_fixture_tool": true,
+    "mcp_tool_call_response_has_multiple_content_blocks": true,
+    "mcp_tool_call_response_has_structured_content": true,
+    "mcp_raw_call_response_contains_lone_unit_escape": true,
+    "mcp_structured_content_retains_lone_unit": true,
+    "model_followup_request_contains_tool_result": true,
+    "model_tool_result_first_line_is_structured_content_json": true,
+    "model_tool_result_does_not_expose_primary_content_text": true,
+    "native_final_text_matches_fixed_response": true,
+    "native_session_captured_tool_related_rows": true,
+    "two_model_requests_observed": true,
+    "both_model_requests_use_fixed_model_route": true
+  },
+  "raw_artifacts": {
+    "native.stdout.raw.json": {
+      "bytes": 1587,
+      "sha256": "73e6983e3ec5f7563331fbc54aa7d7b30a27eacfc87936a6d68127011cf758c5"
+    },
+    "native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mcp-stdio-in.raw.jsonl": {
+      "bytes": 1099,
+      "sha256": "b401b231256a3ea6c8a1435972162d0a1cf25cc3b35eca52cf4cc72b18217331"
+    },
+    "mcp-stdio-out.raw.jsonl": {
+      "bytes": 818,
+      "sha256": "0ebc0f88874a9ea98869b4026458e18be3c1b0dc2d0102d624a5ef793801ccfe"
+    },
+    "mcp-tools-list-response.raw.jsonrpc": {
+      "bytes": 317,
+      "sha256": "c4535f1bf83c48340242ad280ab2ed339d86ad423c84059a5d968a8977a8d51f"
+    },
+    "mcp-tools-call-request.raw.jsonrpc": {
+      "bytes": 196,
+      "sha256": "1aadb7c642b23ef649a4ccdc2edae6de77bc20a4d1052f8cd3a77d690e36bdde"
+    },
+    "mcp-tools-call-response.raw.jsonrpc": {
+      "bytes": 209,
+      "sha256": "59f83910871aa5fe6b847c43b53bea580a437120100548ceb7605535c6b78629"
+    },
+    "model-tool-result.raw.json": {
+      "bytes": 255,
+      "sha256": "8216a4b2f3aed0c5d46616b3988d792595d537614a50e12e5322c1319f0c0830"
+    },
+    "tool-related-session-rows.raw.jsonl": {
+      "bytes": 1987,
+      "sha256": "dd9c0a785bcb7e3188d59711922abbe36f5ef944794213a7519ba2249930ed41"
+    },
+    "native-tools-slice.raw.json": {
+      "bytes": 287,
+      "sha256": "e896001875a68759efc76f3e802877548fc09ff840154da23999c74eb48fd78d"
+    },
+    "model-response-tool-use.raw.sse": {
+      "bytes": 885,
+      "sha256": "b09d9a4e96b092491092dc317d7ac4518edfc68a3326c938e836f470deb57b3f"
+    },
+    "model-response-final.raw.sse": {
+      "bytes": 790,
+      "sha256": "bffa057e955b0c0f7ebbd590e9d5b84128018dcb88290a0a147b8cfd40427b9c"
+    }
+  },
+  "scope": "Native-only 2.1.293 public CLI oracle. Raw stdio JSON-RPC, selected model tool_result block, relevant session JSONL rows, model response bodies, stdout and stderr are preserved directly. Full Anthropic requests and full session JSONL remain only in ignored run-output because they carry the Native system prompt and run-specific context. No full-request/full-session byte equality claim."
+}

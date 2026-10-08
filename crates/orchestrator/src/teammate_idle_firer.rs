@@ -88,23 +88,29 @@ impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
             ..Default::default()
         };
         let aggregate = self.hooks.execute(event, ctx).await;
+        let prevent_continuation = aggregate.prevent_continuation;
         let blocking_feedback = if matches!(
             aggregate.decision,
             Some(hooks::response::HookDecision::Block)
         ) {
-            vec![format!(
-                "TeammateIdle hook feedback:\n{}",
-                aggregate.reason.as_deref().unwrap_or("Blocked by hook")
+            let reason = aggregate
+                .reason
+                .clone()
+                .unwrap_or_else(|| hooks::ExactHookText::from_text("Blocked by hook"));
+            vec![hooks::ExactHookText::wrapped(
+                "TeammateIdle hook feedback:\n",
+                &reason,
+                "",
             )]
         } else {
             Vec::new()
         };
         TeammateIdleOutcome {
-            prevent_continuation: aggregate.prevent_continuation,
-            reason: aggregate.prevent_continuation.then(|| {
-                aggregate
-                    .reason
-                    .unwrap_or_else(|| "TeammateIdle hook prevented continuation".to_string())
+            prevent_continuation,
+            reason: prevent_continuation.then(|| {
+                aggregate.reason.unwrap_or_else(|| {
+                    hooks::ExactHookText::from_text("TeammateIdle hook prevented continuation")
+                })
             }),
             blocking_feedback,
             additional_contexts: aggregate.additional_contexts,

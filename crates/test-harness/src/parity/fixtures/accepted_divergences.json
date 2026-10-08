@@ -46,6 +46,31 @@
       ]
     },
     {
+      "id": "fusion-orchestration",
+      "kind": "divergence",
+      "finding": "LingXi Fusion coordinates multiple models and synthesis as a product capability.",
+      "reason": "The 2026-09-30 latest-Claude parity goal explicitly preserves Fusion. Its lifecycle, persistence and accounting must survive common-runtime compatibility changes.",
+      "decided_on": "2026-09-30",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/core/src/host/fusion.rs", "text": "pub struct FusionRequest" },
+        { "kind": "present", "path": "crates/tasks/src/handlers/local_fusion.rs", "text": "pub struct LocalFusionHandler" }
+      ]
+    },
+    {
+      "id": "local-app-runtime",
+      "kind": "divergence",
+      "finding": "LingXi creates and runs Local Apps with their own runtime profiles and grants.",
+      "reason": "The 2026-09-30 latest-Claude parity goal explicitly preserves create Local App. This includes the runtime and app permission boundary, in addition to the Workflow description exception below.",
+      "decided_on": "2026-09-30",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/local-apps/src/types.rs", "text": "pub struct AppRecord" }
+      ]
+    },
+    {
       "id": "own-web-tooling",
       "kind": "divergence",
       "finding": "Claude Code ships its own web search stack.",
@@ -123,14 +148,13 @@
       "id": "subagent-handback",
       "kind": "divergence",
       "finding": "2.1.267 adds a subagent hand-back contract: a child delivers its report through a dedicated tool, with an enforcement path and a send/flagged/withheld disposition.",
-      "reason": "Gated on `tengu_lively_waffle`, which defaults FALSE, plus auto-mode. On a host with no statsig backend — this port — a default install of 2.1.267 behaves exactly as LingXi does, so the absence IS the alignment. Building it now would port a mechanism upstream does not run. Revisit if the gate flips or the env override appears in a real environment.",
+      "reason": "The 2.1.267 gate defaulted false. This historical exemption does not apply to 2.1.286: its V5e gate defaults tengu_lively_waffle to true, so the absent handback contract is now an open compatibility gap.",
       "decided_on": "2026-09-10",
       "decided_by": "oracle",
-      "status": "active",
-      "anchors": [
-        { "kind": "absent", "path": "crates/tools", "text": "SubagentHandback" },
-        { "kind": "present", "path": "crates/test-harness/src/parity/fixtures/cc_2_1_267_oracle_facts.json", "text": "tengu_lively_waffle" }
-      ]
+      "status": "retired",
+      "retired_on": "2026-09-30",
+      "retired_because": "Claude Code 2.1.286 src_183181264.js V5e enables the gate by default; official 2.1.271 release notes also announce the live auto-mode contract. Retirement removes an invalid exemption; it does not claim that the missing implementation has been completed.",
+      "anchors": []
     },
     {
       "id": "turn-interrupt-markers",

@@ -198,7 +198,7 @@ async fn wait_for_file_active_polls_until_active() {
             request.headers.get("x-goog-api-key").map(String::as_str),
             Some("gemini-poll-key")
         );
-        assert_eq!(request.body_json, serde_json::Value::Null);
+        assert_eq!(request.body_json.as_json_source(), "null");
         assert_eq!(request.body_bytes, None);
     }
 }

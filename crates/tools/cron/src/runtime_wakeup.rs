@@ -2,6 +2,7 @@
 use crate::{LoopRuntime, WakeupScheduler};
 use async_trait::async_trait;
 use lingxi_core::host::{BackgroundTaskHandle, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,10 +52,10 @@ impl WakeupTask {
             )
         }
     }
-    pub fn new(delay: Duration, prompt: &str) -> Self {
+    pub fn new(delay: Duration, prompt: &Utf16JsonProjection) -> Self {
         Self::at(std::time::SystemTime::now() + delay, prompt)
     }
-    fn at(target: std::time::SystemTime, prompt: &str) -> Self {
+    fn at(target: std::time::SystemTime, prompt: &Utf16JsonProjection) -> Self {
         use rand::Rng;
         let seconds = target
             .duration_since(std::time::UNIX_EPOCH)
@@ -65,16 +66,18 @@ impl WakeupTask {
         let hour = local.rem_euclid(86400) / 3600;
         // Native Math.floor(Math.random() * 4294967295), padded to eight hex digits.
         let task_id = format!("{:08x}", rand::rng().random_range(0..u32::MAX));
-        let display_prompt = if crate::is_loop_default_sentinel(prompt) {
-            if crate::is_loop_file_sentinel(prompt) {
-                "/loop (loop.md)"
+        let prompt_units = prompt.string_units("").unwrap_or_default();
+        let is_default = crate::is_loop_default_sentinel(prompt);
+        let is_loop_file = crate::is_loop_file_sentinel(prompt);
+        let display_prompt = if is_default {
+            if is_loop_file {
+                "/loop (loop.md)".to_owned()
             } else {
-                "/loop"
+                "/loop".to_owned()
             }
         } else {
-            prompt
-        }
-        .to_owned();
+            String::from_utf16_lossy(&prompt_units)
+        };
         Self {
             fire_id: lingxi_core::types::MessageId::new(),
             task_id,
@@ -89,14 +92,20 @@ impl WakeupTask {
 #[async_trait]
 pub trait WakeupDelivery: Send + Sync {
     /// Wait for the host's idle boundary, announce the fire, then enqueue it.
-    async fn deliver(&self, command_id: &str, prompt: String, reason: String, task: WakeupTask);
+    async fn deliver(
+        &self,
+        command_id: &str,
+        prompt: Utf16JsonProjection,
+        reason: String,
+        task: WakeupTask,
+    );
     /// Remove already-enqueued dynamic wakeups and return their raw prompts.
-    async fn cancel_queued(&self) -> Vec<String>;
+    async fn cancel_queued(&self) -> Vec<Utf16JsonProjection>;
 }
 
 struct Pending {
     id: String,
-    prompt: String,
+    prompt: Utf16JsonProjection,
     handle: BackgroundTaskHandle,
     cancel: tokio::sync::watch::Sender<bool>,
 }
@@ -137,7 +146,7 @@ impl Drop for RuntimeWakeupScheduler {
 }
 #[async_trait]
 impl WakeupScheduler for RuntimeWakeupScheduler {
-    async fn schedule(&self, delay: Duration, prompt: String, reason: String) {
+    async fn schedule(&self, delay: Duration, prompt: Utf16JsonProjection, reason: String) {
         let task = WakeupTask::new(delay, &prompt);
         let id = task.command_id();
         let task_id = id.clone();
@@ -172,7 +181,7 @@ impl WakeupScheduler for RuntimeWakeupScheduler {
             let _ = registered.send(());
         }
     }
-    async fn cancel_pending(&self) -> Vec<String> {
+    async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
         let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         for entry in &pending {
             let _ = entry.cancel.send(true);
@@ -186,7 +195,10 @@ impl WakeupScheduler for RuntimeWakeupScheduler {
             // A firing task can be present in both registries during the
             // enqueue -> pending-retirement handoff. A dynamic loop has only
             // one pending wakeup per prompt; count that handoff once.
-            if !prompts.contains(&prompt) {
+            if !prompts
+                .iter()
+                .any(|existing| existing.semantically_eq(&prompt))
+            {
                 prompts.push(prompt);
             }
         }
@@ -201,11 +213,12 @@ impl WakeupScheduler for RuntimeWakeupScheduler {
 mod tests {
     use super::*;
     use lingxi_core::host::RuntimeError;
+    use tool_api::tool_trait::source_text_projection;
     #[test]
     fn scheduled_identity_uses_target_clock_and_exact_default_sentinels() {
         let seconds = 1_700_000_040;
         let target = std::time::UNIX_EPOCH + Duration::from_secs(seconds);
-        let task = WakeupTask::at(target, "<<loop.md-dynamic>>");
+        let task = WakeupTask::at(target, &source_text_projection("<<loop.md-dynamic>>"));
         let local = seconds as i64 + cron::schedule::local_offset_seconds(seconds as i64);
         assert_eq!(
             task.cron,
@@ -219,11 +232,15 @@ mod tests {
         assert_eq!(task.task_id.len(), 8);
         assert!(u32::from_str_radix(&task.task_id, 16).unwrap() < u32::MAX);
         assert_eq!(
-            WakeupTask::at(target, "<<autonomous-loop-dynamic>>").display_prompt,
+            WakeupTask::at(
+                target,
+                &source_text_projection("<<autonomous-loop-dynamic>>"),
+            )
+            .display_prompt,
             "/loop"
         );
         assert_eq!(
-            WakeupTask::at(target, " <<loop.md-dynamic>> ").display_prompt,
+            WakeupTask::at(target, &source_text_projection(" <<loop.md-dynamic>> ")).display_prompt,
             " <<loop.md-dynamic>> "
         );
     }
@@ -252,17 +269,17 @@ mod tests {
     struct Delivery {
         entered: tokio::sync::Semaphore,
         release: tokio::sync::Semaphore,
-        queued: Mutex<Vec<String>>,
+        queued: Mutex<Vec<Utf16JsonProjection>>,
     }
     #[async_trait]
     impl WakeupDelivery for Delivery {
-        async fn deliver(&self, id: &str, prompt: String, _: String, _: WakeupTask) {
+        async fn deliver(&self, id: &str, prompt: Utf16JsonProjection, _: String, _: WakeupTask) {
             assert!(id.starts_with("loop-wakeup-"));
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
             self.queued.lock().unwrap().push(prompt);
         }
-        async fn cancel_queued(&self) -> Vec<String> {
+        async fn cancel_queued(&self) -> Vec<Utf16JsonProjection> {
             std::mem::take(&mut *self.queued.lock().unwrap())
         }
     }
@@ -287,14 +304,14 @@ mod tests {
         scheduler
             .schedule(
                 Duration::ZERO,
-                "<<autonomous-loop-dynamic>>".into(),
+                source_text_projection("<<autonomous-loop-dynamic>>"),
                 "test".into(),
             )
             .await;
         delivery.entered.acquire().await.unwrap().forget();
         assert_eq!(
             scheduler.cancel_pending().await,
-            vec!["<<autonomous-loop-dynamic>>"]
+            vec![source_text_projection("<<autonomous-loop-dynamic>>")]
         );
         delivery.release.add_permits(1);
         tokio::task::yield_now().await;
@@ -305,12 +322,20 @@ mod tests {
         let (scheduler, delivery) = fixture();
         delivery.release.add_permits(1);
         scheduler
-            .schedule(Duration::ZERO, " /original ".into(), "test".into())
+            .schedule(
+                Duration::ZERO,
+                source_text_projection(" /original "),
+                "test".into(),
+            )
             .await;
         delivery.entered.acquire().await.unwrap().forget();
         tokio::task::yield_now().await;
-        assert_eq!(*delivery.queued.lock().unwrap(), vec![" /original "]);
-        assert_eq!(scheduler.cancel_pending().await, vec![" /original "]);
+        assert!(delivery.queued.lock().unwrap()[0]
+            .semantically_eq(&source_text_projection(" /original ")));
+        assert_eq!(
+            scheduler.cancel_pending().await,
+            vec![source_text_projection(" /original ")]
+        );
         assert!(delivery.queued.lock().unwrap().is_empty());
     }
 }

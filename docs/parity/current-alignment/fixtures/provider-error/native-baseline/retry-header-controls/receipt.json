@@ -1,0 +1,95 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "403e36062ec8a48be792f69984de6c384f06f986adb6baa78feb4903a3861e3f",
+  "fixture_sha256": {
+    "retry-header-controls.json": "c5c3bc4e0410c771153881bf0df5e47e38ee54edb3da6f6fd1de23d3804ba60c",
+    "cases.json": "2e18c262c9da85dfa94cf8c8cecb52aad600eb0a5311473a50e8e4482d914bba"
+  },
+  "source_run_output_dir": "run-output/retry-header-controls-a_aoqwfm",
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "max_retry_env_set": false,
+  "response_header_control": {
+    "x-should-retry": "false"
+  },
+  "native_500_gateway_authority": "127.0.0.1:57288",
+  "native_500_gateway_authority_source": "Exact loopback authority parsed from http-500-no-retry-header.stdout.raw; candidate test injects Transport and performs no network request.",
+  "results": [
+    {
+      "id": "http-401-no-retry-header",
+      "http_status": 401,
+      "response_header": {
+        "x-should-retry": "false"
+      },
+      "post_count": 1,
+      "timed_out": false,
+      "exit_code": 1,
+      "stdout": {
+        "path": "http-401-no-retry-header.stdout.raw",
+        "bytes": 1252,
+        "sha256": "f483130e419af74accf1b53d174461bc76291dc4438c58fb810b0ea97a2f2868"
+      },
+      "stderr": {
+        "path": "http-401-no-retry-header.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native_json": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "terminal_reason": "api_error",
+        "api_error_status": 401,
+        "num_turns": 1
+      },
+      "result_text_shape": "authentication_notice",
+      "result_utf16_units": 68,
+      "lone_surrogate_indices": [
+        62
+      ],
+      "starts_with_api_error": false,
+      "starts_with_authentication_notice": true,
+      "has_server_side_notice": false,
+      "has_dynamic_loopback_endpoint": false
+    },
+    {
+      "id": "http-500-no-retry-header",
+      "http_status": 500,
+      "response_header": {
+        "x-should-retry": "false"
+      },
+      "post_count": 1,
+      "timed_out": false,
+      "exit_code": 1,
+      "stdout": {
+        "path": "http-500-no-retry-header.stdout.raw",
+        "bytes": 1366,
+        "sha256": "46a4bc57cc143cc81f407e10aa039bb46e59fd6990867e759e543e8fa7a03aeb"
+      },
+      "stderr": {
+        "path": "http-500-no-retry-header.stderr.raw",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native_json": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "terminal_reason": "api_error",
+        "api_error_status": 500,
+        "num_turns": 1
+      },
+      "result_text_shape": "server_error_notice",
+      "result_utf16_units": 181,
+      "lone_surrogate_indices": [
+        38
+      ],
+      "starts_with_api_error": true,
+      "starts_with_authentication_notice": false,
+      "has_server_side_notice": true,
+      "has_dynamic_loopback_endpoint": true
+    }
+  ],
+  "scope": "x-should-retry:false control probe only; does not establish default retry policy."
+}

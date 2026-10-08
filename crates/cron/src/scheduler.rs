@@ -7,12 +7,14 @@
 use crate::schedule::{parse_cron, CronExpression};
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::{Clock, FileSystem, FsError, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
+#[cfg(test)]
 use tasks::TaskSpawnInput;
 #[cfg(test)]
 use tasks::TaskType;
@@ -26,7 +28,7 @@ pub struct SessionCronFire {
     /// Original cron expression.
     pub cron: String,
     /// Unresolved prompt, including loop sentinel values.
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
     /// Teammate owner, when the session task was created by one.
     pub owner: Option<String>,
 }
@@ -67,7 +69,9 @@ impl SessionCronDelivery for RegistryTestDelivery {
             .spawn(
                 TaskType::Dream,
                 TaskSpawnInput::Dream {
-                    prompt: fire.prompt,
+                    prompt: String::from_utf16_lossy(
+                        &fire.prompt.string_units("").unwrap_or_default(),
+                    ),
                     max_iterations: None,
                 },
                 format!("cron: {}", fire.id),
@@ -88,7 +92,7 @@ pub struct SessionCronTask {
     /// Original five-field expression, retained for `CronList`.
     pub cron: String,
     /// Prompt submitted when the schedule fires.
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
     /// Creation time used for due detection and recurring expiry.
     pub created_at: SystemTime,
     /// Last successful claim, when recurring.
@@ -243,7 +247,7 @@ enum TasksFileSnapshot {
 
 /// PARITY `be(tasks)`: the prompt that surfaces missed durable one-shots.
 #[must_use]
-pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> String {
+pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> Utf16JsonProjection {
     let plural = missed.len() > 1;
     let head = format!(
         "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
@@ -252,18 +256,22 @@ pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> String
         if plural { "these prompts" } else { "this prompt" },
         if plural { "each one" } else { "it" },
     );
-    let entries: Vec<String> = missed
-        .iter()
-        .map(|t| {
-            format!(
-                "[{}, created {}]\n{}",
-                crate::schedule::human_schedule(&t.cron),
-                crate::schedule::local_date_time_string(t.created_at),
-                t.prompt
-            )
-        })
-        .collect();
-    format!("{head}\n\n{}", entries.join("\n\n"))
+    let mut units: Vec<u16> = format!("{head}\n\n").encode_utf16().collect();
+    for (index, task) in missed.iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
+        let prefix = format!(
+            "[{}, created {}]\n",
+            crate::schedule::human_schedule(&task.cron),
+            crate::schedule::local_date_time_string(task.created_at),
+        );
+        units.extend(prefix.encode_utf16());
+        units.extend(task.prompt.string_units("").unwrap_or_default());
+    }
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("generated missed-task prompt is a valid source string")
 }
 
 /// Claude Code 2.1.270 default lifespan for recurring cron jobs.
@@ -320,7 +328,7 @@ pub struct CronTaskDef {
     /// Parsed cron schedule.
     pub schedule: CronExpression,
     /// Initial prompt handed to the spawned Dream task.
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
     /// Optional agent type hint for the spawned task.
     pub agent_type: Option<String>,
     /// Last time this job fired (used to suppress same-minute duplicates).
@@ -656,7 +664,7 @@ impl std::future::Future for TickFuture {
 }
 
 struct ClaimedCronJob {
-    spawn_input: TaskSpawnInput,
+    prompt: Utf16JsonProjection,
     rollback: ClaimRollback,
     /// Captured AT CLAIM TIME: claiming a one-shot (or an aged-out recurring
     /// job) removes it from `self.tasks`, so the fire diagnostics cannot read it
@@ -682,20 +690,36 @@ enum ClaimRollback {
 impl ClaimedCronJob {
     /// The prompt this claim will spawn — read BEFORE [`Self::into_parts`]
     /// consumes it.
-    fn prompt(&self) -> &str {
-        match &self.spawn_input {
-            TaskSpawnInput::Dream { prompt, .. } => prompt.as_str(),
-            _ => "",
-        }
+    fn prompt(&self) -> &Utf16JsonProjection {
+        &self.prompt
     }
 
-    fn into_parts(self) -> (TaskSpawnInput, ClaimRollback) {
-        (self.spawn_input, self.rollback)
+    fn into_parts(self) -> (Utf16JsonProjection, ClaimRollback) {
+        (self.prompt, self.rollback)
     }
 }
 
-fn is_dynamic_loop_prompt(prompt: &str) -> bool {
-    prompt == crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL || prompt == crate::LOOP_FILE_DYNAMIC_SENTINEL
+fn source_string_equals(prompt: &Utf16JsonProjection, expected: &str) -> bool {
+    let expected: Vec<u16> = expected.encode_utf16().collect();
+    prompt
+        .string_units("")
+        .is_some_and(|units| units == expected)
+}
+
+fn is_dynamic_loop_prompt(prompt: &Utf16JsonProjection) -> bool {
+    source_string_equals(prompt, crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL)
+        || source_string_equals(prompt, crate::LOOP_FILE_DYNAMIC_SENTINEL)
+}
+
+fn is_loop_default_source(prompt: &Utf16JsonProjection) -> bool {
+    source_string_equals(prompt, crate::AUTONOMOUS_LOOP_SENTINEL)
+        || source_string_equals(prompt, crate::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL)
+        || source_string_equals(prompt, crate::LOOP_FILE_SENTINEL)
+        || source_string_equals(prompt, crate::LOOP_FILE_DYNAMIC_SENTINEL)
+}
+
+fn source_display(prompt: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&prompt.string_units("").unwrap_or_default())
 }
 
 #[async_trait::async_trait]
@@ -1083,7 +1107,7 @@ impl CronScheduler {
         &self,
         id: &str,
         schedule_str: &str,
-        prompt: &str,
+        prompt: &Utf16JsonProjection,
         agent_type: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.register_with_meta(
@@ -1108,7 +1132,7 @@ impl CronScheduler {
         &self,
         id: &str,
         schedule_str: &str,
-        prompt: &str,
+        prompt: &Utf16JsonProjection,
         agent_type: Option<String>,
         created_at: SystemTime,
         recurring: bool,
@@ -1118,7 +1142,7 @@ impl CronScheduler {
         let def = CronTaskDef {
             id: id.into(),
             schedule,
-            prompt: prompt.into(),
+            prompt: prompt.clone(),
             agent_type,
             last_run,
             enabled: true,
@@ -1190,21 +1214,25 @@ impl CronScheduler {
         let mut rows: Vec<_> = tasks
             .values()
             .map(|task| {
-                crate::schedule::loop_usage_row(
-                    &task.prompt,
+                let units = task.prompt.string_units("").unwrap_or_default();
+                let display = String::from_utf16_lossy(&units);
+                let row = crate::schedule::loop_usage_row(
+                    &display,
                     &task.schedule.raw,
                     is_dynamic_loop_prompt(&task.prompt),
                     task.last_run,
                     now,
-                )
+                );
+                (units, row)
             })
             .collect();
-        rows.sort_by(|a, b| {
-            b.tokens
-                .cmp(&a.tokens)
-                .then_with(|| a.prompt.cmp(&b.prompt))
+        rows.sort_by(|(left_units, left_row), (right_units, right_row)| {
+            right_row
+                .tokens
+                .cmp(&left_row.tokens)
+                .then_with(|| left_units.cmp(right_units))
         });
-        rows
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
     async fn unregister_job(&self, id: &str, owner: Option<&str>) -> bool {
@@ -1286,7 +1314,7 @@ impl CronScheduler {
     /// claim has already removed a one-shot (and an aged-out recurring job) from
     /// that map, so reading it back would report every one-shot fire with an
     /// empty prompt and log a recurring job's final run as a one-shot.
-    fn log_fire(id: &str, recurring: bool, prompt: &str) {
+    fn log_fire(id: &str, recurring: bool, prompt: &Utf16JsonProjection) {
         tracing::info!(
             "[ScheduledTasks] firing {id}{}",
             if recurring { " (recurring)" } else { "" }
@@ -1295,7 +1323,7 @@ impl CronScheduler {
             event = "tengu_scheduled_task_fire",
             recurring,
             task_id = %id,
-            autonomous_loop_default = crate::autonomous_loop::is_loop_default_sentinel(prompt),
+            autonomous_loop_default = is_loop_default_source(prompt),
         );
     }
 
@@ -1359,7 +1387,7 @@ impl CronScheduler {
                 let fire = SessionCronFire {
                     id: id.clone(),
                     cron,
-                    prompt: claimed_job.prompt().to_owned(),
+                    prompt: claimed_job.prompt().clone(),
                     owner,
                 };
                 let (_, rollback) = claimed_job.into_parts();
@@ -1367,7 +1395,7 @@ impl CronScheduler {
                     match lingxi_core::host::team_spawn::TeamSpawnSeam::send_message(
                         self.task_registry.as_ref(),
                         owner,
-                        fire.prompt,
+                        fire.prompt.clone(),
                     )
                     .await
                     {
@@ -1387,7 +1415,7 @@ impl CronScheduler {
                     // between fires breaks the settled streak, which is the
                     // backward `blocking_system_before_anchor` scan. The loop's
                     // own fire is `I(e)` and ends that scan, so it is excluded.
-                    if !crate::autonomous_loop::is_loop_default_sentinel(&fire.prompt) {
+                    if !is_loop_default_source(&fire.prompt) {
                         if let Some(loop_runtime) = delivery.loop_runtime() {
                             if loop_runtime.in_flight_prompt().is_some() {
                                 loop_runtime.veto_tick(
@@ -1981,8 +2009,8 @@ impl CronScheduler {
 
         self.apply_claimed_task_state(&authoritative, now, expires_after_fire)
             .await
-            .map(|spawn_input| ClaimedCronJob {
-                spawn_input,
+            .map(|prompt| ClaimedCronJob {
+                prompt,
                 recurring: authoritative.recurring,
                 rollback: ClaimRollback::Durable {
                     project_root: project_root.to_path_buf(),
@@ -2036,10 +2064,7 @@ impl CronScheduler {
             );
         }
         Some(ClaimedCronJob {
-            spawn_input: TaskSpawnInput::Dream {
-                prompt,
-                max_iterations: None,
-            },
+            prompt,
             recurring: original_task.recurring,
             rollback: ClaimRollback::Session {
                 before_task: original_task,
@@ -2062,7 +2087,7 @@ impl CronScheduler {
         authoritative: &CronTaskDef,
         now: SystemTime,
         expires_after_fire: bool,
-    ) -> Option<TaskSpawnInput> {
+    ) -> Option<Utf16JsonProjection> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(authoritative.id.clone(), authoritative.clone());
         let remove_after_fire =
@@ -2087,10 +2112,7 @@ impl CronScheduler {
                 "cron job fired its final run after exceeding the recurring max age"
             );
         }
-        Some(TaskSpawnInput::Dream {
-            prompt: authoritative.prompt.clone(),
-            max_iterations: None,
-        })
+        Some(authoritative.prompt.clone())
     }
 
     async fn rollback_claim(&self, id: &str, rollback: ClaimRollback) {
@@ -3073,7 +3095,7 @@ mod scheduler_tick_tests {
                 super::SessionCronTask {
                     id: "00000000".into(),
                     cron: "* * * * *".into(),
-                    prompt: "__loop_sentinel_raw__".into(),
+                    prompt: Utf16JsonProjection::parse(r#""\ud800x""#).unwrap(),
                     created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
                     last_fired_at: None,
                     recurring: true,
@@ -3096,9 +3118,10 @@ mod scheduler_tick_tests {
         scheduler.tick().await;
         let fires = delivery.fires.lock().await;
         assert_eq!(fires.len(), 1);
+        assert_eq!((&*fires[0].id, &*fires[0].cron), ("00000000", "* * * * *"));
         assert_eq!(
-            (&*fires[0].id, &*fires[0].cron, &*fires[0].prompt),
-            ("00000000", "* * * * *", "__loop_sentinel_raw__")
+            fires[0].prompt,
+            Utf16JsonProjection::parse(r#""\ud800x""#).unwrap()
         );
         assert_eq!(
             handler.spawn_count(),
@@ -3581,7 +3604,10 @@ mod scheduler_tick_tests {
 
         let jobs = scheduler.session_jobs().await;
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].prompt, "edited while spawn was pending");
+        assert_eq!(
+            super::source_display(&jobs[0].prompt),
+            "edited while spawn was pending"
+        );
         assert_eq!(jobs[0].owner.as_deref(), Some("agent:two"));
         assert_eq!(
             scheduler
@@ -3589,7 +3615,7 @@ mod scheduler_tick_tests {
                 .read()
                 .await
                 .get("dsession_edit")
-                .map(|task| task.prompt.as_str()),
+                .map(|task| super::source_display(&task.prompt)),
             Some("edited while spawn was pending")
         );
     }
@@ -3683,6 +3709,7 @@ mod scheduler_tick_tests {
                 automation: None,
             },
         ]);
+        let text = super::source_display(&text);
         assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
         assert!(text.contains("]\na\n\n[Weekdays at 9:00 AM, created "));
         assert!(text.ends_with("]\nb"));
@@ -4046,7 +4073,12 @@ mod scheduler_tick_tests {
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
         scheduler
-            .register("direct", "* * * * *", "direct", None)
+            .register(
+                "direct",
+                "* * * * *",
+                &Utf16JsonProjection::from("direct"),
+                None,
+            )
             .await
             .unwrap();
         scheduler
@@ -4116,7 +4148,7 @@ mod scheduler_tick_tests {
             .prompt = "doctored".into();
         scheduler.tick().await;
         assert_eq!(
-            scheduler.tasks.read().await["dgate"].prompt,
+            super::source_display(&scheduler.tasks.read().await["dgate"].prompt),
             "doctored",
             "an unchanged document must not be re-applied"
         );
@@ -4127,7 +4159,10 @@ mod scheduler_tick_tests {
         );
         fs.files.lock().await.insert(TASKS_PATH.into(), edited);
         scheduler.tick().await;
-        assert_eq!(scheduler.tasks.read().await["dgate"].prompt, "edited");
+        assert_eq!(
+            super::source_display(&scheduler.tasks.read().await["dgate"].prompt),
+            "edited"
+        );
     }
 
     /// PARITY `I`: the next fire is computed once per schedule and reused, and a
@@ -4177,7 +4212,7 @@ mod scheduler_tick_tests {
         let (registry, _) = registry_with_dream_handler(fs.clone());
         let scheduler = scheduler(registry, fs, clock.clone());
         scheduler
-            .register("swept", "0 0 1 1 *", "p", None)
+            .register("swept", "0 0 1 1 *", &Utf16JsonProjection::from("p"), None)
             .await
             .unwrap();
         scheduler.tick().await;
@@ -4296,7 +4331,7 @@ mod scheduler_tick_tests {
     }
     #[async_trait]
     impl crate::CronJobFirer for BlockedAutomationFirer {
-        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+        async fn fire(&self, _: &str, _: &Utf16JsonProjection) -> Result<String, String> {
             panic!("v2 must not use legacy execution");
         }
         async fn fire_automation(
@@ -4518,7 +4553,7 @@ mod scheduler_tick_tests {
     struct BusyReviewFirer;
     #[async_trait]
     impl crate::CronJobFirer for BusyReviewFirer {
-        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+        async fn fire(&self, _: &str, _: &Utf16JsonProjection) -> Result<String, String> {
             unreachable!()
         }
         async fn fire_automation(
@@ -4816,7 +4851,7 @@ mod scheduler_tick_tests {
     }
     #[async_trait]
     impl crate::CronJobFirer for CommitReviewFirer {
-        async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+        async fn fire(&self, _: &str, _: &Utf16JsonProjection) -> Result<String, String> {
             unreachable!()
         }
         async fn fire_automation(
@@ -4988,7 +5023,7 @@ mod scheduler_tick_tests {
         }
         #[async_trait]
         impl crate::CronJobFirer for DrainFirer {
-            async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+            async fn fire(&self, _: &str, _: &Utf16JsonProjection) -> Result<String, String> {
                 unreachable!()
             }
             async fn fire_automation(

@@ -11,6 +11,9 @@ mod invoked_skill_lifecycle_tests;
 #[path = "conversation/tests/session_memory_background_tests.rs"]
 mod session_memory_background_tests;
 
+#[path = "conversation/tests/mod_model_fork_tests.rs"]
+mod mod_model_fork_tests;
+
 #[cfg(test)]
 #[path = "conversation/tests/prompt_snapshot_tests.rs"]
 mod prompt_snapshot_tests;
@@ -79,6 +82,21 @@ mod output_style_reminder_tests;
 #[path = "conversation/tests/additional_context_tests.rs"]
 mod additional_context_tests;
 
+#[path = "conversation/tests/turn_complete_queue_tests.rs"]
+mod turn_complete_queue_tests;
+
+#[path = "conversation/tests/session_measure_tests.rs"]
+mod session_measure_tests;
+
+#[path = "conversation/tests/session_usage_tests.rs"]
+mod session_usage_tests;
+
+#[path = "conversation/tests/session_append_tests.rs"]
+mod session_append_tests;
+
+#[path = "conversation/tests/mod_session_receive_tests.rs"]
+mod mod_session_receive_tests;
+
 // ============================================================================
 // SKILLEXEC.3 (model scope): a tool's `context_modifier` switches the session's
 // main-loop model, applied POST-BATCH on BOTH turn drivers (batched `run_turn`
@@ -144,7 +162,7 @@ mod agent_listing_reminder_tests;
 // Mirrors the `skill_listing_reminder_tests` template: a `StaticMemoryProvider`
 // fixture supplies conditional (`paths:`-gated) `MemoryFile`s, the touched-file
 // set is seeded directly into the shared `read_state_map`, and
-// `conditional_rules_reminder_message` is asserted to inject the matching rule
+// `nested_memory_reminder_messages` is asserted to inject the matching rule
 // once (with sent-tracking dedup) and skip non-matching / already-sent rules.
 #[cfg(test)]
 #[path = "conversation/tests/new_diagnostics_reminder_tests.rs"]
@@ -319,3 +337,6 @@ mod scheduled_turn_tests;
 
 #[path = "conversation/tests/turn_admission_cancel_tests.rs"]
 mod turn_admission_cancel_tests;
+
+#[path = "conversation/tests/nested_memory_287_lifecycle_tests.rs"]
+mod nested_memory_287_lifecycle_tests;

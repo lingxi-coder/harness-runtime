@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use client::adapter::ClientEventListener;
 use client::protocol::events::ClientEvent;
-use local_apps::{sha256_hex, AppAuthoringSpec};
+use local_apps::{AppAuthoringSpec, sha256_hex};
 use serde::Deserialize;
 
 /// Fenced-block info string a Local App plan carries its machine-readable
@@ -320,7 +320,7 @@ fn parse_authoring_block(plan: &str) -> Result<Option<PlanAuthoringBlock>, Strin
         _ => {
             return Err(format!(
                 "the plan carries more than one `{AUTHORING_SPEC_FENCE}` block; keep exactly one"
-            ))
+            ));
         }
     };
     let block: PlanAuthoringBlock = serde_json::from_str(body.trim()).map_err(|error| {
@@ -677,7 +677,7 @@ mod tests {
             }
             async fn on_event(&self, event: ClientEvent) {
                 let label = match event {
-                    ClientEvent::TextDelta { text } => text,
+                    ClientEvent::TextDelta { text } => text.display(),
                     ClientEvent::ToolUseResult { tool, .. } => tool,
                     other => format!("{other:?}"),
                 };
@@ -712,7 +712,7 @@ mod tests {
             .await;
         watcher
             .on_event(ClientEvent::TextDelta {
-                text: "hello".to_string(),
+                text: "hello".into(),
             })
             .await;
 

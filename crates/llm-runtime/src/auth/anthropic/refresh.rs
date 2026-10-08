@@ -103,12 +103,12 @@ impl AuthState {
         access_token: Secret<String>,
         refresh_token: Option<Secret<String>>,
         expires_at: SystemTime,
+        scopes: Vec<String>,
         http: Arc<dyn Transport>,
         clock: Arc<dyn lingxi_core::host::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
     ) -> Arc<Self> {
-        let scopes = config.scopes.clone();
         Arc::new(Self {
             config,
             token: RwLock::new(TokenInfo {
@@ -563,6 +563,8 @@ mod wire_and_persist_tests {
             Secret::new("OLD_ACCESS".into()),
             Some(Secret::new("OLD_REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
+            lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0)
+                .scopes,
             http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
@@ -633,6 +635,8 @@ mod wire_and_persist_tests {
             Some(Secret::new("REFRESH".into())),
             // Expires soon so the proactive lead computation yields a short sleep.
             SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0)
+                .scopes,
             http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
@@ -687,6 +691,8 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0)
+                .scopes,
             http as Arc<dyn Transport>,
             clock as Arc<dyn lingxi_core::host::Clock>,
             None,
@@ -727,6 +733,8 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0)
+                .scopes,
             http.clone() as Arc<dyn Transport>,
             clock as Arc<dyn lingxi_core::host::Clock>,
             None,
@@ -769,6 +777,8 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0)
+                .scopes,
             http.clone() as Arc<dyn Transport>,
             clock as Arc<dyn lingxi_core::host::Clock>,
             None,

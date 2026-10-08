@@ -33,9 +33,10 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
         if requested {
-            self.output
-                .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE)
-                .await;
+            let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE,
+            );
+            self.output.emit_text(&message).await;
         }
         requested
     }
@@ -92,7 +93,7 @@ impl ConversationOrchestrator {
                 // `handle_stop_at_end` already emitted the end-turn here, so no
                 // caller re-emits on this branch.
                 StopHookFlow::Terminate(outcome) => {
-                    return TurnEndVerdict::StopHookTerminated(outcome)
+                    return TurnEndVerdict::StopHookTerminated(outcome);
                 }
                 StopHookFlow::TerminateMaxTurns => return TurnEndVerdict::MaxTurns,
                 StopHookFlow::LoopAgain => {

@@ -99,8 +99,11 @@ impl Tool for ProbeTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "Probe".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -167,7 +170,7 @@ async fn tool_call_body_runs_before_stream_end() {
     registry.register_builtin(Arc::new(ProbeTool { log: log.clone() }));
     let tools = Arc::new(registry);
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -177,7 +180,7 @@ async fn tool_call_body_runs_before_stream_end() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let _ = orch.run_turn_streaming("call a tool").await.expect("ok");
 

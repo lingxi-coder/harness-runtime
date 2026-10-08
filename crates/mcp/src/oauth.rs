@@ -351,7 +351,7 @@ pub enum OAuthError {
 
 impl From<OAuthError> for lingxi_core::host::McpError {
     fn from(e: OAuthError) -> Self {
-        lingxi_core::host::McpError::OAuth(e.to_string())
+        lingxi_core::host::McpError::OAuth(e.to_string().into())
     }
 }
 

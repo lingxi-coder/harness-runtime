@@ -502,12 +502,12 @@ pub fn clamp_mcp_permission_result(
                 }
             } else {
                 PermissionDecisionReason::Other {
-                    reason: format!("MCP tool {tool_name} requires approval"),
+                    reason: format!("MCP tool {tool_name} requires approval").into(),
                 }
             },
             prompt: PermissionPrompt {
                 title: "Permission required".into(),
-                message: format!("MCP tool {tool_name} requires approval"),
+                message: format!("MCP tool {tool_name} requires approval").into(),
                 options: vec!["Allow once".into(), "Deny".into()],
             },
             pending_classifier_check: None,
@@ -515,9 +515,9 @@ pub fn clamp_mcp_permission_result(
         },
         PermissionBehavior::Deny => PermissionResult::Deny {
             reason: PermissionDecisionReason::Other {
-                reason: format!("MCP tool {tool_name} is blocked"),
+                reason: format!("MCP tool {tool_name} is blocked").into(),
             },
-            explanation: Some(format!("MCP tool {tool_name} is blocked")),
+            explanation: Some(format!("MCP tool {tool_name} is blocked").into()),
             metadata,
         },
     }
@@ -731,7 +731,9 @@ mod tests {
         // (`PermissionRuleSource::priority`), yet must not win.
         rules.push(PermissionRule::allow_tool_session("mcp__srv__tool"));
         let policy = PermissionPolicy::from_rules(PermissionMode::Auto, rules);
-        let result = policy.authorize("mcp__srv__tool", &serde_json::json!({}));
+        let input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty test input is valid JSON");
+        let result = policy.authorize("mcp__srv__tool", &input);
         assert!(
             matches!(result, PermissionResult::Ask { .. }),
             "expected the org-ceiling ask rule to win over the session allow rule, got {result:?}"

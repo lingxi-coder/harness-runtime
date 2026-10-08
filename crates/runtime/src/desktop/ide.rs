@@ -281,7 +281,10 @@ impl DesktopIdeHandle {
             .call_tool_with_auth_retry(
                 IDE_SERVER_NAME,
                 &full_name,
-                json!({ "filePath": cwd.to_string_lossy() }),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &json!({ "filePath": cwd.to_string_lossy() }),
+                )
+                .expect("generated IDE path request is valid JSON"),
                 None,
                 None,
             )
@@ -380,18 +383,20 @@ fn ide_spec_matches_endpoint(spec: &McpTransportSpec, endpoint: &IdeLockfile) ->
     }
 }
 
-fn tool_result_text(content: serde_json::Value, secret: &str) -> String {
+fn tool_result_text(
+    content: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    secret: &str,
+) -> String {
     let rendered = content
-        .as_array()
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item.get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
+        .array_len("")
+        .and_then(|len| {
+            (0..len).find_map(|index| {
+                let item = content.subprojection(&format!("/{index}")).ok()?;
+                let text = item.string_at("/text")?;
+                (!text.is_empty()).then(|| text.to_string())
             })
         })
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| content.to_string());
+        .unwrap_or_else(|| content.to_json_string().unwrap_or_default());
     redact_secret(&rendered, secret)
 }
 

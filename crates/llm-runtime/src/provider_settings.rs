@@ -623,7 +623,7 @@ fn parse_flat_provider(
         let raw = value
             .as_str()
             .ok_or_else(|| format!("provider {name:?}: billingMode must be a string"))?;
-        pricing.billing_mode = match raw {
+        pricing.billing_mode = Some(match raw {
             "perToken" => lingxi_core::host::ModelBillingMode::PerToken,
             "subscription" => lingxi_core::host::ModelBillingMode::Subscription,
             "free" => lingxi_core::host::ModelBillingMode::Free,
@@ -633,12 +633,12 @@ fn parse_flat_provider(
                     "provider {name:?}: unsupported billingMode {raw:?}"
                 ));
             }
-        };
+        });
     }
     if !pricing.overrides.is_empty() {
         // A concrete per-model price sheet is stronger evidence than a broad
         // provider billing hint and must drive both cost lookup and display.
-        pricing.billing_mode = lingxi_core::host::ModelBillingMode::PerToken;
+        pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::PerToken);
     }
     for (model_id, model_pricing) in display_overrides {
         if let Some(model) = models
@@ -996,11 +996,8 @@ fn parse_pricing_overrides(
 
     Ok((
         PricingConfig {
-            billing_mode: if overrides.is_empty() {
-                lingxi_core::host::ModelBillingMode::Unknown
-            } else {
-                lingxi_core::host::ModelBillingMode::PerToken
-            },
+            billing_mode: (!overrides.is_empty())
+                .then_some(lingxi_core::host::ModelBillingMode::PerToken),
             require_priced: false,
             overrides,
         },
@@ -1211,7 +1208,7 @@ pub fn anthropic_provider_profile(
         credential,
         models: anthropic_model_profiles(),
         pricing: PricingConfig {
-            billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
+            billing_mode: Some(lingxi_core::host::ModelBillingMode::PerToken),
             ..PricingConfig::default()
         },
         signing: None,
@@ -1705,7 +1702,7 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            lingxi_core::host::ModelBillingMode::PerToken
+            Some(lingxi_core::host::ModelBillingMode::PerToken)
         );
         let display = profile.models[0]
             .metadata
@@ -1745,13 +1742,58 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            lingxi_core::host::ModelBillingMode::Subscription
+            Some(lingxi_core::host::ModelBillingMode::Subscription)
         );
         let model = &profile.models[0];
         assert_eq!(model.metadata.status.as_deref(), Some("beta"));
         assert_eq!(model.metadata.context_window_tokens, Some(128_000));
         assert_eq!(model.metadata.max_input_tokens, None);
         assert!(model.capabilities.vision);
+    }
+
+    #[test]
+    fn omitted_billing_mode_is_inheritable_but_explicit_unknown_is_preserved() {
+        let provider = json!({
+            "type": "anthropic",
+            "baseUrl": "https://api.anthropic.com",
+            "apiKeyEnv": "ANTHROPIC_API_KEY",
+            "models": [{"id": "claude-opus-4-6"}]
+        });
+        let omitted = parse_provider_profiles_strict(
+            &one("anthropic", provider.clone()),
+            ProviderParseOptions::strict_env(),
+        )
+        .expect("profile without a billing hint parses");
+        assert_eq!(omitted[0].profile.pricing.billing_mode, None);
+
+        let mut explicit = provider;
+        explicit["billingMode"] = json!("unknown");
+        let explicit = parse_provider_profiles_strict(
+            &one("anthropic", explicit),
+            ProviderParseOptions::strict_env(),
+        )
+        .expect("explicit unknown billing mode parses");
+        assert_eq!(
+            explicit[0].profile.pricing.billing_mode,
+            Some(lingxi_core::host::ModelBillingMode::Unknown)
+        );
+    }
+
+    #[test]
+    fn pricing_config_serde_keeps_omitted_and_explicit_unknown_distinct() {
+        let omitted: PricingConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(omitted.billing_mode, None);
+        assert!(serde_json::to_value(&omitted)
+            .unwrap()
+            .get("billingMode")
+            .is_none());
+
+        let explicit: PricingConfig =
+            serde_json::from_value(json!({"billingMode":"unknown"})).unwrap();
+        assert_eq!(
+            explicit.billing_mode,
+            Some(lingxi_core::host::ModelBillingMode::Unknown)
+        );
     }
 
     #[test]

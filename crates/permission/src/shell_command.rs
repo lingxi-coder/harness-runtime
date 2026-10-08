@@ -27,14 +27,16 @@
 //! they only make matching more conservative (fall through to ask).
 
 use crate::shell_rule_matching::{parse_shell_rule, ShellRule};
+use crate::source_input::exact_string_field;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 /// Extract the `command` string from a shell tool's JSON input.
 #[must_use]
-pub fn command_from_input(input: &serde_json::Value) -> Option<&str> {
-    input.get("command").and_then(serde_json::Value::as_str)
+pub fn command_from_input(input: &Utf16JsonProjection) -> Option<&str> {
+    exact_string_field(input, "command")
 }
 
 /// Is this a shell tool whose content rules are command patterns?
@@ -420,7 +422,8 @@ fn candidates(subcommand: &str, aggressive_env: bool, seed_original: bool) -> Ve
                 out.push(w);
             }
             if aggressive_env {
-                // Deny/ask path: strip ALL leading env vars (no blocklist).
+                // This is the legacy Eue-shaped fallback candidate, also present
+                // in Native 2.1.289 alongside its parser-derived argv candidate.
                 let e = strip_all_leading_env_vars(&c, None);
                 if seen.insert(e.clone()) {
                     out.push(e);
@@ -588,6 +591,20 @@ pub fn matches_excluded_pattern(pattern: &str, candidate: &str) -> bool {
 /// when wrapped or compounded.
 #[must_use]
 pub fn rule_matches_any_subcommand(rule_content: &str, command: &str) -> bool {
+    rule_matches_any_subcommand_with_candidates(rule_content, command, &[])
+}
+
+/// DENY/ASK aggregation with additional commands recovered from the current
+/// Bash AST. Native 2.1.289 T4 derives a candidate from `astCommand.argv` after
+/// removing leading assignments represented separately in `envVars`; this
+/// accepts those `argv.join(" ")` candidates while retaining the Eue text
+/// fallback in [`rule_matches_any_subcommand`].
+#[must_use]
+pub(crate) fn rule_matches_any_subcommand_with_candidates(
+    rule_content: &str,
+    command: &str,
+    ast_candidates: &[String],
+) -> bool {
     let rule = parse_shell_rule(rule_content);
     for sub in split_command(command) {
         for cand in candidates(&sub, true, true) {
@@ -598,7 +615,35 @@ pub fn rule_matches_any_subcommand(rule_content: &str, command: &str) -> bool {
             }
         }
     }
+    for ast_command in ast_candidates {
+        for cand in candidates(ast_command, true, true) {
+            if rule_matches_candidate(&rule, &cand, false, true) {
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// Source-preserving counterpart to the deny/ask content-rule walk. Every
+/// UTF-16 unit maps to one temporary scalar (with JS-trim whitespace handled
+/// explicitly) only while the existing quote/wrapper/wildcard algorithms run
+/// in memory.
+pub fn rule_matches_any_subcommand_with_candidate_units(
+    rule_content: &[u16],
+    command: &[u16],
+    ast_candidates: &[String],
+) -> bool {
+    let candidate_units = ast_candidates
+        .iter()
+        .map(|candidate| candidate.encode_utf16().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut groups: Vec<&[u16]> = vec![rule_content, command];
+    groups.extend(candidate_units.iter().map(Vec::as_slice));
+    let Some(mapped) = crate::source_input::exact_shell_operation_strings(&groups) else {
+        return false;
+    };
+    rule_matches_any_subcommand_with_candidates(&mapped[0], &mapped[1], &mapped[2..])
 }
 
 /// ALLOW aggregation: is EVERY subcommand of `command` covered by at least one
@@ -621,6 +666,20 @@ pub fn command_fully_allowed(allow_contents: &[&str], command: &str) -> bool {
                 .any(|cand| rule_matches_candidate(rule, cand, true, false))
         })
     })
+}
+
+/// Source-preserving counterpart to [`command_fully_allowed`].
+pub(crate) fn command_fully_allowed_source(allow_contents: &[Vec<u16>], command: &[u16]) -> bool {
+    let mut groups: Vec<&[u16]> = allow_contents.iter().map(Vec::as_slice).collect();
+    groups.push(command);
+    let Some(mapped) = crate::source_input::exact_shell_operation_strings(&groups) else {
+        return false;
+    };
+    let rules = mapped[..allow_contents.len()]
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    command_fully_allowed(&rules, &mapped[allow_contents.len()])
 }
 
 /// EXACT-mode ALLOW match: does the FULL trimmed command (NOT split into
@@ -660,6 +719,20 @@ pub fn command_exact_allowed(allow_contents: &[&str], command: &str) -> bool {
             ShellRule::Wildcard(_) => false,
         })
     })
+}
+
+/// Source-preserving counterpart to [`command_exact_allowed`].
+pub(crate) fn command_exact_allowed_source(allow_contents: &[Vec<u16>], command: &[u16]) -> bool {
+    let mut groups: Vec<&[u16]> = allow_contents.iter().map(Vec::as_slice).collect();
+    groups.push(command);
+    let Some(mapped) = crate::source_input::exact_shell_operation_strings(&groups) else {
+        return false;
+    };
+    let rules = mapped[..allow_contents.len()]
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    command_exact_allowed(&rules, &mapped[allow_contents.len()])
 }
 
 #[cfg(test)]
@@ -981,16 +1054,18 @@ mod tests {
         );
     }
 
-    /// deny/ask path: a `Bash(bazel:*)` deny rule must catch env-prefixed forms
-    /// the OLD regex failed on, and must NOT match the `$`-expansion forms.
+    /// The text-only path is the Eue fallback shared with Native 2.1.289; AST
+    /// candidates are supplied by the policy layer when parsing is available.
     #[test]
     fn deny_catches_env_prefixed_bazel_faithfully() {
-        // \\.-escape: was under-stripped → deny failed.
         assert!(rule_matches_any_subcommand(
             "bazel:*",
             "FOO=a\\ b bazel build"
         ));
-        // concatenated segments: was unstripped → deny failed.
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=bar bazel build"
+        ));
         assert!(rule_matches_any_subcommand(
             "bazel:*",
             "FOO='x'y\"z\" bazel build"
@@ -999,24 +1074,35 @@ mod tests {
             "bazel:*",
             "FOO=a\"b\" bazel build"
         ));
-        // standard form still caught.
-        assert!(rule_matches_any_subcommand(
-            "bazel:*",
-            "FOO=bar bazel build"
-        ));
-
-        // `$`/quoted-`$` forms are NOT stripped → the bazel deny does NOT match
-        // (faithful to TS: those stay sandboxed, not denied via env-strip).
+        // Native's Eue-shaped fallback retains expansion-bearing assignments.
         assert!(!rule_matches_any_subcommand(
             "bazel:*",
             "FOO=$VAR bazel build"
         ));
-        assert!(!rule_matches_any_subcommand(
-            "bazel:*",
+        assert_eq!(
+            strip_all_leading_env_vars("FOO=\"$x\" bazel build", None),
             "FOO=\"$x\" bazel build"
-        ));
+        );
     }
 
+    #[test]
+    fn parsed_argv_candidate_catches_expansion_bearing_assignment() {
+        for (command, ast_candidates) in [
+            (
+                "TZ=\"$HOME\" rm -rf build",
+                vec!["rm -rf build".to_string()],
+            ),
+            (
+                "LANG=staging; TZ=\"$HOME\" rm -rf build",
+                vec!["rm -rf build".to_string()],
+            ),
+        ] {
+            assert!(
+                rule_matches_any_subcommand_with_candidates("rm:*", command, &ast_candidates),
+                "deny/ask rule must match the Native-style argv candidate: {command}"
+            );
+        }
+    }
     /// excludedCommands path: env-prefixed forms decide identically to TS.
     /// `strip_env_and_wrappers_fixedpoint` uses `is_binary_hijack_var`, so the
     /// `bazel` candidate must surface (or not) exactly as the value regex allows.

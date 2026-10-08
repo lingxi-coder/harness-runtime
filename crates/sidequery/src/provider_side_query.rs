@@ -38,9 +38,11 @@ use async_trait::async_trait;
 use lingxi_core::host::http::SseStream;
 #[cfg(test)]
 use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::MediaAnalysis;
 #[cfg(test)]
 use lingxi_core::types::{HttpRequest, HttpResponse};
+use lingxi_llm_client::providers::anthropic::system_prompt::{PromptText, SystemPromptInput};
 use llm_runtime::Transport;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError, LlmRequest,
@@ -51,6 +53,66 @@ use std::sync::Arc;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+fn custom_side_query_prompt(text: Option<&str>) -> Option<Utf16JsonProjection> {
+    text.map(Utf16JsonProjection::from)
+}
+
+fn system_blocks_from_source(
+    source: Option<&Utf16JsonProjection>,
+    captured: Option<&SystemPromptInput>,
+) -> Result<Vec<SystemBlock>, LlmError> {
+    let fallback = if captured.is_none() {
+        source
+            .map(|source| {
+                source
+                    .string_units("")
+                    .map(|units| SystemPromptInput::custom_prompt(PromptText::from_utf16(units)))
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "side-query system prompt must be a root JSON string".into(),
+                    })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let Some(input) = captured.or(fallback.as_ref()) else {
+        return Ok(Vec::new());
+    };
+
+    let elements: Vec<&PromptText> = match input {
+        SystemPromptInput::SourceVector {
+            elements,
+            dynamic_context,
+            ..
+        } => {
+            let mut source_elements: Vec<&PromptText> = elements.iter().collect();
+            if let Some(dynamic_context) = dynamic_context.as_ref().filter(|text| !text.is_empty())
+            {
+                source_elements.push(dynamic_context);
+            }
+            source_elements
+        }
+        SystemPromptInput::CustomPrompt { text } => vec![text],
+        SystemPromptInput::NativeCustomPrompt {
+            source_elements, ..
+        } => source_elements.iter().collect(),
+    };
+
+    elements
+        .into_iter()
+        .map(|element| {
+            Utf16JsonProjection::root_string(
+                element.display_text().to_owned(),
+                element.utf16_code_units().to_vec(),
+            )
+            .map(SystemBlock::text)
+            .map_err(|error| LlmError::InvalidRequest {
+                message: format!("side-query system block could not be encoded: {error}"),
+            })
+        })
+        .collect()
+}
 
 /// Static credential id used inside the internal config for a static API key.
 const SIDEQUERY_CRED_ID: &str = "sidequery_key";
@@ -240,36 +302,54 @@ fn decode_response(
 ) -> SideQueryResponse {
     let retry_count = resp
         .provider_metadata
-        .get("_lingxi_retry_count")
-        .and_then(serde_json::Value::as_u64)
+        .unsigned_integer_at("/_lingxi_retry_count")
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0);
-    let mut text_acc = String::new();
+    let mut text_units = Vec::new();
     let mut saw_text = false;
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut tool_calls = Vec::new();
 
     for block in resp.content {
         match block {
-            llm_runtime::ContentBlock::Text { text, .. }
-            | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => {
+            llm_runtime::ContentBlock::Text { text, .. } => {
                 if first_text_only {
                     if !saw_text {
-                        text_acc.push_str(&text);
+                        text_units.extend(text.encode_utf16());
                     }
                 } else {
                     if separate_text_blocks && saw_text {
-                        text_acc.push_str("\n\n");
+                        text_units.extend("\n\n".encode_utf16());
                     }
-                    text_acc.push_str(&text);
+                    text_units.extend(text.encode_utf16());
+                }
+                saw_text = true;
+            }
+            llm_runtime::ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => {
+                if first_text_only {
+                    if !saw_text {
+                        text_units.extend(utf16_code_units);
+                    }
+                } else {
+                    if separate_text_blocks && saw_text {
+                        text_units.extend("\n\n".encode_utf16());
+                    }
+                    text_units.extend(utf16_code_units);
                 }
                 saw_text = true;
             }
             llm_runtime::ContentBlock::ToolCall { id, name, input } => {
-                tool_calls.push(serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "input": input,
-                }));
+                let input = Utf16JsonProjection::parse(input.as_json_source())
+                    .expect("SDK tool input is valid JSON source");
+                tool_calls.push(
+                    Utf16JsonProjection::object(vec![
+                        ("id".into(), id.to_string().into()),
+                        ("name".into(), name.into()),
+                        ("input".into(), input),
+                    ])
+                    .expect("tool call projection is valid"),
+                );
             }
             // Side queries ignore reasoning / server-tool / connector / advisor
             // / redacted-thinking blocks.
@@ -288,9 +368,12 @@ fn decode_response(
         }
     }
 
-    let text = (!text_acc.is_empty()).then(|| text_acc.clone());
+    let text = (!text_units.is_empty()).then(|| {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&text_units), text_units.clone())
+            .expect("display text matches its exact UTF-16 source")
+    });
     let structured = if want_structured {
-        serde_json::from_str::<serde_json::Value>(&text_acc).ok()
+        Utf16JsonProjection::parse_utf16_json(&text_units).ok()
     } else {
         None
     };
@@ -333,10 +416,13 @@ impl SideQueryClient for ProviderSideQueryClient {
                 CanonicalSideQueryRequest::Plain(request),
             ) => {
                 let query_source = request.query_source.as_str();
+                let system_prompt = request.system_prompt.clone();
                 let canonical = service.build_side_query_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
-                    request.system_prompt.as_deref(),
+                    system_prompt.as_ref(),
+                    request.system_prompt_input.as_ref(),
+                    false,
                     request.messages,
                     request.tools,
                     Some(request.max_tokens),
@@ -360,10 +446,12 @@ impl SideQueryClient for ProviderSideQueryClient {
                     &request.model,
                     request.temperature,
                 );
+                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
                 let canonical = service.build_json_schema_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
-                    request.system_prompt.as_deref(),
+                    system_prompt.as_ref(),
+                    None,
                     request.messages,
                     request.schema,
                     Some(request.max_tokens),
@@ -402,10 +490,13 @@ impl SideQueryClient for ProviderSideQueryClient {
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
+            let system_prompt = request.system_prompt.clone();
             let mut canonical = service.build_side_query_request_with_thinking(
                 &request.model,
                 request.profile.as_deref(),
-                request.system_prompt.as_deref(),
+                system_prompt.as_ref(),
+                request.system_prompt_input.as_ref(),
+                false,
                 request.messages,
                 request.tools,
                 // Fork compaction resolves the parent's ordinary output
@@ -439,19 +530,17 @@ impl SideQueryClient for ProviderSideQueryClient {
         }
 
         // Build the LlmRequest from the SideQueryRequest DTO.
-        let system: Vec<SystemBlock> = request
-            .system_prompt
-            .as_deref()
-            .map(|s| vec![SystemBlock::text(s)])
-            .unwrap_or_default();
+        let system = system_blocks_from_source(
+            request.system_prompt.as_ref(),
+            request.system_prompt_input.as_ref(),
+        )?;
 
         // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
         // We inline a minimal conversion here so sidequery does not need to
         // depend on `agent` (which depends back on sidequery — a cycle).
         let messages = convert_messages(request.messages)?;
 
-        // Convert JSON tool declarations → llm_runtime::ToolDeclaration.
-        let tools = convert_tool_declarations(request.tools)?;
+        let tools = request.tools;
 
         // thinking (cc 2.1.198): a `Some` session config resolves through the
         // SAME `reasoning_for_request` rules `ApiService::build_request`
@@ -516,6 +605,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         let resp = match &self.backend {
             ProviderSideQueryBackend::Session(service) => {
                 let query_source = request.query_source.as_str().to_string();
+                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
                 // Round-3 review finding 4: an explicit `temperature`
                 // override (e.g. the fusion analyst's hard `Some(0.0)`) used
                 // to be silently dropped by the old 7-arg `stream_json_schema`
@@ -540,7 +630,8 @@ impl SideQueryClient for ProviderSideQueryClient {
                     .build_json_schema_request_with_thinking(
                         &request.model,
                         request.profile.as_deref(),
-                        request.system_prompt.as_deref(),
+                        system_prompt.as_ref(),
+                        None,
                         request.messages,
                         request.schema,
                         Some(request.max_tokens),
@@ -563,11 +654,9 @@ impl SideQueryClient for ProviderSideQueryClient {
                         message: "registered side query requires session accounting hooks".into(),
                     }));
                 }
-                let system: Vec<SystemBlock> = request
-                    .system_prompt
-                    .as_deref()
-                    .map(|s| vec![SystemBlock::text(s)])
-                    .unwrap_or_default();
+                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
+                let system = system_blocks_from_source(system_prompt.as_ref(), None)
+                    .map_err(map_structured_llm_error)?;
                 let messages = convert_messages(request.messages)?;
                 // Same capability gate as the Session arm above, sourced
                 // from this client's own registry.
@@ -607,7 +696,17 @@ impl SideQueryClient for ProviderSideQueryClient {
                 llm_req.input.output_format =
                     llm_runtime::services::sdk::protocol::OutputFormat::JsonSchema {
                         name: "response".into(),
-                        schema: request.schema,
+                        schema:
+                            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                                &request.schema,
+                            )
+                            .map_err(|error| {
+                                LlmError::InvalidRequest {
+                                    message: format!(
+                                        "JSON schema could not be encoded as source: {error}"
+                                    ),
+                                }
+                            })?,
                         strict: true,
                     };
                 llm_runtime::HistoryResponse::from_model(
@@ -627,6 +726,14 @@ impl SideQueryClient for ProviderSideQueryClient {
                 "structured output was not valid JSON".into(),
             ));
         };
+        let source = value
+            .to_json_string()
+            .map_err(|error| SideQueryError::InvalidResponse(error.to_string()))?;
+        let value = serde_json::from_str(&source).map_err(|error| {
+            SideQueryError::InvalidResponse(format!(
+                "structured output was not valid JSON: {error}"
+            ))
+        })?;
         Ok(crate::side_query::StrictStructuredQueryResponse {
             value,
             usage: decoded.usage,
@@ -707,7 +814,7 @@ fn temperature_for_capable_model(
 // ── Inline message/tool conversion (no dep on `agent` crate) ─────────────────
 
 fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
-    let message = err.to_string().to_ascii_lowercase();
+    let message = err.classification_source().to_string().to_ascii_lowercase();
     let provider = err.provider_message().unwrap_or("").to_ascii_lowercase();
     if message.contains("json schema")
         || message.contains("structured output")
@@ -751,6 +858,27 @@ fn convert_messages(
     messages.into_iter().map(convert_one_message).collect()
 }
 
+type SdkJsonPayload = llm_runtime::services::sdk::protocol::JsonPayload;
+
+fn source_payload(value: Utf16JsonProjection) -> Result<SdkJsonPayload, llm_runtime::LlmError> {
+    let source = value
+        .to_json_string()
+        .map_err(|error| llm_runtime::LlmError::InvalidRequest {
+            message: format!("source JSON could not be encoded: {error}"),
+        })?;
+    SdkJsonPayload::parse(&source).map_err(|error| llm_runtime::LlmError::InvalidRequest {
+        message: format!("source JSON could not be parsed by the SDK: {error}"),
+    })
+}
+
+fn source_citations(
+    citations: Option<Option<Utf16JsonProjection>>,
+) -> Result<Option<Option<SdkJsonPayload>>, llm_runtime::LlmError> {
+    citations
+        .map(|citations| citations.map(source_payload).transpose())
+        .transpose()
+}
+
 fn convert_one_message(
     msg: lingxi_core::types::ConversationMessage,
 ) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
@@ -782,18 +910,26 @@ fn convert_content_block(
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match block {
         lingxi_core::types::ContentBlock::ProviderContent { protocol, value } => {
-            Ok(llm_runtime::ContentBlock::ProviderContent { protocol, value })
+            Ok(llm_runtime::ContentBlock::ProviderContent {
+                protocol,
+                value: source_payload(value)?,
+            })
         }
-        lingxi_core::types::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
-            text,
-            cache_control: None,
-        }),
+        lingxi_core::types::ContentBlock::Text { text, citations } => {
+            Ok(llm_runtime::ContentBlock::Text {
+                text,
+                citations: source_citations(citations)?,
+                cache_control: None,
+            })
+        }
         lingxi_core::types::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations,
         } => Ok(llm_runtime::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations: source_citations(citations)?,
             cache_control: None,
         }),
         lingxi_core::types::ContentBlock::ToolUse {
@@ -805,7 +941,7 @@ fn convert_content_block(
             // Replay the verbatim provider id when preserved (see agent::convert).
             id: provider_id.unwrap_or_else(|| id.to_string()),
             name,
-            input,
+            input: source_payload(input)?,
         }),
         lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
@@ -813,19 +949,16 @@ fn convert_content_block(
             is_error,
             provider_tool_use_id,
             content_blocks,
-        } => Ok(llm_runtime::ContentBlock::ToolResult {
-            tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
-            // A structured content-block array (e.g. MCP image/resource) rides
-            // as the `Value::Array` output and is emitted verbatim; plain text
-            // stays a `Value::String`.
-            output: content_blocks.map_or_else(
-                || serde_json::Value::String(content),
-                serde_json::Value::Array,
-            ),
-            is_error,
-            cache_control: None,
-            cache_reference: None,
-        }),
+        } => {
+            let output = source_payload(content_blocks.unwrap_or(content))?;
+            Ok(llm_runtime::ContentBlock::ToolResult {
+                tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
+                output,
+                is_error,
+                cache_control: None,
+                cache_reference: None,
+            })
+        }
         lingxi_core::types::ContentBlock::Thinking {
             thinking,
             signature,
@@ -839,6 +972,7 @@ fn convert_content_block(
             Ok(llm_runtime::ContentBlock::Text {
                 text: render_media_analysis(&analysis),
                 cache_control: None,
+                citations: None,
             })
         }
         // Low-frequency server-side blocks: replayed verbatim into the request
@@ -847,7 +981,11 @@ fn convert_content_block(
             Ok(llm_runtime::ContentBlock::RedactedThinking { data })
         }
         lingxi_core::types::ContentBlock::ServerToolUse { id, name, input } => {
-            Ok(llm_runtime::ContentBlock::ServerToolUse { id, name, input })
+            Ok(llm_runtime::ContentBlock::ServerToolUse {
+                id,
+                name,
+                input: source_payload(input)?,
+            })
         }
         lingxi_core::types::ContentBlock::ConnectorText {
             connector_text,
@@ -862,7 +1000,7 @@ fn convert_content_block(
             is_error,
         } => Ok(llm_runtime::ContentBlock::AdvisorToolResult {
             tool_use_id,
-            content,
+            content: source_payload(content)?,
             is_error,
         }),
     }
@@ -910,12 +1048,6 @@ fn render_media_analysis(analysis: &MediaAnalysis) -> String {
     )
 }
 
-fn convert_tool_declarations(
-    tools: Vec<serde_json::Value>,
-) -> Result<Vec<llm_runtime::ToolDeclaration>, llm_runtime::LlmError> {
-    tools.into_iter().map(convert_one_tool).collect()
-}
-
 /// Map the DTO's JSON `tool_choice` to [`llm_runtime::ToolChoice`]. Accepts the
 /// Anthropic wire shapes: `{"type":"auto"}`, `{"type":"any"}`,
 /// `{"type":"none"}`, `{"type":"tool","name":N}`. Unknown / absent ⇒ `None`
@@ -932,42 +1064,6 @@ fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_runtime
             .map(|name| llm_runtime::ToolChoice::Tool { name: name.into() }),
         _ => None,
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn convert_one_tool(
-    value: serde_json::Value,
-) -> Result<llm_runtime::ToolDeclaration, llm_runtime::LlmError> {
-    let name = value
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
-            message: "Tool declaration missing required string field: name".to_string(),
-        })?
-        .to_string();
-
-    let description = value
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
-            message: "Tool declaration missing required string field: description".to_string(),
-        })?
-        .to_string();
-
-    let input_schema = value
-        .get("input_schema")
-        .cloned()
-        .filter(|v| !v.is_null())
-        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
-            message: "Tool declaration missing required field: input_schema".to_string(),
-        })?;
-
-    Ok(llm_runtime::ToolDeclaration {
-        name,
-        description,
-        input_schema,
-        ..Default::default()
-    })
 }
 
 #[cfg(test)]
@@ -1020,6 +1116,7 @@ mod tests {
             model: "claude-haiku-4-5".into(),
             profile: None,
             system_prompt: Some("system".into()),
+            system_prompt_input: None,
             messages: vec![ConversationMessage::user(MessageId::new(), "hi".into())],
             tools: vec![],
             tool_choice: None,
@@ -1033,6 +1130,83 @@ mod tests {
             query_source: QuerySource::MemorySelector,
             skip_system_prompt_prefix: false,
         }
+    }
+
+    fn text_content(text: &Option<Utf16JsonProjection>) -> Option<String> {
+        text.as_ref().and_then(|text| text.string_at(""))
+    }
+
+    #[test]
+    fn side_query_text_structure_and_tool_input_keep_source_code_units() {
+        let mut text_units = r#"{"key":""#.encode_utf16().collect::<Vec<_>>();
+        text_units.push(0xD800);
+        text_units.extend(r#""}"#.encode_utf16());
+        let text = String::from_utf16_lossy(&text_units);
+        let input =
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"arg":"\ud800","large":1e400}"#)
+                .unwrap();
+        let response = llm_runtime::HistoryResponse {
+            id: "response".into(),
+            model: "claude-haiku-4-5".into(),
+            content: vec![
+                llm_runtime::ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units: text_units.clone(),
+                    citations: None,
+                    cache_control: None,
+                },
+                llm_runtime::ContentBlock::ToolCall {
+                    id: "toolu_1".into(),
+                    name: "inspect".into(),
+                    input,
+                },
+            ],
+            stop_reason: Some("tool_use".into()),
+            stop_details: None,
+            usage: Default::default(),
+            cost: None,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+            resumable: None,
+        };
+
+        let decoded = decode_response(response, true, false, false);
+        assert_eq!(
+            decoded.text.as_ref().and_then(|text| text.string_units("")),
+            Some(text_units)
+        );
+        assert_eq!(
+            decoded
+                .structured
+                .as_ref()
+                .and_then(|value| value.string_units("/key")),
+            Some(vec![0xD800])
+        );
+        let input = decoded.tool_calls[0]
+            .subprojection("/input")
+            .ok()
+            .expect("tool call keeps its JSON input");
+        assert_eq!(input.string_units("/arg"), Some(vec![0xD800]));
+        assert!(input.to_json_string().unwrap().contains("1e400"));
+    }
+
+    fn tool_declaration(
+        name: &str,
+        description: &str,
+        schema: &str,
+    ) -> llm_runtime::ToolDeclaration {
+        llm_runtime::convert::to_tool_declarations(vec![
+            lingxi_core::host::SourceToolWireDefinition {
+                name: name.to_owned(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(description),
+                input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(schema)
+                    .unwrap(),
+                strict: false,
+                defer_loading: false,
+            },
+        ])
+        .unwrap()
+        .pop()
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1088,7 +1262,7 @@ mod tests {
 
         let resp = client.query(req(None)).await.expect("query ok");
 
-        assert_eq!(resp.text.as_deref(), Some("hello world"));
+        assert_eq!(text_content(&resp.text).as_deref(), Some("hello world"));
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
         // No output_format requested -> structured stays None.
         assert!(resp.structured.is_none());
@@ -1149,6 +1323,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_prompt_normalizes_utf16_text_in_the_recorded_sdk_request() {
+        let response_body = serde_json::json!({
+            "id":"msg_hook_prompt_utf16",
+            "model":"claude-haiku-4-5",
+            "content":[{"type":"text","text":"feature"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response_body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let high = 0xd800;
+        let mut prompt_units = "<text>\n> ".encode_utf16().collect::<Vec<_>>();
+        prompt_units.push(high);
+        prompt_units.extend("\n</text>\nWhich label fits best?".encode_utf16());
+        let prompt_display = String::from_utf16_lossy(&prompt_units);
+        let mut request = req(None);
+        request.query_source = QuerySource::Custom("hook_prompt".into());
+        request.system_prompt = Some(r#"Answer with exactly one label: "\ud800"."#.into());
+        request.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: prompt_display.clone(),
+                utf16_code_units: prompt_units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        }];
+
+        let response = client.query(request).await.expect("hook prompt query");
+        assert_eq!(text_content(&response.text).as_deref(), Some("feature"));
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let raw_body_text = received[0].body.as_deref().expect("SDK request body");
+        assert!(raw_body_text.contains('\u{fffd}'));
+        let body: serde_json::Value =
+            serde_json::from_str(raw_body_text).expect("recorded SDK request JSON");
+        assert_eq!(body["messages"][0]["content"][0]["text"], prompt_display);
+        assert_eq!(
+            body["system"][0]["text"],
+            r#"Answer with exactly one label: "\ud800"."#
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_sidequery_keeps_exact_utf16_in_the_recorded_sdk_request() {
+        let response_body = serde_json::json!({
+            "id":"msg_ordinary_utf16",
+            "model":"claude-haiku-4-5",
+            "content":[{"type":"text","text":"feature"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response_body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let units = vec![b'a' as u16, 0xd800, b'z' as u16];
+        let display = String::from_utf16_lossy(&units);
+        let mut request = req(None);
+        request.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: display,
+                utf16_code_units: units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        }];
+
+        client.query(request).await.expect("ordinary side query");
+
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let wire = received[0]
+            .body
+            .as_deref()
+            .expect("recorded SDK request body");
+        assert!(wire.contains(r#"a\ud800z"#), "{wire}");
+        assert!(!wire.contains('\u{fffd}'), "{wire}");
+    }
+
+    #[tokio::test]
     async fn side_question_text_blocks_use_claude_separator() {
         let body = serde_json::json!({
             "id": "msg_side_question",
@@ -1168,7 +1436,10 @@ mod tests {
 
         let response = client.query(request).await.expect("query ok");
 
-        assert_eq!(response.text.as_deref(), Some("first\n\nsecond"));
+        assert_eq!(
+            text_content(&response.text).as_deref(),
+            Some("first\n\nsecond")
+        );
     }
 
     #[tokio::test]
@@ -1194,7 +1465,7 @@ mod tests {
             let response = client.query(request).await.expect("compaction response");
 
             assert_eq!(
-                response.text.as_deref(),
+                text_content(&response.text).as_deref(),
                 (!first_text.is_empty()).then_some(first_text)
             );
         }
@@ -1287,19 +1558,21 @@ mod tests {
         request.profile = Some("parent-profile".to_string());
         request.temperature = None;
         request.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::Adaptive);
-        request.effort = Some(serde_json::json!("high"));
-        let parent_tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file from the parent session.",
-            "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}
-        })];
+        request.effort =
+            Some(Utf16JsonProjection::from_serde_value(&serde_json::json!("high")).unwrap());
+        let parent_tools = vec![tool_declaration(
+            "Read",
+            "Read a file from the parent session.",
+            r#"{"type":"object","properties":{"file_path":{"type":"string"}}}"#,
+        )];
         request.tools = parent_tools.clone();
         request.messages = vec![
             ConversationMessage::System {
                 id: MessageId::new(),
-                content: "Conversation compacted".to_string(),
+                content: "Conversation compacted".to_string().into(),
                 subtype: None,
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             ConversationMessage::user(MessageId::new(), "existing context".into()),
@@ -1307,7 +1580,10 @@ mod tests {
         ];
 
         let result = client.query(request).await.expect("session side query");
-        assert_eq!(result.text.as_deref(), Some("<summary>ok</summary>"));
+        assert_eq!(
+            text_content(&result.text).as_deref(),
+            Some("<summary>ok</summary>")
+        );
 
         let received = transport.received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -1321,7 +1597,7 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(sent.body.as_deref().expect("request body")).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-6");
-        assert_eq!(body["tools"], serde_json::json!(parent_tools));
+        assert_eq!(body["tools"], serde_json::to_value(parent_tools).unwrap());
         assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
         assert_eq!(body["output_config"]["effort"], "high");
         assert!(
@@ -1363,9 +1639,11 @@ mod tests {
             .expect("query ok");
 
         let structured = resp.structured.expect("structured present");
-        let names = structured["filenames"].as_array().expect("array");
-        assert_eq!(names.len(), 2);
-        assert_eq!(names[0].as_str(), Some("a.md"));
+        assert_eq!(structured.array_len("/filenames"), Some(2));
+        assert_eq!(
+            structured.string_at("/filenames/0").as_deref(),
+            Some("a.md")
+        );
     }
 
     #[tokio::test]
@@ -1394,7 +1672,7 @@ mod tests {
 
         // Non-JSON body + output_format -> structured stays None, no error.
         assert!(resp.structured.is_none());
-        assert_eq!(resp.text.as_deref(), Some("sorry, no files"));
+        assert_eq!(text_content(&resp.text).as_deref(), Some("sorry, no files"));
     }
 
     #[tokio::test]
@@ -1425,11 +1703,14 @@ mod tests {
         let resp = client.query(req(None)).await.expect("query ok");
 
         // Only the `text` block reaches `text` (thinking / connector dropped).
-        assert_eq!(resp.text.as_deref(), Some("answer"));
+        assert_eq!(text_content(&resp.text).as_deref(), Some("answer"));
         // Only the client-side `tool_use` reaches `tool_calls` (server_tool_use
         // / advisor_tool_result dropped).
         assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0]["name"].as_str(), Some("search"));
+        assert_eq!(
+            resp.tool_calls[0].string_at("/name").as_deref(),
+            Some("search")
+        );
     }
 
     #[tokio::test]
@@ -1463,10 +1744,10 @@ mod tests {
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(resp.tool_calls.len(), 1);
         let call = &resp.tool_calls[0];
-        assert_eq!(call["name"].as_str(), Some("search"));
-        assert_eq!(call["input"]["q"].as_str(), Some("rust"));
+        assert_eq!(call.string_at("/name").as_deref(), Some("search"));
+        assert_eq!(call.string_at("/input/q").as_deref(), Some("rust"));
         // ToolUseId serialises transparently as the bare UUID string.
-        assert_eq!(call["id"].as_str(), Some(tu));
+        assert_eq!(call.string_at("/id").as_deref(), Some(tu));
     }
 
     #[tokio::test]
@@ -1481,9 +1762,11 @@ mod tests {
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         let mut r = req(None);
         r.tool_choice = Some(serde_json::json!({ "type": "any" }));
-        r.tools = vec![
-            serde_json::json!({"name":"search","description":"Search","input_schema":{"type":"object","properties":{}}}),
-        ];
+        r.tools = vec![tool_declaration(
+            "search",
+            "Search",
+            r#"{"type":"object","properties":{}}"#,
+        )];
         r.stop_sequences = vec!["STOP".into()];
         client.query(r).await.expect("query ok");
         let received = transport.received.lock().unwrap();
@@ -1579,7 +1862,7 @@ mod tests {
                 .query(r)
                 .await
                 .unwrap_or_else(|e| panic!("{m} must resolve, got {e:?}"));
-            assert_eq!(resp.text.as_deref(), Some("SUMMARY"), "{m}");
+            assert_eq!(text_content(&resp.text).as_deref(), Some("SUMMARY"), "{m}");
 
             // The request reached the wire with the right model AND the
             // adaptive thinking shape (all three are adaptive-thinking models).
@@ -1725,10 +2008,10 @@ mod tests {
             request: &'a llm_runtime::ProviderRequest,
         ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::StreamingResponse, llm_runtime::LlmError>>
         {
-            self.received_bodies
-                .lock()
-                .unwrap()
-                .push(request.body_json.clone());
+            self.received_bodies.lock().unwrap().push(
+                serde_json::from_str(request.body_json.as_json_source())
+                    .expect("request body is valid JSON source"),
+            );
             let items = self
                 .frames
                 .iter()
@@ -1761,13 +2044,19 @@ mod tests {
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
     ) -> ProviderSideQueryClient {
-        structured_session_client_with_parent_forced_tool_choice(transport, analytics, false)
+        structured_session_client_with_parent_forced_tool_choice(
+            transport,
+            analytics,
+            false,
+            "claude-sonnet-4-20250514",
+        )
     }
 
     fn structured_session_client_with_parent_forced_tool_choice(
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
         parent_forced_tool_choice: bool,
+        request_model: &str,
     ) -> ProviderSideQueryClient {
         let config = ClientConfig {
             providers: vec![ProviderProfile {
@@ -1782,8 +2071,8 @@ mod tests {
                     id: "session-key".to_string(),
                 },
                 models: vec![ModelProfile {
-                    display_model: "claude-sonnet-4-20250514".to_string(),
-                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    display_model: request_model.to_string(),
+                    request_model: request_model.to_string(),
                     billing_model: "claude-sonnet-4".to_string(),
                     aliases: vec![],
                     description: None,
@@ -1836,9 +2125,14 @@ mod tests {
     #[tokio::test]
     async fn session_json_schema_does_not_inherit_parent_forced_tool_choice() {
         let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
-        let client =
-            structured_session_client_with_parent_forced_tool_choice(transport.clone(), None, true);
-        let request = strict_req();
+        let client = structured_session_client_with_parent_forced_tool_choice(
+            transport.clone(),
+            None,
+            true,
+            "claude-sonnet-4-6",
+        );
+        let mut request = strict_req();
+        request.model = "claude-sonnet-4-6".into();
         let expected_schema = request.schema.clone();
 
         let response = client

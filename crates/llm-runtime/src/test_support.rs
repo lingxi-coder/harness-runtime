@@ -48,22 +48,17 @@ pub trait FixtureTransport: Send + Sync {
     > {
         Box::pin(async move {
             use futures::StreamExt;
-            let body_json: serde_json::Value =
+            let body_json: lingxi_llm_client::protocol::JsonPayload =
                 serde_json::from_slice(&request.body).unwrap_or_default();
-            let is_stream = body_json
-                .get("stream")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
+            // This test transport only needs the stream bit to choose its mock
+            // entry point. The canonical request body remains source-backed.
+            let is_stream = body_json.bool_at("/stream") == Some(true)
                 || request.url.contains("streamGenerateContent")
                 || request.url.contains("invoke-with-response-stream");
             let mut host = ProviderRequest::post_json(request.url, body_json);
             host.method = request.method;
             host.headers = request.headers.into_iter().collect();
-            if !request.body.is_empty()
-                && serde_json::from_slice::<serde_json::Value>(&request.body).is_err()
-            {
-                host.body_bytes = Some(request.body.to_vec());
-            }
+            host.body_bytes = Some(request.body.to_vec());
             if !is_stream {
                 let response = self
                     .execute(&host)
@@ -123,7 +118,10 @@ pub trait FixtureTransport: Send + Sync {
         >,
     > {
         Box::pin(async move {
-            let mut host = ProviderRequest::post_json(request.url, serde_json::Value::Null);
+            let mut host = ProviderRequest::post_json(
+                request.url,
+                lingxi_llm_client::protocol::JsonPayload::default(),
+            );
             host.headers = request.headers.into_iter().collect();
             let connection = self
                 .open_responses_websocket_session(&host)
@@ -196,13 +194,12 @@ impl sdk::transport::WebSocketConnection for ScriptedWebSocket {
     async fn send(&mut self, payload: bytes::Bytes) -> Result<sdk::StreamResponse, wire::LlmError> {
         use futures::StreamExt;
         self.request.body_json =
-            serde_json::from_slice(&payload).map_err(|e| wire::LlmError::InvalidRequest {
-                message: e.to_string(),
-            })?;
-        self.request
-            .body_json
-            .as_object_mut()
-            .map(|body| body.remove("type"));
+            serde_json::from_slice::<lingxi_llm_client::protocol::JsonPayload>(&payload).map_err(
+                |e| wire::LlmError::InvalidRequest {
+                    message: e.to_string(),
+                },
+            )?;
+        self.request.body_json = self.request.body_json.without_object_field("type")?;
         let response = self
             .connection
             .send(&self.request)

@@ -8,8 +8,8 @@ use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::auth::anthropic::login::init_refresh_driver;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 
@@ -85,6 +85,7 @@ async fn init_refresh_driver_returns_state_and_spawns_proactive() {
         Secret::new("ACCESS".into()),
         Some(Secret::new("REFRESH".into())),
         now + Duration::from_secs(3600),
+        vec!["user:inference".into()],
         transport,
         clock,
         None,
@@ -96,6 +97,7 @@ async fn init_refresh_driver_returns_state_and_spawns_proactive() {
 
     // Proactive handle was stored.
     assert!(state.proactive_handle().await.is_some());
+    assert_eq!(state.token.read().await.scopes, ["user:inference"]);
 
     // Clean up: shutdown for a tidy test environment.
     state.shutdown(&*spawner).await;

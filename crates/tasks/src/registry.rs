@@ -18,6 +18,7 @@ use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionCompletionSink,
     FusionExecutor, ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,6 +34,9 @@ mod shell_adoption;
 #[path = "human_messages.rs"]
 mod human_messages;
 
+#[path = "handback.rs"]
+mod handback;
+
 pub struct TaskRegistry {
     /// Weak self-reference installed once the composition root wraps the
     /// registry in `Arc`.  Cancellation-sensitive task transactions use it to
@@ -45,10 +49,22 @@ pub struct TaskRegistry {
     observer_pairings:
         std::sync::OnceLock<Arc<lingxi_core::host::observer_pairing::ObserverPairings>>,
     human_messages: std::sync::Mutex<HashMap<String, human_messages::HumanInbox>>,
+    /// Report acceptance and its receipt are one owned transaction. Stops and
+    /// run replacement cross this fence before invalidating a live token.
+    handback_transactions: tokio::sync::Mutex<()>,
+    handback_runs: std::sync::Mutex<
+        HashMap<lingxi_core::types::AgentId, lingxi_core::host::handback::HandbackRunToken>,
+    >,
+    peer_inboxes: std::sync::Mutex<HashMap<lingxi_core::types::AgentId, handback::PeerInbox>>,
+    /// The live root owns admission. Its reverse link to this registry must
+    /// not retain the root or its durable writer after session shutdown.
+    reporting_admission:
+        std::sync::OnceLock<std::sync::Weak<dyn lingxi_core::host::handback::ReportingAdmission>>,
     shell_adoption_gate: Arc<tokio::sync::Mutex<()>>,
     shell_transfer_mutation: tokio::sync::Mutex<()>,
     /// Allocated shells may exit before their background row is published.
-    pending_bash_registration: std::sync::Mutex<HashMap<String, Option<(Option<i32>, bool)>>>,
+    pending_bash_registration:
+        std::sync::Mutex<HashMap<String, Option<(Option<i32>, bool, Option<String>)>>>,
     shell_transfer_fences: Arc<std::sync::Mutex<HashSet<String>>>,
     shell_adoption_runtime: Option<(
         Arc<dyn ProcessRunner>,
@@ -56,6 +72,10 @@ pub struct TaskRegistry {
     )>,
     observer_activity_lock: tokio::sync::Mutex<()>,
     tasks: Arc<crate::lifecycle_store::TaskRows>,
+    /// Active direct-Agent wait claims. Generations prevent a dropped older
+    /// waiter from resetting a newer waiter's notification claim.
+    agent_wait_claims: std::sync::Mutex<HashMap<String, AgentWaitClaimRecord>>,
+    next_agent_wait_claim_generation: AtomicU64,
     shell_session_activity: std::sync::Mutex<ShellSessionActivity>,
     workflow_launch_reservations: Arc<std::sync::Mutex<HashSet<String>>>,
     workflow_session_filter: Arc<std::sync::RwLock<Option<String>>>,
@@ -117,6 +137,11 @@ pub struct TaskRegistry {
     task_completed_firer: std::sync::Mutex<hooks::OptionalTaskCompletedFirer>,
     /// Analytics sink for `tengu_agent_tool_terminated`; `None` ⇒ no emission.
     analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
+    /// Host-owned writer for the actual coordinator member `isActive` field.
+    /// Installed by the composition root; never inferred from task status.
+    team_member_activity: std::sync::RwLock<
+        Option<Arc<dyn lingxi_core::host::team_registry::TeamMemberActivityHandle>>,
+    >,
     /// Best-effort seam to fire the `TaskCreated` hook when a task is created.
     /// Counterpart to [`task_completed_firer`](Self::task_completed_firer):
     /// `None` (the default) => strict no-op; the orchestrator injects a real
@@ -198,7 +223,7 @@ impl Drop for ShellStopGuard {
 #[derive(Clone, Default)]
 struct RestPayload {
     /// The agent's final-text response → the `<result>` section.
-    result: Option<String>,
+    result: Option<Utf16JsonProjection>,
     /// Run usage → the `<usage>` section.
     usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     /// Persistent id of the resting agent. Used only for unnamed-owner
@@ -209,6 +234,81 @@ struct RestPayload {
     /// owner match is by the same creator fields child task creation stamps.
     agent_name: Option<String>,
     team_name: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentWaitClaimRecord {
+    generation: u64,
+    active_waiters: usize,
+    agent_id: lingxi_core::types::AgentId,
+}
+
+/// A wait's notification claim is weakly tied to the registry. Dropping the
+/// wait future schedules a generation-checked release without retaining the
+/// session registry or its handlers.
+pub(crate) struct AgentWaitNotificationClaim {
+    registry: std::sync::Weak<TaskRegistry>,
+    runtime: tokio::runtime::Handle,
+    task_id: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl AgentWaitNotificationClaim {
+    pub(crate) async fn release(mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry
+                .release_agent_wait_claim(&self.task_id, self.generation)
+                .await;
+        }
+        // The registry helper has no suspension point after its claim/refcount
+        // mutation commits. Keep Drop armed while it waits for the row lock so
+        // cancellation schedules the same generation-checked release.
+        self.armed = false;
+    }
+
+    pub(crate) async fn finish(mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry
+                .finish_agent_wait_claim(&self.task_id, self.generation)
+                .await;
+        }
+        // As in `release`, this assignment follows the commit with no await in
+        // between; cancellation while waiting leaves Drop responsible for the
+        // finalizing handoff.
+        self.armed = false;
+    }
+}
+
+impl Drop for AgentWaitNotificationClaim {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let registry = self.registry.clone();
+        let task_id = self.task_id.clone();
+        let generation = self.generation;
+        drop(self.runtime.spawn(async move {
+            if let Some(registry) = registry.upgrade() {
+                registry
+                    .release_agent_wait_claim(&task_id, generation)
+                    .await;
+            }
+        }));
+    }
+}
+
+fn clear_agent_finalizing_fact(agent: &mut crate::state::LocalAgentTaskState) -> bool {
+    if matches!(
+        agent.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(true)
+    ) {
+        agent.agent_list_lifecycle.finalizing =
+            lingxi_core::host::task_registry::FieldPresence::Value(false);
+        true
+    } else {
+        false
+    }
 }
 
 type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
@@ -267,7 +367,10 @@ impl Drop for SpawnPublicationGuard {
         let cleanups = self.cleanups.clone();
         let aliases = self.aliases.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::error!(task_id, "task spawn cancelled without a Tokio runtime; registry rollback could not be scheduled");
+            tracing::error!(
+                task_id,
+                "task spawn cancelled without a Tokio runtime; registry rollback could not be scheduled"
+            );
             return;
         };
         drop(runtime.spawn(async move {
@@ -414,10 +517,16 @@ impl TaskRegistry {
             shell_transfer_mutation: tokio::sync::Mutex::new(()),
             shell_transfer_fences: Arc::new(std::sync::Mutex::new(HashSet::new())),
             human_messages: std::sync::Mutex::new(HashMap::new()),
+            handback_transactions: tokio::sync::Mutex::new(()),
+            handback_runs: std::sync::Mutex::new(HashMap::new()),
+            peer_inboxes: std::sync::Mutex::new(HashMap::new()),
+            reporting_admission: std::sync::OnceLock::new(),
             shell_adoption_runtime: None,
             observer_activity_lock: tokio::sync::Mutex::new(()),
             pending_bash_registration: std::sync::Mutex::new(HashMap::new()),
             tasks: Arc::new(crate::lifecycle_store::TaskRows::default()),
+            agent_wait_claims: std::sync::Mutex::new(HashMap::new()),
+            next_agent_wait_claim_generation: AtomicU64::new(1),
             shell_session_activity: std::sync::Mutex::new(ShellSessionActivity::default()),
             workflow_launch_reservations: Arc::new(std::sync::Mutex::new(HashSet::new())),
             workflow_session_filter: Arc::new(std::sync::RwLock::new(None)),
@@ -437,6 +546,7 @@ impl TaskRegistry {
             output_manager,
             task_completed_firer: std::sync::Mutex::new(None),
             analytics_bus: None,
+            team_member_activity: std::sync::RwLock::new(None),
             task_created_firer: std::sync::Mutex::new(None),
             notification_revision: tokio::sync::watch::channel(0).0,
             stopping_shells: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -449,6 +559,73 @@ impl TaskRegistry {
             lifecycle_gate: Arc::new(RwLock::new(())),
             accepting_tasks: AtomicBool::new(true),
         }
+    }
+
+    /// Install the current session's coordinator team-file activity writer.
+    /// The registry does not retain a coordinator or team-file implementation.
+    pub fn set_team_member_activity_handle(
+        &self,
+        handle: Arc<dyn lingxi_core::host::team_registry::TeamMemberActivityHandle>,
+    ) {
+        *self
+            .team_member_activity
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Publish an explicit activity fact for one exact in-process teammate.
+    /// The identity and member address come from its registered task row, not
+    /// caller-provided strings or a task status heuristic. Standalone rows have
+    /// no coordinator member and therefore do not publish a team-file write.
+    pub async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), TaskError> {
+        let identity = {
+            let tasks = self.tasks.read().await;
+            tasks.values().find_map(|state| match state {
+                TaskState::InProcessTeammate(teammate) if teammate.agent_id == agent_id => {
+                    let base = &teammate.base;
+                    Some(
+                        match (
+                            base.creator_team_name
+                                .as_deref()
+                                .filter(|team| !team.is_empty()),
+                            base.creator_teammate_name
+                                .as_deref()
+                                .filter(|name| !name.is_empty()),
+                        ) {
+                            (Some(team), Some(member)) => {
+                                Some((team.to_owned(), member.to_owned()))
+                            }
+                            _ => None,
+                        },
+                    )
+                }
+                _ => None,
+            })
+        };
+        let Some(identity) = identity else {
+            return Err(TaskError::NotFound(agent_id.as_uuid().to_string()));
+        };
+        let Some((team_name, member_name)) = identity else {
+            // A matching standalone teammate has no coordinator member to
+            // update, and the source does not create an implicit team row.
+            return Ok(());
+        };
+        let handle = self
+            .team_member_activity
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                TaskError::Internal("team member activity writer is not installed".into())
+            })?;
+        handle
+            .set_active(&team_name, &member_name, active)
+            .await
+            .map_err(TaskError::Internal)
     }
 
     /// Bind the session's departure cleanup owner without retaining the session.
@@ -711,7 +888,7 @@ impl TaskRegistry {
         &self,
         task_type: TaskType,
         input: TaskSpawnInput,
-        description: String,
+        description: Utf16JsonProjection,
     ) -> Result<String, TaskError> {
         let _admission = self.lifecycle_gate.read().await;
         if !self.accepting_tasks.load(Ordering::Acquire) {
@@ -753,6 +930,7 @@ impl TaskRegistry {
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }),
@@ -779,11 +957,20 @@ impl TaskRegistry {
                     _ => (
                         lingxi_core::types::AgentId::nil(),
                         String::new(),
-                        String::new(),
+                        Utf16JsonProjection::from(""),
                         false,
                     ),
                 };
                 TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                    handback: None,
+                    handback_history: Vec::new(),
+
+                    agent_spawn_provenance: Default::default(),
+                    // Generic task-create rows are placeholders, not a Native
+                    // Agent launch; keep their lifecycle facts missing until
+                    // the actual spawn path binds a real Agent identity.
+                    agent_list_lifecycle: Default::default(),
+                    spawned_description: None,
                     is_parked: false,
                     is_observer: false,
                     observed_agent_id: None,
@@ -809,7 +996,8 @@ impl TaskRegistry {
             }),
             TaskType::Monitor => TaskState::Monitor(crate::state::MonitorTaskState {
                 base,
-                command: String::new(),
+                command: Utf16JsonProjection::from(""),
+                source_description: Utf16JsonProjection::from(""),
                 exit_code: None,
                 stdout_bytes: None,
             }),
@@ -829,6 +1017,14 @@ impl TaskRegistry {
                 base.creator_teammate_name = Some(name.clone());
                 base.creator_team_name = Some(team_name.clone());
                 TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                    child_model: None,
+                    child_model_profile: None,
+                    handback: None,
+                    handback_history: Vec::new(),
+
+                    agent_spawn_provenance: Default::default(),
+                    spawned_agent_type: None,
+                    spawned_description: None,
                     is_idle: false,
                     awaiting_plan_approval: false,
                     base,
@@ -843,6 +1039,7 @@ impl TaskRegistry {
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }),
@@ -870,7 +1067,12 @@ impl TaskRegistry {
     /// no distinct `subject` field), `task_description` from `description`.
     /// `teammate_name` / `team_name` are not stored on the task state, so they
     /// ride as `None` (the same documented gap as the `TaskCompleted` fire).
-    async fn fire_task_created(&self, task_id: &str, task_type: TaskType, description: &str) {
+    async fn fire_task_created(
+        &self,
+        task_id: &str,
+        task_type: TaskType,
+        description: &Utf16JsonProjection,
+    ) {
         let firer = self
             .task_created_firer
             .lock()
@@ -891,8 +1093,8 @@ impl TaskRegistry {
             firer
                 .fire(hooks::TaskCreatedFire {
                     task_id: task_id.to_string(),
-                    task_subject: format!("{task_type:?}"),
-                    task_description: Some(description.to_string()),
+                    task_subject: format!("{task_type:?}").into(),
+                    task_description: Some(description.clone()),
                     teammate_name,
                     team_name,
                 })
@@ -986,7 +1188,7 @@ impl TaskRegistry {
             .map_err(|e| TaskError::Io(e.to_string()))?;
         // Description mirrors `NZu`'s `${serverName}/${toolName}` (also what
         // `background_message` interpolates as the tool label).
-        let description = format!("{server_name}/{tool_name}");
+        let description = Utf16JsonProjection::from(format!("{server_name}/{tool_name}"));
         let description_for_hook = description.clone();
         let base = TaskStateBase {
             id: id.clone(),
@@ -1102,7 +1304,7 @@ impl TaskRegistry {
         &self,
         id: String,
         command: String,
-        description: String,
+        description: Utf16JsonProjection,
         tool_use_id: Option<String>,
         cwd: Option<String>,
         creator_agent_id: Option<lingxi_core::types::AgentId>,
@@ -1128,7 +1330,7 @@ impl TaskRegistry {
         &self,
         id: String,
         command: String,
-        description: String,
+        description: Utf16JsonProjection,
         tool_use_id: Option<String>,
         cwd: Option<String>,
         creator_agent_id: Option<lingxi_core::types::AgentId>,
@@ -1171,6 +1373,7 @@ impl TaskRegistry {
             command,
             pid: None,
             exit_code: None,
+            stop_cause: None,
             cwd,
             // This entry point only fires for a shell that is actually being
             // backgrounded (claude-code `Xne` registers `isBackgrounded: true`).
@@ -1215,7 +1418,7 @@ impl TaskRegistry {
                 Some(_) => {
                     return Err(TaskError::Internal(
                         "shell identity belongs to another task type".into(),
-                    ))
+                    ));
                 }
                 None => {
                     rows.insert(id.clone(), state);
@@ -1231,7 +1434,7 @@ impl TaskRegistry {
             if created && early_exit.is_some() {
                 rows.checkpoint();
             }
-            let early_terminal = early_exit.and_then(|(code, killed)| {
+            let early_terminal = early_exit.and_then(|(code, killed, stop_cause)| {
                 let entry = rows.get_mut(&id).expect("just registered shell");
                 if entry.base().status.is_terminal() {
                     return None;
@@ -1242,6 +1445,7 @@ impl TaskRegistry {
                 if let Some(code) = code {
                     shell.exit_code = Some(code);
                 }
+                shell.stop_cause = stop_cause;
                 shell.base.status = if killed {
                     TaskStatus::Killed
                 } else if code == Some(0) {
@@ -1297,7 +1501,7 @@ impl TaskRegistry {
                             .fire(hooks::TaskCreatedFire {
                                 task_id: task_id.clone(),
                                 task_subject: "LocalBash".into(),
-                                task_description: Some(description_for_hook),
+                                task_description: Some(description_for_hook.clone()),
                                 teammate_name: base.creator_teammate_name.clone(),
                                 team_name: base.creator_team_name.clone(),
                             })
@@ -1317,7 +1521,7 @@ impl TaskRegistry {
                                 task_id,
                                 status: status.into(),
                                 task_subject: base.description.clone(),
-                                task_description: Some(base.description),
+                                task_description: Some(description_for_hook.clone()),
                                 teammate_name: base.creator_teammate_name,
                                 team_name: base.creator_team_name,
                             })
@@ -1463,7 +1667,7 @@ impl TaskRegistry {
             id: id.clone(),
             task_type: TaskType::LocalAgent,
             status: TaskStatus::Running,
-            description: registration.description,
+            description: registration.description.clone(),
             tool_use_id: registration.tool_use_id,
             start_time: SystemTime::now(),
             end_time: None,
@@ -1477,6 +1681,11 @@ impl TaskRegistry {
             creator_agent_id: registration.creator_agent_id,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+            agent_spawn_provenance: registration.agent_spawn_provenance.clone(),
+            agent_list_lifecycle: lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent(),
+            spawned_description: Some(registration.description.clone()),
             base,
             agent_id: registration.agent_id,
             subagent_type: registration.agent_type,
@@ -1497,7 +1706,7 @@ impl TaskRegistry {
             aliases.insert(registration.agent_id.to_string(), id.clone());
             aliases.insert(registration.agent_id.as_uuid().to_string(), id.clone());
         }
-        self.fire_task_created(&id, TaskType::LocalAgent, &state.base().description)
+        self.fire_task_created(&id, TaskType::LocalAgent, &registration.description)
             .await;
         self.bump_notification_revision();
         Ok(state)
@@ -1539,14 +1748,25 @@ impl TaskRegistry {
         }
         let result = outcome.result.clone();
         let usage = outcome.usage.clone();
+        let run = outcome.handback.as_ref().map(|state| state.run);
         self.set_agent_outcome(&id, outcome).await;
-        self.mark_task_rested(&id, result, usage, Some(agent_id), None, None)
-            .await;
+        self.mark_task_rested_with_finalizing(
+            &id,
+            result,
+            usage,
+            Some(agent_id),
+            None,
+            None,
+            run,
+            true,
+        )
+        .await;
         self.get(&id).await.is_some_and(|state| state.is_parked())
     }
 
     /// `mln`: a foreground completion is consumed directly by the caller.
     pub async fn unregister_foreground_agent(&self, task_id: &str) {
+        let _report_transaction = self.handback_transactions.lock().await;
         let id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
         if matches!(map.get(&id), Some(TaskState::LocalAgent(agent)) if agent.outcome.killed_by.as_deref() == Some("user"))
@@ -1755,20 +1975,31 @@ impl TaskRegistry {
                         && !named_agent_ids.iter().any(|named| named == id) =>
                 {
                     // `p.description ? `${p.id} (${Vn(p.description)})` : p.id`.
-                    background_agents.push(if agent.base.description.is_empty() {
-                        id.clone()
+                    let description = sanitize_task_source_display(&agent.base.description);
+                    let description_units = description.string_units("").unwrap_or_default();
+                    let mut units = Vec::new();
+                    if agent
+                        .base
+                        .description
+                        .string_units("")
+                        .is_none_or(|units| units.is_empty())
+                    {
+                        units.extend(id.encode_utf16());
                     } else {
-                        format!(
-                            "{id} ({})",
-                            lingxi_core::host::display::sanitize_display(&agent.base.description)
-                        )
-                    });
+                        units.extend(format!("{id} (").encode_utf16());
+                        units.extend_from_slice(&description_units);
+                        units.extend(")".encode_utf16());
+                    }
+                    background_agents.push(
+                        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                            .expect("task roster entry is a root source string"),
+                    );
                 }
                 _ => {}
             }
         }
         running_teammates.sort();
-        background_agents.sort();
+        background_agents.sort_by(|left, right| left.string_units("").cmp(&right.string_units("")));
         lingxi_core::host::task_registry::TaskNotFoundRosters {
             running_teammates,
             background_agents,
@@ -1939,7 +2170,7 @@ impl TaskRegistry {
 
     pub fn subscribe_task_lifecycle(
         &self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<serde_json::Value> {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Utf16JsonProjection> {
         self.tasks.subscribe()
     }
 
@@ -1980,7 +2211,7 @@ impl TaskRegistry {
                 description: shell.base.description.clone(),
                 tool_use_id: shell.base.tool_use_id.clone(),
                 output_path: Some(shell.base.output_file.to_string_lossy().into_owned()),
-                result: Some(tail.to_string()),
+                result: Some(Utf16JsonProjection::from(tail)),
                 ..Default::default()
             };
             self.pending_monitor_events
@@ -2100,6 +2331,27 @@ impl TaskRegistry {
         exit_code: Option<i32>,
         killed: bool,
     ) -> Result<(), TaskError> {
+        self.settle_background_bash_with_cause(task_id, exit_code, killed, None)
+            .await
+    }
+
+    /// Settle the background lifetime limit with the oracle's `deadline` cause.
+    pub async fn settle_background_bash_deadline(
+        &self,
+        task_id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskError> {
+        self.settle_background_bash_with_cause(task_id, exit_code, true, Some("deadline".into()))
+            .await
+    }
+
+    async fn settle_background_bash_with_cause(
+        &self,
+        task_id: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+        stop_cause: Option<String>,
+    ) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         {
             let rows = self.tasks.write().await;
@@ -2111,7 +2363,7 @@ impl TaskRegistry {
                     .get_mut(&task_id)
                 {
                     // Only a live allocation can retain a pre-registration receipt.
-                    pending.get_or_insert((exit_code, killed));
+                    pending.get_or_insert((exit_code, killed, stop_cause));
                 }
                 return Ok(());
             }
@@ -2131,6 +2383,9 @@ impl TaskRegistry {
             match map.get_mut(&task_id) {
                 Some(entry) if entry.base().status.is_terminal() => return Ok(()),
                 Some(entry) => {
+                    if let TaskState::LocalBash(shell) = entry {
+                        shell.stop_cause = stop_cause;
+                    }
                     entry.base_mut().end_time = Some(SystemTime::now());
                     Some(entry.base().output_file.clone())
                 }
@@ -2161,7 +2416,7 @@ impl TaskRegistry {
     pub async fn settle_mcp_task(
         &self,
         task_id: &str,
-        result_text: &str,
+        result_text: &Utf16JsonProjection,
         failed: bool,
     ) -> Result<bool, TaskError> {
         self.settle_mcp_task_with_hint(task_id, result_text, failed, None)
@@ -2171,9 +2426,9 @@ impl TaskRegistry {
     pub async fn settle_mcp_task_with_hint(
         &self,
         task_id: &str,
-        result_text: &str,
+        result_text: &Utf16JsonProjection,
         failed: bool,
-        saved_hint: Option<&str>,
+        saved_hint: Option<&Utf16JsonProjection>,
     ) -> Result<bool, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         // Guard + recover the spool path under a read lock.
@@ -2189,7 +2444,16 @@ impl TaskRegistry {
         // it AND `TaskOutput` can serve it later. The inline `<result>` in the
         // notification is stamped separately, below, from the state — claude's
         // `F` is handed `resultText` directly and a renderer cannot read a file.
-        let _ = self.output_manager.append(&output_file, result_text).await;
+        let result_units = result_text
+            .string_units("")
+            .expect("MCP task result text is a root string");
+        // The task spool is a UTF-8 filesystem sink; Native TextEncoder replaces
+        // any unpaired UTF-16 surrogate with U+FFFD at this boundary.
+        let filesystem_text = String::from_utf16_lossy(&result_units);
+        let _ = self
+            .output_manager
+            .append(&output_file, &filesystem_text)
+            .await;
         // The call has settled, so it is no longer cancellable — drop the
         // cancel hook before the atomic terminal transition below (this also
         // makes the task drain-eligible once it goes terminal). Removing it
@@ -2234,8 +2498,8 @@ impl TaskRegistry {
                 // text here would put it somewhere nothing reads and leave a
                 // failed row looking like it had an answer.
                 if !failed {
-                    m.result_text = Some(result_text.to_string());
-                    m.saved_hint = saved_hint.map(str::to_string);
+                    m.result_text = Some(result_text.clone());
+                    m.saved_hint = saved_hint.cloned();
                 }
             }
             state.base_mut().status = status;
@@ -2294,7 +2558,7 @@ impl TaskRegistry {
         &self,
         task_type: TaskType,
         input: TaskSpawnInput,
-        description: String,
+        description: Utf16JsonProjection,
     ) -> Result<String, TaskError> {
         self.spawn_with_aliases(task_type, input, description, &[])
             .await
@@ -2306,7 +2570,7 @@ impl TaskRegistry {
         &self,
         task_type: TaskType,
         input: TaskSpawnInput,
-        description: String,
+        description: Utf16JsonProjection,
         restored_aliases: &[String],
     ) -> Result<String, TaskError> {
         let _admission = self.lifecycle_gate.read().await;
@@ -2353,7 +2617,13 @@ impl TaskRegistry {
             .map_err(|e| TaskError::Io(e.to_string()))?;
         // Keep a copy of the description for the `TaskCreated` fire below — the
         // original is moved into `base` here.
-        let description_for_hook = description.clone();
+        let description_for_hook = match &input {
+            TaskSpawnInput::Monitor {
+                source_description, ..
+            } => source_description.clone(),
+            TaskSpawnInput::MonitorWs(source) => source.registration.task.description.clone(),
+            _ => description.clone(),
+        };
         let base = TaskStateBase {
             id: id.clone(),
             task_type,
@@ -2372,6 +2642,12 @@ impl TaskRegistry {
             creator_agent_id: None,
         };
         let mut state = state_for_spawn(base, &input);
+        if let (Some((model, profile)), TaskState::InProcessTeammate(teammate)) =
+            (handle.teammate_model_route.as_ref(), &mut state)
+        {
+            teammate.child_model = Some(model.clone());
+            teammate.child_model_profile.clone_from(profile);
+        }
         if let TaskState::LocalAgent(agent) = &mut state {
             if agent.is_observer {
                 let marker_path = agent.base.output_file.with_extension("observer.json");
@@ -2487,7 +2763,7 @@ impl TaskRegistry {
 
     /// Return all known tasks.
     pub async fn list(&self) -> Vec<TaskState> {
-        self.tasks.read().await.values().cloned().collect()
+        self.tasks.ordered_states().await
     }
 
     /// Scope workflow rows in `TaskList` / `/workflows` to one session.
@@ -2797,7 +3073,7 @@ impl TaskRegistry {
                 id: adopted.task_id.clone(),
                 task_type: TaskType::LocalWorkflow,
                 status: TaskStatus::Paused,
-                description: adopted.description,
+                description: adopted.description.into(),
                 tool_use_id: None,
                 start_time: adopted.start_time,
                 end_time: None,
@@ -2900,7 +3176,7 @@ impl TaskRegistry {
     pub async fn enqueue_monitor_event(
         &self,
         task_id: &str,
-        event: &str,
+        event: Utf16JsonProjection,
         housekeeping: bool,
     ) -> Result<(), TaskError> {
         const MAX_PENDING_MONITOR_EVENTS: usize = 1_024;
@@ -2922,10 +3198,10 @@ impl TaskRegistry {
                 recipient_agent_id: monitor.base.creator_agent_id,
                 task_type: "monitor_ws".to_string(),
                 status: "running".to_string(),
-                description: monitor.base.description.clone(),
+                description: monitor.source_description.clone(),
                 tool_use_id: monitor.base.tool_use_id.clone(),
                 output_path: Some(monitor.base.output_file.to_string_lossy().into_owned()),
-                result: Some(event.to_string()),
+                result: Some(event),
                 // `GM(…,{isHousekeeping})` — a harness line about the monitor,
                 // not script output. The renderer suppresses the per-event
                 // push hint for these.
@@ -3008,8 +3284,8 @@ impl TaskRegistry {
                     .fire(hooks::TaskCompletedFire {
                         task_id: task_id.to_string(),
                         status: status_str.to_string(),
-                        task_subject: base.description.clone(),
-                        task_description: Some(base.description.clone()),
+                        task_subject: source_task_description(updated),
+                        task_description: Some(source_task_description(updated)),
                         teammate_name: base.creator_teammate_name.clone(),
                         team_name: base.creator_team_name.clone(),
                     })
@@ -3082,6 +3358,54 @@ impl TaskRegistry {
         Ok(())
     }
 
+    /// Update one real local-Agent source fact consumed by the Native
+    /// `$.agent.list` status reducer. Identity is the exact `AgentId`; no
+    /// status, parked bit, or neighboring fact is used to infer an update.
+    pub async fn update_agent_list_local_fact(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) -> Result<(), TaskError> {
+        let mut tasks = self.tasks.write().await;
+        let Some(agent) = tasks.values_mut().find_map(|state| match state {
+            TaskState::LocalAgent(agent) if agent.agent_id == agent_id => Some(agent),
+            _ => None,
+        }) else {
+            return Err(TaskError::NotFound(agent_id.as_uuid().to_string()));
+        };
+        use lingxi_core::host::task_registry::{AgentListLocalFactUpdate, FieldPresence};
+        match update {
+            AgentListLocalFactUpdate::IsIdle(value) => {
+                agent.agent_list_lifecycle.is_idle = FieldPresence::Value(value);
+            }
+            AgentListLocalFactUpdate::Finalizing(value) => {
+                agent.agent_list_lifecycle.finalizing = FieldPresence::Value(value);
+            }
+            AgentListLocalFactUpdate::KeepaliveReason { reason, active } => {
+                agent.agent_list_lifecycle.keepalive_reasons =
+                    match std::mem::take(&mut agent.agent_list_lifecycle.keepalive_reasons) {
+                        FieldPresence::Value(mut reasons) => {
+                            if active {
+                                if !reasons.contains(&reason) {
+                                    reasons.push(reason.clone());
+                                }
+                            } else {
+                                reasons.retain(|existing| existing != &reason);
+                            }
+                            FieldPresence::Value(reasons)
+                        }
+                        FieldPresence::Null | FieldPresence::Missing if active => {
+                            FieldPresence::Value(vec![reason])
+                        }
+                        other => other,
+                    };
+            }
+        }
+        drop(tasks);
+        self.bump_notification_revision();
+        Ok(())
+    }
+
     pub async fn set_awaiting_plan_approval(
         &self,
         task_id: &str,
@@ -3108,9 +3432,45 @@ impl TaskRegistry {
         task_id: &str,
         status: TaskStatus,
     ) -> Result<TaskState, TaskError> {
+        self.set_status_with_agent_finalizing(task_id, status, None)
+            .await
+    }
+
+    /// Complete the Native local-Agent status and its `finalizing` fact in a
+    /// single row mutation. Native emits this intermediate completed state
+    /// before the result notification, then clears the fact in its `finally`.
+    pub async fn set_agent_status_with_finalizing(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        finalizing: bool,
+    ) -> Result<TaskState, TaskError> {
+        if status != TaskStatus::Completed {
+            return Err(TaskError::Unsupported);
+        }
+        self.set_status_with_agent_finalizing(task_id, status, Some(finalizing))
+            .await
+    }
+
+    async fn set_status_with_agent_finalizing(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        agent_finalizing: Option<bool>,
+    ) -> Result<TaskState, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
+        if matches!(status, TaskStatus::Failed | TaskStatus::Killed) {
+            self.invalidate_handback_for_task(&task_id).await;
+        }
         let updated = {
             let mut map = self.tasks.write().await;
+            if agent_finalizing.is_some() {
+                match map.get(&task_id) {
+                    None => return Err(TaskError::NotFound(task_id.clone())),
+                    Some(TaskState::LocalAgent(_)) => {}
+                    Some(_) => return Err(TaskError::Unsupported),
+                }
+            }
             // Answered BEFORE the mutable borrow below: the keepalive question
             // is about the WHOLE map (does any live row name this agent as its
             // creator?), which cannot be asked while one entry is borrowed
@@ -3143,6 +3503,10 @@ impl TaskRegistry {
                 TaskState::LocalAgent(a) => {
                     a.is_parked = false;
                     a.base.status = status;
+                    if let Some(finalizing) = agent_finalizing {
+                        a.agent_list_lifecycle.finalizing =
+                            lingxi_core::host::task_registry::FieldPresence::Value(finalizing);
+                    }
                     if status.is_terminal() {
                         // `bind_background_killer` inserts a cleanup for
                         // foreground agents too, and only the LocalBash arm
@@ -3236,23 +3600,40 @@ impl TaskRegistry {
         Ok(())
     }
 
-    /// Deprecated compatibility hook. Completed background tasks are retained
-    /// after notification; there is no implicit terminal-task GC here.
-    pub async fn evict_terminal_tasks(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Publish a completed turn and its persistent park atomically with the
     /// pending rest payload. A parked runner remains resumable after notification
     /// and eviction passes. Truly terminated tasks cannot be re-armed.
     pub async fn mark_task_rested(
         &self,
         task_id: &str,
-        result: Option<String>,
+        result: Option<Utf16JsonProjection>,
         usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
         agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
+    ) {
+        self.mark_task_rested_with_finalizing(
+            task_id, result, usage, agent_id, agent_name, team_name, run, false,
+        )
+        .await;
+    }
+
+    /// Publish a persistent Agent rest and its Native completed/finalizing
+    /// facts atomically. The notification drain clears `finalizing` after it
+    /// builds the matching result notification. Observer rests suppress that
+    /// notification and finish through their own digest handoff.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_task_rested_with_finalizing(
+        &self,
+        task_id: &str,
+        result: Option<Utf16JsonProjection>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
+        agent_name: Option<String>,
+        team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
+        finalizing: bool,
     ) {
         let Some(task_id) = self.resolve_task_id(task_id).await else {
             return;
@@ -3261,14 +3642,26 @@ impl TaskRegistry {
         let Some(state) = map.get_mut(&task_id) else {
             return;
         };
+        if run.is_some_and(|expected| {
+            state
+                .handback()
+                .is_none_or(|current| current.run != expected)
+        }) {
+            return;
+        }
         if state.is_terminated() {
             return;
         }
         let TaskState::LocalAgent(agent) = state else {
             return;
         };
+        if agent.outcome.killed_by.is_some() {
+            return;
+        }
         agent.is_parked = true;
         agent.base.status = TaskStatus::Completed;
+        agent.agent_list_lifecycle.finalizing =
+            lingxi_core::host::task_registry::FieldPresence::Value(finalizing);
         agent.base.end_time = Some(SystemTime::now());
         agent.base.evict_after = None;
         agent.base.notified = false;
@@ -3287,6 +3680,7 @@ impl TaskRegistry {
                     tracing::warn!(task_id, %error, "observer activity delivery failed");
                 }
             }
+            self.finish_observer_rest_handoff(&task_id).await;
             return;
         }
         self.pending_rest.write().await.insert(
@@ -3407,10 +3801,249 @@ impl TaskRegistry {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
         if let Some(TaskState::LocalAgent(agent)) = map.get_mut(&task_id) {
+            if let Some(handback) = &outcome.handback {
+                if agent
+                    .handback
+                    .as_ref()
+                    .is_some_and(|current| current.run != handback.run)
+                {
+                    return;
+                }
+                // A late terminal projection cannot overwrite a newer run or
+                // manufacture a receipt after its live authority was stopped.
+                if agent.handback.as_ref().is_some_and(|current| {
+                    current.run == handback.run
+                        && current.active == handback.active
+                        && current.receipt == handback.receipt
+                }) {
+                    agent.handback = Some(handback.clone());
+                }
+            }
             if let Some(error) = outcome.error.clone() {
                 agent.error = Some(error);
             }
             agent.outcome.merge(outcome);
+        }
+    }
+
+    /// Replace the local Agent's conversation snapshot with the runner's
+    /// settled history. The final snapshot includes admitted transcript
+    /// rewrites and excludes rows removed by server fallback/tombstones.
+    pub async fn replace_agent_transcript_messages(
+        &self,
+        task_id: &str,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) -> Result<(), TaskError> {
+        let task_id = self
+            .resolve_task_id(task_id)
+            .await
+            .unwrap_or_else(|| task_id.to_owned());
+        let mut rows = self.tasks.write().await;
+        let Some(state) = rows.get_mut(&task_id) else {
+            return Err(TaskError::NotFound(task_id));
+        };
+        let TaskState::LocalAgent(agent) = state else {
+            return Err(TaskError::Unsupported);
+        };
+        agent.messages = messages;
+        Ok(())
+    }
+
+    /// Native K3's one-time notification claim, restricted to the exact raw
+    /// launch identity currently stored on this local-agent row.
+    pub(crate) async fn claim_agent_wait_notification(
+        &self,
+        task_id: &str,
+        raw_agent_id: &str,
+    ) -> Result<
+        Option<AgentWaitNotificationClaim>,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        let registry = self.self_ref.get().cloned().ok_or_else(|| {
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "task registry self binding is unavailable for wait cleanup".into(),
+            )
+        })?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(format!(
+                "task wait requires a Tokio runtime: {error}"
+            ))
+        })?;
+        let mut rows = self.tasks.write().await;
+        let Some(agent_id) = rows.get(task_id).and_then(|state| match state {
+            TaskState::LocalAgent(agent)
+                if agent.agent_id.as_uuid().to_string() == raw_agent_id =>
+            {
+                Some(agent.agent_id)
+            }
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        let generation = {
+            let mut claims = self
+                .agent_wait_claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match claims.get_mut(task_id) {
+                Some(claim) if claim.agent_id == agent_id => {
+                    claim.active_waiters = claim.active_waiters.saturating_add(1);
+                    claim.generation
+                }
+                _ => {
+                    let generation = self
+                        .next_agent_wait_claim_generation
+                        .fetch_add(1, Ordering::Relaxed);
+                    claims.insert(
+                        task_id.to_owned(),
+                        AgentWaitClaimRecord {
+                            generation,
+                            active_waiters: 1,
+                            agent_id,
+                        },
+                    );
+                    generation
+                }
+            }
+        };
+        let Some(TaskState::LocalAgent(agent)) = rows.get_mut(task_id) else {
+            // The task lock is held, so this can only be reached if a future
+            // state variant breaks the identity predicate above.
+            self.agent_wait_claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(task_id);
+            return Ok(None);
+        };
+        agent.base.notified = true;
+        Ok(Some(AgentWaitNotificationClaim {
+            registry,
+            runtime,
+            task_id: task_id.to_owned(),
+            generation,
+            armed: true,
+        }))
+    }
+
+    /// Finish the direct Agent-tool handoff for a completion whose K3 claim
+    /// already suppressed the registry notification. The terminal waiter is
+    /// the result handoff, so clear `finalizing` only after it has captured the
+    /// settled outcome.
+    async fn release_agent_wait_claim(&self, task_id: &str, generation: u64) {
+        let changed = {
+            let mut rows = self.tasks.write().await;
+            let current_agent_id = rows.get(task_id).and_then(|state| match state {
+                TaskState::LocalAgent(agent) => Some(agent.agent_id),
+                _ => None,
+            });
+            let matches_claim = {
+                let mut claims = self
+                    .agent_wait_claims
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(claim) = claims.get_mut(task_id) else {
+                    return;
+                };
+                if claim.generation != generation {
+                    return;
+                }
+                if current_agent_id != Some(claim.agent_id) {
+                    claims.remove(task_id);
+                    return;
+                }
+                if claim.active_waiters > 1 {
+                    claim.active_waiters -= 1;
+                    return;
+                }
+                claims.remove(task_id);
+                true
+            };
+            if !matches_claim {
+                return;
+            }
+            let Some(TaskState::LocalAgent(agent)) = rows.get_mut(task_id) else {
+                return;
+            };
+            if agent.base.status.is_terminal() && agent.base.notified {
+                // A terminal claim cannot be reset: the completion path has
+                // already suppressed its normal notification. Complete the
+                // producer-finally fact instead of leaving agent.list at a
+                // permanent running projection.
+                clear_agent_finalizing_fact(agent)
+            } else if !agent.base.status.is_terminal() && agent.base.notified {
+                // qOt restores notification eligibility when the last live
+                // waiter leaves before the task has settled.
+                agent.base.notified = false;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.bump_notification_revision();
+        }
+    }
+
+    async fn finish_agent_wait_claim(&self, task_id: &str, generation: u64) {
+        let changed = {
+            let mut rows = self.tasks.write().await;
+            let current_agent_id = rows.get(task_id).and_then(|state| match state {
+                TaskState::LocalAgent(agent) => Some(agent.agent_id),
+                _ => None,
+            });
+            let matches_claim = {
+                let mut claims = self
+                    .agent_wait_claims
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(claim) = claims.get(task_id) else {
+                    return;
+                };
+                if claim.generation == generation && current_agent_id == Some(claim.agent_id) {
+                    claims.remove(task_id);
+                    true
+                } else if claim.generation == generation {
+                    claims.remove(task_id);
+                    false
+                } else {
+                    false
+                }
+            };
+            if !matches_claim {
+                return;
+            }
+            let Some(TaskState::LocalAgent(agent)) = rows.get_mut(task_id) else {
+                return;
+            };
+            if agent.base.status.is_terminal() && agent.base.notified {
+                clear_agent_finalizing_fact(agent)
+            } else if !agent.base.status.is_terminal() && agent.base.notified {
+                agent.base.notified = false;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.bump_notification_revision();
+        }
+    }
+
+    /// Observer rests suppress the ordinary task notification (and may instead
+    /// deliver a digest), so their finalizing transition has its own handoff.
+    async fn finish_observer_rest_handoff(&self, task_id: &str) {
+        let changed = {
+            let mut rows = self.tasks.write().await;
+            let Some(TaskState::LocalAgent(agent)) = rows.get_mut(task_id) else {
+                return;
+            };
+            if !agent.is_observer || !agent.base.notified {
+                return;
+            }
+            clear_agent_finalizing_fact(agent)
+        };
+        if changed {
+            self.bump_notification_revision();
         }
     }
 
@@ -3599,11 +4232,17 @@ impl TaskRegistry {
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = Result<(), String>> + Send,
     {
-        let canonical_result = outcome.result.clone().ok_or_else(|| {
+        let canonical_result_source = outcome.result.clone().ok_or_else(|| {
             TaskError::Internal(
                 "Local App terminal commit requires a canonical result payload".into(),
             )
         })?;
+        let canonical_result_units = canonical_result_source
+            .string_units("")
+            .expect("Local App workflow result is a root string");
+        // This reaches the same UTF-8 filesystem sink that Native TextEncoder
+        // uses for the serialized JSON.stringify result.
+        let canonical_result = String::from_utf16_lossy(&canonical_result_units);
         let task_id = self.canonical_or_raw(task_id).await;
         let (updated, publication_committed) = {
             let mut map = self.tasks.write().await;
@@ -3784,6 +4423,7 @@ impl TaskRegistry {
         killed_by: &str,
     ) -> Result<(), TaskError> {
         let canonical = self.canonical_or_raw(task_id).await;
+        self.invalidate_handback_for_task(&canonical).await;
         let _human_resume = if killed_by == "user" {
             // Cancel before waiting: an in-progress human prepare must release
             // this same gate, then old teardown completes before a new epoch runs.
@@ -3980,7 +4620,13 @@ impl TaskRegistry {
         state: &TaskState,
         map: &HashMap<String, TaskState>,
     ) -> Option<lingxi_core::types::AgentId> {
-        let owner = state.base().creator_agent_id?;
+        let owner = match state.handback().map(|state| state.recipient) {
+            Some(lingxi_core::host::handback::HandbackRecipient::Main { .. }) => return None,
+            Some(lingxi_core::host::handback::HandbackRecipient::Agent { agent_id, .. }) => {
+                agent_id
+            }
+            None => state.base().creator_agent_id?,
+        };
         // lLe/IRe: an agent/workflow whose owner no longer has a live runner
         // reports to the main session instead of stranding the completion.
         if matches!(
@@ -4236,7 +4882,7 @@ impl TaskRegistry {
                 recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 status: status_to_wire(b.status).to_string(),
-                description: b.description.clone(),
+                description: source_task_description(state),
                 tool_use_id: b.tool_use_id.clone(),
                 output_path,
                 exit_code,
@@ -4259,7 +4905,10 @@ impl TaskRegistry {
                 // KEPT worktree's path/branch, from the handler's terminal
                 // `agent_worktree_result` judgment). `None` ⇒ the bare
                 // `was stopped` verb / no worktree section.
-                killed_by: agent_outcome.killed_by,
+                killed_by: agent_outcome.killed_by.or_else(|| match state {
+                    TaskState::LocalBash(shell) => shell.stop_cause.clone(),
+                    _ => None,
+                }),
                 worktree_path: agent_outcome.worktree_path,
                 worktree_branch: agent_outcome.worktree_branch,
                 // Set only when the run ended by exhausting its turn budget;
@@ -4286,7 +4935,9 @@ impl TaskRegistry {
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
                     .or(agent_outcome.result)
-                    .or(fusion_final_text)
+                    // Fusion final text is a known host-generated UTF-8 scalar
+                    // projection; its separate typed-source contract is unchanged.
+                    .or_else(|| fusion_final_text.map(Utf16JsonProjection::from))
                     .or_else(|| match state {
                         // The settled call's text, stamped by
                         // `settle_mcp_task`. Only a completed call has one.
@@ -4351,6 +5002,15 @@ impl TaskRegistry {
             // it.
             if let Some(state) = map.get_mut(&id) {
                 state.base_mut().notified = true;
+                if let TaskState::LocalAgent(agent) = state {
+                    if matches!(
+                        agent.agent_list_lifecycle.finalizing,
+                        lingxi_core::host::task_registry::FieldPresence::Value(true)
+                    ) {
+                        agent.agent_list_lifecycle.finalizing =
+                            lingxi_core::host::task_registry::FieldPresence::Value(false);
+                    }
+                }
             }
         }
 
@@ -4401,7 +5061,7 @@ impl TaskRegistry {
                 // A resting persistent agent completed this turn-set while its
                 // keepalive retains the runner for future notifications/messages.
                 status: status_to_wire(TaskStatus::Completed).to_string(),
-                description: b.description.clone(),
+                description: source_task_description(state),
                 tool_use_id: b.tool_use_id.clone(),
                 // The spool carries the just-produced turn-set result; the model
                 // reads it (it was told it can Read/Bash-tail the output file).
@@ -4455,6 +5115,15 @@ impl TaskRegistry {
             });
             if let Some(state) = map.get_mut(&id) {
                 state.base_mut().notified = true;
+                if let TaskState::LocalAgent(agent) = state {
+                    if matches!(
+                        agent.agent_list_lifecycle.finalizing,
+                        lingxi_core::host::task_registry::FieldPresence::Value(true)
+                    ) {
+                        agent.agent_list_lifecycle.finalizing =
+                            lingxi_core::host::task_registry::FieldPresence::Value(false);
+                    }
+                }
             }
         }
         // Consuming an owner's message and reactivating that owner are one
@@ -4580,6 +5249,7 @@ impl TaskRegistry {
     /// field in the M1 surface; other variants are no-ops on cancel.
     pub async fn kill(&self, task_id: &str) -> Result<(), TaskError> {
         let canonical = self.canonical_or_raw(task_id).await;
+        self.invalidate_handback_for_task(&canonical).await;
         // A source handoff and explicit shell teardown are exclusive ownership
         // decisions. Native completion may still win under the task-row lock.
         let is_shell = self
@@ -4917,17 +5587,42 @@ fn monitor_stopped_note(
         recipient_agent_id: base.creator_agent_id,
         task_type: "monitor_ws".into(),
         status: "running".into(),
-        description: base.description.clone(),
+        description: source_task_description(state),
         result: Some("[Monitor stopped]".into()),
         monitor_housekeeping: true,
         ..Default::default()
     })
 }
 
+/// Source description for model-facing task data. Monitor descriptions use
+/// their request carrier so task rows and notifications retain the same units.
+fn source_task_description(state: &TaskState) -> Utf16JsonProjection {
+    match state {
+        TaskState::Monitor(monitor) => monitor.source_description.clone(),
+        TaskState::LocalAgent(agent) => agent
+            .spawned_description
+            .clone()
+            .unwrap_or_else(|| state.base().description.clone()),
+        TaskState::InProcessTeammate(agent) => agent
+            .spawned_description
+            .clone()
+            .unwrap_or_else(|| state.base().description.clone()),
+        _ => state.base().description.clone(),
+    }
+}
+
+fn sanitize_task_source_display(source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let scalar =
+        std::char::decode_utf16(source.string_units("").unwrap_or_default().iter().copied())
+            .filter_map(Result::ok)
+            .collect::<String>();
+    lingxi_core::host::display::sanitize_display(&scalar).into()
+}
+
 /// `JF` calls `pi`, not `ha`: this is an SDK system event, never a model
 /// message (2.1.263 src_158095655.js, `pi` → `ju`). Claim before stamping
 /// notified, so two stop calls cannot publish the same terminal event twice.
-fn shell_stopped_sdk_event(state: &TaskState) -> Option<serde_json::Value> {
+fn shell_stopped_sdk_event(state: &TaskState) -> Option<Utf16JsonProjection> {
     if state.base().notified || !matches!(state, TaskState::LocalBash(_) | TaskState::Monitor(_)) {
         return None;
     }
@@ -4937,14 +5632,30 @@ fn shell_stopped_sdk_event(state: &TaskState) -> Option<serde_json::Value> {
     } else {
         String::new()
     };
-    let mut event = serde_json::json!({
-        "type": "system", "subtype": "task_notification", "task_id": base.id,
-        "status": "stopped", "output_file": output_file, "summary": base.description,
-    });
+    let mut fields = vec![
+        ("type".into(), Utf16JsonProjection::from("system")),
+        (
+            "subtype".into(),
+            Utf16JsonProjection::from("task_notification"),
+        ),
+        (
+            "task_id".into(),
+            Utf16JsonProjection::from(base.id.as_str()),
+        ),
+        ("status".into(), Utf16JsonProjection::from("stopped")),
+        (
+            "output_file".into(),
+            Utf16JsonProjection::from(output_file.as_str()),
+        ),
+        ("summary".into(), source_task_description(state)),
+    ];
     if let Some(tool_use_id) = &base.tool_use_id {
-        event["tool_use_id"] = serde_json::json!(tool_use_id);
+        fields.push((
+            "tool_use_id".into(),
+            Utf16JsonProjection::from(tool_use_id.as_str()),
+        ));
     }
-    Some(event)
+    Some(Utf16JsonProjection::object(fields).expect("generated task receipt object is valid"))
 }
 
 /// The `notified` half of a kill — claude-code's `notified:!0`, stamped by every
@@ -5118,12 +5829,22 @@ fn stamp_terminal_clock(state: &mut TaskState, holds_live_children: bool) {
 /// reconciles back onto its `WorkerAgent`.
 #[async_trait]
 impl TeamSpawnSeam for TaskRegistry {
+    async fn send_peer(
+        &self,
+        task_id: &str,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+    ) -> Result<(), TeamSpawnError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        self.admit_peer_to_task(&task_id, envelope)
+            .await
+            .map_err(task_err_to_team_spawn_err)
+    }
     async fn spawn_teammate(
         &self,
         agent_id: lingxi_core::types::AgentId,
         name: String,
         team_name: String,
-        description: String,
+        description: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<String, TeamSpawnError> {
         self.spawn(
             TaskType::InProcessTeammate,
@@ -5152,7 +5873,10 @@ impl TeamSpawnSeam for TaskRegistry {
         request: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
         inherit: lingxi_core::host::subagent_spawn::SubagentInheritance,
     ) -> Result<String, TeamSpawnError> {
-        let description = request.description.clone().unwrap_or_default();
+        let description = request
+            .description
+            .clone()
+            .unwrap_or_else(|| Utf16JsonProjection::from(""));
         self.spawn(
             TaskType::InProcessTeammate,
             TaskSpawnInput::InProcessTeammate {
@@ -5227,7 +5951,11 @@ impl TeamSpawnSeam for TaskRegistry {
     /// unknown/gone task (`NotFound`) maps to [`TeamSpawnError::Terminated`] —
     /// the pump's "stop" signal. A handler that does not support messages maps
     /// to [`TeamSpawnError::Unsupported`]; anything else is `Internal`.
-    async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+    async fn send_message(
+        &self,
+        task_id: &str,
+        message: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), TeamSpawnError> {
         // Addressing parity with the other task surfaces: an agent is
         // registered under its task id AND its aliases (the agent id, its name,
         // and `name@team`), and `get` / `kill` / `output` all resolve those
@@ -5402,6 +6130,13 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base.tool_use_id.clone_from(tool_use_id);
             }
         }
+        TaskSpawnInput::InProcessTeammate { spawn_request, .. } => {
+            if base.creator_agent_id.is_none() {
+                base.creator_agent_id = spawn_request
+                    .as_ref()
+                    .and_then(|request| request.creator_agent_id);
+            }
+        }
         _ => {}
     }
     match input {
@@ -5413,6 +6148,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 command: command.clone(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             })
@@ -5425,6 +6161,16 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             spawn_request,
             ..
         } => TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+            agent_spawn_provenance: spawn_request
+                .as_ref()
+                .map(|request| request.agent_spawn_provenance.clone())
+                .unwrap_or_default(),
+            agent_list_lifecycle: lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent(),
+            spawned_description: spawn_request
+                .as_ref()
+                .and_then(|request| request.description.clone()),
             is_parked: false,
             is_observer: spawn_request.as_ref().is_some_and(|r| {
                 r.query_source_label.as_deref()
@@ -5465,11 +6211,26 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             agent_id,
             name,
             team_name,
+            spawn_request,
             ..
         } => {
             base.creator_teammate_name = Some(name.clone());
             base.creator_team_name = Some(team_name.clone());
             TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                child_model: None,
+                child_model_profile: None,
+                handback: None,
+                handback_history: Vec::new(),
+                agent_spawn_provenance: spawn_request
+                    .as_ref()
+                    .map(|request| request.agent_spawn_provenance.clone())
+                    .unwrap_or_default(),
+                spawned_agent_type: spawn_request
+                    .as_ref()
+                    .map(|request| request.subagent_type.clone()),
+                spawned_description: spawn_request
+                    .as_ref()
+                    .and_then(|request| request.description.clone()),
                 is_idle: false,
                 awaiting_plan_approval: false,
                 base,
@@ -5524,12 +6285,17 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         }
         TaskSpawnInput::MonitorWs(source) => TaskState::Monitor(crate::state::MonitorTaskState {
             base,
-            command: source.registration.url.clone(),
+            // Keep the existing WebSocket monitor address in the internal
+            // command slot; it is not surfaced as a shell command because its
+            // task type remains `monitor_ws`.
+            command: Utf16JsonProjection::from(source.registration.url.as_str()),
+            source_description: source.registration.task.description.clone(),
             exit_code: None,
             stdout_bytes: None,
         }),
         TaskSpawnInput::Monitor {
             command,
+            source_description,
             spawn_command: _,
             timeout: _,
             cwd: _,
@@ -5547,6 +6313,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             TaskState::Monitor(crate::state::MonitorTaskState {
                 base,
                 command: command.clone(),
+                source_description: source_description.clone(),
                 exit_code: None,
                 stdout_bytes: None,
             })
@@ -6023,6 +6790,7 @@ mod adopted_workflow_scope_test {
                     creator_agent_id: None,
                     creator_teammate_name: None,
                     creator_team_name: None,
+                    agent_spawn_provenance: Default::default(),
                 },
             )
             .await
@@ -6060,6 +6828,7 @@ mod adopted_workflow_scope_test {
                     creator_agent_id: None,
                     creator_teammate_name: None,
                     creator_team_name: None,
+                    agent_spawn_provenance: Default::default(),
                 },
             )
             .await
@@ -6142,6 +6911,7 @@ mod adopted_workflow_scope_test {
             creator_agent_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            agent_spawn_provenance: Default::default(),
         };
         let state = registry
             .register_foreground_agent(registration.clone())
@@ -6222,6 +6992,7 @@ mod adopted_workflow_scope_test {
             creator_agent_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            agent_spawn_provenance: Default::default(),
         };
         let state = registry
             .register_foreground_agent(registration.clone())
@@ -6362,7 +7133,7 @@ mod adopted_workflow_scope_test {
             .tasks
             .write()
             .await
-            .insert("aobserver".into(), TaskState::LocalAgent(observer));
+            .insert("aobserver", TaskState::LocalAgent(observer));
         registry
             .set_status("aobserver", TaskStatus::Completed)
             .await
@@ -6390,7 +7161,13 @@ mod adopted_workflow_scope_test {
         let notices = registry.take_pending_task_notifications().await;
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].status, "running");
-        assert_eq!(notices[0].result.as_deref(), Some("Continue?"));
+        assert_eq!(
+            notices[0]
+                .result
+                .as_ref()
+                .and_then(|result| result.string_at("")),
+            Some("Continue?")
+        );
         let row = registry.get(id).await.unwrap();
         assert_eq!(row.base().status, TaskStatus::Running);
         assert!(!row.base().notified);
@@ -6789,7 +7566,10 @@ mod adopted_workflow_scope_test {
             .expect("completed terminal notification");
         assert_eq!(notification.status, "completed");
         assert_eq!(
-            notification.result.as_deref(),
+            notification
+                .result
+                .as_ref()
+                .and_then(|result| result.string_at("")),
             Some(r#"{"ok":true,"host_checked":true}"#)
         );
         assert!(notification.error.is_none());

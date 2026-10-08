@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use lingxi_core::host::read_auto_allow::ReadAutoAllow;
-use serde_json::json;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use crate::policy::PermissionPolicy;
 use crate::result::{PermissionDecisionReason, PermissionResult};
@@ -105,7 +105,11 @@ impl ReadAutoAllow for PolicyReadAutoAllow {
             return false;
         }
         // `qE(e, n)` — the non-prompting evaluation of a Read of this path.
-        let result = self.policy.authorize("Read", &json!({ "file_path": path }));
+        let empty =
+            Utf16JsonProjection::parse("{}").expect("generated empty Read input is valid JSON");
+        let input = crate::source_input::with_generated_string_field(&empty, "file_path", path)
+            .expect("generated UTF-8 Read path is a valid JSON field");
+        let result = self.policy.authorize("Read", &input);
         decision_permits_read(&result, self.policy.mode)
     }
 }
@@ -145,7 +149,7 @@ mod tests {
             reason,
             prompt: crate::result::PermissionPrompt {
                 title: String::new(),
-                message: String::new(),
+                message: String::new().into(),
                 options: vec![],
             },
             pending_classifier_check: None,

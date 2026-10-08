@@ -8,7 +8,9 @@
 
 use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
+use lingxi_core::host::SourceToolWireDefinition;
 use lingxi_core::host::WorktreeHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, ConversationMessage, McpConnectionId, SessionId};
 use memory::snapshot::AgentMemorySnapshot;
 use std::path::PathBuf;
@@ -23,12 +25,18 @@ use tool_api::content_replacement::ContentReplacementState;
 /// re-allocating.
 #[derive(Clone)]
 pub struct SubagentContext {
+    /// Native query-function depth for this agent's next request. This is
+    /// separate from recursive Agent spawn depth and is inherited from the
+    /// actual query path that launched it.
+    pub native_query_depth: u32,
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
     /// Shared registry used for recipient-scoped notification folding.
     pub task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
+    /// Host-trusted caller/origin snapshot inherited by nested Agent launches.
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
     /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm
     /// (claude-code `TeammateContext.agentName`, surfaced via `getAgentName()`).
     /// For a teammate this is its human name (e.g. `"researcher"`), NOT the
@@ -127,7 +135,7 @@ pub struct SubagentContext {
     /// `None` ⇒ a fresh spawn, seeded as before.
     pub resumed_history: Option<Vec<ConversationMessage>>,
     /// Pre-rendered system prompt (post template + frontmatter expansion).
-    pub rendered_system_prompt: Option<Arc<str>>,
+    pub rendered_system_prompt: Option<Arc<Utf16JsonProjection>>,
     /// Fixed engine-owned mobile runtime reminder for a fresh child. Rendered
     /// after this spawn's tool policy is resolved, so shell details are exposed
     /// only when `Shell` is in the child's actual advertised tool set. The
@@ -137,6 +145,12 @@ pub struct SubagentContext {
     /// Per-spawn guest workspace reminder, kept separate from the stable mobile
     /// runtime prefix because explicit cwd/worktree isolation can vary.
     pub mobile_runtime_workspace_reminder: Option<Arc<str>>,
+    /// Resolved user context and per-agent lazy instruction cursor.
+    pub instruction_context: lingxi_core::host::instructions::InstructionContext,
+    /// Explicit fork userContext overrides bypass omitClaudeMd selection.
+    pub instruction_context_is_override: bool,
+    pub instruction_provider:
+        Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped
     /// in a `Mutex` so the tool layer can mutate it across awaits.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
@@ -148,12 +162,13 @@ pub struct SubagentContext {
     /// a specific provider (the dual-LLM candidate's resolved profile). Threaded
     /// from [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_profile`] by the
     /// spawner; the runner passes it as the `profile` arg of the api client's
-    /// `messages_create_*_in` methods. `None` ⇒ default/unscoped provider
-    /// resolution (the legacy single-provider behavior).
+    /// typed streaming request. `None` selects the host's current default
+    /// provider route.
     pub model_profile: Option<String>,
-    /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
-    /// loop. `None` keeps the legacy stub behavior (no real API calls) for
-    /// back-compat with callers that haven't wired an API client yet.
+    /// Managed model restriction snapshot used to validate a provider-admitted
+    /// server fallback before the child accepts its response. This carries no
+    /// provider catalog; `None` means the host supplied no restriction.
+    pub server_fallback_model_enforcement: Option<llm_runtime::model::allowlist::ModelEnforcement>,
     /// The refusal-fallback CHAIN this run may walk when the model refuses.
     ///
     /// claude-code runs subagents through the same query generator as the main
@@ -161,6 +176,8 @@ pub struct SubagentContext {
     /// the chain is handed down explicitly. Empty (the default) means a refusal
     /// ends the run, which is what this port did for every subagent before.
     pub refusal_fallback_chain: Vec<String>,
+    /// Model API for the multi-turn runner. `None` is an unconfigured host
+    /// and fails before instruction discovery or startup writes.
     pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
     /// Tool dispatch seam inherited from the parent via
     /// [`lingxi_core::host::subagent_spawn::SubagentInheritance`]. `None` means the agent
@@ -198,12 +215,16 @@ pub struct SubagentContext {
     /// built-ins from [`crate::builtins`], overridden by the file catalog), so
     /// the policy is per-agent: a read-only agent narrows this advertised set
     /// AND `allowed_tools` together, while `general-purpose` keeps the full set.
-    pub tool_schemas: Vec<serde_json::Value>,
+    pub tool_schemas: Vec<SourceToolWireDefinition>,
     /// Structured-output schema (JSON Schema string) forwarded from
     /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::schema`]. When `Some`, the
     /// runner injects a forced `StructuredOutput` tool and returns the model's
     /// tool input as the result. `None` ⇒ free-form text output.
     pub schema: Option<String>,
+    /// Host-owned Source JSON Schema validator for schema-bearing runs. Missing
+    /// service configuration is a setup error; validation is never skipped.
+    pub structured_output_validator:
+        Option<Arc<dyn lingxi_core::host::json_schema_validator::JsonSchemaValidator>>,
     /// Per-turn `tool_choice` policy applied while [`Self::schema`] is `Some`,
     /// forwarded from
     /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
@@ -294,4 +315,22 @@ pub struct SubagentContext {
     /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_attempt`]:
     /// `main` grows this struct from the front.
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
+    /// Private reporting contract and runtime-minted run capability.
+    pub handback: Option<Arc<crate::handback::HandbackRuntime>>,
+    /// One-shot cold-restore publication barrier, independent of tool opt-in.
+    pub handback_restore_start: Option<lingxi_core::host::handback::HandbackRestoreParticipant>,
+}
+
+/// Held outside the runner future so cancellation before its first poll still
+/// releases a published cold-restore slot. Arrival is idempotent.
+pub(crate) struct HandbackRestoreStartupGuard(
+    pub Option<lingxi_core::host::handback::HandbackRestoreParticipant>,
+);
+
+impl Drop for HandbackRestoreStartupGuard {
+    fn drop(&mut self) {
+        if let Some(participant) = &self.0 {
+            participant.release_failed();
+        }
+    }
 }

@@ -5,18 +5,21 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::share::{ShareError, SharePayload, ShareResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::BuiltinToolContext;
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "share";
@@ -35,14 +38,14 @@ impl ShareTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object",
         "properties": {
             "text": { "type": "string" },
             "url": { "type": "string" }
         }
-    })
+    }))
 });
 
 fn map_share_err(e: &ShareError) -> ToolError {
@@ -54,23 +57,31 @@ impl Tool for ShareTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.share.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "share tool — user confirms in the native share sheet".into(),
@@ -81,20 +92,20 @@ impl Tool for ShareTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Presenting the native share sheet".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Share text or a URL via the device's native share sheet.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        if input.get("text").is_none() && input.get("url").is_none() {
+        if input.get_property("text").is_none() && input.get_property("url").is_none() {
             return Err(ValidationError(
                 "provide at least one of `text` or `url`".into(),
             ));
@@ -104,7 +115,7 @@ impl Tool for ShareTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -115,21 +126,27 @@ impl Tool for ShareTool {
 
         let payload = SharePayload {
             text: input
-                .get("text")
-                .and_then(Value::as_str)
+                .get_property("text")
+                .and_then(|value| value.as_str())
                 .map(str::to_string),
             image_bytes: None,
-            url: input.get("url").and_then(Value::as_str).map(str::to_string),
+            url: input
+                .get_property("url")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         };
         let outcome = share.share(payload).await.map_err(|e| map_share_err(&e))?;
 
         Ok(ToolCallResult {
-            data: json!({ "shared": matches!(outcome, ShareResult::Success) }),
+            data: generated_projection(
+                &json!({ "shared": matches!(outcome, ShareResult::Success) }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

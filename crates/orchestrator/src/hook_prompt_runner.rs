@@ -26,7 +26,8 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
-use lingxi_core::types::{ConversationMessage, MessageId};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock as CoreContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 
 use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
@@ -135,18 +136,47 @@ impl ApiClientHookPromptRunner {
     /// `extractTextContent(response.message.content)`; `execPromptHook.ts:105`).
     /// `Text` and `ConnectorText` blocks contribute; tool-use / reasoning blocks
     /// are ignored, matching `extractTextContent`'s text-only projection.
-    fn extract_text(response: &HistoryResponse) -> String {
-        let mut out = String::new();
+    fn extract_text(response: &HistoryResponse) -> Utf16JsonProjection {
+        let mut units = Vec::new();
         for block in &response.content {
             match block {
-                LlmContentBlock::Text { text, .. } => out.push_str(text),
+                LlmContentBlock::Text { text, .. } => units.extend(text.encode_utf16()),
+                LlmContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => units.extend(utf16_code_units),
                 LlmContentBlock::ConnectorText { connector_text, .. } => {
-                    out.push_str(connector_text);
+                    units.extend(connector_text.encode_utf16());
                 }
                 _ => {}
             }
         }
-        out
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("response text display is derived from exact UTF-16 units")
+    }
+
+    fn user_message_from_projection(prompt: &Utf16JsonProjection) -> ConversationMessage {
+        let text = prompt
+            .string_at("")
+            .expect("prompt runner input is a string projection")
+            .to_owned();
+        let utf16_code_units = prompt
+            .string_units("")
+            .expect("prompt runner input is a string projection");
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![CoreContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        }
     }
 
     /// Map an [`LlmError`] to a [`PromptHookError`]. A transport timeout becomes
@@ -154,7 +184,7 @@ impl ApiClientHookPromptRunner {
     /// path); every other failure is a [`PromptHookError::Query`]
     /// (`outcome: 'non_blocking_error'`).
     fn map_error(err: LlmError) -> PromptHookError {
-        match err {
+        match err.classification_source() {
             LlmError::Transport { ref message }
                 if message.contains("timeout") || message.contains("Timeout") =>
             {
@@ -162,7 +192,7 @@ impl ApiClientHookPromptRunner {
                 // so we synthesize a zero-duration timeout for the hook error.
                 PromptHookError::Timeout(std::time::Duration::ZERO)
             }
-            other => PromptHookError::Query(other.to_string()),
+            _ => PromptHookError::Query(err.to_string()),
         }
     }
 }
@@ -204,6 +234,7 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
         if content.is_empty() {
             content.push(lingxi_core::types::ContentBlock::Text {
                 text: "[Thinking removed]".into(),
+                citations: None,
             });
         }
     }
@@ -211,7 +242,7 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
 
 #[async_trait]
 impl HookPromptRunner for ApiClientHookPromptRunner {
-    async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+    async fn run(&self, req: PromptHookRequest) -> Result<Utf16JsonProjection, PromptHookError> {
         let session = match self.session.get() {
             Some(session) => session.session_model().await,
             None => None,
@@ -242,37 +273,41 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
             } else {
                 bound_hook_transcript(&transcript, budget, &message_grouping)
             };
-            messages.push(ConversationMessage::user(
-                MessageId::new(),
-                req.prompt.clone(),
-            ));
+            messages.push(Self::user_message_from_projection(&req.prompt));
             let response = self
                 .api
-                .messages_create_hook_prompt(
-                    &model,
-                    profile.as_deref(),
-                    &req.system_prompt,
-                    messages,
-                )
+                .messages_create(crate::OrchestratorApiRequest::HookPrompt(
+                    crate::HookPromptRequest::new(
+                        &model,
+                        profile.as_deref(),
+                        &req.system_prompt,
+                        messages,
+                    ),
+                ))
                 .await;
             let response = match response {
-                Err(LlmError::ContextOverflow { .. }) if !transcript.is_empty() => {
+                Err(error)
+                    if !transcript.is_empty()
+                        && matches!(
+                            error.classification_source(),
+                            LlmError::ContextOverflow { .. }
+                        ) =>
+                {
                     let mut messages = if last_usage <= budget / 2 {
                         transcript.clone()
                     } else {
                         bound_hook_transcript(&transcript, budget / 2, &message_grouping)
                     };
-                    messages.push(ConversationMessage::user(
-                        MessageId::new(),
-                        req.prompt.clone(),
-                    ));
+                    messages.push(Self::user_message_from_projection(&req.prompt));
                     self.api
-                        .messages_create_hook_prompt(
-                            &model,
-                            profile.as_deref(),
-                            &req.system_prompt,
-                            messages,
-                        )
+                        .messages_create(crate::OrchestratorApiRequest::HookPrompt(
+                            crate::HookPromptRequest::new(
+                                &model,
+                                profile.as_deref(),
+                                &req.system_prompt,
+                                messages,
+                            ),
+                        ))
                         .await
                 }
                 other => other,
@@ -311,7 +346,7 @@ async fn load_hook_transcript(
     let text = match tokio::fs::read_to_string(path).await {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(hooks::PromptHookTranscript::default())
+            return Ok(hooks::PromptHookTranscript::default());
         }
         Err(e) => {
             return Err(PromptHookError::Query(format!(
@@ -336,10 +371,10 @@ async fn load_hook_transcript(
         .rev()
         .find(|r| {
             r.message_type == "assistant"
-                && r.message.get("usage").is_some()
-                && r.message.get("model").and_then(serde_json::Value::as_str) != Some("<synthetic>")
+                && r.message.get_property("usage").is_some()
+                && r.message.string_at("/model") != Some("<synthetic>")
         })
-        .and_then(|r| r.message.get("usage"));
+        .and_then(|r| r.message.subprojection("/usage").ok());
     let last_usage = usage
         .map(|usage| {
             [
@@ -350,13 +385,11 @@ async fn load_hook_transcript(
             ]
             .iter()
             .map(|key| {
-                usize::try_from(
-                    usage
-                        .get(*key)
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                )
-                .unwrap_or(usize::MAX)
+                usage
+                    .number_at(&format!("/{key}"))
+                    .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+                    .map(|value| value as usize)
+                    .unwrap_or(0)
             })
             .fold(0usize, usize::saturating_add)
         })
@@ -504,12 +537,15 @@ mod tests {
             content: vec![LlmContentBlock::Text {
                 text: body.into(),
                 cache_control: None,
+                citations: None,
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
             usage: Usage::default(),
             cost: None,
-            provider_metadata: serde_json::Value::Null,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+                .expect("null is valid JSON"),
+            resumable: None,
         }
     }
 
@@ -531,12 +567,28 @@ mod tests {
     impl OrchestratorApiClient for MockApi {
         async fn messages_create(
             &self,
-            model: &str,
-            profile: Option<&str>,
-            system: Option<&str>,
-            msgs: Vec<ConversationMessage>,
-            _tools: Vec<serde_json::Value>,
+            request: crate::OrchestratorApiRequest,
         ) -> Result<HistoryResponse, LlmError> {
+            let (request_model, request_profile, request_system, msgs, _tools) = match request {
+                crate::OrchestratorApiRequest::Main(request) => (
+                    request.model,
+                    request.profile,
+                    request.system.map(|system| system.display_text()),
+                    request.messages,
+                    request.tools,
+                ),
+                crate::OrchestratorApiRequest::HookPrompt(request) => (
+                    request.model,
+                    request.profile,
+                    Some(request.system),
+                    request.messages,
+                    Vec::new(),
+                ),
+            };
+            let model = request_model.as_str();
+            let profile = request_profile.as_deref();
+            let system = request_system.as_deref();
+
             self.recorded.lock().unwrap().push((
                 model.to_string(),
                 profile.map(str::to_owned),
@@ -601,7 +653,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(usage, 15);
         assert!(
-            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text == "tests passed"))
+            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], lingxi_core::types::ContentBlock::Text { text, .. } if text == "tests passed"))
         );
     }
 
@@ -613,8 +665,10 @@ mod tests {
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "latest".into(),
+                    citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             },
             ConversationMessage::user(MessageId::new(), "tool result".into()),
         ];
@@ -625,7 +679,7 @@ mod tests {
             panic!("truncation preface")
         };
         assert!(
-            matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text.contains("1 earlier messages omitted"))
+            matches!(&content[0], lingxi_core::types::ContentBlock::Text { text, .. } if text.contains("1 earlier messages omitted"))
         );
         assert!(bound_hook_transcript(&[], 1, &Default::default()).is_empty());
     }
@@ -635,8 +689,12 @@ mod tests {
         let id = MessageId::new();
         let assistant = |text: &str| ConversationMessage::Assistant {
             id,
-            content: vec![lingxi_core::types::ContentBlock::Text { text: text.into() }],
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: None,
+            resumable: None,
         };
         let messages = vec![
             ConversationMessage::user(MessageId::new(), "old".repeat(100)),
@@ -699,8 +757,10 @@ mod tests {
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "just completed".into(),
+                    citations: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             },
         ];
         request.transcript = Some(hooks::PromptHookTranscript {
@@ -725,7 +785,7 @@ mod tests {
 
         let out = runner.run(req("is this safe?", None)).await.unwrap();
 
-        assert_eq!(out, r#"{"ok": true}"#);
+        assert_eq!(out.string_at(""), Some(r#"{"ok": true}"#));
         let recorded = api.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         let (model, profile, system, msgs) = &recorded[0];
@@ -739,13 +799,62 @@ mod tests {
             ConversationMessage::User { content, .. } => {
                 assert_eq!(
                     content,
-                    &vec![lingxi_core::types::ContentBlock::Text {
-                        text: "is this safe?".into()
+                    &vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        text: "is this safe?".into(),
+                        utf16_code_units: "is this safe?".encode_utf16().collect(),
+                        citations: None
                     }]
                 );
             }
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extracted_text_retains_lone_surrogate_units() {
+        let response = HistoryResponse {
+            id: "msg_1".into(),
+            model: "claude-haiku-4-5".into(),
+            content: vec![LlmContentBlock::TextJsUtf16 {
+                text: "�".into(),
+                utf16_code_units: vec![0xd800],
+                citations: None,
+                cache_control: None,
+            }],
+            stop_reason: None,
+            stop_details: None,
+            usage: Usage::default(),
+            cost: None,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null").unwrap(),
+            resumable: None,
+        };
+        let extracted = ApiClientHookPromptRunner::extract_text(&response);
+        assert_eq!(extracted.string_units(""), Some(vec![0xd800]));
+    }
+
+    #[tokio::test]
+    async fn prompt_user_message_retains_exact_source_units() {
+        let api = MockApi::text("claude-haiku-4-5", r#"{"ok": true}"#);
+        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let mut request = req("safe", None);
+        request.prompt = Utf16JsonProjection::parse(r#""safe \ud800""#).unwrap();
+
+        runner.run(request).await.unwrap();
+
+        let recorded = api.recorded.lock().unwrap();
+        let ConversationMessage::User { content, .. } = &recorded[0].3[0] else {
+            panic!("expected the prompt user message")
+        };
+        let CoreContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &content[0]
+        else {
+            panic!("expected source-backed prompt text")
+        };
+        assert_eq!(
+            utf16_code_units,
+            &"safe ".encode_utf16().chain([0xd800]).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -886,9 +995,11 @@ mod tests {
                         },
                         lingxi_core::types::ContentBlock::Text {
                             text: "tests passed".into(),
+                            citations: None,
                         },
                     ],
                     stop_reason: None,
+                    resumable: None,
                 },
                 ConversationMessage::user(MessageId::new(), "and again".into()),
                 ConversationMessage::Assistant {
@@ -903,6 +1014,7 @@ mod tests {
                         },
                     ],
                     stop_reason: None,
+                    resumable: None,
                 },
             ],
             last_usage_tokens: 10,
@@ -925,7 +1037,8 @@ mod tests {
         assert_eq!(
             assistant_content(1),
             vec![lingxi_core::types::ContentBlock::Text {
-                text: "tests passed".into()
+                text: "tests passed".into(),
+                citations: None
             }]
         );
         // Signed and redacted traces go too: the evaluator judges text, and a
@@ -933,7 +1046,8 @@ mod tests {
         assert_eq!(
             assistant_content(3),
             vec![lingxi_core::types::ContentBlock::Text {
-                text: "[Thinking removed]".into()
+                text: "[Thinking removed]".into(),
+                citations: None
             }]
         );
     }

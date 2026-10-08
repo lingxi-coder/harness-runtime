@@ -148,17 +148,22 @@ impl BuiltinCommandHandler for PowerupHandler {
                 Ok(unlocked) => unlocked,
                 Err(error) => {
                     return CommandResult::Done {
-                        display: Some(format!("/powerup: {error}")),
+                        display: Some((format!("/powerup: {error}")).into()),
                     };
                 }
             },
             None => BTreeSet::new(),
         };
 
-        let raw = args.raw_args.trim();
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some((USAGE.to_string()).into()),
+            };
+        };
+        let raw = raw_args.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
             return CommandResult::Done {
-                display: Some(render_index(&unlocked)),
+                display: Some((render_index(&unlocked)).into()),
             };
         }
 
@@ -167,12 +172,12 @@ impl BuiltinCommandHandler for PowerupHandler {
         if first.eq_ignore_ascii_case("done") || first.eq_ignore_ascii_case("complete") {
             let Some(id) = parts.next() else {
                 return CommandResult::Done {
-                    display: Some(USAGE.to_string()),
+                    display: Some((USAGE.to_string()).into()),
                 };
             };
             if parts.next().is_some() || !is_known_lesson(id) {
                 return CommandResult::Done {
-                    display: Some(USAGE.to_string()),
+                    display: Some((USAGE.to_string()).into()),
                 };
             }
             let was_new = unlocked.insert(id.to_string());
@@ -180,7 +185,7 @@ impl BuiltinCommandHandler for PowerupHandler {
                 if let Some(path) = path.as_deref() {
                     if let Err(error) = write_unlocked(path, &unlocked) {
                         return CommandResult::Done {
-                            display: Some(format!("/powerup: {error}")),
+                            display: Some((format!("/powerup: {error}")).into()),
                         };
                     }
                 }
@@ -192,22 +197,22 @@ impl BuiltinCommandHandler for PowerupHandler {
                 format!("{title} is already done.")
             };
             return CommandResult::Done {
-                display: Some(format!("{prefix}\n\n{}", render_index(&unlocked))),
+                display: Some((format!("{prefix}\n\n{}", render_index(&unlocked))).into()),
             };
         }
 
         if parts.next().is_some() {
             return CommandResult::Done {
-                display: Some(USAGE.to_string()),
+                display: Some((USAGE.to_string()).into()),
             };
         }
         let Some(lesson) = lesson(first) else {
             return CommandResult::Done {
-                display: Some(USAGE.to_string()),
+                display: Some((USAGE.to_string()).into()),
             };
         };
         CommandResult::Done {
-            display: Some(render_detail(lesson, unlocked.contains(lesson.id))),
+            display: Some((render_detail(lesson, unlocked.contains(lesson.id))).into()),
         }
     }
 
@@ -360,9 +365,9 @@ mod tests {
 
     fn args(raw_args: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "powerup".to_string(),
-            raw_args: raw_args.to_string(),
-            positional_args: raw_args.split_whitespace().map(str::to_string).collect(),
+            name: "powerup".into(),
+            raw_args: raw_args.into(),
+            positional_args: raw_args.split_whitespace().map(Into::into).collect(),
         }
     }
 

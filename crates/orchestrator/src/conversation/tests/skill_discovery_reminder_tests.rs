@@ -77,6 +77,7 @@ async fn push_write_pivot(orch: &ConversationOrchestrator) {
             provider_id: None,
         }],
         stop_reason: None,
+        resumable: None,
     };
     orch.session.lock().await.history.push(msg);
 }
@@ -117,6 +118,36 @@ async fn seeded_prefetch_renders_skill_discovery_block() {
          Invoke via Skill(\"<name>\") for complete instructions.\n\
          </system-reminder>"
     );
+}
+
+#[tokio::test]
+async fn skill_discovery_reminder_keeps_exact_description_units() {
+    let description = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        "�".to_owned(),
+        vec![0xd800],
+    )
+    .unwrap();
+    let orch = orch_with_seed(vec![DiscoveredSkill {
+        name: "source-skill".into(),
+        description,
+        short_id: None,
+    }]);
+    push_write_pivot(&orch).await;
+    orch.start_skill_discovery_prefetch().await;
+    let message = orch
+        .skill_discovery_reminder_message()
+        .await
+        .expect("the source skill should be surfaced");
+    let ConversationMessage::User { content, .. } = message else {
+        panic!("skill discovery is a synthetic user message");
+    };
+    let ContentBlock::TextJsUtf16 {
+        utf16_code_units, ..
+    } = &content[0]
+    else {
+        panic!("skill discovery text must retain its source units");
+    };
+    assert!(utf16_code_units.contains(&0xd800));
 }
 
 // (D.4 integration) Non-write iteration (no write-pivot tool) ⇒ inert even

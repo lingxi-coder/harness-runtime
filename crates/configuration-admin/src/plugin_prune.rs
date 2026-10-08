@@ -39,7 +39,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use migrations::settings_update::read_settings_map;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use migrations::settings_update::read_settings_source;
 use serde_json::{Map, Value};
 use telemetry::AnalyticsBus;
 
@@ -317,11 +318,14 @@ pub fn orphan_notice(orphans: &[String], scope_label: &str) -> String {
 }
 
 /// Read a scope's `enabledPlugins` map.
-fn read_enabled(path: &Path) -> Map<String, Value> {
-    read_settings_map(path)
+fn read_enabled(path: &Path) -> Utf16JsonProjection {
+    read_settings_source(path)
         .ok()
-        .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
-        .unwrap_or_default()
+        .and_then(|settings| {
+            settings.get_property("enabledPlugins")?.object_entries()?;
+            settings.subprojection("/enabledPlugins").ok()
+        })
+        .unwrap_or_else(|| Utf16JsonProjection::object(Vec::new()).expect("empty source object"))
 }
 
 /// Remove the orphan records at the scope in-memory; the caller persists first,
@@ -660,6 +664,30 @@ mod tests {
             cwd,
             plugins,
         }
+    }
+
+    #[test]
+    fn enabled_plugins_source_read_keeps_other_lone_utf16_settings() {
+        let e = env();
+        let path = e.home.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"enabledPlugins":{"hello@mymkt":true}}"#,
+        )
+        .unwrap();
+
+        let enabled = read_enabled(&path);
+        assert_eq!(
+            enabled
+                .get_property("hello@mymkt")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool),
+            Some(true)
+        );
+        let settings = read_settings_source(&path).unwrap();
+        assert_eq!(
+            settings.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
     }
 
     /// Materialize a plugin's installPath manifest (`.lingxi-plugin/plugin.json`)

@@ -10,12 +10,20 @@ use serde_json::json;
 #[test]
 fn text_block_round_trip() {
     let mut acc = BlockAccumulator::new();
-    acc.start_block(0, BlockKind::Text).expect("start");
+    acc.start_block(
+        0,
+        BlockKind::Text {
+            citations: None,
+            utf16_code_units: None,
+            initial_text: String::new(),
+        },
+    )
+    .expect("start");
     acc.append_text(0, "hel").expect("append1");
     acc.append_text(0, "lo").expect("append2");
     let completed = acc.stop_block(0).expect("stop");
     match completed {
-        CompletedBlock::Text { text } => assert_eq!(text, "hello"),
+        CompletedBlock::Text { text, .. } => assert_eq!(text, "hello"),
         other => panic!("expected Text, got {other:?}"),
     }
 }
@@ -85,7 +93,15 @@ fn delta_without_start_errors() {
 #[test]
 fn double_stop_errors() {
     let mut acc = BlockAccumulator::new();
-    acc.start_block(0, BlockKind::Text).expect("start");
+    acc.start_block(
+        0,
+        BlockKind::Text {
+            citations: None,
+            utf16_code_units: None,
+            initial_text: String::new(),
+        },
+    )
+    .expect("start");
     acc.stop_block(0).expect("first stop");
     let err = acc.stop_block(0).expect_err("second stop");
     assert!(matches!(err, StreamingError::DoubleStop { index: 0 }));
@@ -94,7 +110,15 @@ fn double_stop_errors() {
 #[test]
 fn type_mismatch_errors() {
     let mut acc = BlockAccumulator::new();
-    acc.start_block(0, BlockKind::Text).expect("start");
+    acc.start_block(
+        0,
+        BlockKind::Text {
+            citations: None,
+            utf16_code_units: None,
+            initial_text: String::new(),
+        },
+    )
+    .expect("start");
     let err = acc.append_json(0, "{}").expect_err("mismatch");
     assert!(matches!(
         err,

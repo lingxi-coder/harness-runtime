@@ -5,6 +5,7 @@ use lingxi_core::host::{
     FileSystem, FusionActivation, FusionPreparedSummary, RuntimeSpawner, SubagentInheritance,
     SubagentSpawnRequest,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -86,11 +87,24 @@ pub trait Task: Send + Sync {
         Err(TaskError::Unsupported)
     }
 
-    /// Deliver a message to a running task. Default implementation rejects.
+    /// Deliver a root-string source projection to a running task. Default
+    /// implementation rejects; handlers must retain the projection's exact
+    /// UTF-16 code units through the task's inbound-message boundary.
     async fn send_message(
         &self,
         _task_id: &str,
-        _message: String,
+        _message: Utf16JsonProjection,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
+    /// Accept a report into a typed peer queue without granting human resume
+    /// authority. Success acknowledges queue admission, not model consumption.
+    async fn send_peer(
+        &self,
+        _task_id: &str,
+        _envelope: lingxi_core::host::handback::HandbackEnvelope,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
         Err(TaskError::Unsupported)
@@ -119,7 +133,7 @@ pub enum TaskSpawnInput {
         /// `'general-purpose'` fallback when the `AgentDefinition` has none).
         subagent_type: String,
         /// Initial prompt.
-        prompt: String,
+        prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
         /// Whether to start backgrounded.
         is_backgrounded: bool,
         /// Originating `tool_use_id` of the spawning Agent tool call, stamped on
@@ -174,7 +188,7 @@ pub enum TaskSpawnInput {
         /// message (`SubagentContext::prompt_messages`) so it has a task to work
         /// on rather than only chatting. Empty ⇒ no initial message (the
         /// teammate parks awaiting the first injected message).
-        description: String,
+        description: Utf16JsonProjection,
     },
     /// Spawn a local workflow.
     LocalWorkflow {
@@ -257,8 +271,12 @@ pub enum TaskSpawnInput {
     },
     /// Spawn a shell stdout event monitor.
     Monitor {
-        /// Shell command to execute.
-        command: String,
+        /// Exact source shell command. It is TextEncoder-lowered only when the
+        /// process runner receives its `ProcessCommand`.
+        command: Utf16JsonProjection,
+        /// Exact source description retained by the task row, model-facing
+        /// records, and notifications.
+        source_description: Utf16JsonProjection,
         /// The sandbox-wrapped form to actually spawn, when the tool's
         /// `shouldUseSandbox` decision said to confine it. `None` ⇒ spawn
         /// `command` unwrapped. `command` stays the raw text so `/tasks` and
@@ -335,6 +353,10 @@ pub struct TaskHandle {
     /// Prepared Fusion identity/duration/panel summary copied into the task
     /// row before `TaskCreated`. `None` for every non-Fusion task.
     pub(crate) fusion_prepared_summary: Option<FusionPreparedSummary>,
+    /// Resolved route of an in-process teammate, captured from its final
+    /// `SubagentContext` before the worker is published. This stays out of
+    /// task spawn input and public task rows.
+    pub(crate) teammate_model_route: Option<(String, Option<String>)>,
     /// One-shot worker activation owned by the registry handoff. Dropping an
     /// unactivated handle cancels handlers whose callback owns a readiness
     /// sender, so a cancelled registry spawn cannot launch partial work.
@@ -352,6 +374,7 @@ impl TaskHandle {
             task_id: task_id.into(),
             cleanup,
             fusion_prepared_summary: None,
+            teammate_model_route: None,
             activation: None,
             fusion_activation: None,
         }
@@ -361,6 +384,18 @@ impl TaskHandle {
     #[must_use]
     pub fn with_fusion_prepared_summary(mut self, summary: FusionPreparedSummary) -> Self {
         self.fusion_prepared_summary = Some(summary);
+        self
+    }
+
+    /// Attach a host-resolved in-process teammate model route for the task
+    /// registry's private snapshot facts.
+    #[must_use]
+    pub(crate) fn with_teammate_model_route(
+        mut self,
+        model: String,
+        profile: Option<String>,
+    ) -> Self {
+        self.teammate_model_route = Some((model, profile));
         self
     }
 

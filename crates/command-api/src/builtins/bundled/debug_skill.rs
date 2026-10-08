@@ -33,7 +33,8 @@
 //! agent is a recorded LingXi divergence (removed on purpose), so the step is
 //! dropped rather than pointed at an agent this port does not register.
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, trim_source_text, BundledPromptFn, PromptPart};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::{Path, PathBuf};
 
 /// Upstream `pe` — how many trailing lines of the log to inline.
@@ -82,7 +83,11 @@ fn tail(path: &Path) -> String {
 
 /// Build the skill body for a given home — pure, so tests need no `set_var`.
 #[must_use]
-pub(crate) fn render(home: &Path, args: &str, project_dir: &Path) -> String {
+pub(crate) fn render(
+    home: &Path,
+    args: &Utf16JsonProjection,
+    project_dir: &Path,
+) -> Utf16JsonProjection {
     let mut out = String::from(
         "# Debug Skill\n\nHelp the user debug an issue they're encountering in this current \
          LingXi session.\n",
@@ -112,38 +117,44 @@ pub(crate) fn render(home: &Path, args: &str, project_dir: &Path) -> String {
         }
     }
 
-    out.push_str(&format!(
-        "\n## Issue Description\n\n{}\n",
-        if args.trim().is_empty() {
-            "The user did not describe a specific issue. Read the debug log and summarize any \
-             errors, warnings, or notable issues."
-        } else {
-            args.trim()
-        }
-    ));
-
-    out.push_str(&format!(
+    let issue = trim_source_text(args);
+    let settings = format!(
         "\n## Settings\n\nRemember that settings are in:\n* user - {}\n* project - {}\n* local - {}\n",
         lingxi_core::settings::loader::user_settings_path()
             .map_or_else(|| "(unresolved)".to_string(), |p| p.display().to_string()),
         lingxi_core::settings::loader::project_settings_path(project_dir).display(),
         lingxi_core::settings::loader::local_settings_path(project_dir).display(),
-    ));
+    );
 
-    out.push_str(&format!(
+    let instructions = format!(
         "\n## Instructions\n\n1. Review the user's issue description\n2. The last {TAIL_LINES} \
          lines show the debug file format. Look for [ERROR] and [WARN] entries, stack traces, and \
          failure patterns across the file\n3. Explain what you found in plain language\n4. Suggest \
          concrete fixes or next steps\n",
-    ));
-    out
+    );
+    if issue.string_units("").is_some_and(|units| units.is_empty()) {
+        out.push_str("\n## Issue Description\n\nThe user did not describe a specific issue. Read the debug log and summarize any \
+                    errors, warnings, or notable issues.\n");
+        out.push_str(&settings);
+        out.push_str(&instructions);
+        out.into()
+    } else {
+        source_concat([
+            PromptPart::Text(&out),
+            PromptPart::Text("\n## Issue Description\n\n"),
+            PromptPart::Source(&issue),
+            PromptPart::Text("\n"),
+            PromptPart::Text(&settings),
+            PromptPart::Text(&instructions),
+        ])
+    }
 }
 
 /// Dynamic prompt builder for `/debug`.
 pub struct DebugPromptFn;
 
 impl BundledPromptFn for DebugPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         render(&lingxi_home_dir(), args, &cwd)
     }
@@ -152,6 +163,14 @@ impl BundledPromptFn for DebugPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
+
+    fn render_display(home: &Path, args: &str, project_dir: &Path) -> String {
+        render(home, &args.into(), project_dir)
+            .string_at("")
+            .unwrap()
+            .to_owned()
+    }
 
     fn temp_home(tag: &str) -> PathBuf {
         let dir =
@@ -178,7 +197,7 @@ mod tests {
     fn the_prompt_quotes_the_current_session_log() {
         let home = temp_home("has-log");
         let log = seed_log(&home, "[INFO] boot\n[ERROR] something broke\n");
-        let out = render(&home, "it crashed", Path::new("/repo"));
+        let out = render_display(&home, "it crashed", Path::new("/repo"));
         assert!(
             out.contains(&log.display().to_string()),
             "must name the log path"
@@ -200,7 +219,7 @@ mod tests {
     #[test]
     fn without_a_log_it_says_so_instead_of_claiming_logging_is_now_on() {
         let home = temp_home("no-log");
-        let out = render(&home, "", Path::new("/repo"));
+        let out = render_display(&home, "", Path::new("/repo"));
         assert!(out.contains("was not started with `--debug`"));
         assert!(out.contains("restart with `lingxi --debug`"));
         assert!(
@@ -224,7 +243,7 @@ mod tests {
                 .as_bytes(),
         )
         .unwrap();
-        let out = render(&home, "", Path::new("/repo"));
+        let out = render_display(&home, "", Path::new("/repo"));
         assert!(out.contains("was not started with `--debug`"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -235,7 +254,7 @@ mod tests {
         let home = temp_home("tail");
         let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
         seed_log(&home, &body);
-        let out = render(&home, "", Path::new("/repo"));
+        let out = render_display(&home, "", Path::new("/repo"));
         assert!(out.contains("line 99"), "the newest line must be present");
         assert!(!out.contains("line 5\n"), "old lines must not be inlined");
         assert!(out.contains("grep for [ERROR]"));
@@ -245,7 +264,7 @@ mod tests {
     #[test]
     fn the_body_is_branded_and_drops_the_removed_agent() {
         let home = temp_home("brand");
-        let out = render(&home, "", Path::new("/repo"));
+        let out = render_display(&home, "", Path::new("/repo"));
         assert!(!out.contains("Claude Code"));
         assert!(
             !out.contains("claude-code-guide"),

@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::clipboard::ClipboardError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -20,6 +21,8 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "clipboard";
@@ -38,15 +41,15 @@ impl ClipboardTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object",
         "properties": {
             "action": { "type": "string", "enum": ["set", "get"] },
             "text": { "type": "string", "description": "Text to write to the clipboard (required for `set`)." }
         },
         "required": ["action"]
-    })
+    }))
 });
 
 fn map_clipboard_err(e: &ClipboardError) -> ToolError {
@@ -63,25 +66,36 @@ impl Tool for ClipboardTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.clipboard.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         // `get` is read-only; `set` mutates external clipboard state. Neither
         // touches workspace files, but `set` is not a pure read.
-        input.get("action").and_then(Value::as_str) == Some("get")
+        input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+            == Some("get")
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "clipboard tool — native OS clipboard access".into(),
@@ -92,22 +106,28 @@ impl Tool for ClipboardTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Accessing the clipboard".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Read or write the device system clipboard (plain text).".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("set") => {
-                let has_text = input.get("text").and_then(Value::as_str).is_some();
+                let has_text = input
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .is_some();
                 if has_text {
                     Ok(())
                 } else {
@@ -121,7 +141,7 @@ impl Tool for ClipboardTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -130,15 +150,15 @@ impl Tool for ClipboardTool {
         })?;
 
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .unwrap_or_default();
 
         let data = match action {
             "set" => {
                 let text = input
-                    .get("text")
-                    .and_then(Value::as_str)
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_string();
                 clipboard
@@ -160,12 +180,13 @@ impl Tool for ClipboardTool {
         };
 
         Ok(ToolCallResult {
-            data,
+            data: generated_projection(&data),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -179,6 +200,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_support::test_json_view;
     use lingxi_core::host::clipboard::Clipboard;
     use std::sync::{Arc, Mutex};
 
@@ -229,8 +251,10 @@ mod tests {
         assert!(!ClipboardTool::new(ctx_with(None)).is_enabled(&static_ctx));
         let tool = ClipboardTool::new(ctx_with(Some(Arc::new(FakeClipboard::default()))));
         assert!(tool.is_enabled(&static_ctx));
-        assert!(tool.is_read_only(&json!({ "action": "get" })));
-        assert!(!tool.is_read_only(&json!({ "action": "set", "text": "hello" })));
+        assert!(tool.is_read_only(&generated_projection(&json!({ "action": "get" }))));
+        assert!(!tool.is_read_only(&generated_projection(
+            &json!({ "action": "set", "text": "hello" })
+        )));
     }
 
     #[tokio::test]
@@ -239,13 +263,16 @@ mod tests {
         let tool = ClipboardTool::new(ctx_with(Some(fake.clone())));
         let res = tool
             .call(
-                json!({ "action": "set", "text": "hello" }),
+                generated_projection(&json!({ "action": "set", "text": "hello" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["set"], true);
+        assert_eq!(
+            res.data.at_pointer("/set").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(fake.last.lock().unwrap().clone().as_deref(), Some("hello"));
     }
 
@@ -258,13 +285,13 @@ mod tests {
         let tool = ClipboardTool::new(ctx_with(Some(fake)));
         let res = tool
             .call(
-                json!({ "action": "get" }),
+                generated_projection(&json!({ "action": "get" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["text"], "copied");
+        assert_eq!(res.data.string_at("/text"), Some("copied"));
     }
 
     #[tokio::test]
@@ -272,7 +299,7 @@ mod tests {
         let tool = ClipboardTool::new(ctx_with(None));
         let err = tool
             .call(
-                json!({ "action": "get" }),
+                generated_projection(&json!({ "action": "get" })),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
@@ -287,11 +314,11 @@ mod tests {
         let tool = ClipboardTool::new(ctx_with(Some(fake)));
         let err = tool
             .validate_input(
-                &json!({ "action": "set" }),
+                &generated_projection(&json!({ "action": "set" })),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await
             .unwrap_err();
-        assert!(err.0.contains("text"));
+        assert!(err.0.string_at("").unwrap().contains("text"));
     }
 }

@@ -36,10 +36,18 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use permission::gate::{PermissionDecision, PermissionGate};
 use permission::loader::permission_rules_from_settings_json;
 use permission::{PermissionMode, PermissionPolicy, PermissionRuleSource, PolicyPermissionGate};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
+
+macro_rules! source_json {
+    ($($tokens:tt)+) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+))
+            .expect("test permission input is valid JSON")
+    };
+}
 
 // ============================================================================
 // Helpers (mirror parity_mcp_invocation.rs)
@@ -148,7 +156,7 @@ fn deny_rule_on_fqn_does_not_collide_with_builtin_short_name() {
     // The FQN is denied by the rule (exact tool-name match).
     assert!(
         matches!(
-            policy.authorize("mcp__mock__a", &serde_json::json!({ "x": 1 })),
+            policy.authorize("mcp__mock__a", &source_json!({ "x": 1 })),
             permission::result::PermissionResult::Deny { .. }
         ),
         "deny rule mcp__mock__a must deny the FQN tool_use"
@@ -158,7 +166,7 @@ fn deny_rule_on_fqn_does_not_collide_with_builtin_short_name() {
     // Default-mode ask (no rule matched), proving the namespaces don't collide.
     assert!(
         matches!(
-            policy.authorize("a", &serde_json::json!({})),
+            policy.authorize("a", &source_json!({})),
             permission::result::PermissionResult::Ask { .. }
         ),
         "the FQN deny rule must NOT deny a builtin short-named `a`"
@@ -173,7 +181,7 @@ async fn gate_denies_fqn_but_not_builtin_short_name() {
     let gate = policy_gate(r#"{ "permissions": { "deny": ["mcp__mock__a"] } }"#, inner);
 
     // FQN → Deny (rule), with a rendered reason.
-    match gate.check("mcp__mock__a", &serde_json::json!({})).await {
+    match gate.check("mcp__mock__a", &source_json!({})).await {
         PermissionDecision::Deny { reason } => {
             assert!(
                 reason.contains("mcp__mock__a"),
@@ -187,7 +195,7 @@ async fn gate_denies_fqn_but_not_builtin_short_name() {
     // delegated to the inner gate, which allows. The key parity point: it is NOT
     // blocked by the FQN deny rule.
     assert_eq!(
-        gate.check("a", &serde_json::json!({})).await,
+        gate.check("a", &source_json!({})).await,
         PermissionDecision::Allow,
         "builtin `a` must not be blocked by the mcp__mock__a deny rule"
     );
@@ -200,7 +208,7 @@ async fn allow_rule_on_fqn_permits_it() {
     let inner = Arc::new(NoOpPermissionGate);
     let gate = policy_gate(r#"{ "permissions": { "allow": ["mcp__mock__b"] } }"#, inner);
     assert_eq!(
-        gate.check("mcp__mock__b", &serde_json::json!({})).await,
+        gate.check("mcp__mock__b", &source_json!({})).await,
         PermissionDecision::Allow,
         "exact allow rule on the FQN must permit it"
     );
@@ -233,7 +241,7 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -310,7 +318,7 @@ async fn allowed_fqn_tool_use_reaches_server_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

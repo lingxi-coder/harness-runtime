@@ -7,6 +7,7 @@
 //! memory file paths to surface in the next prompt.
 
 use crate::file::{MemoryError, MemoryFile};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sidequery::{QuerySource, SideQueryClient, SideQueryRequest};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -68,6 +69,7 @@ impl MemorySelector {
             model: self.selector_model.clone(),
             profile: None,
             system_prompt: Some("You select memory files relevant to the query.".into()),
+            system_prompt_input: None,
             messages: vec![lingxi_core::types::ConversationMessage::user(
                 lingxi_core::types::MessageId::new(),
                 prompt,
@@ -229,18 +231,19 @@ fn truncate_with_ascii_ellipsis(input: String, max_chars: usize) -> String {
     truncated
 }
 
-fn parse_filenames(value: Option<&serde_json::Value>) -> Vec<String> {
-    let Some(v) = value else {
+fn parse_filenames(value: Option<&Utf16JsonProjection>) -> Vec<String> {
+    let Some(value) = value else {
         return Vec::new();
     };
-    v.get("filenames")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(std::string::ToString::to_string))
-                .collect()
+    let Some(length) = value.array_len("/filenames") else {
+        return Vec::new();
+    };
+    (0..length)
+        .filter_map(|index| {
+            let units = value.string_units(&format!("/filenames/{index}"))?;
+            String::from_utf16(&units).ok()
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 #[cfg(test)]
@@ -302,7 +305,10 @@ mod tests {
         async fn query(&self, _req: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
             Ok(SideQueryResponse {
                 text: None,
-                structured: Some(self.0.clone()),
+                structured: Some(
+                    Utf16JsonProjection::from_serde_value(&self.0)
+                        .expect("test response is valid JSON"),
+                ),
                 tool_calls: Vec::new(),
                 usage: cost::Usage::default(),
                 stop_reason: Some("end_turn".into()),
@@ -390,5 +396,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selected, vec![PathBuf::from("/project/shared.md")]);
+    }
+
+    #[test]
+    fn structured_filename_with_unpaired_utf16_is_rejected_without_lossy_path() {
+        let response = Utf16JsonProjection::parse(r#"{"filenames":["/project/\ud800.md"]}"#)
+            .expect("test source is valid JSON");
+        assert!(parse_filenames(Some(&response)).is_empty());
     }
 }

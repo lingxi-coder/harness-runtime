@@ -29,7 +29,9 @@ pub(super) fn captured_prices(
             || name == &route.pricing_model.billing_model
     });
     let explicit = declared.is_some();
-    if configured.billing_mode == lingxi_core::host::ModelBillingMode::Subscription && !explicit {
+    if configured.billing_mode == Some(lingxi_core::host::ModelBillingMode::Subscription)
+        && !explicit
+    {
         return Err("subscription requires explicit attempt pricing".into());
     }
     let (mut price, resolution) = catalog
@@ -199,11 +201,7 @@ pub(super) fn quote(
     ),
     String,
 > {
-    quote_body(
-        route,
-        prepared.route.protocol.clone(),
-        &prepared.provider_request,
-    )
+    quote_body(route, prepared.route.protocol, &prepared.provider_request)
 }
 
 pub(super) fn quote_body(
@@ -239,28 +237,29 @@ pub(super) fn quote_body(
         return Err("registered attempts require canonical JSON HTTP transport".into());
     }
     let body = &request.body_json;
-    if !body.is_object() || body.get("web_search_options").is_some() {
+    if !body.is_root_object() || body.raw_source_at("/web_search_options").is_some() {
         return Err("unsupported provider-native request configuration".into());
     }
-    if let Some(tools) = body.get("tools") {
-        let tools = tools.as_array().ok_or("invalid tools body")?;
-        for tool in tools {
-            let ordinary = tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
-                || (tool.get("type").is_none()
-                    && tool.get("name").is_some()
-                    && tool.get("input_schema").is_some())
-                || (tool.as_object().is_some_and(|value| value.len() == 1)
-                    && tool.get("functionDeclarations").is_some());
+    if let Some(tools) = body.payload_at("/tools") {
+        let length = tools.array_len("").ok_or("invalid tools body")?;
+        for index in 0..length {
+            let tool = tools.array_item(index).ok_or("invalid tools body")?;
+            let ordinary = tool.string_at("/type").as_deref() == Some("function")
+                || (tool.raw_source_at("/type").is_none()
+                    && tool.raw_source_at("/name").is_some()
+                    && tool.raw_source_at("/input_schema").is_some())
+                || (tool.object_len("") == Some(1)
+                    && tool.raw_source_at("/functionDeclarations").is_some());
             if !ordinary {
                 return Err("unbounded provider-native billable tools are unsupported".into());
             }
         }
     }
     let limits = [
-        body.get("max_tokens"),
-        body.get("max_completion_tokens"),
-        body.get("max_output_tokens"),
-        body.pointer("/generationConfig/maxOutputTokens"),
+        body.payload_at("/max_tokens"),
+        body.payload_at("/max_completion_tokens"),
+        body.payload_at("/max_output_tokens"),
+        body.payload_at("/generationConfig/maxOutputTokens"),
     ]
     .into_iter()
     .flatten()
@@ -269,7 +268,7 @@ pub(super) fn quote_body(
         return Err("one unambiguous output limit required".into());
     }
     let output = limits[0]
-        .as_u64()
+        .unsigned_integer_at("")
         .filter(|value| *value > 0)
         .ok_or("finite output limit required")?;
     if output > u64::from(route.output_cap) {
@@ -292,11 +291,11 @@ pub(super) fn quote_body(
         return Err("canonical request exceeds captured input limit".into());
     }
     let speed = body
-        .get("speed")
-        .or_else(|| body.get("service_tier"))
-        .map(|speed| speed.as_str().ok_or("invalid effective speed"))
+        .payload_at("/speed")
+        .or_else(|| body.payload_at("/service_tier"))
+        .map(|speed| speed.string_at("").ok_or("invalid effective speed"))
         .transpose()?;
-    let price = match speed {
+    let price = match speed.as_deref() {
         None if route.default_fast => route.fast.clone().ok_or("missing default fast tier")?,
         None | Some("standard" | "default") => route.pricing.clone(),
         Some("fast" | "priority") => route.fast.clone().ok_or("missing pinned fast tier")?,

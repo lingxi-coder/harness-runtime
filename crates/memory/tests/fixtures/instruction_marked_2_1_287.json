@@ -1,0 +1,627 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "helper_runtime": "Bun 1.3.11",
+  "sourceByteRanges": [
+    {
+      "start": 184844122,
+      "end": 184872169,
+      "startMarker": "function Lw()",
+      "endMarker": "class _d{",
+      "sha256": "3adcda7282def0e175da80e78b8df5999acd4dab6de9d19364347bff76174353"
+    },
+    {
+      "start": 181980903,
+      "end": 181980962,
+      "startMarker": "function Ww(",
+      "endMarker": "function jE(",
+      "sha256": "d3e9ef9467bfae46f07d9d9902ef5ab3fe765254dccf1ac6eea35821ab49db65"
+    },
+    {
+      "start": 181983661,
+      "end": 181984246,
+      "startMarker": "function DH(",
+      "endMarker": "function z(",
+      "sha256": "0fdf8553632c259791a4708c1b4f7e1af186930238a22ab05bb584ec85c1c125"
+    },
+    {
+      "start": 181985170,
+      "end": 181986914,
+      "startMarker": "var gQ=",
+      "endMarker": "function dht(",
+      "sha256": "122e2f3cea5b79c323ecd75e3f39183845251c76372a4ba2a7fde501263c6727"
+    },
+    {
+      "start": 181986914,
+      "end": 181987891,
+      "startMarker": "function dht(",
+      "endMarker": "function oXn(",
+      "sha256": "195a2861cbeee39fa87e9419a6da6bdeb50a8d9c7299911d45929874fbfa64c0"
+    },
+    {
+      "start": 186421808,
+      "end": 186422615,
+      "startMarker": "var h0n=",
+      "endMarker": "function zI(",
+      "sha256": "beb40709f5bc065070d914d2d52e9ffd5507372cb2264f75c6402c8f64c3f66d"
+    },
+    {
+      "start": 186422648,
+      "end": 186423389,
+      "startMarker": "function y0n(",
+      "endMarker": "function xTo(",
+      "sha256": "f0201c942f59827a8b19a3eef7bf6e8fd256a0ae395ac6db2d7015b60ee6c698"
+    },
+    {
+      "start": 186413531,
+      "end": 186413791,
+      "startMarker": "function cEe(",
+      "endMarker": "var dat=",
+      "sha256": "4524bf2d67fa60130b1166899cb2653e323c93a2bc53ffd96d79549570d10c44"
+    },
+    {
+      "start": 186425510,
+      "end": 186426282,
+      "startMarker": "function v0n(",
+      "endMarker": "var T0n=",
+      "sha256": "1e0951ddd29276ba33c7a66392a3894e5719df3735041142f4a196dff75a0a41"
+    }
+  ],
+  "scope": "Unchanged actual native Rq marked lexer, Hs/DH/Bun.YAML/dht/y0n/uat/cEe/v0n. Path resolver and remote-path guard are controlled; no filesystem acquisition or quoteLossyValues. The native parser decides conditional lexer invocation and rawContent/contentDiffersFromDisk. Tokens are diagnostic native views. Local Bun helper execution, not the native CLI or its embedded runtime. Filenames use the permitted LingXi branding difference.",
+  "cases": [
+    {
+      "name": "comment-token-consumes-following-blank-lines",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before\r\n<!-- hidden -->\r\n\r\n\r\nafter\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before\nafter\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "before\r\n<!-- hidden -->\r\n\r\n\r\nafter\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before\n"
+          },
+          {
+            "type": "html",
+            "raw": "<!-- hidden -->\n\n\n"
+          },
+          {
+            "type": "paragraph",
+            "raw": "after\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-container-keeps-interior-comment",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "<div>\r\n<!-- inside -->\r\n</div>\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "<div>\n<!-- inside -->\n</div>\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "<div>\r\n<!-- inside -->\r\n</div>\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "html",
+            "raw": "<div>\n<!-- inside -->\n</div>\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "interrupted-multiline-code-span",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "`open\r\n<!-- inside -->\r\nclose`\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "`open\nclose`\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "`open\r\n<!-- inside -->\r\nclose`\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "`open\n"
+          },
+          {
+            "type": "html",
+            "raw": "<!-- inside -->\n"
+          },
+          {
+            "type": "paragraph",
+            "raw": "close`\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "standalone-indented-code-keeps-comment",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "    <!-- code -->\r\nnext\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "    <!-- code -->\nnext\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "    <!-- code -->\r\nnext\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "code",
+            "raw": "    <!-- code -->\n"
+          },
+          {
+            "type": "paragraph",
+            "raw": "next\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "inline-comment-keeps-comment",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before <!-- inline -->\r\nnext\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before <!-- inline -->\nnext\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "before <!-- inline -->\r\nnext\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before <!-- inline -->\nnext\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "fenced-code-keeps-comment",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "```\r\n<!-- inside -->\r\n```\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "```\n<!-- inside -->\n```\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "```\r\n<!-- inside -->\r\n```\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "code",
+            "raw": "```\n<!-- inside -->\n```\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unclosed-comment-is-preserved",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "<!-- unclosed\r\nrest\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "<!-- unclosed\nrest\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "<!-- unclosed\r\nrest\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "html",
+            "raw": "<!-- unclosed\nrest\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "comment-residue-keeps-following-blank-line",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "<!-- hidden --> text\r\n\r\nnext\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " text\n\nnext\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "<!-- hidden --> text\r\n\r\nnext\r\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "html",
+            "raw": "<!-- hidden --> text\n\n"
+          },
+          {
+            "type": "paragraph",
+            "raw": "next\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "import-without-comment-keeps-raw-crlf",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before\r\n@child.md\r\nafter\r\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before\r\n@child.md\r\nafter\r\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": [
+            "/repo/child.md"
+          ]
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before\n@child.md\nafter\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-container-does-not-load-import",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "<div>\n@child.md\n</div>\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "<div>\n@child.md\n</div>\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "html",
+            "raw": "<div>\n@child.md\n</div>\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "paragraph-indentation-keeps-comment",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before\n    <!-- code -->\nafter\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before\n    <!-- code -->\nafter\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before\n    <!-- code -->\nafter\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "paragraph-indentation-still-loads-import",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before\n    @child.md\nafter\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before\n    @child.md\nafter\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": [
+            "/repo/child.md"
+          ]
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before\n    @child.md\nafter\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "multiline-code-span-does-not-load-import",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "`before\n@child.md\nafter`\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "`before\n@child.md\nafter`\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "`before\n@child.md\nafter`\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "frontmatter-closing-bom-is-js-whitespace",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "---\npaths: src/**\n---﻿\nbody\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---﻿\nbody\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "body\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "frontmatter-closing-nel-is-not-js-whitespace",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "---\npaths: src/**\n---\nbody\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "\nbody\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\nbody\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "\nbody\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "frontmatter-opening-bom-is-js-whitespace",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "---﻿\npaths: src/**\n---\nbody\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---﻿\npaths: src/**\n---\nbody\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "body\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "multiple-comment-spans-in-one-token",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "<!-- a --><!-- b -->\n\nrest\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "rest\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "<!-- a --><!-- b -->\n\nrest\n"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "html",
+            "raw": "<!-- a --><!-- b -->\n\n"
+          },
+          {
+            "type": "paragraph",
+            "raw": "rest\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "blockquote-comment-keeps-container-raw",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "> <!-- inside -->\n> quote\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "> <!-- inside -->\n> quote\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "blockquote",
+            "raw": "> <!-- inside -->\n> quote\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-comment-keeps-container-raw",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "- <!-- inside -->\n  list\n"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "- <!-- inside -->\n  list\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "list",
+            "raw": "- <!-- inside -->\n  list\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "bare-cr-with-inline-comment-is-normalized",
+      "input": {
+        "path": "/repo/LINGXI.md",
+        "type": "Project",
+        "raw": "before <!-- inline -->\rafter\r"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "before <!-- inline -->\nafter\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "before <!-- inline -->\rafter\r"
+          },
+          "includePaths": []
+        },
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "before <!-- inline -->\nafter\n"
+          }
+        ]
+      }
+    }
+  ]
+}

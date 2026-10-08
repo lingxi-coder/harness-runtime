@@ -1,6 +1,8 @@
 //! Restored sessions can answer /btw without a preceding live turn.
 use lingxi_core::host::{OrchestratorHandle, RecapOutcome};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -11,7 +13,7 @@ use std::sync::{Arc, Mutex};
 struct CaptureClient(
     Mutex<Vec<sidequery::SideQueryRequest>>,
     Option<&'static str>,
-    Vec<serde_json::Value>,
+    Vec<Utf16JsonProjection>,
 );
 #[async_trait::async_trait]
 impl sidequery::SideQueryClient for CaptureClient {
@@ -52,13 +54,13 @@ async fn side_question_prefers_text_over_a_mixed_tool_response() {
     let client = Arc::new(CaptureClient(
         Mutex::new(Vec::new()),
         Some("Answer text"),
-        vec![serde_json::json!({"name": "Read"})],
+        vec![Utf16JsonProjection::parse(r#"{"name":"Read"}"#).unwrap()],
     ));
     let orch = make_orch(client, Arc::new(sidequery::CacheSafeParamsSlot::new()));
 
     assert!(matches!(
-        orch.answer_side_question("What happened?").await.unwrap(),
-        RecapOutcome::Text(text) if text == "Answer text"
+        orch.answer_side_question(&"What happened?".into()).await.unwrap(),
+        RecapOutcome::Text(text) if text.string_at("") == Some("Answer text")
     ));
 }
 
@@ -70,8 +72,8 @@ async fn side_question_surfaces_api_errors_as_text() {
     );
 
     assert!(matches!(
-        orch.answer_side_question("What happened?").await.unwrap(),
-        RecapOutcome::Text(text) if text == "(API error: invalid request: bad request)"
+        orch.answer_side_question(&"What happened?".into()).await.unwrap(),
+        RecapOutcome::Text(text) if text.string_at("") == Some("(API error: invalid request: bad request)")
     ));
 }
 
@@ -142,7 +144,7 @@ async fn side_question_rebuilds_resumed_context_without_writing_slot_or_history(
         state.model_profile = Some("resumed-provider".into());
     }
     assert!(
-        matches!(orch.answer_side_question("Progress?").await.unwrap(), RecapOutcome::Text(text) if text == "Restored progress")
+        matches!(orch.answer_side_question(&"Progress?".into()).await.unwrap(), RecapOutcome::Text(text) if text.string_at("") == Some("Restored progress"))
     );
     assert!(slot.get_last().await.is_none());
     assert_eq!(orch.session().lock().await.history, history);
@@ -151,7 +153,9 @@ async fn side_question_rebuilds_resumed_context_without_writing_slot_or_history(
     assert_eq!(req.model, "resumed-model");
     assert_eq!(req.profile.as_deref(), Some("resumed-provider"));
     assert_eq!(
-        req.system_prompt.as_deref(),
+        req.system_prompt
+            .as_ref()
+            .and_then(|value| value.string_at("")),
         Some("Custom system prompt for resumed session"),
         "fallback must honor the effective custom prompt instead of rebuilding defaults"
     );
@@ -177,7 +181,8 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
         "Frozen prefix".into(),
     )];
     slot.save(sidequery::CacheSafeParams {
-        system_prompt: "frozen system".into(),
+        system_prompt: Arc::new("frozen system".into()),
+        system_prompt_input: Some(SystemPromptInput::custom_prompt("frozen system".into())),
         user_context: Default::default(),
         system_context: Default::default(),
         user_context_message: None,
@@ -192,11 +197,16 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
             custom_system_prompt: None,
             append_system_prompt: None,
         },
-        tools: vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file.",
-            "input_schema": {"type": "object"}
-        })],
+        tools: vec![lingxi_core::host::SourceToolWireDefinition {
+            name: "Read".into(),
+            description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Read a file."),
+            input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"type":"object"}"#,
+            )
+            .unwrap(),
+            strict: false,
+            defer_loading: false,
+        }],
         effort: Some(serde_json::json!("high")),
         fork_context_messages: prefix.clone(),
         transcript_path: None,
@@ -210,32 +220,43 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "New completed answer".into(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         },
         ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "Partial answer".into(),
+                citations: None,
             }],
             stop_reason: None,
+            resumable: None,
         },
     ];
     orch.session().lock().await.history = history.clone();
     let current_model = orch.session().lock().await.model.clone();
-    orch.answer_side_question("Progress?").await.unwrap();
+    orch.answer_side_question(&"Progress?".into())
+        .await
+        .unwrap();
     assert_eq!(slot.get_last().await.unwrap().generation, generation);
     let requests = client.0.lock().unwrap();
-    assert_eq!(requests[0].system_prompt.as_deref(), Some("frozen system"));
+    assert_eq!(
+        requests[0]
+            .system_prompt
+            .as_ref()
+            .and_then(|value| value.string_at("")),
+        Some("frozen system")
+    );
     assert_eq!(requests[0].model, current_model);
     assert_eq!(requests[0].effort, Some(serde_json::json!("medium")));
+    let expected_tools: Vec<llm_runtime::ToolDeclaration> = serde_json::from_str(
+        r#"[{"name":"Read","description":"Read a file.","input_schema":{"type":"object"}}]"#,
+    )
+    .unwrap();
     assert_eq!(
-        requests[0].tools,
-        vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file.",
-            "input_schema": {"type": "object"}
-        })],
+        requests[0].tools, expected_tools,
         "a captured side-query slot must preserve the parent tool schemas"
     );
     assert_eq!(&requests[0].messages[..2], &history[..2]);

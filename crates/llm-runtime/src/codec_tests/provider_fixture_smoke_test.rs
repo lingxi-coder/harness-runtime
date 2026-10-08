@@ -72,14 +72,14 @@ fn assert_openai_events(events: &[HistoryEvent]) {
         HistoryEvent::ContentBlockDelta {
             index: 1,
             delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
-        } if partial_json == "{\"command\":"
+        } if super::fragment_is_text(partial_json, "{\"command\":")
     ));
     assert!(matches!(
         events[5],
         HistoryEvent::ContentBlockDelta {
             index: 1,
             delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
-        } if partial_json == "\"ls\"}"
+        } if super::fragment_is_text(partial_json, "\"ls\"}")
     ));
     assert!(matches!(
         events[6],
@@ -92,7 +92,7 @@ fn assert_openai_events(events: &[HistoryEvent]) {
     assert!(matches!(
         events[8],
         HistoryEvent::MessageDelta {
-            delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None },
+            delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None, resumable: None },
             ..
         } if reason == "tool_use"
     ));
@@ -127,7 +127,7 @@ fn assert_gemini_events(events: &[HistoryEvent]) {
         HistoryEvent::ContentBlockDelta {
             index: 1,
             delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
-        } if partial_json == "{\"command\":\"ls\"}"
+        } if super::fragment_is_text(partial_json, "{\"command\":\"ls\"}")
     ));
     assert!(matches!(
         events[5],
@@ -138,7 +138,7 @@ fn assert_gemini_events(events: &[HistoryEvent]) {
         HistoryEvent::ContentBlockStop { index: 0 }
     ));
     assert!(
-        matches!(events[7], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use")
+        matches!(events[7], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None, resumable: None }, .. } if reason == "tool_use")
     );
     assert_single_message_stop(events);
 }
@@ -186,8 +186,11 @@ fn provider_fixtures_smoke_test() {
     ));
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(
-        decoded.provider_metadata["stop_reason"],
-        serde_json::json!("end_turn")
+        decoded
+            .provider_metadata
+            .string_at("/stop_reason")
+            .as_deref(),
+        Some("end_turn")
     );
     assert_eq!(decoded.usage.counts().input_tokens, 9);
     assert_eq!(decoded.usage.counts().output_tokens, 3);

@@ -53,6 +53,173 @@ use lingxi_core::host::env::is_env_truthy;
 use llm_runtime::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
 
+/// Provider kind that affects Native alias and legacy-model decisions.
+///
+/// This is intentionally not inferred from a profile name or endpoint. A host
+/// must map it from the configured provider identity; unknown/custom providers
+/// stay `Other` until they have an explicit identity source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelProviderKind {
+    /// Anthropic's first-party provider.
+    FirstParty,
+    /// Claude on Amazon Bedrock (`bedrock`, distinct from `anthropicAws`).
+    Bedrock,
+    /// Claude on Vertex.
+    Vertex,
+    /// Claude on Azure AI Foundry.
+    Foundry,
+    /// Explicit Anthropic AWS service provider identity.
+    AnthropicAws,
+    /// Explicit Anthropic Google Cloud provider identity.
+    AnthropicGoogleCloud,
+    /// Anthropic Mantle provider identity.
+    Mantle,
+    /// Explicit Anthropic gateway provider identity.
+    Gateway,
+    /// Other or not-yet-classified provider.
+    #[default]
+    Other,
+}
+
+impl ModelProviderKind {
+    /// Native `ad()` permits legacy Opus remapping only for these provider
+    /// identities. Bedrock, Vertex, Foundry, and Mantle remain distinct.
+    #[must_use]
+    pub const fn permits_legacy_opus_remap(self) -> bool {
+        matches!(
+            self,
+            Self::FirstParty | Self::AnthropicAws | Self::AnthropicGoogleCloud | Self::Gateway
+        )
+    }
+}
+
+/// Exact selected route facts used by model resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRouteFacts {
+    /// Current concrete/requested model id.
+    pub model: String,
+    /// Selected profile, if the host has an explicit profile for this route.
+    pub profile: Option<String>,
+    /// Provider identity from the route resolver/configuration.
+    pub provider: Option<ModelProviderKind>,
+    /// Configured endpoint. This is descriptive route data; it is not used to
+    /// guess provider kind.
+    pub endpoint: Option<String>,
+    /// Configured protocol family, when known.
+    pub protocol: Option<String>,
+}
+
+/// Family aliases selected from the active route's host catalog or explicit
+/// family overrides. `Some("")` is a real configured override and must remain
+/// distinct from `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FamilyModelDefaults {
+    /// `opus` family default or explicit override.
+    pub opus: Option<String>,
+    /// `sonnet` family default or explicit override.
+    pub sonnet: Option<String>,
+    /// `haiku` family default or explicit override.
+    pub haiku: Option<String>,
+    /// `fable` family default or explicit override.
+    pub fable: Option<String>,
+}
+
+impl FamilyModelDefaults {
+    /// Return one configured family default without collapsing `Some("")`.
+    #[must_use]
+    pub fn get(&self, family: &str) -> Option<&str> {
+        match family {
+            "opus" => self.opus.as_deref(),
+            "sonnet" => self.sonnet.as_deref(),
+            "haiku" => self.haiku.as_deref(),
+            "fable" => self.fable.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Presence-sensitive, host-owned context for one selected model route.
+///
+/// `best_model`, `fable_strategy_available`, `native_1m`, and the entitlement
+/// snapshot are optional because the current runtime does not yet provide the
+/// corresponding Native catalog/feature sources. Missing values are not
+/// synthesized from profile names or endpoint URLs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelResolutionContext {
+    /// Resolved or explicitly selected route.
+    pub route: ModelRouteFacts,
+    /// Defaults/overrides for the active route.
+    pub family_defaults: FamilyModelDefaults,
+    /// Native's dynamically selected `best` model, when a trusted source exists.
+    pub best_model: Option<String>,
+    /// Whether the Native Fable strategy is available for this host/session.
+    pub fable_strategy_available: Option<bool>,
+    /// Native 1M support for the model currently being resolved, when known.
+    pub native_1m: Option<bool>,
+    /// Explicit entitlement result, when a trusted source exists.
+    pub entitlement_allowed: Option<bool>,
+    /// LingXi switch equivalent to Native's truthy 1M-disable gate.
+    pub disable_1m_context: bool,
+    /// LingXi switch equivalent to Native's legacy Opus remap gate.
+    pub disable_legacy_model_remap: bool,
+}
+
+/// Host route lookup failure. The Agent layer reports ambiguity and missing
+/// configured routes instead of selecting the first/last same-named profile.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModelResolutionError {
+    /// No configured route could serve the requested model/profile.
+    #[error("no configured model route for model {model:?} and profile {profile:?}: {reason}")]
+    RouteUnavailable {
+        /// Requested model.
+        model: String,
+        /// Requested profile, if supplied.
+        profile: Option<String>,
+        /// Route resolver detail.
+        reason: String,
+    },
+    /// More than one configured profile can serve an unqualified model.
+    #[error("model {model:?} is served by multiple profiles: {profiles:?}")]
+    AmbiguousRoute {
+        /// Requested model.
+        model: String,
+        /// Matching profile names.
+        profiles: Vec<String>,
+    },
+    /// The host did not provide an actual default for this family on the route.
+    #[error("no {family} model default is available for profile {profile:?}")]
+    MissingFamilyDefault {
+        /// Missing family name.
+        family: String,
+        /// Selected profile, if available.
+        profile: Option<String>,
+    },
+}
+
+/// Synchronous route-context provider. Implementations may own a runtime or
+/// config snapshot internally, but callers exchange only owned route facts.
+pub trait ModelResolutionContextProvider: Send + Sync {
+    /// Resolve route facts for a concrete model/profile pair.
+    fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError>;
+}
+
+impl<F> ModelResolutionContextProvider for F
+where
+    F: Fn(&str, Option<&str>) -> Result<ModelResolutionContext, ModelResolutionError> + Send + Sync,
+{
+    fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        self(model, profile)
+    }
+}
+
 /// Managed model-restriction context threaded into the plan-mode upgrade swap
 /// (binary `RF`) and the subagent model-request gate (binary `ble`/`Qly`). Boot
 /// resolves it once from the managed `availableModels` allowlist and hands it to
@@ -108,6 +275,10 @@ fn family_default_id(family_lower: &str) -> Option<&'static str> {
         // 2.1.198 alias table: sonnet.default = "claude-sonnet-5" (was 4-6).
         "sonnet" => Some("claude-sonnet-5"),
         "haiku" => Some("claude-haiku-4-5"),
+        // Current Harness catalog default. Native 2.1.289 obtains this from
+        // the active model registry; that live provider/session lookup is not
+        // available through this string-only helper.
+        "fable" => Some("claude-fable-5-1"),
         _ => None,
     }
 }
@@ -403,7 +574,10 @@ fn api_provider_is_first_party() -> bool {
 /// provider noise), NOT a raw substring on the full id.
 fn alias_matches_parent_tier(alias: &str, parent_model: &str) -> bool {
     let canonical = canonical_name(parent_model);
-    match alias.to_lowercase().as_str() {
+    match lingxi_core::host::effort::trim_js_whitespace(alias)
+        .to_lowercase()
+        .as_str()
+    {
         "opus" => canonical.contains("opus"),
         "sonnet" => canonical.contains("sonnet"),
         "haiku" => canonical.contains("haiku"),
@@ -418,7 +592,7 @@ fn alias_matches_parent_tier(alias: &str, parent_model: &str) -> bool {
 /// `model.ts:279-283`) is a no-op for these substring checks, so it is folded
 /// in (identical to the skill copy's note).
 fn canonical_name(model: &str) -> String {
-    let name = model.to_lowercase();
+    let name = lingxi_core::host::effort::trim_js_whitespace(model).to_lowercase();
     // Order matters: check more specific versions first (4-6 before 4-5 before 4).
     if name.contains("claude-opus-4-6") {
         return "claude-opus-4-6".to_string();
@@ -472,53 +646,268 @@ fn canonical_name(model: &str) -> String {
     name
 }
 
-/// Resolve a user/agent-specified model string to a concrete id — the
-/// alias-resolution subset of `parseUserSpecifiedModel` (`model.ts:445-505`),
-/// EXACTLY as in `tools/skill/src/model_override.rs`. Bare family aliases
-/// (`opus` / `sonnet` / `haiku` / `opusplan` / `best`) map to their default id
-/// (preserving a trailing `[1m]`, except `best` which `getBestModel` ignores
-/// `[1m]` for); every other string passes through with only `[1m]` normalized.
+/// Resolve a user-specified model using facts for the actual selected route.
 ///
-/// The alias arms route through the env-aware `get_default_*_model` helpers
-/// (matching the TS `getDefaultSonnetModel()` / `getDefaultHaikuModel()` /
-/// `getDefaultOpusModel()` calls at `model.ts:459-465`), so the
-/// `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env overrides take effect.
-///
-/// The ant-model registry, the legacy Opus 4.0/4.1 first-party remap, and the
-/// Foundry deployment-id passthrough branches of `parseUserSpecifiedModel` are
-/// NOT modeled (unreachable from this seam — see the skill copy's note).
-///
-/// Public entry point — claude's `getMainLoopModel()` → `parseUserSpecifiedModel`.
-/// The composition root calls this to resolve the user/CLI model setting (a bare
-/// alias like `opusplan`/`sonnet`, or a full id) to the concrete main-loop wire
-/// id BEFORE handing it to a subagent/teammate spawner as the `parent_model`.
-/// Without this the `AgentModel::Inherit` default-mode branch returns the raw
-/// alias (a bogus wire id); claude passes the RESOLVED `mainLoopModel` as the
-/// child's parent. The raw alias is still passed separately as `model_setting`
-/// so the plan-mode `opusplan→Opus` swap can fire.
-#[must_use]
-pub fn resolve_user_specified_model(model_input: &str) -> String {
-    parse_user_specified_model(model_input)
+/// This is the production `At(model)` boundary. Provider identity, endpoint,
+/// protocol, family defaults, and Native-only catalog facts arrive from the
+/// host's route-context provider; this pure resolver never reads provider env
+/// switches or guesses provider kind from a profile name/URL. `Some("")` in a
+/// family default is preserved as a configured empty override.
+pub fn resolve_user_specified_model(
+    model_input: &str,
+    context: &ModelResolutionContext,
+) -> Result<String, ModelResolutionError> {
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(model_input);
+    let normalized = trimmed.to_lowercase();
+    if context.disable_1m_context && has_1m_context(&normalized) {
+        // Native's `_I` is a JS-truthy gate: a disabled 1M suffix bypasses
+        // alias parsing and preserves the supplied spelling.
+        return Ok(trimmed.to_string());
+    }
+
+    let has_1m_tag = has_1m_context(&normalized);
+    let base = if has_1m_tag {
+        strip_1m_suffix(&normalized)
+    } else {
+        normalized.clone()
+    };
+    let family_default = |family: &str| {
+        context
+            .family_defaults
+            .get(family)
+            .map(str::to_owned)
+            .ok_or_else(|| ModelResolutionError::MissingFamilyDefault {
+                family: family.to_string(),
+                profile: context.route.profile.clone(),
+            })
+    };
+
+    match base.as_str() {
+        "opusplan" | "sonnet" => Ok(append_1m_suffix(family_default("sonnet")?, has_1m_tag)),
+        "haiku" => Ok(append_1m_suffix(family_default("haiku")?, has_1m_tag)),
+        "opus" => Ok(append_1m_suffix(family_default("opus")?, has_1m_tag)),
+        "fable" => {
+            if context.fable_strategy_available == Some(false) {
+                return Err(ModelResolutionError::MissingFamilyDefault {
+                    family: "fable".to_string(),
+                    profile: context.route.profile.clone(),
+                });
+            }
+            // Native has an additional dynamic endpoint/catalog gate for Fable
+            // and 1M. The host has no trusted source for those facts yet, so it
+            // keeps an explicitly supplied suffix and does not claim parity.
+            Ok(append_1m_suffix(family_default("fable")?, has_1m_tag))
+        }
+        "best" => {
+            // The Native `kI()` strategy/catalog lookup and entitlement overlay
+            // are not available in this runtime. Use a trusted host best model
+            // when supplied; otherwise preserve the current host Opus fallback.
+            match context.best_model.as_ref() {
+                Some(model) => Ok(model.clone()),
+                None => family_default("opus"),
+            }
+        }
+        _ if is_legacy_opus_id(&base)
+            && !context.disable_legacy_model_remap
+            && context
+                .route
+                .provider
+                .is_some_and(ModelProviderKind::permits_legacy_opus_remap) =>
+        {
+            Ok(append_1m_suffix(family_default("opus")?, has_1m_tag))
+        }
+        _ => {
+            // Non-aliases retain caller casing; a recognized 1M suffix is
+            // normalized to one canonical trailing marker.
+            if has_1m_tag {
+                Ok(normalize_1m_suffix(trimmed))
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+    }
+}
+
+/// Resolve the current host's user model setting using route facts. This helper
+/// is also used by the live session selection provider, so boot and subsequent
+/// Agent/teammate spawns share the same model/profile classification.
+pub fn resolve_agent_model_with_context(
+    model: &AgentModel,
+    parent_model: &str,
+    permission_mode: PermissionMode,
+    model_setting: Option<&str>,
+    context: &ModelResolutionContext,
+) -> Result<String, ModelResolutionError> {
+    resolve_agent_model_restricted_with_context(
+        model,
+        parent_model,
+        permission_mode,
+        model_setting,
+        None,
+        context,
+        &mut |_| {},
+    )
+}
+
+/// [`resolve_agent_model_with_context`] with the managed-model restriction.
+/// Route identity and family aliases still come exclusively from `context`.
+pub fn resolve_agent_model_restricted_with_context(
+    model: &AgentModel,
+    parent_model: &str,
+    permission_mode: PermissionMode,
+    model_setting: Option<&str>,
+    restriction: Option<ModelRestriction<'_>>,
+    context: &ModelResolutionContext,
+    warn: &mut dyn FnMut(&str),
+) -> Result<String, ModelResolutionError> {
+    let inherit = |warn: &mut dyn FnMut(&str)| -> Result<String, ModelResolutionError> {
+        let plan = permission_mode == PermissionMode::Plan;
+        if plan
+            && !model_setting
+                .is_some_and(|setting| setting == "opusplan" || setting == "opusplan[1m]")
+        {
+            if model_setting == Some("haiku") {
+                let upgrade = resolve_user_specified_model("sonnet", context)?;
+                if restriction_bars(restriction, &upgrade) {
+                    if let Some((allow, overrides, catalog)) =
+                        restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+                    {
+                        if let Some(newest) = allowlist::newest_permitted_in_family(
+                            "sonnet",
+                            catalog,
+                            Some(allow),
+                            Some(overrides),
+                        ) {
+                            warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
+                            return Ok(newest);
+                        }
+                    }
+                    warn(allowlist::warnings::PLAN_HAIKU_RESTING);
+                    return resolve_user_specified_model("haiku", context);
+                }
+                return Ok(upgrade);
+            }
+        }
+        if plan && (model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]")) {
+            let one_m = model_setting == Some("opusplan[1m]");
+            let mut upgrade = resolve_user_specified_model("opus", context)?;
+            if one_m && !upgrade.to_lowercase().ends_with("[1m]") {
+                upgrade.push_str("[1m]");
+            }
+            if restriction_bars(restriction, &upgrade) {
+                if let Some((allow, overrides, catalog)) =
+                    restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+                {
+                    if let Some(newest) = allowlist::newest_permitted_in_family(
+                        "opus",
+                        catalog,
+                        Some(allow),
+                        Some(overrides),
+                    ) {
+                        warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
+                        return Ok(newest);
+                    }
+                }
+                warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
+                return resolve_user_specified_model(model_setting.unwrap_or("opusplan"), context);
+            }
+            return Ok(upgrade);
+        }
+        Ok(parent_model.to_string())
+    };
+
+    // `LINGXI_SUBAGENT_MODEL` is a user override, not a provider identity
+    // source. It keeps Native's early-return ordering and bypasses region-prefix
+    // inheritance.
+    if let Some(value) = std::env::var("LINGXI_SUBAGENT_MODEL")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        let resolved = resolve_user_specified_model(&value, context)?;
+        if restriction_bars(restriction, &resolved) {
+            warn(&format!(
+                "Subagent model \"{value}{}",
+                allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            ));
+            return inherit(warn);
+        }
+        return Ok(resolved);
+    }
+
+    let parent_region_prefix = get_bedrock_region_prefix(parent_model);
+    let apply_parent_region_prefix = |resolved: &str, original_spec: &str| -> String {
+        if let Some(prefix) = parent_region_prefix {
+            if context.route.provider == Some(ModelProviderKind::Bedrock) {
+                if get_bedrock_region_prefix(original_spec).is_some() {
+                    return resolved.to_owned();
+                }
+                return apply_bedrock_region_prefix(resolved, prefix);
+            }
+        }
+        resolved.to_owned()
+    };
+
+    match model {
+        AgentModel::Inherit => inherit(warn),
+        AgentModel::Explicit(spec) | AgentModel::Alias(spec) => {
+            if alias_matches_parent_tier(spec, parent_model) {
+                return Ok(parent_model.to_string());
+            }
+            let resolved = resolve_user_specified_model(spec, context)?;
+            let resolved = apply_parent_region_prefix(&resolved, spec);
+            if restriction_bars(restriction, &resolved) {
+                warn(&format!(
+                    "Subagent model \"{spec}{}",
+                    allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+                ));
+                return inherit(warn);
+            }
+            Ok(resolved)
+        }
+    }
 }
 
 fn parse_user_specified_model(model_input: &str) -> String {
-    let trimmed = model_input.trim();
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(model_input);
     let normalized = trimmed.to_lowercase();
-    let has_1m_tag = has_1m_context(&normalized);
-    let base = strip_1m_suffix(&normalized);
-    let suffix = if has_1m_tag { "[1m]" } else { "" };
-
+    // Native `_I()` returns the environment string and `Xd()` tests it with
+    // JavaScript truthiness: every nonempty value (including "0"/"false")
+    // disables 1M alias parsing. With that switch set, a suffixed alias falls
+    // through unchanged instead of being resolved as its bare family.
+    let one_m_disabled = js_env_truthy(branding::DISABLE_1M_CONTEXT_ENV);
+    let has_1m_tag = !one_m_disabled && has_1m_context(&normalized);
+    let base = if has_1m_tag {
+        strip_1m_suffix(&normalized)
+    } else {
+        normalized.clone()
+    };
     match base.as_str() {
         // `opusplan` → Sonnet default (Opus only in plan mode), 1:1 with TS.
-        "opusplan" | "sonnet" => format!("{}{suffix}", get_default_sonnet_model()),
-        "haiku" => format!("{}{suffix}", get_default_haiku_model()),
-        "opus" => format!("{}{suffix}", get_default_opus_model()),
+        "opusplan" | "sonnet" => append_1m_suffix(get_default_sonnet_model(), has_1m_tag),
+        "haiku" => append_1m_suffix(get_default_haiku_model(), has_1m_tag),
+        "opus" => append_1m_suffix(get_default_opus_model(), has_1m_tag),
+        // The suffix is retained conservatively here. Native can suppress it
+        // for some first-party official-endpoint/native-1M combinations, but
+        // this API has no endpoint or live registry input to prove that gate.
+        "fable" => append_1m_suffix(get_default_fable_model(), has_1m_tag),
         // `getBestModel` returns the Opus default and ignores any [1m] suffix.
+        // This is the existing Host resolution only: Native `kI()` is selected
+        // dynamically from session/provider model state unavailable here.
         "best" => get_default_opus_model(),
         _ => {
+            // Native `T2e` compares the lowercased alias against this exact
+            // legacy set, then remaps only for its allowed API-provider family
+            // and when `ibt()` sees no truthy disable flag.
+            if api_provider_is_first_party()
+                && !js_env_truthy(branding::DISABLE_LEGACY_MODEL_REMAP_ENV)
+                && is_legacy_opus_id(&base)
+            {
+                return append_1m_suffix(get_default_opus_model(), has_1m_tag);
+            }
+
             // Non-alias: preserve the original case, normalizing only `[1m]`.
             if has_1m_tag {
-                format!("{}[1m]", strip_1m_suffix(trimmed))
+                normalize_1m_suffix(trimmed)
             } else {
                 trimmed.to_string()
             }
@@ -526,10 +915,48 @@ fn parse_user_specified_model(model_input: &str) -> String {
     }
 }
 
+const LEGACY_OPUS_MODEL_IDS: [&str; 4] = [
+    "claude-opus-4-20250514",
+    "claude-opus-4-1-20250805",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+];
+
+fn is_legacy_opus_id(model: &str) -> bool {
+    LEGACY_OPUS_MODEL_IDS.contains(&model)
+}
+
+fn get_default_fable_model() -> String {
+    if let Ok(value) = std::env::var("ANTHROPIC_DEFAULT_FABLE_MODEL") {
+        // Native `k0e()` distinguishes a missing env property from a present
+        // empty string (`!== undefined`); preserve that distinction here.
+        return value;
+    }
+    // Current Host fallback only. Native `Wd()` chooses from its active
+    // provider/model registry, which this string-only API cannot query.
+    family_default_id("fable")
+        .expect("fable has a current Host catalog fallback")
+        .to_string()
+}
+
+fn append_1m_suffix(model: String, requested: bool) -> String {
+    if requested {
+        normalize_1m_suffix(&model)
+    } else {
+        model
+    }
+}
+
+/// JavaScript environment-value truthiness for Native gates that use `if
+/// (process.env.NAME)`. Rust's shared `is_env_truthy` deliberately has a
+/// stricter allowlist and is not equivalent for these specific switches.
+fn js_env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty())
+}
+
 /// `true` if `model` carries an explicit `[1m]` suffix (case-insensitive).
-/// Mirrors `has1mContext` reduced to the substring test (the
-/// `CLAUDE_CODE_DISABLE_1M_CONTEXT` gate is not modeled here — `[1m]` passthrough
-/// is a no-op for the family-default resolution this seam performs).
+/// Mirrors Native `lbt`'s case-insensitive substring test. The caller applies
+/// Native `Xd`'s environment gate.
 fn has_1m_context(model: &str) -> bool {
     model.to_lowercase().contains("[1m]")
 }
@@ -538,10 +965,23 @@ fn has_1m_context(model: &str) -> bool {
 /// `replace(/\[1m]$/i, '').trim()`.
 fn strip_1m_suffix(s: &str) -> String {
     if s.to_lowercase().ends_with("[1m]") {
-        s[..s.len() - 4].trim().to_string()
+        lingxi_core::host::effort::trim_js_whitespace(&s[..s.len() - 4]).to_string()
     } else {
-        s.trim().to_string()
+        lingxi_core::host::effort::trim_js_whitespace(s).to_string()
     }
+}
+
+/// Native `e$` removes every contiguous trailing `[1m]` tag, trims, and adds
+/// one canonical suffix.
+fn normalize_1m_suffix(s: &str) -> String {
+    let mut base = lingxi_core::host::effort::trim_js_whitespace(s).to_string();
+    while base.to_lowercase().ends_with("[1m]") {
+        base.truncate(base.len() - "[1m]".len());
+        base = base
+            .trim_end_matches(lingxi_core::host::effort::javascript_whitespace)
+            .to_string();
+    }
+    format!("{base}[1m]")
 }
 
 /// The Explore model-cap ladder — claude-code 2.1.198 `Kyl`
@@ -804,6 +1244,12 @@ mod tests {
             std::env::set_var(key, val);
             Self { key, prev }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
@@ -815,6 +1261,53 @@ mod tests {
     }
 
     const DEFAULT: PermissionMode = PermissionMode::Default;
+
+    // Unit-test adapter that turns the isolated env fixture into explicit
+    // route facts. Production callers must obtain these facts from the host's
+    // ModelRuntime-backed provider instead of consulting provider env flags.
+    fn resolution_test_context() -> ModelResolutionContext {
+        let provider = if api_provider_is_bedrock() {
+            ModelProviderKind::Bedrock
+        } else if api_provider_is_foundry() {
+            ModelProviderKind::Foundry
+        } else if lingxi_core::host::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_USE_VERTEX").ok().as_deref(),
+        ) {
+            ModelProviderKind::Vertex
+        } else if api_provider_is_first_party() {
+            ModelProviderKind::FirstParty
+        } else {
+            ModelProviderKind::Other
+        };
+        let env_or = |key: &str, fallback: String| std::env::var(key).unwrap_or(fallback);
+        ModelResolutionContext {
+            route: ModelRouteFacts {
+                provider: Some(provider),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some(env_or(
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    get_default_opus_model(),
+                )),
+                sonnet: Some(env_or(
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    get_default_sonnet_model(),
+                )),
+                haiku: Some(env_or(
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    get_default_haiku_model(),
+                )),
+                fable: Some(env_or(
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                    get_default_fable_model(),
+                )),
+            },
+            disable_1m_context: js_env_truthy(branding::DISABLE_1M_CONTEXT_ENV),
+            disable_legacy_model_remap: js_env_truthy(branding::DISABLE_LEGACY_MODEL_REMAP_ENV),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn inherit_resolves_to_parent_model() {
@@ -1154,6 +1647,14 @@ mod tests {
             ),
             "us.anthropic.claude-opus-4-6-v1:0"
         );
+        assert!(alias_matches_parent_tier(
+            "\u{feff}sonnet\u{feff}",
+            "claude-sonnet-5"
+        ));
+        assert!(!alias_matches_parent_tier(
+            "\u{0085}sonnet\u{0085}",
+            "claude-sonnet-5"
+        ));
     }
 
     #[test]
@@ -1360,6 +1861,7 @@ mod tests {
         assert_eq!(family_default_id("sonnet"), Some("claude-sonnet-5"));
         assert_eq!(family_default_id("opus"), Some("claude-opus-4-8"));
         assert_eq!(family_default_id("haiku"), Some("claude-haiku-4-5"));
+        assert_eq!(family_default_id("fable"), Some("claude-fable-5-1"));
         // Foundry arm — the only Opus per_provider divergence in 2.1.207.
         assert_eq!(OPUS_FOUNDRY_DEFAULT_ID, "claude-opus-4-6");
         // Sonnet 3P arm (bedrock/vertex/foundry per_provider) unchanged.
@@ -1476,6 +1978,157 @@ mod tests {
             ),
             "custom-opus-id"
         );
+    }
+
+    #[test]
+    fn direct_model_resolution_covers_fable_case_aliases_and_existing_best_fallback() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _providers = clear_provider_env();
+        let _opus = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "configured-opus");
+        let _sonnet = EnvGuard::set("ANTHROPIC_DEFAULT_SONNET_MODEL", "configured-sonnet");
+        let _haiku = EnvGuard::set("ANTHROPIC_DEFAULT_HAIKU_MODEL", "configured-haiku");
+        let _fable = EnvGuard::set("ANTHROPIC_DEFAULT_FABLE_MODEL", "configured-fable");
+        let _one_m = EnvGuard::set(branding::DISABLE_1M_CONTEXT_ENV, "");
+
+        let context = resolution_test_context();
+        assert_eq!(
+            resolve_user_specified_model(" FABLE ", &context).unwrap(),
+            "configured-fable"
+        );
+        assert_eq!(
+            resolve_user_specified_model("OpUs[1M]", &context).unwrap(),
+            "configured-opus[1m]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("OpUsPlAn[1m]", &context).unwrap(),
+            "configured-sonnet[1m]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("HAIKU", &context).unwrap(),
+            "configured-haiku"
+        );
+        // Keep current Host behavior until the live Native kI/session registry
+        // is part of this resolver's inputs.
+        assert_eq!(
+            resolve_user_specified_model("best[1m]", &context).unwrap(),
+            "configured-opus"
+        );
+        assert_eq!(
+            resolve_user_specified_model("Custom-Model[1m]", &context).unwrap(),
+            "Custom-Model[1m]"
+        );
+    }
+
+    #[test]
+    fn model_alias_trim_matches_ecmascript_whitespace_not_rust_whitespace() {
+        let context = ModelResolutionContext {
+            family_defaults: FamilyModelDefaults {
+                sonnet: Some("configured-sonnet".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_user_specified_model("\u{feff}sonnet\u{feff}", &context).unwrap(),
+            "configured-sonnet",
+            "ECMAScript String.trim removes BOM"
+        );
+        assert_eq!(
+            resolve_user_specified_model("\u{0085}sonnet\u{0085}", &context).unwrap(),
+            "\u{0085}sonnet\u{0085}",
+            "ECMAScript String.trim preserves NEL"
+        );
+    }
+
+    #[test]
+    fn fable_default_distinguishes_missing_override_from_explicit_empty() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _providers = clear_provider_env();
+
+        let missing = EnvGuard::unset("ANTHROPIC_DEFAULT_FABLE_MODEL");
+        let context = resolution_test_context();
+        assert_eq!(
+            resolve_user_specified_model("fable", &context).unwrap(),
+            "claude-fable-5-1",
+            "missing override uses the current Host fallback; Native uses a live provider/catalog lookup"
+        );
+        drop(missing);
+
+        let _empty = EnvGuard::set("ANTHROPIC_DEFAULT_FABLE_MODEL", "");
+        let context = resolution_test_context();
+        assert_eq!(resolve_user_specified_model("fable", &context).unwrap(), "");
+    }
+
+    #[test]
+    fn one_m_resolution_normalizes_repeated_tags_and_respects_js_truthiness() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _providers = clear_provider_env();
+        let _opus = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "configured-opus");
+        let disabled = EnvGuard::set(branding::DISABLE_1M_CONTEXT_ENV, "");
+        let context = resolution_test_context();
+
+        assert_eq!(
+            resolve_user_specified_model("Custom-Model[1m][1M]", &context).unwrap(),
+            "Custom-Model[1m]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("OPUS[1M]", &context).unwrap(),
+            "configured-opus[1m]"
+        );
+
+        // In Node, any nonempty environment string is truthy; "false" is not
+        // parsed as a boolean false. With the gate on, suffixed aliases remain
+        // as supplied, while a bare alias still resolves.
+        std::env::set_var(branding::DISABLE_1M_CONTEXT_ENV, "false");
+        let context = resolution_test_context();
+        assert_eq!(
+            resolve_user_specified_model("OPUS[1M]", &context).unwrap(),
+            "OPUS[1M]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("Custom-Model[1m][1M]", &context).unwrap(),
+            "Custom-Model[1m][1M]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("OPUS", &context).unwrap(),
+            "configured-opus"
+        );
+
+        drop(disabled);
+    }
+
+    #[test]
+    fn legacy_opus_remap_obeys_native_disable_and_provider_gates() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _providers = clear_provider_env();
+        let _opus = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "current-opus");
+        let disabled = EnvGuard::set(branding::DISABLE_LEGACY_MODEL_REMAP_ENV, "");
+        let context = resolution_test_context();
+
+        assert_eq!(
+            resolve_user_specified_model("claude-opus-4-1-20250805", &context).unwrap(),
+            "current-opus"
+        );
+        assert_eq!(
+            resolve_user_specified_model("CLAUDE-OPUS-4-1-20250805[1M]", &context).unwrap(),
+            "current-opus[1m]"
+        );
+
+        std::env::set_var(branding::DISABLE_LEGACY_MODEL_REMAP_ENV, "false");
+        let context = resolution_test_context();
+        assert_eq!(
+            resolve_user_specified_model("claude-opus-4-1-20250805", &context).unwrap(),
+            "claude-opus-4-1-20250805"
+        );
+        std::env::set_var(branding::DISABLE_LEGACY_MODEL_REMAP_ENV, "");
+        std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        let context = resolution_test_context();
+        assert_eq!(
+            resolve_user_specified_model("claude-opus-4-1-20250805", &context).unwrap(),
+            "claude-opus-4-1-20250805"
+        );
+
+        drop(disabled);
     }
 
     // ── GAe/obm/dPn (2.1.198): built-in Explore model from the session model ──

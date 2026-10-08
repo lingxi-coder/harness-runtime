@@ -15,6 +15,7 @@ use lingxi_core::host::{
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -142,8 +143,8 @@ impl MockMcpTransport {
         self.tools.lock().unwrap().push(McpToolDto {
             server_name: "mock".into(),
             tool_name: name.into(),
-            description: format!("{name} test tool"),
-            input_schema: serde_json::json!({"type": "object"}),
+            description: format!("{name} test tool").into(),
+            input_schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
             output_schema: None,
             annotations: None,
             icons: Vec::new(),
@@ -301,8 +302,8 @@ impl McpTransport for MockMcpTransport {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: std::collections::HashMap::new(),
-            extensions: std::collections::HashMap::new(),
+            experimental: Utf16JsonProjection::object(Vec::new()).unwrap(),
+            extensions: Utf16JsonProjection::object(Vec::new()).unwrap(),
         })
     }
 
@@ -325,10 +326,10 @@ impl McpTransport for MockMcpTransport {
         &self,
         _conn: &McpRawConnection,
         _tool: &str,
-        _input: Value,
+        _input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         Ok(McpToolResultDto {
-            content: serde_json::json!("ok"),
+            content: "ok".into(),
             is_error: false,
             ..Default::default()
         })
@@ -337,7 +338,7 @@ impl McpTransport for MockMcpTransport {
     async fn read_resource(
         &self,
         _conn: &McpRawConnection,
-        _uri: &str,
+        _uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal("not implemented".into()))
     }

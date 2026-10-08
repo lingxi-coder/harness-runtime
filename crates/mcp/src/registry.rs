@@ -5,7 +5,7 @@
 //! ([`McpRegistry::connect_all`]) and the reconnect/backoff loop
 //! ([`McpRegistry::run_reconnect_loop`]) implement the "Plan 13" wiring.
 
-use crate::client::McpClient;
+use crate::client::{McpClient, McpClientError};
 use crate::connection::{McpConnectionState, McpServerConfig};
 use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
@@ -13,10 +13,12 @@ use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
 use futures_util::FutureExt as _;
 use indexmap::IndexMap;
+use lingxi_core::host::json_schema_validator::JsonSchemaValidator;
 use lingxi_core::host::{
     Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpTransport,
     McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -166,11 +168,17 @@ pub type McpOperationGuard = dyn Fn() -> bool + Send + Sync;
 const OPERATION_GUARD_REJECTED: &str = "MCP operation superseded";
 
 fn operation_guard_rejected() -> McpError {
-    McpError::Internal(OPERATION_GUARD_REJECTED.to_string())
+    McpError::Internal(OPERATION_GUARD_REJECTED.to_string().into())
 }
 
 fn is_operation_guard_rejected(error: &McpError) -> bool {
-    matches!(error, McpError::Internal(message) if message == OPERATION_GUARD_REJECTED)
+    matches!(error, McpError::Internal(message) if message.string_at("") == Some(OPERATION_GUARD_REJECTED))
+}
+
+fn mcp_error_source_diagnostic(error: &McpError) -> Utf16JsonProjection {
+    error
+        .source_diagnostic()
+        .unwrap_or_else(|| Utf16JsonProjection::from(error.to_string()))
 }
 
 /// MCP server catalog affected by an inbound `notifications/*/list_changed`.
@@ -434,6 +442,34 @@ struct RegisteredClient {
     client: Arc<McpClient>,
 }
 
+/// Connection-scoped parser captured by a registered MCP tool. It retains a
+/// stable server slot so Cached/lazy tools can be constructed before a live
+/// client is installed, and never performs a registry lookup while parsing.
+#[derive(Clone)]
+pub struct McpToolOutputSchemaParserHandle {
+    slot: Arc<RwLock<Option<Arc<McpClient>>>>,
+    full_name: String,
+}
+
+impl McpToolOutputSchemaParserHandle {
+    /// Apply the schema plan held by the currently bound connection.
+    pub async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpClientError> {
+        let client = self.slot.read().await.clone().ok_or_else(|| {
+            McpClientError::Rpc(
+                format!(
+                    "MCP server for tool {} has no connected output schema parser",
+                    self.full_name
+                )
+                .into(),
+            )
+        })?;
+        client.parse_tool_output(&self.full_name, output).await
+    }
+}
+
 /// Immutable identity of the grant that supplied a live connection's bearer.
 /// The value is a provider-neutral hash of the MCP refresh grant, never the
 /// access/refresh secret itself. `verify_current` is false for static bearer
@@ -527,14 +563,17 @@ impl LazyUpgradeSlot {
     }
 
     fn stale_error(&self) -> McpError {
-        McpError::Connection(format!("MCP server \"{}\" is no longer cached", self.key))
+        McpError::Connection(format!("MCP server \"{}\" is no longer cached", self.key).into())
     }
 
     fn panic_error(&self) -> McpError {
-        McpError::Internal(format!(
-            "MCP server \"{}\" cached lazy-upgrade task panicked",
-            self.key
-        ))
+        McpError::Internal(
+            format!(
+                "MCP server \"{}\" cached lazy-upgrade task panicked",
+                self.key
+            )
+            .into(),
+        )
     }
 
     fn finish_if_unset(&self, terminal: LazyUpgradeTerminal) -> bool {
@@ -641,6 +680,13 @@ struct DiscoveryCachePartition {
     negotiation_mode: crate::protocol_negotiation::NegotiationMode,
 }
 
+#[derive(Clone)]
+struct CachedDiscoveryContext {
+    connection_id: McpConnectionId,
+    partition: Option<DiscoveryCachePartition>,
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+}
+
 struct DiscoveryCacheConsult {
     decision: crate::discovery_cache::Decision,
     partition: Option<DiscoveryCachePartition>,
@@ -709,6 +755,9 @@ pub struct McpRegistry {
     /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
     /// gate error text non-deterministic.
     clients: Arc<RwLock<IndexMap<String, RegisteredClient>>>,
+    /// Stable per-server slots captured by MCP tool parser handles. These are
+    /// not registry lookups at result time; registration updates each slot.
+    output_parser_slots: Arc<StdMutex<HashMap<String, Arc<RwLock<Option<Arc<McpClient>>>>>>>,
     /// Fan-out for inbound server catalog invalidations. The engine subscribes
     /// once and refreshes the shared tool registry after a successful
     /// `tools/list`; lagged consumers reconcile against the latest shared active
@@ -719,6 +768,8 @@ pub struct McpRegistry {
     agent_scoped: Arc<RwLock<HashMap<AgentId, HashMap<String, McpConnectionId>>>>,
     /// Transport boundary supplied by the host platform.
     transport: Arc<dyn McpTransport>,
+    /// Shared host-owned worker; each client creates its own profile session.
+    json_schema_validator: Option<Arc<dyn JsonSchemaValidator>>,
     /// Optional bridge to the transport's live `jsonrpc::Connection`s.
     ///
     /// When `Some`, [`Self::connect`] builds an [`McpClient`] over the
@@ -742,6 +793,10 @@ pub struct McpRegistry {
     /// static headers; static-token servers are unaffected either way. Wired
     /// via [`Self::with_oauth`].
     oauth: Option<OAuthDeps>,
+    /// Host-owned Projects-session inputs. `None` means this registry has no
+    /// host source; production composition injects one shared context into its
+    /// main and child registries before they connect.
+    projects_session_host: Option<Arc<crate::projects_session::ProjectsSessionHostContext>>,
     /// Session cwd used by dynamic MCP header helpers.
     headers_helper_cwd: std::path::PathBuf,
     /// Plugin roots keyed by scoped MCP server name.
@@ -787,6 +842,9 @@ pub struct McpRegistry {
     /// cloned slot handle, so removing the map entry invalidates future joins
     /// without racing already-waiting callers.
     lazy_upgrade_slots: Arc<RwLock<HashMap<String, Arc<LazyUpgradeSlot>>>>,
+    /// Provenance captured when a cached catalog was served, including fresh
+    /// hits whose first live dial can happen after the OAuth grant changes.
+    cached_discovery_contexts: Arc<RwLock<HashMap<String, CachedDiscoveryContext>>>,
     /// Exact cached-prompt generation bridges (`C -> L1`). Kept only while the
     /// current state+client still publish that first live generation.
     prompt_predecessors: Arc<RwLock<HashMap<McpConnectionId, PromptPredecessor>>>,
@@ -853,6 +911,7 @@ fn clone_mcp_error(error: &McpError) -> McpError {
             www_authenticate: www_authenticate.clone(),
         },
         McpError::OAuth(message) => McpError::OAuth(message.clone()),
+        McpError::Result(error) => McpError::Result(error.clone()),
         McpError::ToolNotFound(message) => McpError::ToolNotFound(message.clone()),
         McpError::Timeout { server, tool, secs } => McpError::Timeout {
             server: server.clone(),
@@ -864,9 +923,7 @@ fn clone_mcp_error(error: &McpError) -> McpError {
 }
 
 fn lazy_upgrade_panic_error(server_name: &str, phase: &str) -> McpError {
-    McpError::Internal(format!(
-        "MCP server \"{server_name}\" panicked during {phase}"
-    ))
+    McpError::Internal(format!("MCP server \"{server_name}\" panicked during {phase}").into())
 }
 
 fn panic_payload_mentions_connect(payload: &(dyn std::any::Any + Send)) -> bool {
@@ -906,12 +963,15 @@ impl McpRegistry {
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
             clients: Arc::clone(&self.clients),
+            output_parser_slots: Arc::clone(&self.output_parser_slots),
             catalog_changes: self.catalog_changes.clone(),
             agent_scoped: Arc::clone(&self.agent_scoped),
             transport: Arc::clone(&self.transport),
+            json_schema_validator: self.json_schema_validator.clone(),
             raw_conn: self.raw_conn.clone(),
             hook_dispatcher: self.hook_dispatcher.clone(),
             oauth: self.oauth.clone(),
+            projects_session_host: self.projects_session_host.clone(),
             headers_helper_cwd: self.headers_helper_cwd.clone(),
             headers_helper_plugin_roots: Arc::clone(&self.headers_helper_plugin_roots),
             additional_roots: self.additional_roots.clone(),
@@ -921,6 +981,7 @@ impl McpRegistry {
             pending_transport_cleanups: Arc::clone(&self.pending_transport_cleanups),
             listener_reopen_state: Arc::clone(&self.listener_reopen_state),
             lazy_upgrade_slots: Arc::clone(&self.lazy_upgrade_slots),
+            cached_discovery_contexts: Arc::clone(&self.cached_discovery_contexts),
             prompt_predecessors: Arc::clone(&self.prompt_predecessors),
             configuration_frozen: Arc::clone(&self.configuration_frozen),
             #[cfg(test)]
@@ -946,14 +1007,16 @@ impl McpRegistry {
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
             clients: Arc::new(RwLock::new(IndexMap::new())),
+            output_parser_slots: Arc::new(StdMutex::new(HashMap::new())),
             catalog_changes,
             agent_scoped: Arc::new(RwLock::new(HashMap::new())),
             transport,
+            json_schema_validator: None,
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
-            headers_helper_cwd: std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            projects_session_host: None,
+            headers_helper_cwd: std::path::PathBuf::from("."),
             headers_helper_plugin_roots: Arc::new(RwLock::new(HashMap::new())),
             additional_roots: crate::new_shared_roots(Vec::new()),
             health_check_interval: Duration::from_secs(30),
@@ -962,6 +1025,7 @@ impl McpRegistry {
             pending_transport_cleanups: Arc::new(RwLock::new(HashMap::new())),
             listener_reopen_state: Arc::new(RwLock::new(HashMap::new())),
             lazy_upgrade_slots: Arc::new(RwLock::new(HashMap::new())),
+            cached_discovery_contexts: Arc::new(RwLock::new(HashMap::new())),
             prompt_predecessors: Arc::new(RwLock::new(HashMap::new())),
             configuration_frozen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -1093,9 +1157,9 @@ impl McpRegistry {
                 })
         };
         let Some(connection_id) = connection_id else {
-            return Err(McpError::Connection(format!(
-                "MCP server \"{server_name}\" has no live notification connection"
-            )));
+            return Err(McpError::Connection(
+                format!("MCP server \"{server_name}\" has no live notification connection").into(),
+            ));
         };
 
         // A platform transport may not implement the optional notification
@@ -1108,9 +1172,12 @@ impl McpRegistry {
         .catch_unwind()
         .await
         .map_err(|_| {
-            McpError::Internal(format!(
+            McpError::Internal(
+                format!(
                 "MCP transport panicked while subscribing to notifications for \"{server_name}\""
-            ))
+            )
+                .into(),
+            )
         })?
     }
 
@@ -1130,6 +1197,74 @@ impl McpRegistry {
             raw_conn: Some(raw_conn),
             ..Self::new(transport)
         }
+    }
+
+    /// Inject the lazily-created host validator. Each `McpClient` built by
+    /// this registry creates one retained `McpOutputSchema2020` session.
+    #[must_use]
+    pub fn with_json_schema_validator(mut self, validator: Arc<dyn JsonSchemaValidator>) -> Self {
+        self.assert_configuration_mutable("with_json_schema_validator");
+        self.json_schema_validator = Some(validator);
+        self
+    }
+
+    fn output_parser_slot(&self, server_key: &str) -> Arc<RwLock<Option<Arc<McpClient>>>> {
+        let mut slots = self
+            .output_parser_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slots
+            .entry(server_key.to_owned())
+            .or_insert_with(|| Arc::new(RwLock::new(None)))
+            .clone()
+    }
+
+    async fn set_output_parser_client(&self, server_key: &str, client: Option<Arc<McpClient>>) {
+        *self.output_parser_slot(server_key).write().await = client;
+    }
+
+    /// Capture the stable parser slot for one server/tool pair. The slot can
+    /// be bound later when a cached server establishes its live connection.
+    #[must_use]
+    pub fn output_schema_parser_handle(
+        &self,
+        server_key: &str,
+        full_name: &str,
+    ) -> Arc<McpToolOutputSchemaParserHandle> {
+        Arc::new(McpToolOutputSchemaParserHandle {
+            slot: self.output_parser_slot(server_key),
+            full_name: full_name.to_owned(),
+        })
+    }
+
+    /// Attach the owning host's Projects-session context before the first
+    /// connection attempt. Share one `Arc` with every registry belonging to
+    /// the same host; this builder performs no environment reads.
+    #[must_use]
+    pub fn with_projects_session_host(
+        mut self,
+        host: Arc<crate::projects_session::ProjectsSessionHostContext>,
+    ) -> Self {
+        self.assert_configuration_mutable("with_projects_session_host");
+        self.projects_session_host = Some(host);
+        self
+    }
+
+    /// Clone the host context for a child registry that belongs to this same
+    /// runtime host.
+    #[must_use]
+    pub fn projects_session_host_context(
+        &self,
+    ) -> Option<Arc<crate::projects_session::ProjectsSessionHostContext>> {
+        self.projects_session_host.clone()
+    }
+
+    /// Native `Is(el)` latch. `None` means no host source was injected.
+    #[must_use]
+    pub fn projects_session_default_host_enabled(&self) -> Option<bool> {
+        self.projects_session_host
+            .as_ref()
+            .map(|host| host.default_host_enabled())
     }
 
     /// Inject the optional [`HookDispatcher`] forwarded into every
@@ -1325,9 +1460,94 @@ impl McpRegistry {
             name.into(),
             RegisteredClient {
                 connection_id: None,
-                client,
+                client: Arc::clone(&client),
             },
         );
+        self.set_output_parser_client(name, Some(client)).await;
+    }
+
+    /// Read live metadata from the current transport connection, or the native
+    /// name/version-only implementation projection from a cache hit. Looking up
+    /// live metadata by connection id prevents replaced instructions from leaking.
+    pub async fn server_metadata(
+        &self,
+        name: &str,
+    ) -> Option<lingxi_core::host::McpServerMetadataDto> {
+        let connections = self.connections.read().await;
+        match connections.get(name)? {
+            McpConnectionState::Connected {
+                config,
+                connection_id,
+                ..
+            } if !config.disabled => self.transport.server_metadata(*connection_id),
+            McpConnectionState::Cached {
+                config,
+                server_info,
+                ..
+            } if !config.disabled => {
+                server_info
+                    .as_ref()
+                    .map(|server_info| lingxi_core::host::McpServerMetadataDto {
+                        server_info: Some(
+                            Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                                "name": server_info.name,
+                                "version": server_info.version,
+                            }))
+                            .expect("cached server information is generated JSON"),
+                        ),
+                        ..Default::default()
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Snapshot instructions from active shared servers for model context.
+    /// Agent-scoped servers are owned by their dedicated tool resolver.
+    pub async fn server_instruction_blocks(&self) -> Vec<(String, Utf16JsonProjection)> {
+        self.server_instruction_snapshot().await.1
+    }
+
+    /// Eligible names and live instructions captured under the same state lock.
+    /// Cached servers remain eligible but have no cached server instructions.
+    pub async fn server_instruction_snapshot(
+        &self,
+    ) -> (Vec<String>, Vec<(String, Utf16JsonProjection)>) {
+        let connections = self.connections.read().await;
+        let mut names = Vec::new();
+        let mut instructions = Vec::new();
+        for state in connections.values() {
+            let (config, connection_id) = match state {
+                McpConnectionState::Connected {
+                    config,
+                    connection_id,
+                    ..
+                } => (config, Some(*connection_id)),
+                McpConnectionState::Cached { config, .. } => (config, None),
+                _ => continue,
+            };
+            if config.disabled || config.scope == crate::connection::ConfigScope::Agent {
+                continue;
+            }
+            names.push(config.name.clone());
+            let Some(connection_id) = connection_id else {
+                continue;
+            };
+            if let Some(instruction) = self
+                .transport
+                .server_metadata(connection_id)
+                .and_then(|metadata| metadata.instructions)
+                .filter(|text| text.string_units("").is_some_and(|units| !units.is_empty()))
+            {
+                instructions.push((
+                    config.name.clone(),
+                    crate::client::truncate_source_description(&instruction),
+                ));
+            }
+        }
+        instructions.sort_by(|left, right| left.0.cmp(&right.0));
+        names.sort();
+        (names, instructions)
     }
 
     /// Return the cached `Arc<McpClient>` for `name`, if any (M4-07).
@@ -1361,17 +1581,18 @@ impl McpRegistry {
         if let Some(raw_key) = self.cached_raw_key(name).await {
             self.ensure_dialed_from_cache(&raw_key).await?;
             return self.get_client(name).await.ok_or_else(|| {
-                McpError::Internal(format!(
-                    "MCP server \"{name}\" did not publish a client after cache lazy-dial"
-                ))
+                McpError::Internal(
+                    format!("MCP server \"{name}\" did not publish a client after cache lazy-dial")
+                        .into(),
+                )
             });
         }
         if let Some(client) = self.get_client(name).await {
             return Ok(client);
         }
-        Err(McpError::Internal(format!(
-            "MCP server \"{name}\" has no live client"
-        )))
+        Err(McpError::Internal(
+            format!("MCP server \"{name}\" has no live client").into(),
+        ))
     }
 
     /// Whether `name` can currently accept tool calls.
@@ -1454,6 +1675,8 @@ impl McpRegistry {
             let _guard = lifecycle.lock().await;
             let negotiation_mode = if let Some(slot) = self.lazy_upgrade_slot(key).await {
                 slot.negotiation_mode
+            } else if let Some(context) = self.cached_discovery_contexts.read().await.get(key) {
+                context.negotiation_mode
             } else {
                 let conns = self.connections.read().await;
                 match conns.get(key) {
@@ -1485,9 +1708,9 @@ impl McpRegistry {
                 }
                 slot.wait().await
             }
-            LazyUpgradePreparation::Skip => Err(McpError::Connection(format!(
-                "MCP server \"{key}\" is no longer cached"
-            ))),
+            LazyUpgradePreparation::Skip => Err(McpError::Connection(
+                format!("MCP server \"{key}\" is no longer cached").into(),
+            )),
         }
     }
 
@@ -1525,6 +1748,18 @@ impl McpRegistry {
             .map(|(_, v)| v.config().clone())
     }
 
+    /// Native Sbt(SS()): inspect this session's current client configs against
+    /// the owning host's captured startup URL. `None` means the registry has no
+    /// host source; an injected host with no startup URL yields `Some(false)`.
+    pub async fn projects_session_signal(&self) -> Option<bool> {
+        let Some(host) = &self.projects_session_host else {
+            return None;
+        };
+        Some(self.connections.read().await.values().any(|state| {
+            crate::projects_session::client_config_matches(state.config(), host.startup_url())
+        }))
+    }
+
     /// Call one MCP tool and retry a single authentication failure after a
     /// full reconnect. Reconnect re-runs `headersHelper` and OAuth resolution;
     /// a second 401/403 is returned unchanged and never loops.
@@ -1532,7 +1767,7 @@ impl McpRegistry {
         &self,
         server: &str,
         full_name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
@@ -1555,7 +1790,9 @@ impl McpRegistry {
                 lazy_dialed = true;
                 self.ensure_dialed_from_cache(&raw_key)
                     .await
-                    .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()))?;
+                    .map_err(|error| {
+                        crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
+                    })?;
                 self.get_client(server).await
             } else {
                 self.get_client(server).await
@@ -1563,16 +1800,19 @@ impl McpRegistry {
         };
         let Some(client) = client else {
             if lazy_dialed {
-                return Err(crate::client::McpClientError::Rpc(format!(
-                    "MCP server \"{server}\" did not publish a client after cache lazy-dial"
-                )));
+                return Err(crate::client::McpClientError::Rpc(
+                    format!(
+                        "MCP server \"{server}\" did not publish a client after cache lazy-dial"
+                    )
+                    .into(),
+                ));
             }
             let Some((connection_id, _registry_key)) =
                 self.direct_inprocess_connection(server).await
             else {
-                return Err(crate::client::McpClientError::Rpc(format!(
-                    "MCP server \"{server}\" has no live client"
-                )));
+                return Err(crate::client::McpClientError::Rpc(
+                    format!("MCP server \"{server}\" has no live client").into(),
+                ));
             };
 
             // `full_name` is the model-facing `mcp__<server>__<tool>` name.
@@ -1581,15 +1821,17 @@ impl McpRegistry {
             // avoids teaching an in-process provider about FQN normalization.
             let prefix = format!("mcp__{server}__");
             let tool_name = full_name.strip_prefix(&prefix).ok_or_else(|| {
-                crate::client::McpClientError::Rpc(format!(
-                    "invalid MCP tool name {full_name:?} for server {server:?}"
-                ))
+                crate::client::McpClientError::Rpc(
+                    format!("invalid MCP tool name {full_name:?} for server {server:?}").into(),
+                )
             })?;
             return self
                 .transport
                 .call_tool(&McpRawConnection { connection_id }, tool_name, input)
                 .await
-                .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()));
+                .map_err(|error| {
+                    crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
+                });
         };
         let first = client
             .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
@@ -1637,14 +1879,17 @@ impl McpRegistry {
             });
         }
 
-        let raw_name =
-            raw_name.ok_or_else(|| crate::client::McpClientError::Rpc(error.to_string()))?;
+        let Some(raw_name) = raw_name else {
+            return Err(error);
+        };
         if session_expired {
             self.reconnect_preserving_auth(&raw_name).await
         } else {
             self.reconnect(&raw_name).await
         }
-        .map_err(|retry_error| crate::client::McpClientError::Rpc(retry_error.to_string()))?;
+        .map_err(|retry_error| {
+            crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
+        })?;
         let mut _refreshed_from_cache = false;
         let refreshed = if let Some(client) = self.get_client(server).await {
             Some(client)
@@ -1653,16 +1898,19 @@ impl McpRegistry {
             self.ensure_dialed_from_cache(&raw_key)
                 .await
                 .map_err(|retry_error| {
-                    crate::client::McpClientError::Rpc(retry_error.to_string())
+                    crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
                 })?;
             self.get_client(server).await
         } else {
             self.get_client(server).await
         }
         .ok_or_else(|| {
-            crate::client::McpClientError::Rpc(format!(
-                "MCP server \"{server}\" did not publish a client after authentication refresh"
-            ))
+            crate::client::McpClientError::Rpc(
+                format!(
+                    "MCP server \"{server}\" did not publish a client after authentication refresh"
+                )
+                .into(),
+            )
         })?;
         let second = refreshed
             .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
@@ -1703,9 +1951,10 @@ impl McpRegistry {
             name.into(),
             RegisteredClient {
                 connection_id: None,
-                client,
+                client: Arc::clone(&client),
             },
         );
+        self.set_output_parser_client(name, Some(client)).await;
     }
 
     /// Connect, run `initialize`, and discover the server's catalog.
@@ -1729,7 +1978,9 @@ impl McpRegistry {
                 None,
                 Some("UNCONFIGURED"),
             ));
-            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+            return Err(McpError::Connection(
+                UNCONFIGURED_MESSAGE.to_string().into(),
+            ));
         }
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
@@ -1793,6 +2044,7 @@ impl McpRegistry {
                 },
             );
             self.clients.write().await.shift_remove(&key);
+            self.set_output_parser_client(&key, None).await;
             self.clear_prompt_predecessors_for_key(&key).await;
             if let Some(connection_id) = retired_connection_id {
                 self.emit_retire_event_if_shared(&config, &key, connection_id)
@@ -1837,7 +2089,9 @@ impl McpRegistry {
                 None,
                 Some("UNCONFIGURED"),
             ));
-            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+            return Err(McpError::Connection(
+                UNCONFIGURED_MESSAGE.to_string().into(),
+            ));
         }
         let key = config.name.clone();
         let lifecycle = self.lifecycle_lock(&key);
@@ -1856,6 +2110,7 @@ impl McpRegistry {
                 | Some(McpConnectionState::HealthChecking { .. })
                 | Some(McpConnectionState::Connecting { .. })
                 | Some(McpConnectionState::AwaitingOAuth { .. })
+                | Some(McpConnectionState::NeedsAuth { .. })
                 | Some(McpConnectionState::Reconnecting { .. }) => {}
                 _ => {
                     connections.insert(
@@ -1920,13 +2175,7 @@ impl McpRegistry {
                     let _ = self.cleanup_owned_pending_state(&key, &config).await;
                     return Ok(None);
                 }
-                connections.insert(
-                    key.clone(),
-                    McpConnectionState::Disconnected {
-                        config,
-                        last_error: Some(error.to_string()),
-                    },
-                );
+                connections.insert(key.clone(), Self::connection_failure_state(config, &error));
                 drop(connections);
                 self.clear_prompt_predecessors_for_key(&key).await;
                 Err(error)
@@ -1987,7 +2236,9 @@ impl McpRegistry {
                 None,
                 Some("UNCONFIGURED"),
             ));
-            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+            return Err(McpError::Connection(
+                UNCONFIGURED_MESSAGE.to_string().into(),
+            ));
         }
         let table_key = agent_scope_table_key(agent_id, &config.name);
         let lifecycle = self.lifecycle_lock(&table_key);
@@ -2022,6 +2273,7 @@ impl McpRegistry {
         }
         self.connections.write().await.remove(table_key);
         self.clients.write().await.shift_remove(table_key);
+        self.set_output_parser_client(table_key, None).await;
         self.clear_prompt_predecessors_for_key(table_key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         Ok(())
@@ -2040,13 +2292,10 @@ impl McpRegistry {
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
-            self.connections.write().await.insert(
-                key.clone(),
-                McpConnectionState::Disconnected {
-                    config,
-                    last_error: Some(error.to_string()),
-                },
-            );
+            self.connections
+                .write()
+                .await
+                .insert(key.clone(), Self::connection_failure_state(config, error));
             self.clear_prompt_predecessors_for_key(&key).await;
         }
         result
@@ -2101,7 +2350,7 @@ impl McpRegistry {
             } = consult;
             match decision {
                 crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
-                    return self
+                    let connection_id = self
                         .serve_discovery_cache_hit(
                             &config,
                             &key,
@@ -2110,7 +2359,16 @@ impl McpRegistry {
                             true,
                             operation_guard,
                         )
-                        .await;
+                        .await?;
+                    self.cached_discovery_contexts.write().await.insert(
+                        key.clone(),
+                        CachedDiscoveryContext {
+                            connection_id,
+                            partition,
+                            negotiation_mode,
+                        },
+                    );
+                    return Ok(connection_id);
                 }
                 crate::discovery_cache::Decision::Stale { entry, age_ms } => {
                     let entry_era = entry
@@ -2173,22 +2431,42 @@ impl McpRegistry {
             },
         );
         drop(connections);
-        let discovery = match self
+        let discovery = self
             .discover_live_connection(&config, negotiation_mode)
-            .await
-        {
-            Ok(discovery) => discovery,
-            Err(error) => {
-                if error_is_auth_response(&error) {
-                    emit_server_needs_auth_for_config(&config, None);
-                } else if matches!(error, McpError::OAuth(_)) {
-                    emit_server_needs_auth_for_config(&config, Some("discovery_schema"));
-                }
-                return Err(error);
-            }
-        };
+            .await?;
         self.install_live_discovery(key, config, discovery, None, operation_guard, None)
             .await
+    }
+
+    fn connection_failure_needs_auth(error: &McpError) -> bool {
+        // Static/header-helper credential refusals have already been classified
+        // as ordinary Connection errors. Match the structured response here;
+        // an unrelated URL/error containing the digits 401/403 is not auth.
+        matches!(
+            error,
+            McpError::HttpResponse {
+                status: 401 | 403,
+                ..
+            } | McpError::OAuth(_)
+        )
+    }
+
+    fn connection_failure_state(config: McpServerConfig, error: &McpError) -> McpConnectionState {
+        if Self::connection_failure_needs_auth(error) {
+            emit_server_needs_auth_for_config(
+                &config,
+                matches!(error, McpError::OAuth(_)).then_some("discovery_schema"),
+            );
+            McpConnectionState::NeedsAuth {
+                config,
+                error: error.to_string(),
+            }
+        } else {
+            McpConnectionState::Disconnected {
+                config,
+                last_error: Some(error.to_string()),
+            }
+        }
     }
 
     fn validate_connectable_config(config: &McpServerConfig) -> Result<(), McpError> {
@@ -2200,7 +2478,7 @@ impl McpRegistry {
                 Some("UNCONFIGURED"),
             ));
             return Err(McpError::Connection(
-                crate::connection::UNCONFIGURED_ERROR.to_string(),
+                crate::connection::UNCONFIGURED_ERROR.to_string().into(),
             ));
         }
         if let Some(err) = &config.config_error {
@@ -2211,7 +2489,7 @@ impl McpRegistry {
                 None,
                 Some("INVALID_CONFIG"),
             ));
-            return Err(McpError::Connection(err.clone()));
+            return Err(McpError::Connection(err.clone().into()));
         }
         if let Some(err) = config.connect_time_url_error() {
             emit_server_config_invalid(config, telemetry::tengu::mcp::ConfigInvalidSource::Connect);
@@ -2221,7 +2499,7 @@ impl McpRegistry {
                 None,
                 Some("INVALID_CONFIG"),
             ));
-            return Err(McpError::Connection(err.to_string()));
+            return Err(McpError::Connection(err.to_string().into()));
         }
         Ok(())
     }
@@ -2239,6 +2517,7 @@ impl McpRegistry {
     }
 
     async fn invalidate_lazy_upgrade_slot(&self, key: &str) -> Option<Arc<LazyUpgradeSlot>> {
+        self.cached_discovery_contexts.write().await.remove(key);
         self.lazy_upgrade_slots.write().await.remove(key)
     }
 
@@ -2323,6 +2602,19 @@ impl McpRegistry {
                         )));
                     }
                 }
+                let cached_context = self
+                    .cached_discovery_contexts
+                    .write()
+                    .await
+                    .remove(key)
+                    .filter(|context| context.connection_id == connection_id);
+                let refresh_partition = cached_context
+                    .as_ref()
+                    .and_then(|context| context.partition.clone())
+                    .or(refresh_partition);
+                let negotiation_mode = cached_context
+                    .as_ref()
+                    .map_or(negotiation_mode, |context| context.negotiation_mode);
                 let slot = Arc::new(LazyUpgradeSlot::new(
                     key.to_string(),
                     connection_id,
@@ -2350,9 +2642,9 @@ impl McpRegistry {
             CachedDialState::Connecting { config } => {
                 let Some(slot) = self.lazy_upgrade_slot(key).await else {
                     return match mode {
-                        LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
-                            "MCP server \"{key}\" is no longer cached"
-                        ))),
+                        LazyUpgradeMode::Foreground => Err(McpError::Connection(
+                            format!("MCP server \"{key}\" is no longer cached").into(),
+                        )),
                         LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
                     };
                 };
@@ -2360,17 +2652,17 @@ impl McpRegistry {
                     Ok(LazyUpgradePreparation::Wait(slot, false))
                 } else {
                     match mode {
-                        LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
-                            "MCP server \"{key}\" is no longer cached"
-                        ))),
+                        LazyUpgradeMode::Foreground => Err(McpError::Connection(
+                            format!("MCP server \"{key}\" is no longer cached").into(),
+                        )),
                         LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
                     }
                 }
             }
             CachedDialState::Missing => match mode {
-                LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
-                    "MCP server \"{key}\" is no longer cached"
-                ))),
+                LazyUpgradeMode::Foreground => Err(McpError::Connection(
+                    format!("MCP server \"{key}\" is no longer cached").into(),
+                )),
                 LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
             },
         }
@@ -2472,10 +2764,13 @@ impl McpRegistry {
                 key.to_string(),
                 RegisteredClient {
                     connection_id: Some(discovery.connection_id),
-                    client,
+                    client: Arc::clone(&client),
                 },
             );
+        } else {
+            clients.shift_remove(key);
         }
+        *self.output_parser_slot(key).write().await = discovery.client.clone();
         prompt_predecessors.retain(|_, predecessor| predecessor.key != key);
         if let Some(cached_connection_id) = retired_connection_id {
             prompt_predecessors.insert(
@@ -2497,6 +2792,7 @@ impl McpRegistry {
     ) -> Result<LiveDiscovery, McpError> {
         let connect_timeout = mcp_connection_timeout();
         let connect_started = std::time::Instant::now();
+        let elicitation = crate::elicitation_capabilities::for_config(config);
         let has_user_auth_header = crate::negotiation::spec_has_authorization(&config.spec);
         let helper_enabled = crate::headers_helper::has_headers_helper(&config.spec);
         let mut resolved_config = config.clone();
@@ -2532,7 +2828,7 @@ impl McpRegistry {
         );
 
         let attempt = |spec: McpTransportSpec| {
-            self.connect_attempt(spec, connect_timeout, &config.name, negotiation_mode)
+            self.connect_attempt(spec, connect_timeout, config, negotiation_mode, elicitation)
         };
 
         let (conn, caps, negotiated) = match attempt(connect_spec.clone()).await {
@@ -2596,7 +2892,7 @@ impl McpRegistry {
                     e,
                     has_user_auth_header,
                     helper_minted_authorization,
-                ))
+                ));
             }
         };
         // Capture the grant-bound partition immediately after the authenticated
@@ -2631,6 +2927,49 @@ impl McpRegistry {
             &negotiated,
         ));
         match std::panic::AssertUnwindSafe(async {
+            let gate_url = {
+                let u = spec_url(&config.spec);
+                (!u.is_empty()).then(|| u.to_string())
+            };
+            let connection_id = conn.connection_id;
+            let mut client = None;
+            let mut listener_connection = None;
+            if let Some(raw_conn) = &self.raw_conn {
+                if let Some(connection) = raw_conn.connection_for(connection_id) {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let client_base = McpClient::with_roots(
+                        config.name.clone(),
+                        cwd,
+                        self.additional_roots.clone(),
+                        connection.clone(),
+                        self.hook_dispatcher.clone(),
+                    )
+                    .await;
+                    let client_base = match &self.json_schema_validator {
+                        Some(validator) => client_base.with_json_schema_validator(Arc::clone(validator)),
+                        None => client_base,
+                    };
+                    client = Some(Arc::new(
+                        client_base.with_config_options(
+                            config.timeout_ms,
+                            config.always_load,
+                            config.tools.clone(),
+                            config.tool_permissions.clone(),
+                        )
+                        .with_transport_kind(config.spec.transport_kind())
+                        .with_negotiated_protocol(negotiated.clone())
+                        .with_elicitation_capabilities(elicitation)
+                        .with_handshake_state(
+                            caps.clone(),
+                            self.transport.server_metadata(connection_id).as_ref(),
+                        )
+                        .with_server_url(gate_url.clone()),
+                    ));
+                    listener_connection = Some(connection);
+                }
+            }
+
+
             let mut tools_list_elapsed = std::time::Duration::ZERO;
             let mut catalog_failures = CatalogFetchFailures::default();
             let mut tools = if caps.tools {
@@ -2714,10 +3053,6 @@ impl McpRegistry {
             };
 
             let normalized_server = normalize_name_for_mcp(&config.name);
-            let gate_url = {
-                let u = spec_url(&config.spec);
-                (!u.is_empty()).then(|| u.to_string())
-            };
             let server_display = config.name.clone();
             let mut degraded_counts: std::collections::HashMap<
                 telemetry::tengu::mcp::DegradedReason,
@@ -2745,7 +3080,7 @@ impl McpRegistry {
                 );
             }
             tools.retain_mut(|dto| {
-                let decision = crate::tool_schema::decide_tool_schema(
+                let decision = crate::tool_schema::decide_tool_schema_source(
                     gate_url.as_deref(),
                     &dto.input_schema,
                 );
@@ -2775,10 +3110,14 @@ impl McpRegistry {
                     );
                 }
                 if let Some(note) = decision.description_note {
-                    dto.description = if dto.description.is_empty() {
-                        note
+                    dto.description = if dto
+                        .description
+                        .string_units("")
+                        .is_some_and(|units| !units.is_empty())
+                    {
+                        crate::client::prepend_source_text(&format!("{note}\n\n"), &dto.description)
                     } else {
-                        format!("{note}\n\n{}", dto.description)
+                        note.into()
                     };
                 }
                 dto.input_schema = decision.schema;
@@ -2805,34 +3144,6 @@ impl McpRegistry {
                 emit_degraded(&payload);
             }
 
-            let connection_id = conn.connection_id;
-            let mut client = None;
-            let mut listener_connection = None;
-            if let Some(raw_conn) = &self.raw_conn {
-                if let Some(connection) = raw_conn.connection_for(connection_id) {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    client = Some(Arc::new(
-                        McpClient::with_roots(
-                            config.name.clone(),
-                            cwd,
-                            self.additional_roots.clone(),
-                            connection.clone(),
-                            self.hook_dispatcher.clone(),
-                        )
-                        .await
-                        .with_config_options(
-                            config.timeout_ms,
-                            config.always_load,
-                            config.tools.clone(),
-                            config.tool_permissions.clone(),
-                        )
-                        .with_transport_kind(config.spec.transport_kind())
-                        .with_negotiated_protocol(negotiated.clone())
-                        .with_server_url(gate_url.clone()),
-                    ));
-                    listener_connection = Some(connection);
-                }
-            }
 
             LiveDiscovery {
                 connection_id,
@@ -2964,6 +3275,7 @@ impl McpRegistry {
         let (tools, resources, resource_templates, prompts) = self
             .published_catalogs_for_connection(&key, connection_id, &discovery)
             .await;
+        let metadata = self.transport.server_metadata(connection_id);
         self.persist_or_purge_discovery_cache(
             &config,
             discovery.discovery_cache_partition.as_ref(),
@@ -2975,6 +3287,7 @@ impl McpRegistry {
             discovery.negotiation_mode,
             discovery.grant_provenance.as_ref(),
             Some(&discovery.negotiated),
+            metadata.as_ref(),
         )
         .await;
         if let Some(connection) = listener_connection {
@@ -3099,6 +3412,7 @@ impl McpRegistry {
         let (tools, resources, resource_templates, prompts) = self
             .published_catalogs_for_connection(key, discovery.connection_id, &discovery)
             .await;
+        let metadata = self.transport.server_metadata(discovery.connection_id);
         self.persist_or_purge_discovery_cache(
             &slot.expected_config,
             discovery.discovery_cache_partition.as_ref(),
@@ -3110,6 +3424,7 @@ impl McpRegistry {
             slot.negotiation_mode,
             discovery.grant_provenance.as_ref(),
             Some(&discovery.negotiated),
+            metadata.as_ref(),
         )
         .await;
         if let Some(connection) = listener_connection {
@@ -3182,39 +3497,51 @@ impl McpRegistry {
         let still_current =
             matches!(current_slot.as_ref(), Some(current_slot) if Arc::ptr_eq(current_slot, slot));
         if still_current {
-            match slot.mode {
-                LazyUpgradeMode::Foreground => {
-                    let current_connecting = matches!(
-                        self.connections.read().await.get(key),
-                        Some(McpConnectionState::Connecting { config, .. })
-                            if Self::same_config_snapshot(config, &slot.expected_config)
-                    );
-                    if current_connecting {
-                        self.connections.write().await.insert(
-                            key.to_string(),
-                            McpConnectionState::Disconnected {
-                                config: slot.expected_config.clone(),
-                                last_error: Some(error.to_string()),
-                            },
-                        );
-                        self.clear_prompt_predecessors_for_key(key).await;
-                        self.emit_retire_event_if_shared(
-                            &slot.expected_config,
-                            key,
-                            slot.cached_connection_id,
-                        )
-                        .await;
-                    }
+            let current_generation = match self.connections.read().await.get(key) {
+                Some(McpConnectionState::Cached {
+                    connection_id,
+                    config,
+                    ..
+                }) => {
+                    *connection_id == slot.cached_connection_id
+                        && Self::same_config_snapshot(config, &slot.expected_config)
                 }
-                LazyUpgradeMode::Background => {
+                Some(McpConnectionState::Connecting { config, .. })
+                | Some(McpConnectionState::AwaitingOAuth { config, .. }) => {
+                    Self::same_config_snapshot(config, &slot.expected_config)
+                }
+                _ => false,
+            };
+            if current_generation {
+                let auth_response = matches!(
+                    error,
+                    McpError::HttpResponse {
+                        status: 401 | 403,
+                        ..
+                    }
+                );
+                if auth_response
+                    || slot.mode == LazyUpgradeMode::Background
+                    || !Self::connection_failure_needs_auth(error)
+                {
                     self.record_discovery_cache_refresh_failure_locked(
-                        key,
-                        slot.cached_connection_id,
                         &slot.expected_config,
                         slot.refresh_partition.as_ref(),
+                        auth_response,
                     )
                     .await;
                 }
+                self.connections.write().await.insert(
+                    key.to_string(),
+                    Self::connection_failure_state(slot.expected_config.clone(), error),
+                );
+                self.clear_prompt_predecessors_for_key(key).await;
+                self.emit_retire_event_if_shared(
+                    &slot.expected_config,
+                    key,
+                    slot.cached_connection_id,
+                )
+                .await;
             }
             self.remove_lazy_upgrade_slot_if_matches(key, slot).await;
         }
@@ -3252,10 +3579,13 @@ impl McpRegistry {
         )
         .await
         .map_err(|_| {
-            McpError::Internal(format!(
-                "disconnect timed out after {:?}",
-                cleanup_disconnect_timeout()
-            ))
+            McpError::Internal(
+                format!(
+                    "disconnect timed out after {:?}",
+                    cleanup_disconnect_timeout()
+                )
+                .into(),
+            )
         })?
     }
 
@@ -3352,8 +3682,9 @@ impl McpRegistry {
         &self,
         spec: McpTransportSpec,
         timeout: Duration,
-        server_name: &str,
+        config: &McpServerConfig,
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+        elicitation: lingxi_core::host::McpElicitationCapabilities,
     ) -> Result<
         (
             McpRawConnection,
@@ -3362,12 +3693,16 @@ impl McpRegistry {
         ),
         McpError,
     > {
+        let server_name = &config.name;
         let deadline = tokio::time::Instant::now() + timeout;
         let timeout_error = || {
-            McpError::Connection(format!(
-                "MCP server \"{server_name}\" connection timed out after {}ms",
-                timeout.as_millis()
-            ))
+            McpError::Connection(
+                format!(
+                    "MCP server \"{server_name}\" connection timed out after {}ms",
+                    timeout.as_millis()
+                )
+                .into(),
+            )
         };
         let expected_era = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
@@ -3392,6 +3727,7 @@ impl McpRegistry {
                         expected_era: Some(expected_era),
                         deadline_ms: timeout.as_millis() as u64,
                         probe_timeout_ms,
+                        elicitation,
                     },
                 ),
             )
@@ -3449,6 +3785,7 @@ impl McpRegistry {
                     | Some(McpConnectionState::HealthChecking { .. })
                     | Some(McpConnectionState::Connecting { .. })
                     | Some(McpConnectionState::AwaitingOAuth { .. })
+                    | Some(McpConnectionState::NeedsAuth { .. })
                     | Some(McpConnectionState::Reconnecting { .. }) => {}
                     _ => {
                         conns.insert(
@@ -3686,6 +4023,7 @@ impl McpRegistry {
                 Some(
                     McpConnectionState::Disconnected { config, .. }
                     | McpConnectionState::AwaitingOAuth { config, .. }
+                    | McpConnectionState::NeedsAuth { config, .. }
                     | McpConnectionState::Reconnecting { config, .. }
                     | McpConnectionState::Failed { config, .. }
                     | McpConnectionState::Stopped { config },
@@ -3733,6 +4071,9 @@ impl McpRegistry {
                     | McpConnectionState::AwaitingOAuth {
                         config: current, ..
                     }
+                    | McpConnectionState::NeedsAuth {
+                        config: current, ..
+                    }
                     | McpConnectionState::Reconnecting {
                         config: current, ..
                     }
@@ -3765,6 +4106,7 @@ impl McpRegistry {
         // handle to the now-dead connection. `shift_remove` preserves discovery
         // order for the remaining entries.
         self.clients.write().await.shift_remove(name);
+        self.set_output_parser_client(name, None).await;
         self.clear_prompt_predecessors_for_key(name).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         // Remove this connection's dynamic tool partition immediately. A later
@@ -3908,9 +4250,9 @@ impl McpRegistry {
         let (mut config, current_connection) = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
-                return Err(McpError::Internal(format!(
-                    "no MCP server named \"{name}\""
-                )));
+                return Err(McpError::Internal(
+                    format!("no MCP server named \"{name}\"").into(),
+                ));
             };
             if state.config().disabled == disabled {
                 return Ok(None);
@@ -3943,6 +4285,7 @@ impl McpRegistry {
                 },
             );
             self.clients.write().await.shift_remove(name);
+            self.set_output_parser_client(name, None).await;
             self.clear_prompt_predecessors_for_key(name).await;
             Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
             if let Some((connection_id, _)) = current_connection {
@@ -3992,9 +4335,9 @@ impl McpRegistry {
         let config = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
-                return Err(McpError::Internal(format!(
-                    "no MCP server named \"{name}\""
-                )));
+                return Err(McpError::Internal(
+                    format!("no MCP server named \"{name}\"").into(),
+                ));
             };
             state.config().clone()
         };
@@ -4023,9 +4366,9 @@ impl McpRegistry {
         let config = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
-                return Err(McpError::Internal(format!(
-                    "no MCP server named \"{name}\""
-                )));
+                return Err(McpError::Internal(
+                    format!("no MCP server named \"{name}\"").into(),
+                ));
             };
             state.config().clone()
         };
@@ -4268,7 +4611,7 @@ impl McpRegistry {
         out
     }
 
-    /// Every prompt advertised by a CONNECTED server, as
+    /// Every prompt advertised by a SHARED CONNECTED server, as
     /// `(server_name, connection_id, prompt)`.
     ///
     /// Claude-code merges these into the slash-command list (`getAllCommands`
@@ -4293,6 +4636,12 @@ impl McpRegistry {
         servers.sort();
         let mut out = Vec::new();
         for name in servers {
+            if conns
+                .get(name)
+                .is_some_and(|state| state.config().name != *name)
+            {
+                continue;
+            }
             if let Some(
                 crate::connection::McpConnectionState::Connected {
                     connection_id,
@@ -4323,8 +4672,8 @@ impl McpRegistry {
         &self,
         connection_id: lingxi_core::types::McpConnectionId,
         prompt_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, McpError> {
+        arguments: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpError> {
         let direct = {
             let connections = self.connections.read().await;
             connections.iter().find_map(|(name, state)| match state {
@@ -4358,9 +4707,10 @@ impl McpRegistry {
                     .get(&connection_id)
                     .cloned()
                     .ok_or_else(|| {
-                        McpError::Internal(format!(
-                            "MCP prompt connection {connection_id} is no longer active"
-                        ))
+                        McpError::Internal(
+                            format!("MCP prompt connection {connection_id} is no longer active")
+                                .into(),
+                        )
                     })?;
                 (
                     predecessor.key.clone(),
@@ -4378,22 +4728,26 @@ impl McpRegistry {
                     ..
                 }) => {
                     if *current != expected_live_connection_id {
-                        return Err(McpError::Internal(format!(
-                            "MCP prompt connection {connection_id} is no longer active"
-                        )));
+                        return Err(McpError::Internal(
+                            format!("MCP prompt connection {connection_id} is no longer active")
+                                .into(),
+                        ));
                     }
                     if let Some(predecessor) = predecessor.as_ref() {
                         if !Self::same_config_snapshot(config, &predecessor.config) {
-                            return Err(McpError::Internal(format!(
-                                "MCP prompt connection {connection_id} is no longer active"
-                            )));
+                            return Err(McpError::Internal(
+                                format!(
+                                    "MCP prompt connection {connection_id} is no longer active"
+                                )
+                                .into(),
+                            ));
                         }
                     }
                 }
                 _ => {
-                    return Err(McpError::Internal(format!(
-                        "MCP prompt connection {connection_id} is no longer active"
-                    )))
+                    return Err(McpError::Internal(
+                        format!("MCP prompt connection {connection_id} is no longer active").into(),
+                    ));
                 }
             }
         }
@@ -4401,22 +4755,29 @@ impl McpRegistry {
         let client = {
             let clients = self.clients.read().await;
             let entry = clients.get(&server_name).ok_or_else(|| {
-                McpError::Internal(format!(
-                    "MCP prompt server {server_name} has no live client"
-                ))
+                McpError::Internal(
+                    format!("MCP prompt server {server_name} has no live client").into(),
+                )
             })?;
             if entry.connection_id != Some(expected_live_connection_id) {
-                return Err(McpError::Internal(format!(
-                    "MCP prompt connection {connection_id} is no longer active"
-                )));
+                return Err(McpError::Internal(
+                    format!("MCP prompt connection {connection_id} is no longer active").into(),
+                ));
             }
             Arc::clone(&entry.client)
         };
 
+        let prompt_name = Utf16JsonProjection::from(prompt_name);
         client
-            .get_prompt(prompt_name, arguments)
+            .get_prompt(&prompt_name, arguments)
             .await
-            .map_err(|error| McpError::Internal(error.to_string()))
+            .map_err(|error| {
+                McpError::Internal(
+                    error
+                        .source_diagnostic()
+                        .unwrap_or_else(|| error.to_string().into()),
+                )
+            })
     }
 
     /// Recover the RAW wire tool name for a model-facing MCP tool `full_name`.
@@ -4705,7 +5066,9 @@ fn project_action_state(state: &McpConnectionState) -> lingxi_core::host::McpAct
         McpConnectionState::Connecting { .. } | McpConnectionState::Reconnecting { .. } => {
             McpActionState::Pending
         }
-        McpConnectionState::AwaitingOAuth { .. } => McpActionState::NeedsAuth,
+        McpConnectionState::AwaitingOAuth { .. } | McpConnectionState::NeedsAuth { .. } => {
+            McpActionState::NeedsAuth
+        }
         McpConnectionState::Failed { .. }
         | McpConnectionState::Disconnected { .. }
         | McpConnectionState::Stopped { .. } => McpActionState::Failed,
@@ -4732,7 +5095,9 @@ fn project_status(state: &McpConnectionState) -> lingxi_core::host::McpStatus {
         | McpConnectionState::HealthChecking { .. }
         | McpConnectionState::Reconnecting { .. }
         | McpConnectionState::Stopped { .. } => McpStatus::Disconnected,
-        McpConnectionState::Failed { error, .. } => McpStatus::Error(error.clone()),
+        McpConnectionState::Failed { error, .. } | McpConnectionState::NeedsAuth { error, .. } => {
+            McpStatus::Error(error.clone())
+        }
     }
 }
 

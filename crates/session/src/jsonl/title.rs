@@ -25,8 +25,10 @@
 //!    `[Request interrupted…]` markers.
 
 use crate::jsonl::schema::JsonlMessage;
+use lingxi_core::types::utf16_json::JsonValueView;
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(test)]
 use serde_json::Value;
 
 /// Maximum number of `char`s stored for the title before truncation + ellipsis.
@@ -105,7 +107,7 @@ pub(crate) fn has_autonomous_tick_prompt(messages: &[JsonlMessage]) -> bool {
         {
             return false;
         }
-        let Some(content) = message.message.get("content") else {
+        let Some(content) = message.message.at_pointer("/content") else {
             return false;
         };
         collect_texts(content).is_some_and(|texts| {
@@ -165,7 +167,7 @@ fn first_meaningful_user_text(messages: &[JsonlMessage]) -> Option<String> {
         }
 
         // `const content = msg.message?.content; if (!content) continue` (1754).
-        let Some(content) = m.message.get("content") else {
+        let Some(content) = m.message.at_pointer("/content") else {
             continue;
         };
 
@@ -247,19 +249,22 @@ pub(crate) fn truncate_title(text: &str) -> String {
 /// `for(let s of r){...if(s.type==="tool_result")return;
 /// if(s.type==="text"&&typeof s.text==="string")o.push(s.text)}` (a tool_result
 /// carrier yields nothing). Non-string/non-array content → `Some(empty)`.
-fn collect_texts(content: &Value) -> Option<Vec<String>> {
+fn collect_texts(content: JsonValueView<'_>) -> Option<Vec<String>> {
     if let Some(s) = content.as_str() {
         Some(vec![s.to_string()])
-    } else if let Some(arr) = content.as_array() {
+    } else if let Some(arr) = content.array_len() {
         let mut out = Vec::new();
-        for block in arr {
-            let ty = block.get("type").and_then(Value::as_str);
+        for index in 0..arr {
+            let Some(block) = content.get_index(index) else {
+                continue;
+            };
+            let ty = block.get_property("type").and_then(JsonValueView::as_str);
             // First tool_result block aborts the entire message.
             if ty == Some("tool_result") {
                 return None;
             }
             if ty == Some("text") {
-                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                if let Some(t) = block.get_property("text").and_then(JsonValueView::as_str) {
                     out.push(t.to_string());
                 }
             }
@@ -285,7 +290,7 @@ fn extract_tag(text: &str, re: &Regex) -> Option<String> {
 /// Read a boolean outer field (e.g. `isMeta`, `isCompactSummary`) from
 /// `JsonlMessage::extra`; missing / non-bool ⇒ `false`.
 fn extra_flag(m: &JsonlMessage, key: &str) -> bool {
-    m.extra.get(key).and_then(Value::as_bool).unwrap_or(false)
+    m.extra.get_property(key).and_then(JsonValueView::as_bool).unwrap_or(false)
 }
 
 /// Truncate `s` to [`TITLE_MAX_CHARS`] `char`s, trimming the slice and appending
@@ -312,9 +317,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn read_message(value: Value) -> JsonlMessage {
+        let source = serde_json::to_string(&value).unwrap();
+        crate::jsonl::reader::route_lines(&source)
+            .messages_in_order
+            .into_iter()
+            .next()
+            .expect("message row")
+    }
+
     /// Build a `user` JSONL message with the given inner `content`.
     fn user(content: Value) -> JsonlMessage {
-        serde_json::from_value(json!({
+        read_message(json!({
             "type": "user",
             "uuid": "11111111-1111-1111-1111-111111111111",
             "parentUuid": null,
@@ -326,7 +340,6 @@ mod tests {
             "userType": "external",
             "message": {"role": "user", "content": content}
         }))
-        .expect("valid user message")
     }
 
     /// Build a `user` message with extra outer fields merged in (e.g. isMeta).
@@ -347,7 +360,7 @@ mod tests {
         for (k, v) in extra.as_object().unwrap() {
             obj.insert(k.clone(), v.clone());
         }
-        serde_json::from_value(base).expect("valid user message")
+        read_message(base)
     }
 
     #[test]

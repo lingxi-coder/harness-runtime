@@ -118,6 +118,8 @@ struct Frontmatter {
     max_turns: Option<serde_yaml::Value>,
     #[serde(default)]
     background: Option<serde_yaml::Value>,
+    #[serde(default, rename = "omitClaudeMd")]
+    omit_claude_md: Option<serde_yaml::Value>,
     #[serde(default)]
     memory: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -432,7 +434,7 @@ pub fn parse_agent_markdown(
         system_prompt: if system_prompt.is_empty() {
             None
         } else {
-            Some(system_prompt)
+            Some(system_prompt.into())
         },
         mcp_servers,
         frontmatter_hooks,
@@ -450,7 +452,16 @@ pub fn parse_agent_markdown(
         initial_prompt,
         color,
         observer,
+        omit_claude_md: matches!(
+            fm.omit_claude_md.as_ref(),
+            Some(serde_yaml::Value::Bool(true))
+        ) || fm
+            .omit_claude_md
+            .as_ref()
+            .and_then(serde_yaml::Value::as_str)
+            == Some("true"),
         cache_ttl: parse_cache_ttl_yaml(fm.experimental.as_ref()),
+        offer_provider: None,
     })
 }
 
@@ -1108,6 +1119,12 @@ pub fn parse_agent_from_json(
         }
     };
 
+    let omit_claude_md = match obj.get("omitClaudeMd") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return None,
+    };
+
     // isolation: `z.enum(['worktree','remote'])`. Availability of the remote
     // runner is checked later; the public JSON schema accepts both values.
     let isolation = match obj.get("isolation") {
@@ -1193,7 +1210,7 @@ pub fn parse_agent_from_json(
         permission_mode,
         source,
         base_dir: PathBuf::new(),
-        system_prompt: Some(system_prompt),
+        system_prompt: Some(system_prompt.into()),
         mcp_servers,
         frontmatter_hooks,
         icon: None,
@@ -1209,7 +1226,9 @@ pub fn parse_agent_from_json(
         initial_prompt,
         color: None,
         observer,
+        omit_claude_md,
         cache_ttl: parse_cache_ttl_json(obj.get("experimental")),
+        offer_provider: None,
     })
 }
 
@@ -1397,6 +1416,15 @@ fn validate_flag_agent_schema(name: &str, definition: &serde_json::Value) -> Res
         }
     }
 
+    if let Some(value) = obj.get("omitClaudeMd") {
+        if !value.is_boolean() {
+            return Err(invalid_json_type(
+                &format!("{name}.omitClaudeMd"),
+                "boolean",
+                Some(value),
+            ));
+        }
+    }
     if let Some(value) = obj.get("background") {
         if !value.is_boolean() {
             return Err(invalid_json_type(
@@ -2038,7 +2066,12 @@ mod tests {
         .unwrap();
         assert_eq!(def.agent_type, "reviewer");
         assert_eq!(def.when_to_use, "review code");
-        assert_eq!(def.system_prompt.as_deref(), Some("Body"));
+        assert_eq!(
+            def.system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
+            Some("Body")
+        );
     }
 
     #[test]
@@ -2053,7 +2086,12 @@ mod tests {
         .expect("parse with bom");
         assert_eq!(def.agent_type, "reviewer");
         assert_eq!(def.when_to_use, "review code");
-        assert_eq!(def.system_prompt.as_deref(), Some("Body"));
+        assert_eq!(
+            def.system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
+            Some("Body")
+        );
     }
 
     #[test]
@@ -3005,7 +3043,12 @@ mod tests {
         let def = parse_agent_from_json("myagent", &json, AgentSource::Flag).unwrap();
         assert_eq!(def.agent_type, "myagent");
         assert_eq!(def.when_to_use, "does things");
-        assert_eq!(def.system_prompt.as_deref(), Some("you are a helper"));
+        assert_eq!(
+            def.system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
+            Some("you are a helper")
+        );
         assert!(matches!(def.tools, AgentToolPolicy::Explicit(_)));
         assert_eq!(def.disallowed_tools, vec!["Bash"]);
         assert!(matches!(def.model, AgentModel::Inherit));
@@ -3274,7 +3317,10 @@ mod tests {
         assert_eq!(out[0].agent_type, "reviewer");
         assert_eq!(out[0].when_to_use, "Reviews code");
         assert_eq!(
-            out[0].system_prompt.as_deref(),
+            out[0]
+                .system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
             Some("You are a code reviewer")
         );
         assert_eq!(out[0].source, AgentSource::Flag);
@@ -3368,6 +3414,57 @@ mod tests {
             let parsed = parse_agents_from_flag_json_checked(raw).unwrap();
             assert_eq!(parsed.len(), 1);
             assert!(parsed[0].observer.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod omit_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn omit_yaml_literal_and_string_true_are_accepted_for_files_and_plugins() {
+        for source in [
+            AgentSource::Plugin,
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
+        ] {
+            for (raw, expected) in [
+                ("true", true),
+                ("'true'", true),
+                ("false", false),
+                ("'TRUE'", false),
+                ("1", false),
+            ] {
+                let definition = parse_agent_markdown(
+                    &format!(
+                        "---\nname: worker\ndescription: task\nomitClaudeMd: {raw}\n---\nprompt"
+                    ),
+                    source,
+                    "/tmp".into(),
+                    Path::new("/tmp/worker.md"),
+                )
+                .unwrap();
+                assert_eq!(definition.omit_claude_md, expected, "{raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn omit_json_is_strictly_boolean() {
+        for value in [serde_json::json!(true), serde_json::json!(false)] {
+            let raw = serde_json::json!({"worker":{"description":"task","prompt":"prompt","omitClaudeMd":value}}).to_string();
+            assert_eq!(
+                parse_agents_from_flag_json_checked(&raw).unwrap()[0].omit_claude_md,
+                value.as_bool().unwrap()
+            );
+        }
+        for value in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let raw = serde_json::json!({"worker":{"description":"task","prompt":"prompt","omitClaudeMd":value}}).to_string();
+            assert!(parse_agents_from_flag_json_checked(&raw).is_err());
         }
     }
 }

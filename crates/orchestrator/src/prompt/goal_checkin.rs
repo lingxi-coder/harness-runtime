@@ -90,6 +90,121 @@ fn sanitize_checkin_text(text: &str) -> String {
     out
 }
 
+fn sanitize_checkin_text_source(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    static INVISIBLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let invisible = INVISIBLE.get_or_init(|| {
+        regex::Regex::new(
+            r"[\p{Cf}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\x00-\x08\x0E-\x1F\x7F-\x9F]",
+        )
+        .expect("valid oracle Unicode sanitation pattern")
+    });
+    let source_units = source
+        .string_units("")
+        .expect("active goal condition must be a JSON string");
+    let mut out = Vec::with_capacity(source_units.len());
+    let mut pending_space = false;
+    let mut index = 0;
+    while index < source_units.len() {
+        let first = source_units[index];
+        let (character, consumed) = if (0xd800..=0xdbff).contains(&first)
+            && source_units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000
+                + ((u32::from(first) - 0xd800) << 10)
+                + (u32::from(source_units[index + 1]) - 0xdc00);
+            (char::from_u32(scalar), 2)
+        } else if (0xd800..=0xdfff).contains(&first) {
+            (None, 1)
+        } else {
+            (char::from_u32(u32::from(first)), 1)
+        };
+        index += consumed;
+        let Some(character) = character else {
+            // JavaScript's check-in sanitizer does not classify unpaired UTF-16
+            // surrogates as invisible text; keep the original code unit.
+            if pending_space {
+                out.push(0x0020);
+                pending_space = false;
+            }
+            out.push(first);
+            if consumed == 2 {
+                out.push(source_units[index - 1]);
+            }
+            continue;
+        };
+        let mut encoded_character = [0; 4];
+        if invisible.is_match(character.encode_utf8(&mut encoded_character)) {
+            continue;
+        }
+        if (character.is_whitespace() && character != '\u{85}') || character == '\u{feff}' {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(0x0020);
+            pending_space = false;
+        }
+        let normalized = match character {
+            '\u{ff1c}' | '\u{fe64}' | '\u{2329}' | '\u{27e8}' | '\u{3008}' | '\u{2039}'
+            | '\u{02c2}' | '\u{1438}' | '\u{276c}' | '\u{276e}' | '\u{2770}' | '\u{29fc}'
+            | '\u{226e}' | '\u{227a}' | '\u{22d6}' => '<',
+            '\u{ff1e}' | '\u{fe65}' | '\u{232a}' | '\u{27e9}' | '\u{3009}' | '\u{203a}'
+            | '\u{02c3}' | '\u{1433}' | '\u{276d}' | '\u{276f}' | '\u{2771}' | '\u{29fd}'
+            | '\u{226f}' | '\u{227b}' | '\u{22d7}' => '>',
+            '\u{ff0f}' | '\u{2215}' | '\u{2044}' => '/',
+            other => other,
+        };
+        let mut encoded = [0; 2];
+        out.extend_from_slice(normalized.encode_utf16(&mut encoded));
+    }
+    let display = String::from_utf16_lossy(&out);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(display, out)
+        .expect("sanitized goal condition is a valid UTF-16 string")
+}
+
+fn escape_checkin_html_source(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut out = Vec::new();
+    for unit in source
+        .string_units("")
+        .expect("sanitized goal condition must be a JSON string")
+    {
+        match unit {
+            0x0026 => out.extend([0x0026, 0x0061, 0x006d, 0x0070, 0x003b]),
+            0x003c => out.extend([0x0026, 0x006c, 0x0074, 0x003b]),
+            0x003e => out.extend([0x0026, 0x0067, 0x0074, 0x003b]),
+            other => out.push(other),
+        }
+    }
+    let display = String::from_utf16_lossy(&out);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(display, out)
+        .expect("escaped goal condition is a valid UTF-16 string")
+}
+
+fn append_source_string(
+    units: &mut Vec<u16>,
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) {
+    units.extend(
+        source
+            .string_units("")
+            .expect("check-in text fragment must be a JSON string"),
+    );
+}
+
+fn source_string_from_units(
+    units: Vec<u16>,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(display, units)
+        .expect("generated check-in is a valid UTF-16 string")
+}
+
 /// `cUv = 30` @292041909 — the default check-in interval, in minutes.
 pub const DEFAULT_CHECKIN_MINUTES: i64 = 30;
 
@@ -150,6 +265,39 @@ pub fn truncate_with_char_count(s: &str, cap: usize) -> String {
     format!("{}\u{2026} [+{} chars]", &s[..end], total - units)
 }
 
+fn truncate_source_with_char_count(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    cap: usize,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let source_units = source
+        .string_units("")
+        .expect("goal task detail must be a JSON string");
+    if source_units.len() <= cap {
+        return source.clone();
+    }
+    let mut end = 0usize;
+    let mut units = 0usize;
+    while end < source_units.len() {
+        let unit_count = if (0xd800..=0xdbff).contains(&source_units[end])
+            && source_units
+                .get(end + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            2
+        } else {
+            1
+        };
+        if units.saturating_add(unit_count) > cap {
+            break;
+        }
+        units += unit_count;
+        end += unit_count;
+    }
+    let mut output = source_units[..end].to_vec();
+    output.extend(format!("\u{2026} [+{} chars]", source_units.len() - units).encode_utf16());
+    source_string_from_units(output)
+}
+
 /// One background task that is currently deferring the goal — the port's stand-in
 /// for `_qf`'s output elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +309,7 @@ pub struct DeferringTask {
     /// `efr[s.type]` — the already-mapped type label.
     pub label: String,
     /// `s.type==="local_bash"&&!isMonitor ? s.command : s.description`.
-    pub detail: String,
+    pub detail: lingxi_core::types::utf16_json::Utf16JsonProjection,
 }
 
 /// `Szf(e, t, r).body` @292038578 — the check-in text.
@@ -177,41 +325,56 @@ pub struct DeferringTask {
 /// `max(1, round(deferred_ms / 60000))`, so a sub-minute deferral still reads
 /// "1 min".
 #[must_use]
-pub fn build_checkin_body(condition: &str, deferred_ms: i64, tasks: &[DeferringTask]) -> String {
+pub fn build_checkin_body(
+    condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    deferred_ms: i64,
+    tasks: &[DeferringTask],
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     // `Math.max(1, Math.round(t/60000))`. Integer round-half-up: for a
     // non-negative `t`, `(t + 30_000) / 60_000` is exactly `Math.round(t/60000)`
     // (JS rounds `.5` toward +Infinity), with no float cast.
     let minutes = deferred_ms.max(0).saturating_add(30_000) / 60_000;
     let minutes = minutes.max(1);
-    let goal = super::sanitize::escape_reminder_html(&sanitize_checkin_text(condition));
+    let goal = escape_checkin_html_source(&sanitize_checkin_text_source(condition));
+    let mut body = "Goal check-in: \u{ab}".encode_utf16().collect::<Vec<_>>();
+    append_source_string(&mut body, &goal);
     if tasks.is_empty() {
-        return format!(
-            "Goal check-in: \u{ab}{goal}\u{bb} is still active. Its evaluation was deferred for \
-{minutes} min while background work ran, and that work is no longer running (it finished or was \
-stopped without reporting back). Continue toward the goal."
+        body.extend(
+            format!(
+                "\u{bb} is still active. Its evaluation was deferred for {minutes} min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
+            )
+            .encode_utf16(),
+        );
+        return source_string_from_units(body);
+    }
+    let mut lines = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
+        if index > 0 {
+            lines.push(0x000a);
+        }
+        let mut line = format!("- {} \u{b7} {} \u{b7} ", task.id, task.label)
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        append_source_string(&mut line, &sanitize_checkin_text_source(&task.detail));
+        let line = source_string_from_units(line);
+        append_source_string(
+            &mut lines,
+            &escape_checkin_html_source(&truncate_source_with_char_count(
+                &line,
+                TASK_LINE_CHAR_CAP,
+            )),
         );
     }
-    let lines = tasks
-        .iter()
-        .map(|task| {
-            super::sanitize::escape_reminder_html(&truncate_with_char_count(
-                &format!(
-                    "- {} \u{b7} {} \u{b7} {}",
-                    task.id,
-                    task.label,
-                    sanitize_checkin_text(&task.detail)
-                ),
-                TASK_LINE_CHAR_CAP,
-            ))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Goal check-in: \u{ab}{goal}\u{bb} is still active, and evaluation has been deferred for \
-{minutes} min because background work is still running:\n{lines}\nCheck on their progress (e.g. \
-read their output). If they are progressing, say so briefly and keep waiting; if they are stuck \
-or no longer needed, fix or stop them and continue toward the goal."
-    )
+    body.extend(
+        format!("\u{bb} is still active, and evaluation has been deferred for {minutes} min because background work is still running:\n")
+            .encode_utf16(),
+    );
+    body.extend(lines);
+    body.extend(
+        "\nCheck on their progress (e.g. read their output). If they are progressing, say so briefly and keep waiting; if they are stuck or no longer needed, fix or stop them and continue toward the goal."
+            .encode_utf16(),
+    );
+    source_string_from_units(body)
 }
 
 /// `Zil()` @292038365 — the check-in interval in milliseconds, or `0` (disabled).
@@ -279,8 +442,14 @@ pub fn idle_cap_reached(idle_checkin_count: u32) -> bool {
 
 /// `Mns(e).body` — the body a capped check-in delivers.
 #[must_use]
-pub fn with_idle_pause_suffix(body: &str) -> String {
-    format!("{body}{IDLE_PAUSED_BODY_SUFFIX}")
+pub fn with_idle_pause_suffix(
+    body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut units = body
+        .string_units("")
+        .expect("check-in body must be a JSON string");
+    units.extend(IDLE_PAUSED_BODY_SUFFIX.encode_utf16());
+    source_string_from_units(units)
 }
 
 /// `HZ`'s delay, in ms:
@@ -358,11 +527,11 @@ impl GoalDeferralState {
     /// `interval_ms == 0` (feature disabled) leaves the state untouched.
     pub fn advance(
         &mut self,
-        condition: &str,
+        condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         tasks: &[DeferringTask],
         now_ms: i64,
         interval_ms: i64,
-    ) -> Option<String> {
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         if interval_ms == 0 {
             return None;
         }
@@ -428,19 +597,31 @@ impl GoalDeferralState {
 mod tests {
     use super::*;
 
+    fn source(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        text.into()
+    }
+
+    fn display(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
+        source.string_at("").unwrap().into_owned()
+    }
+
     fn task(id: &str, label: &str, detail: &str) -> DeferringTask {
         DeferringTask {
             id: id.into(),
             start_time_ms: Some(0),
             label: label.into(),
-            detail: detail.into(),
+            detail: source(detail),
         }
     }
 
     #[test]
     fn the_no_longer_running_body_is_byte_exact_against_2_1_238() {
         assert_eq!(
-            build_checkin_body("ship the port", 31 * 60_000, &[]),
+            display(&build_checkin_body(
+                &source("ship the port"),
+                31 * 60_000,
+                &[]
+            )),
             "Goal check-in: \u{ab}ship the port\u{bb} is still active. Its evaluation was deferred for 31 min while background work ran, and that work is no longer running (it finished or was stopped without reporting back). Continue toward the goal."
         );
     }
@@ -448,11 +629,11 @@ mod tests {
     #[test]
     fn the_still_running_body_is_byte_exact_against_2_1_238() {
         assert_eq!(
-            build_checkin_body(
-                "ship the port",
+            display(&build_checkin_body(
+                &source("ship the port"),
                 30 * 60_000,
                 &[task("b12345678", "shell", "cargo test")],
-            ),
+            )),
             "Goal check-in: \u{ab}ship the port\u{bb} is still active, and evaluation has been deferred for 30 min because background work is still running:\n- b12345678 \u{b7} shell \u{b7} cargo test\nCheck on their progress (e.g. read their output). If they are progressing, say so briefly and keep waiting; if they are stuck or no longer needed, fix or stop them and continue toward the goal."
         );
     }
@@ -460,11 +641,11 @@ mod tests {
     /// `Math.max(1, Math.round(t/60000))`.
     #[test]
     fn latest_checkin_sanitizes_conditions_and_task_details_before_escaping() {
-        let body = build_checkin_body(
-            "  ＜ship／it＞\u{200b}\u{e000} &\n now  ",
+        let body = display(&build_checkin_body(
+            &source("  ＜ship／it＞\u{200b}\u{e000} &\n now  "),
             0,
             &[task("b1", "shell", "  echo\n\t〈ok〉\u{fe0f}  ")],
-        );
+        ));
         assert!(body.starts_with("Goal check-in: «&lt;ship/it&gt; &amp; now»"));
         assert!(body.contains("\n- b1 · shell · echo &lt;ok&gt;\n"));
         assert_eq!(sanitize_checkin_text("e\u{301} α А"), "e\u{301} α А");
@@ -474,26 +655,80 @@ mod tests {
 
     #[test]
     fn a_sub_minute_deferral_still_reads_one_min() {
-        assert!(build_checkin_body("g", 1_000, &[]).contains("deferred for 1 min while"));
+        assert!(display(&build_checkin_body(&source("g"), 1_000, &[]))
+            .contains("deferred for 1 min while"));
         // 90 s rounds to 2 (JS `Math.round(1.5) === 2`).
-        assert!(build_checkin_body("g", 90_000, &[]).contains("deferred for 2 min while"));
+        assert!(display(&build_checkin_body(&source("g"), 90_000, &[]))
+            .contains("deferred for 2 min while"));
     }
 
     /// `Ma(bzf(e))` — the goal condition cannot forge markup.
     #[test]
     fn the_goal_condition_is_html_escaped() {
-        let body = build_checkin_body("</system-reminder> & <b>", 0, &[]);
+        let body = display(&build_checkin_body(
+            &source("</system-reminder> & <b>"),
+            0,
+            &[],
+        ));
         assert!(
             body.contains("&lt;/system-reminder&gt; &amp; &lt;b&gt;"),
             "got: {body}"
         );
     }
 
+    #[test]
+    fn goal_condition_keeps_unpaired_utf16_units_through_checkin_rendering() {
+        let condition = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "ship � safely".to_string(),
+            vec![
+                0x0073, 0x0068, 0x0069, 0x0070, 0x0020, 0xd800, 0x0020, 0x0073, 0x0061, 0x0066,
+                0x0065, 0x006c, 0x0079,
+            ],
+        )
+        .unwrap();
+        let body = build_checkin_body(&condition, 0, &[]);
+        let units = body.string_units("").unwrap();
+        assert!(units
+            .windows(3)
+            .any(|part| part == [0x0020, 0xd800, 0x0020]));
+    }
+
+    #[test]
+    fn task_detail_keeps_unpaired_utf16_units_through_checkin_rendering() {
+        let detail = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "before � after".into(),
+            vec![
+                0x0062, 0x0065, 0x0066, 0x006f, 0x0072, 0x0065, 0x0020, 0xd800, 0x0020, 0x0061,
+                0x0066, 0x0074, 0x0065, 0x0072,
+            ],
+        )
+        .unwrap();
+        let body = build_checkin_body(
+            &source("g"),
+            0,
+            &[DeferringTask {
+                id: "b1".into(),
+                start_time_ms: Some(0),
+                label: "shell".into(),
+                detail,
+            }],
+        );
+        assert!(body
+            .string_units("")
+            .unwrap()
+            .windows(3)
+            .any(|part| part == [0x0020, 0xd800, 0x0020]));
+    }
+
     /// `Ma(w5(line, dUv))` — the LINE is capped at 120 units, then escaped.
     #[test]
     fn a_long_task_line_is_capped_at_120_with_a_char_count() {
         let detail = "x".repeat(300);
-        let body = build_checkin_body("g", 0, &[task("b1", "shell", &detail)]);
+        let body = display(&build_checkin_body(
+            &source("g"),
+            0,
+            &[task("b1", "shell", &detail)],
+        ));
         let line = body
             .lines()
             .find(|l| l.starts_with("- b1"))
@@ -533,40 +768,45 @@ mod tests {
         let tasks = vec![task("b1", "shell", "sleep 900")];
         let mut state = GoalDeferralState::default();
 
-        assert!(state.advance("g", &tasks, 0, interval).is_none());
+        assert!(state.advance(&source("g"), &tasks, 0, interval).is_none());
         assert_eq!(state.deferred_since, Some(0));
-        assert!(state.advance("g", &tasks, interval - 1, interval).is_none());
+        assert!(state
+            .advance(&source("g"), &tasks, interval - 1, interval)
+            .is_none());
         assert_eq!(state.checkin_count, 0);
 
         let text = state
-            .advance("g", &tasks, interval, interval)
+            .advance(&source("g"), &tasks, interval, interval)
             .expect("check-in at the interval");
-        assert!(text.contains("deferred for 30 min because"), "got: {text}");
+        assert!(
+            display(&text).contains("deferred for 30 min because"),
+            "got: {text}"
+        );
         assert_eq!(state.checkin_count, 1);
         assert_eq!(state.deferred_since, Some(interval));
 
         // The clock restarted with a 60m backoff.
         assert!(state
-            .advance("g", &tasks, 2 * interval - 1, interval)
+            .advance(&source("g"), &tasks, 2 * interval - 1, interval)
             .is_none());
         let second = state
-            .advance("g", &tasks, 3 * interval, interval)
+            .advance(&source("g"), &tasks, 3 * interval, interval)
             .expect("second check-in at one hour");
         assert!(
-            second.contains("deferred for 60 min because"),
+            display(&second).contains("deferred for 60 min because"),
             "got: {second}"
         );
         assert_eq!(state.checkin_count, 2);
 
         // The cap is 120m for every later check-in.
         assert!(state
-            .advance("g", &tasks, 7 * interval - 1, interval)
+            .advance(&source("g"), &tasks, 7 * interval - 1, interval)
             .is_none());
         let third = state
-            .advance("g", &tasks, 7 * interval, interval)
+            .advance(&source("g"), &tasks, 7 * interval, interval)
             .expect("third check-in at two hours");
         assert!(
-            third.contains("deferred for 120 min because"),
+            display(&third).contains("deferred for 120 min because"),
             "got: {third}"
         );
         assert_eq!(state.checkin_count, 3);
@@ -580,14 +820,14 @@ mod tests {
         let interval = 30 * 60_000;
         let mut state = GoalDeferralState::default();
         let first = vec![task("b1", "shell", "one")];
-        assert!(state.advance("g", &first, 0, interval).is_none());
+        assert!(state.advance(&source("g"), &first, 0, interval).is_none());
 
         // Long gap, and every deferring task is new ⇒ new run.
         let mut second = vec![task("b2", "shell", "two")];
         second[0].start_time_ms = Some((interval + 1) as u64);
         assert!(
             state
-                .advance("g", &second, 3 * interval, interval)
+                .advance(&source("g"), &second, 3 * interval, interval)
                 .is_none(),
             "a new run restarts the clock instead of firing immediately"
         );
@@ -600,8 +840,10 @@ mod tests {
         let interval = 30 * 60_000;
         let mut state = GoalDeferralState::default();
         let first = vec![task("b1", "shell", "one")];
-        assert!(state.advance("g", &first, 0, interval).is_none());
-        assert!(state.advance("g", &first, interval, interval).is_some());
+        assert!(state.advance(&source("g"), &first, 0, interval).is_none());
+        assert!(state
+            .advance(&source("g"), &first, interval, interval)
+            .is_some());
         assert_eq!(state.checkin_count, 1);
 
         // 45 minutes after the last pass is greater than the base interval,
@@ -609,14 +851,16 @@ mod tests {
         let mut second = vec![task("b2", "shell", "two")];
         second[0].start_time_ms = Some((interval + 1) as u64);
         let restart = interval + interval * 3 / 2;
-        assert!(state.advance("g", &second, restart, interval).is_none());
+        assert!(state
+            .advance(&source("g"), &second, restart, interval)
+            .is_none());
         assert_eq!(state.deferred_since, Some(restart));
         assert_eq!(state.checkin_count, 0);
         assert!(state
-            .advance("g", &second, restart + interval - 1, interval)
+            .advance(&source("g"), &second, restart + interval - 1, interval)
             .is_none());
         assert!(state
-            .advance("g", &second, restart + interval, interval)
+            .advance(&source("g"), &second, restart + interval, interval)
             .is_some());
     }
 
@@ -627,8 +871,8 @@ mod tests {
         let interval = 30 * 60_000;
         let mut state = GoalDeferralState::default();
         let tasks = vec![task("b1", "shell", "one")];
-        assert!(state.advance("g", &tasks, 0, interval).is_none());
-        let text = state.advance("g", &tasks, 3 * interval, interval);
+        assert!(state.advance(&source("g"), &tasks, 0, interval).is_none());
+        let text = state.advance(&source("g"), &tasks, 3 * interval, interval);
         assert!(
             text.is_some(),
             "the long-running task must trigger a check-in"
@@ -639,10 +883,10 @@ mod tests {
     fn newly_deferring_old_task_does_not_reset_the_checkin_clock() {
         let interval = 30 * 60_000;
         let mut state = GoalDeferralState::default();
-        state.advance("g", &[task("old", "shell", "one")], 0, interval);
+        state.advance(&source("g"), &[task("old", "shell", "one")], 0, interval);
         assert!(state
             .advance(
-                "g",
+                &source("g"),
                 &[task("new-id", "shell", "two")],
                 2 * interval,
                 interval
@@ -661,8 +905,10 @@ mod tests {
             }],
         ] {
             let mut state = GoalDeferralState::default();
-            state.advance("g", &[task("old", "shell", "one")], 0, interval);
-            assert!(state.advance("g", &tasks, 2 * interval, interval).is_some());
+            state.advance(&source("g"), &[task("old", "shell", "one")], 0, interval);
+            assert!(state
+                .advance(&source("g"), &tasks, 2 * interval, interval)
+                .is_some());
         }
     }
 
@@ -717,7 +963,7 @@ mod tests {
     #[test]
     fn the_pause_suffix_is_byte_exact() {
         assert_eq!(
-            with_idle_pause_suffix("Goal check-in: body."),
+            display(&with_idle_pause_suffix(&source("Goal check-in: body."))),
             "Goal check-in: body. Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
         );
     }
@@ -742,7 +988,7 @@ mod tests {
     fn a_zero_interval_disables_the_feature_entirely() {
         let mut state = GoalDeferralState::default();
         let tasks = vec![task("b1", "shell", "one")];
-        assert!(state.advance("g", &tasks, 10_000_000, 0).is_none());
+        assert!(state.advance(&source("g"), &tasks, 10_000_000, 0).is_none());
         assert_eq!(state, GoalDeferralState::default(), "no state is touched");
     }
 

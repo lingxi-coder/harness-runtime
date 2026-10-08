@@ -4,7 +4,6 @@
 //! `LineCodec` — NDJSON: one JSON object per `\n`-terminated line.
 
 use bytes::{Buf, BufMut, BytesMut};
-use serde_json::Value;
 use thiserror::Error;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -101,18 +100,16 @@ impl Decoder for LspCodec {
                 }
                 let body = src.split_to(body_len);
                 self.pending_body_len = None;
-                let v: Value = match serde_json::from_slice(&body) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        tracing::warn!(%error, "LSP: dropped unparseable message body");
-                        continue;
-                    }
-                };
-                if !v.is_object() {
+                if !body
+                    .iter()
+                    .copied()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .is_some_and(|byte| byte == b'{')
+                {
                     tracing::warn!("LSP: dropped message body that is not an object");
                     continue;
                 }
-                match serde_json::from_value(v) {
+                match serde_json::from_slice::<Message>(&body) {
                     Ok(message) => return Ok(Some(message)),
                     Err(error) => {
                         tracing::warn!(%error, "LSP: dropped unrecognized JSON-RPC message body");
@@ -295,8 +292,7 @@ impl Decoder for LineCodec {
                 return Err(CodecError::FrameTooLarge(line.len(), self.max_frame_size));
             }
 
-            let v: Value = serde_json::from_slice(&line)?;
-            let msg: Message = serde_json::from_value(v)?;
+            let msg: Message = serde_json::from_slice(&line)?;
             return Ok(Some(msg));
         }
     }
@@ -305,7 +301,7 @@ impl Decoder for LineCodec {
 #[cfg(test)]
 mod lsp_codec_tests {
     use super::*;
-    use crate::messages::{Id, Notification, Request, JSONRPC_VERSION};
+    use crate::messages::{Id, JsonPayload, Notification, Request, JSONRPC_VERSION};
     use serde_json::json;
 
     fn encode_and_decode(msg: Message) -> Message {
@@ -320,7 +316,11 @@ mod lsp_codec_tests {
 
     #[test]
     fn encode_request_uses_content_length_header() {
-        let req = Request::new("ping", Some(json!({})), Id::Number(1));
+        let req = Request::new(
+            "ping",
+            Some(JsonPayload::from_serializable(&json!({})).unwrap()),
+            Id::Number(1),
+        );
         let mut codec = LspCodec::default();
         let mut buf = BytesMut::new();
         codec.encode(Message::Request(req), &mut buf).unwrap();
@@ -356,8 +356,42 @@ mod lsp_codec_tests {
     }
 
     #[test]
+    fn line_codec_retains_raw_json_in_request_and_response_members() {
+        let source = r#"{"input":"\ud800","list":[1,2]}"#;
+        let request = Message::Request(Request::new(
+            "tools/call",
+            Some(JsonPayload::parse(source).unwrap()),
+            Id::Number(9),
+        ));
+        let decoded = encode_and_decode(request);
+        let Message::Request(decoded) = decoded else {
+            panic!("expected request");
+        };
+        assert_eq!(decoded.params.unwrap().as_json(), source);
+
+        let response = Message::Response(
+            crate::messages::Response::success_raw_json(
+                Id::Number(10),
+                r#"{"content":"\udfff"}"#.to_owned(),
+            )
+            .unwrap(),
+        );
+        let decoded = encode_and_decode(response);
+        let Message::Response(decoded) = decoded else {
+            panic!("expected response");
+        };
+        assert_eq!(
+            decoded.result.unwrap().as_json(),
+            r#"{"content":"\udfff"}"#
+        );
+    }
+
+    #[test]
     fn roundtrip_notification() {
-        let n = Notification::new("notifications/cancelled", Some(json!({"requestId": 1})));
+        let n = Notification::new(
+            "notifications/cancelled",
+            Some(JsonPayload::from_serializable(&json!({"requestId": 1})).unwrap()),
+        );
         let back = encode_and_decode(Message::Notification(n.clone()));
         assert!(matches!(back, Message::Notification(_)));
     }
@@ -489,7 +523,7 @@ mod lsp_codec_tests {
 #[cfg(test)]
 mod line_codec_tests {
     use super::*;
-    use crate::messages::{Id, Request};
+    use crate::messages::{Id, JsonPayload, Request};
     use serde_json::json;
 
     #[test]
@@ -551,7 +585,11 @@ mod line_codec_tests {
             .unwrap();
         codec
             .encode(
-                Message::Request(Request::new("b", Some(json!({})), Id::Number(2))),
+                Message::Request(Request::new(
+                    "b",
+                    Some(JsonPayload::from_serializable(&json!({})).unwrap()),
+                    Id::Number(2),
+                )),
                 &mut buf,
             )
             .unwrap();

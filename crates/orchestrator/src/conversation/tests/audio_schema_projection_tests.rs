@@ -1,9 +1,9 @@
 use super::*;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -243,7 +243,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
     let search_view = registry.tool_search_view();
 
-    let unknown = orchestrator.build_wire_tools().await;
+    let unknown = orchestrator.build_wire_tools().await.0;
     assert!(wire_tool(&unknown, "speech").is_none());
     assert!(search_view.entries().is_empty());
 
@@ -253,7 +253,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     // Model the successful ToolSearch selection: its shared deferral state
     // makes this discovered schema visible in the next request.
     registry.deferral().mark_loaded(["speech"]);
-    let known = orchestrator.build_wire_tools().await;
+    let known = orchestrator.build_wire_tools().await.0;
     assert_eq!(
         wire_tool(&known, "speech").unwrap()["input_schema"]["properties"]["action"]["enum"],
         json!(["transcribe", "speak"])
@@ -265,10 +265,12 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("known capabilities should populate the wire cache");
-    assert!(known_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:1".into())));
+    assert!(
+        known_cache
+            .key
+            .dynamic_schema_revisions
+            .contains(&("speech".into(), "native:1".into()))
+    );
     let known_search = search_view.entries();
     assert_eq!(known_search.len(), 1);
     assert_eq!(known_search[0].name, "speech");
@@ -279,7 +281,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
 
     *supported_actions.write().expect("support lock") = Some(vec!["transcribe".into()]);
     schema_revision.store(2, Ordering::Release);
-    let changed = orchestrator.build_wire_tools().await;
+    let changed = orchestrator.build_wire_tools().await.0;
     assert_eq!(
         wire_tool(&changed, "speech").unwrap()["input_schema"]["properties"]["action"]["enum"],
         json!(["transcribe"])
@@ -291,16 +293,18 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("changed capabilities should refresh the wire cache");
-    assert!(changed_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:2".into())));
+    assert!(
+        changed_cache
+            .key
+            .dynamic_schema_revisions
+            .contains(&("speech".into(), "native:2".into()))
+    );
     assert_ne!(known_cache.key, changed_cache.key);
     assert_eq!(search_view.entries()[0].name, "speech");
 
     *supported_actions.write().expect("support lock") = None;
     schema_revision.store(3, Ordering::Release);
-    let disconnected = orchestrator.build_wire_tools().await;
+    let disconnected = orchestrator.build_wire_tools().await.0;
     assert!(wire_tool(&disconnected, "speech").is_none());
     assert!(search_view.entries().is_empty());
     let disconnected_cache = orchestrator
@@ -310,9 +314,11 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("disconnect should refresh the wire cache");
-    assert!(!disconnected_cache
-        .key
-        .tool_names
-        .iter()
-        .any(|name| name == "speech"));
+    assert!(
+        !disconnected_cache
+            .key
+            .tool_names
+            .iter()
+            .any(|name| name == "speech")
+    );
 }

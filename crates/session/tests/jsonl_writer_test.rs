@@ -2,6 +2,7 @@
 //! `\n` per line, no extra whitespace.
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::JsonlMessage;
@@ -18,7 +19,10 @@ fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
         timestamp: format!("2026-05-25T14:30:0{n}.000Z"),
         cwd: "/tmp/proj".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":format!("hello {n}")}),
+        message: Utf16JsonProjection::from_serde_value(
+            &json!({"role":"user","content":format!("hello {n}")}),
+        )
+        .unwrap(),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -26,7 +30,15 @@ fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Map::default(),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     }
 }
 
@@ -77,7 +89,7 @@ async fn three_appends_produce_three_lines_one_lf_each() {
     assert_eq!(lines[3], "");
 
     for (idx, line) in lines[..3].iter().enumerate() {
-        let parsed: JsonlMessage = serde_json::from_str(line).expect("parse");
+        let parsed = session::jsonl::reader::route_lines(line).messages_in_order[0].clone();
         assert_eq!(parsed.timestamp, format!("2026-05-25T14:30:0{idx}.000Z"));
     }
 
@@ -87,6 +99,72 @@ async fn three_appends_produce_three_lines_one_lf_each() {
 
     // No CRLF anywhere.
     assert!(!text.contains("\r\n"), "writer must use LF, not CRLF");
+}
+
+#[tokio::test]
+async fn attachment_append_keeps_deep_raw_json_and_exact_surrogates() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("attachments.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = JsonlWriter::new(path.clone(), fs);
+    let depth = 384usize;
+    let deep = format!("{}\"\\ud800\"{}", "[".repeat(depth), "]".repeat(depth));
+    let attachment_source = format!(
+        r#"{{"type":"hook_success","content":"before\ud800after","deep":{deep},"wide":1e400,"zero":-0}}"#
+    );
+    let attachment = Utf16JsonProjection::parse(&attachment_source).unwrap();
+    let expected_attachment = attachment.to_json_string().unwrap();
+    let message = JsonlMessage {
+        message_type: "attachment".into(),
+        uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+        parent_uuid: None,
+        session_id: "11111111-2222-3333-4444-555555555555".into(),
+        timestamp: "2026-10-06T00:00:00.000Z".into(),
+        cwd: "/tmp/proj".into(),
+        version: "0.12.0".into(),
+        message: Utf16JsonProjection::parse("null").unwrap(),
+        is_sidechain: false,
+        user_type: Some("external".into()),
+        git_branch: None,
+        entrypoint: Some("cli".into()),
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+        attachment_projection: Some(attachment),
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
+    };
+
+    writer
+        .append(&message)
+        .await
+        .expect("append deep attachment");
+    let raw = std::fs::read_to_string(&path).expect("read native JSONL");
+    let line = raw.trim_end_matches('\n');
+    let attachment_position = line.find("\"attachment\":").unwrap();
+    let type_position = line.find("\"type\":\"attachment\"").unwrap();
+    assert!(attachment_position < type_position, "{line}");
+    assert!(line.contains(r#""content":"before\ud800after""#));
+    assert!(line.contains(r#""wide":null""#));
+    assert!(line.contains(r#""zero":0""#));
+
+    let loaded = session::jsonl::reader::route_lines(line);
+    assert_eq!(loaded.malformed_line_count, 0);
+    assert_eq!(loaded.messages_in_order.len(), 1);
+    assert_eq!(
+        loaded.messages_in_order[0]
+            .attachment_projection
+            .as_ref()
+            .unwrap()
+            .to_json_string()
+            .unwrap(),
+        expected_attachment
+    );
 }
 
 // ---- Writer-field fidelity (§G gap 4) ----------------------------------

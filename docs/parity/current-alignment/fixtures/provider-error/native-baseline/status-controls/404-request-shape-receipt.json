@@ -1,0 +1,69 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner": "capture-404-request-attempts.py",
+  "fixed_input_reference": "../status-controls.json case http-404",
+  "http_status": 404,
+  "response_body_case": "nested-error-message-lone-surrogate",
+  "response_body_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+  "max_retries_environment": 0,
+  "network_boundary": "127.0.0.1-only; fixed dummy key; no upstream relay",
+  "request_count": 2,
+  "requests": [
+    {
+      "index": 1,
+      "body_bytes": 41373,
+      "body_sha256": "db5044aceff2d15ca45e4c0f9cc7c8c5c6ba5daf02c0f662438f3235996cd721",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "top_level_keys": [
+        "context_management",
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "stream",
+        "system",
+        "thinking",
+        "tools"
+      ],
+      "message_count": 1,
+      "headers": {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+      }
+    },
+    {
+      "index": 2,
+      "body_bytes": 41374,
+      "body_sha256": "08644368b4d1ec1cfaca6215721a542cc73c0e997397504e960f2340556023dd",
+      "model": "claude-sonnet-4-5",
+      "stream": false,
+      "top_level_keys": [
+        "context_management",
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "stream",
+        "system",
+        "thinking",
+        "tools"
+      ],
+      "message_count": 1,
+      "headers": {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+      }
+    }
+  ],
+  "request_bodies_byte_equal": false,
+  "changed_json_paths": [
+    "/stream"
+  ],
+  "native_result_sha256": "e072dff230943863a0b68661920e61e254119c76391819a2550ef89a1075ce3f",
+  "raw_request_body_location": "Ignored run-output/status-404-attempts/request-{1,2}.body.raw; rerun the portable capture script to regenerate.",
+  "account_identifying_metadata": "Full request bodies are not checked in; metadata.user_id and values are omitted from this receipt."
+}

@@ -75,6 +75,7 @@ pub mod client;
 pub mod config_diagnostics;
 pub mod connection;
 pub mod discovery_cache;
+mod elicitation_capabilities;
 pub mod enterprise_policy;
 pub mod env_expansion;
 pub mod headers_helper;
@@ -87,6 +88,7 @@ pub mod mcp_output_storage;
 pub mod negotiation;
 pub mod normalization;
 pub mod oauth;
+pub mod projects_session;
 pub mod protocol_negotiation;
 pub mod raw_conn;
 pub mod registry;
@@ -139,7 +141,7 @@ pub use mcp_output_storage::{
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
     ConversationExport, LocalAppExposure, ManagedLocalAppServer, McpCatalogChanged, McpCatalogKind,
-    McpRegistry,
+    McpRegistry, McpToolOutputSchemaParserHandle,
 };
 pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,

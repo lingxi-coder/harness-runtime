@@ -45,7 +45,7 @@
 //! coordinator session / no-first-turn) matches the `ForkHandler` port and is
 //! behavior-preserving; see that module's docs for the rationale.
 
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{trim_source_text, BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{ForkOutcome, OrchestratorHandle};
@@ -77,10 +77,10 @@ impl SubtaskHandler {
 impl BuiltinCommandHandler for SubtaskHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         // `let n = r.trim(); if (!n) return e("Usage: /subtask <task>", ...)`.
-        let task = args.raw_args.trim();
-        if task.is_empty() {
+        let task = trim_source_text(&args.raw_args);
+        if task.string_units("").is_some_and(|units| units.is_empty()) {
             return CommandResult::Done {
-                display: Some("Usage: /subtask \\<task\\>".to_string()),
+                display: Some(("Usage: /subtask \\<task\\>".to_string()).into()),
             };
         }
 
@@ -91,7 +91,8 @@ impl BuiltinCommandHandler for SubtaskHandler {
             return CommandResult::Done {
                 display: Some(
                     "Subtasks are not available in coordinator sessions. Use /branch instead."
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ),
             };
         }
@@ -107,18 +108,21 @@ impl BuiltinCommandHandler for SubtaskHandler {
         if !has_first_turn {
             return CommandResult::Done {
                 display: Some(
-                    "Cannot start a subtask before the first conversation turn".to_string(),
+                    "Cannot start a subtask before the first conversation turn"
+                        .to_string()
+                        .into(),
                 ),
             };
         }
 
-        match self.handle.fork_conversation(task).await {
+        match self.handle.fork_conversation(&task).await {
             Ok(ForkOutcome { name, agent_id }) => {
                 // `o.agentId.slice(-4)` — last 4 chars (or fewer, for a shorter
                 // id). Agent ids are ASCII, so a byte slice is safe.
                 let tail = &agent_id[agent_id.len().saturating_sub(4)..];
+                let name = name.string_at("").unwrap_or_default();
                 CommandResult::Done {
-                    display: Some(format!("{FORK_ICON} forked {name} ({tail})")),
+                    display: Some((format!("{FORK_ICON} forked {name} ({tail})")).into()),
                 }
             }
             Err(e) => {
@@ -128,7 +132,7 @@ impl BuiltinCommandHandler for SubtaskHandler {
                 // port can't verify.
                 let msg = e.to_string();
                 CommandResult::Done {
-                    display: Some(format!("Could not start subtask: {msg}")),
+                    display: Some((format!("Could not start subtask: {msg}")).into()),
                 }
             }
         }
@@ -151,9 +155,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "subtask".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "subtask".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

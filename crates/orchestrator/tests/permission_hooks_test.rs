@@ -4,7 +4,8 @@
 //! Parity with claude-code (HOOK.3 issues 2/3 — SOURCE-GATED):
 //! - `PermissionRequest` (`runPermissionRequestHooksForHeadlessAgent`) fires ONLY
 //!   when the gate is ABOUT TO ASK (`resolve_detailed` → `Ask`), BEFORE the prompt;
-//!   a hook 'allow' RESCUES the call (resolved via `check_after_hook_allow`), a
+//!   a hook 'allow' RESCUES the call (`honour_hook_allow` for a standing allow;
+//!   `check_after_hook_allow_rewritten` when the input is rewritten), a
 //!   hook 'deny' denies. An outright ALLOW, or a rule/mode DENY, is already
 //!   resolved → `PermissionRequest` does NOT fire for it.
 //! - `PermissionDenied` (`executePermissionDeniedHooks`, `toolExecution.ts:1075`)
@@ -31,6 +32,7 @@ use lingxi_core::host::permission_gate::{
     PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
 };
 use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{
     ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ImageSource, ToolUseId,
 };
@@ -233,8 +235,11 @@ impl Tool for EchoTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "echo".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -265,7 +270,7 @@ struct SeenRequest {
 struct SeenDenied {
     tool_name: String,
     tool_input: serde_json::Value,
-    reason: String,
+    reason: Utf16JsonProjection,
 }
 
 #[derive(Default)]
@@ -483,6 +488,7 @@ fn two_turn_api(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -552,7 +558,10 @@ async fn classifier_deny_fires_permission_denied_not_request() {
     );
     assert_eq!(log.denials[0].tool_name, "Echo");
     assert_eq!(log.denials[0].tool_input, json!({ "cmd": "rm -rf /" }));
-    assert_eq!(log.denials[0].reason, "classifier blocked it");
+    assert_eq!(
+        log.denials[0].reason.string_at(""),
+        Some("classifier blocked it")
+    );
 }
 
 #[tokio::test]
@@ -755,7 +764,10 @@ async fn pre_tool_additional_context_surfaces_even_when_denied() {
                 {
                     if *tu == tool_use_id {
                         saw_deny_result = true;
-                        assert!(*is_error, "the deny tool_result must be is_error");
+                        assert!(
+                            is_error.unwrap_or(false),
+                            "the deny tool_result must be is_error"
+                        );
                         // claude-code sends the deny reason VERBATIM as the
                         // tool_result content (no "Permission denied: " wrapper).
                         assert!(
@@ -783,7 +795,7 @@ async fn pre_tool_additional_context_surfaces_even_when_denied() {
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == ctx_text)))
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == ctx_text)))
         })
         .expect("standalone additionalContext message present even though the tool was denied");
 
@@ -857,7 +869,7 @@ fn deny_result_blocks<'a>(
         ConversationMessage::User { content, .. }
             if content.iter().any(|b| matches!(
                 b,
-                ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == tu
+                ContentBlock::ToolResult { tool_use_id, is_error: Some(true), .. } if tool_use_id == tu
             )) =>
         {
             Some(content)
@@ -904,7 +916,7 @@ async fn ask_behavior_deny_appends_image_blocks_at_top_level() {
             tool_use_id: tu,
             ..
         } => {
-            assert!(*is_error);
+            assert!(is_error.unwrap_or(false));
             assert_eq!(tu, &tool_use_id);
             // Deny reason reaches the model VERBATIM (no "Permission denied: " wrapper).
             assert!(
@@ -964,7 +976,13 @@ async fn normal_deny_is_plain_text_tool_result_only() {
         "a normal deny is the plain text tool_result ONLY (no image blocks): {content:?}"
     );
     assert!(
-        matches!(&content[0], ContentBlock::ToolResult { is_error: true, .. }),
+        matches!(
+            &content[0],
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
+        ),
         "the sole block is the is_error tool_result: {content:?}"
     );
 }
@@ -992,7 +1010,7 @@ fn retry_meta_present(history: &[ConversationMessage]) -> bool {
     // (`createUserMessage({…, isMeta:!0})`), so require `is_meta: true` here.
     history.iter().any(|m| {
         matches!(m, ConversationMessage::User { content, is_meta: true, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == verbatim)))
     })
 }
 
@@ -1030,7 +1048,7 @@ async fn permission_denied_retry_pushes_meta_when_classifier_gate_forced_on() {
         .history
         .iter()
         .position(|m| matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id: tu, is_error: true, .. } if *tu == tool_use_id))))
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id: tu, is_error: Some(true), .. } if *tu == tool_use_id))))
         .expect("deny tool_result present");
     let verbatim = "The PermissionDenied hook indicated you may retry this tool call.";
     let retry_pos = s
@@ -1038,7 +1056,7 @@ async fn permission_denied_retry_pushes_meta_when_classifier_gate_forced_on() {
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == verbatim)))
         })
         .expect("retry meta present");
     assert!(

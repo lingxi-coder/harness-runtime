@@ -104,7 +104,7 @@ pub fn watchdog_abort_error(timeout: Duration, wall_elapsed: Duration) -> crate:
 #[must_use]
 pub fn is_stream_suspended(error: &crate::LlmError) -> bool {
     matches!(
-        error,
+        error.classification_source(),
         crate::LlmError::StreamInterrupted { message } if message.starts_with(STREAM_SUSPENDED_PREFIX)
     )
 }
@@ -113,7 +113,7 @@ pub fn is_stream_suspended(error: &crate::LlmError) -> bool {
 #[must_use]
 pub fn is_stream_idle_timeout(error: &crate::LlmError) -> bool {
     matches!(
-        error,
+        error.classification_source(),
         crate::LlmError::StreamInterrupted { message } if message.starts_with(STREAM_IDLE_TIMEOUT_PREFIX)
     )
 }
@@ -155,7 +155,7 @@ pub fn first_byte_abort_error(timeout: Duration, wall_elapsed: Duration) -> crat
 #[must_use]
 pub fn is_stream_no_response(error: &crate::LlmError) -> bool {
     matches!(
-        error,
+        error.classification_source(),
         crate::LlmError::Transport { message } if message == STREAM_NO_RESPONSE_MESSAGE
     )
 }

@@ -25,9 +25,12 @@
 // metadata also avoids its fixed per-item metadata buffer.
 #![allow(missing_docs)]
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
+use std::collections::HashMap;
 
 use crate::protocol::listings::SessionModeDto;
+use crate::protocol::text::ClientTextDto;
 
 fn default_git_version_control() -> bool {
     true
@@ -659,6 +662,30 @@ pub struct AppBridgeV2ResponseDto {
     pub stream_id: Option<String>,
 }
 
+/// Structured terminal provider-error metadata in an app-owned Agent result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentTerminalErrorDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_error_status: Option<u16>,
+    pub terminal_reason: String,
+}
+
+/// Result returned by the app-owned Agent `send` and `stream` operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentTurnResponseDto {
+    pub cancelled: bool,
+    pub session_id: String,
+    pub stream_id: Option<String>,
+    pub text: crate::protocol::text::ClientTextDto,
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<AppAgentTerminalErrorDto>,
+}
+
 /// Ordered v2 stream frame used by LLM and Agent session streams.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -701,6 +728,15 @@ pub enum AppBridgeStreamFrameDto {
         stream_id: String,
         seq: u64,
         reason: String,
+    },
+    TerminalApiError {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_error_status: Option<u16>,
+        terminal_reason: String,
     },
 }
 
@@ -1482,12 +1518,25 @@ pub struct ManagedLocalAppMcpServerDto {
 /// `ClientEvent::AppEvent` envelope to keep `UniFFI` enum metadata bounded.
 // Boxing variants would change the generated mobile binding API; this is
 // infrequent control-plane data rather than a hot-path value.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AppEventDto {
+macro_rules! define_app_event_dto {
+    ($($variants:tt)*) => {
+        #[doc = "Extensible local-app event payload carried by the single top-level"]
+        #[doc = "`ClientEvent::AppEvent` envelope to keep `UniFFI` enum metadata bounded."]
+        #[allow(clippy::large_enum_variant)]
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[non_exhaustive]
+        pub enum AppEventDto { $($variants)* }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum AppEventDtoWire { $($variants)* }
+    };
+}
+
+define_app_event_dto! {
     AppDetailsChanged {
         details: AppDetailsDto,
     },
@@ -1614,15 +1663,215 @@ pub enum AppEventDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app_id: Option<String>,
         code: LocalAppPluginErrorCodeDto,
-        message: String,
+        message: ClientTextDto,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+
+}
+
+impl From<AppEventDtoWire> for AppEventDto {
+    fn from(value: AppEventDtoWire) -> Self {
+        match value {
+            AppEventDtoWire::AppDetailsChanged { details } => Self::AppDetailsChanged { details },
+            AppEventDtoWire::AppBridgeResponse { response } => Self::AppBridgeResponse { response },
+            AppEventDtoWire::AppUiRequest { request } => Self::AppUiRequest { request },
+            AppEventDtoWire::AppCapabilityRequested { request } => {
+                Self::AppCapabilityRequested { request }
+            }
+            AppEventDtoWire::AppCheckpointsChanged {
+                app_id,
+                checkpoints,
+            } => Self::AppCheckpointsChanged {
+                app_id,
+                checkpoints,
+            },
+            AppEventDtoWire::AppLlmActivityChanged { app_id, active } => {
+                Self::AppLlmActivityChanged { app_id, active }
+            }
+            AppEventDtoWire::AppAgentEventPosted {
+                app_id,
+                seq,
+                topic,
+                created_at_ms,
+            } => Self::AppAgentEventPosted {
+                app_id,
+                seq,
+                topic,
+                created_at_ms,
+            },
+            AppEventDtoWire::AppBridgeStreamFrame { frame, frame_json } => {
+                Self::AppBridgeStreamFrame { frame, frame_json }
+            }
+            AppEventDtoWire::AppRecordChanged { record } => Self::AppRecordChanged { record },
+            AppEventDtoWire::AppProfileProposal { proposal } => {
+                Self::AppProfileProposal { proposal }
+            }
+            AppEventDtoWire::AppBackgroundTaskChanged {
+                app_id,
+                task_id,
+                status,
+                result_json,
+                error,
+                retryable,
+            } => Self::AppBackgroundTaskChanged {
+                app_id,
+                task_id,
+                status,
+                result_json,
+                error,
+                retryable,
+            },
+            AppEventDtoWire::AppCreated { record, request_id } => {
+                Self::AppCreated { record, request_id }
+            }
+            AppEventDtoWire::AppDependencyChangeConfirmationRequested { request } => {
+                Self::AppDependencyChangeConfirmationRequested { request }
+            }
+            AppEventDtoWire::PluginStatusChanged { status } => Self::PluginStatusChanged { status },
+            AppEventDtoWire::PluginInventoryChanged { inventory } => {
+                Self::PluginInventoryChanged { inventory }
+            }
+            AppEventDtoWire::CreateConfirmationRequested { request } => {
+                Self::CreateConfirmationRequested { request }
+            }
+            AppEventDtoWire::McpProposalApprovalRequested { request } => {
+                Self::McpProposalApprovalRequested { request }
+            }
+            AppEventDtoWire::ManagedMcpInventoryChanged { servers } => {
+                Self::ManagedMcpInventoryChanged { servers }
+            }
+            AppEventDtoWire::VerificationSummaryChanged {
+                app_id,
+                publication_state,
+                mcp_verification,
+                ui_verification,
+            } => Self::VerificationSummaryChanged {
+                app_id,
+                publication_state,
+                mcp_verification,
+                ui_verification,
+            },
+            AppEventDtoWire::LocalAppOperationFailed {
+                app_id,
+                code,
+                message,
+                request_id,
+            } => Self::LocalAppOperationFailed {
+                app_id,
+                code,
+                message,
+                request_id,
+            },
+        }
+    }
+}
+
+struct AppEventRawFields(HashMap<String, Box<RawValue>>);
+
+impl<'de> Deserialize<'de> for AppEventRawFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RawObjectVisitor {
+            type Value = AppEventRawFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object with raw member values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    fields.insert(key, map.next_value::<Box<RawValue>>()?);
+                }
+                Ok(AppEventRawFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(RawObjectVisitor)
+    }
+}
+
+fn app_event_raw_required<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    let raw = fields.remove(name).ok_or_else(|| E::missing_field(name))?;
+    serde_json::from_str(raw.get()).map_err(E::custom)
+}
+
+fn app_event_raw_optional<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<T>, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        Some(raw) => serde_json::from_str(raw.get()).map_err(E::custom),
+        None => Ok(None),
+    }
+}
+
+fn app_event_raw_fallback_json<E>(
+    tag: &str,
+    fields: HashMap<String, Box<RawValue>>,
+) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    let mut json = String::from("{\"type\":");
+    json.push_str(&serde_json::to_string(tag).map_err(E::custom)?);
+    for (key, value) in fields {
+        json.push(',');
+        json.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
+        json.push(':');
+        json.push_str(value.get());
+    }
+    json.push('}');
+    Ok(json)
+}
+
+impl<'de> Deserialize<'de> for AppEventDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let AppEventRawFields(mut fields) = AppEventRawFields::deserialize(deserializer)?;
+        let tag = app_event_raw_required::<String, D::Error>(&mut fields, "type")?;
+        match tag.as_str() {
+            "local_app_operation_failed" => Ok(Self::LocalAppOperationFailed {
+                app_id: app_event_raw_optional(&mut fields, "app_id")?,
+                code: app_event_raw_required(&mut fields, "code")?,
+                message: app_event_raw_required(&mut fields, "message")?,
+                request_id: app_event_raw_optional(&mut fields, "request_id")?,
+            }),
+            _ => {
+                let json = app_event_raw_fallback_json::<D::Error>(&tag, fields)?;
+                let wire: AppEventDtoWire =
+                    serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
+                Ok(wire.into())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AppBridgeStreamFrameDto;
+    use super::{AppAgentTerminalErrorDto, AppAgentTurnResponseDto, AppBridgeStreamFrameDto};
+    use crate::protocol::text::ClientTextDto;
 
     #[test]
     fn v2_stream_frame_fields_use_camel_case_on_json_wire() {
@@ -1639,6 +1888,46 @@ mod tests {
         assert_eq!(value["streamId"], "stream-1");
         assert_eq!(value["dataJson"], "{}");
         assert!(value.get("app_id").is_none());
+    }
+
+    #[test]
+    fn terminal_api_error_stream_frame_preserves_unknown_status_presence() {
+        let frame = AppBridgeStreamFrameDto::TerminalApiError {
+            app_id: "abc12345".into(),
+            request_id: "request-1".into(),
+            stream_id: "stream-1".into(),
+            seq: 4,
+            api_error_status: None,
+            terminal_reason: "api_error".into(),
+        };
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["type"], "terminal_api_error");
+        assert_eq!(value["terminalReason"], "api_error");
+        assert!(value.get("apiErrorStatus").is_none());
+        assert_eq!(
+            serde_json::from_value::<AppBridgeStreamFrameDto>(value).unwrap(),
+            frame
+        );
+    }
+
+    #[test]
+    fn app_agent_result_keeps_terminal_error_and_exact_text_units() {
+        let response = AppAgentTurnResponseDto {
+            cancelled: false,
+            session_id: "session-1".into(),
+            stream_id: None,
+            text: ClientTextDto::from_code_units(vec![b'a' as u16, 0xd800, b'b' as u16]),
+            turn_id: "turn-1".into(),
+            terminal_error: Some(AppAgentTerminalErrorDto {
+                api_error_status: Some(413),
+                terminal_reason: "image_error".into(),
+            }),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains(r#""text":"a\ud800b""#), "{json}");
+        assert!(json.contains(r#""terminalReason":"image_error""#), "{json}");
+        let decoded: AppAgentTurnResponseDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, response);
     }
 
     // ── Plugin enable/disable/status wire contract (§17.1, §19.2) ──────────
@@ -2225,7 +2514,7 @@ mod tests {
         let failure = AppEventDto::LocalAppOperationFailed {
             app_id: None,
             code: LocalAppPluginErrorCodeDto::InvalidMcpSettings,
-            message: "The saved MCP settings for this app are invalid.".into(),
+            message: ClientTextDto::from_utf8("The saved MCP settings for this app are invalid."),
             request_id: Some("plugin-read-1".into()),
         };
         let json = serde_json::to_value(&failure).expect("serialize local app failure");
@@ -2236,6 +2525,44 @@ mod tests {
             serde_json::from_value::<AppEventDto>(json).expect("deserialize local app failure"),
             failure
         );
+    }
+
+    #[test]
+    fn local_app_failure_preserves_source_message_through_full_event_envelope() {
+        let wire = r#"{"type":"local_app_operation_failed","code":"invalid_mcp_settings","message":"plugin \udfff failure","request_id":"app-9"}"#;
+        let event: AppEventDto = serde_json::from_str(wire).expect("deserialize full app event");
+        let expected = vec![
+            b'p' as u16,
+            b'l' as u16,
+            b'u' as u16,
+            b'g' as u16,
+            b'i' as u16,
+            b'n' as u16,
+            b' ' as u16,
+            0xdfff,
+            b' ' as u16,
+            b'f' as u16,
+            b'a' as u16,
+            b'i' as u16,
+            b'l' as u16,
+            b'u' as u16,
+            b'r' as u16,
+            b'e' as u16,
+        ];
+        let AppEventDto::LocalAppOperationFailed { message, .. } = &event else {
+            panic!("expected local app operation failure event");
+        };
+        assert_eq!(message.code_units, expected);
+
+        let encoded = serde_json::to_string(&event).expect("serialize full app event");
+        assert!(encoded.contains(r#""type":"local_app_operation_failed""#));
+        assert!(encoded.contains(r#""message":"plugin \udfff failure""#));
+        let decoded: AppEventDto =
+            serde_json::from_str(&encoded).expect("round-trip full app event");
+        let AppEventDto::LocalAppOperationFailed { message, .. } = decoded else {
+            panic!("expected local app operation failure event");
+        };
+        assert_eq!(message.code_units, expected);
     }
 
     // ---------------------------------------------------------------------

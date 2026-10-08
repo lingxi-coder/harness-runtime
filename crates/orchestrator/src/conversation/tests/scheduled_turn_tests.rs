@@ -1,10 +1,18 @@
 use super::*;
 use crate::test_support::{
-    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
+    message_start, message_stop, noop_hook_executor, text_delta,
 };
 use std::sync::Arc;
+
+fn source_text(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        text.to_owned(),
+        text.encode_utf16().collect(),
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
@@ -25,7 +33,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         ]
     };
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![events(), events()]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
         streaming.clone(),
@@ -35,11 +43,11 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     let before = orch.session.lock().await.model.clone();
     let reasoning = orch.current_reasoning_selection();
     orch.run_scheduled_turn(
-        "scheduled prompt",
+        source_text("scheduled prompt"),
         "test-provider/scheduled-model",
         lingxi_core::host::ReasoningSelection::Automatic,
         CancellationToken::new(),
@@ -52,6 +60,68 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
     let calls = streaming.captured_calls().await;
     assert_eq!(calls[0].model, "scheduled-model");
     assert_eq!(calls[1].model, before);
+}
+
+#[tokio::test]
+async fn scheduled_turn_keeps_unpaired_utf16_prompt_units_in_history() {
+    let api = Arc::new(MockApiClient::new(Vec::new()));
+    api.set_model_listings(vec![lingxi_core::host::ModelListing {
+        request_model: "scheduled-model".into(),
+        provider_id: "test-provider".into(),
+        ..Default::default()
+    }]);
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![crate::scripted![
+        message_start("source-prompt", "scheduled-model"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop()
+    ]]));
+    let orch = ConversationOrchestrator::new_with_streaming(
+        crate::OrchestratorConfig::default(),
+        api,
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let prompt =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::root_string("�".into(), vec![0xd800])
+            .unwrap();
+    orch.run_scheduled_turn(
+        prompt,
+        "test-provider/scheduled-model",
+        lingxi_core::host::ReasoningSelection::Automatic,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let history = orch.snapshot_history().await;
+    let user = history
+        .iter()
+        .find_map(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. } => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        &user[0],
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            utf16_code_units,
+            ..
+        } if utf16_code_units == &vec![0xd800]
+    ));
+    let call = streaming.captured_calls().await;
+    assert!(call[0].messages.iter().any(|message| matches!(
+        message,
+        lingxi_core::types::ConversationMessage::User { content, .. }
+            if matches!(&content[0], lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. } if utf16_code_units == &vec![0xd800])
+    )));
 }
 
 #[tokio::test]
@@ -68,7 +138,7 @@ async fn missing_saved_model_fails_before_appending_prompt() {
     );
     let result = orch
         .run_scheduled_turn(
-            "must not append",
+            source_text("must not append"),
             "gone/model",
             lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),
@@ -78,7 +148,7 @@ async fn missing_saved_model_fails_before_appending_prompt() {
     assert!(orch.snapshot_history().await.is_empty());
 }
 
-fn scheduled_session_fixture() -> ConversationOrchestrator {
+fn scheduled_session_fixture() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(Vec::new()));
     api.set_model_listings(vec![lingxi_core::host::ModelListing {
         request_model: "scheduled-model".into(),
@@ -93,7 +163,7 @@ fn scheduled_session_fixture() -> ConversationOrchestrator {
         message_delta_stop("end_turn"),
         message_stop()
     ]]));
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
         streaming,
@@ -103,7 +173,7 @@ fn scheduled_session_fixture() -> ConversationOrchestrator {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    )
+    ))
 }
 
 #[tokio::test]
@@ -114,7 +184,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
     let (release_binding, binding_released) = tokio::sync::oneshot::channel();
     let scheduled = orch.run_scheduled_turn_in_session(
         original_session,
-        "saved prompt",
+        source_text("saved prompt"),
         "test-provider/scheduled-model",
         lingxi_core::host::ReasoningSelection::Automatic,
         CancellationToken::new(),
@@ -128,7 +198,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
 
     let resume =
         <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::resume_session(
-            &orch,
+            orch.as_ref(),
             resumed_session,
             Vec::new(),
             None,
@@ -140,7 +210,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
     assert_eq!(orch.session.lock().await.session_id, original_session);
     let busy = orch
         .run_scheduled_turn(
-            "cannot enter while binding",
+            source_text("cannot enter while binding"),
             "test-provider/scheduled-model",
             lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),
@@ -167,7 +237,7 @@ async fn scheduled_target_mismatch_is_retryable_without_binding_or_appending() {
     let result = orch
         .run_scheduled_turn_in_session(
             lingxi_core::types::SessionId::new(),
-            "must never be appended to the new foreground session",
+            source_text("must never be appended to the new foreground session"),
             "test-provider/scheduled-model",
             lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),

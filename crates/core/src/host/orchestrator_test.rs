@@ -6,6 +6,23 @@ use super::*;
 mod tests {
     use super::*;
 
+    #[test]
+    fn prompt_tool_description_keeps_source_string_and_rejects_non_string_snapshots() {
+        let raw = r#"{"name":"probe","description":"a\ud800b"}"#;
+        let tool: PromptToolDescription = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            tool.description.string_units(""),
+            Some(vec![0x61, 0xd800, 0x62])
+        );
+        assert_eq!(serde_json::to_string(&tool).unwrap(), raw);
+        for description in ["null", "false", "1", "[]", "{}"] {
+            assert!(serde_json::from_str::<PromptToolDescription>(&format!(
+                r#"{{"name":"probe","description":{description}}}"#,
+            ))
+            .is_err());
+        }
+    }
+
     #[allow(dead_code)]
     fn _trait_objects_compile() {
         fn _f<T: OutputStream + 'static>(t: T) -> Box<dyn OutputStream> {
@@ -26,6 +43,40 @@ mod tests {
         assert_eq!(ev, back);
     }
 
+    #[test]
+    fn assistant_text_event_preserves_exact_utf16_on_the_json_boundary() {
+        let text = crate::types::utf16_json::Utf16JsonProjection::root_string(
+            "A�😀".into(),
+            vec![65, 0xd800, 0xd83d, 0xde00],
+        )
+        .unwrap();
+        let event = OutputEvent::Text { text };
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""text":"A\ud800😀""#), "{encoded}");
+        assert!(!encoded.contains("code_units"), "{encoded}");
+        let decoded: OutputEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn mod_output_event_round_trips_unpaired_utf16_text() {
+        let text =
+            crate::types::utf16_json::Utf16JsonProjection::root_string("�".into(), vec![0xd800])
+                .unwrap();
+        let event = OutputEvent::ModLog {
+            plugin: "example".into(),
+            text,
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains("\\ud800"), "{encoded}");
+        let decoded: OutputEvent = serde_json::from_str(&encoded).unwrap();
+        let OutputEvent::ModLog { text, .. } = decoded else {
+            panic!("expected ModLog event");
+        };
+        assert_eq!(text.string_units(""), Some(vec![0xd800]));
+    }
+
     /// Coordinator-activation T08: the additive `emit_coordinator_status`
     /// PUSH hook ships as a default no-op so every pre-existing `OutputStream`
     /// impl (TUI / CLI / `MockOutputStream`) keeps compiling without an
@@ -39,20 +90,20 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &crate::types::utf16_json::Utf16JsonProjection) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _input: &serde_json::Value,
+                _input: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_tool_result(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _model_text: &str,
-                _result: &serde_json::Value,
+                _model_text: &crate::types::utf16_json::Utf16JsonProjection,
+                _result: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -75,7 +126,10 @@ mod tests {
         let ev = OutputEvent::ToolCall {
             id,
             tool: "Read".into(),
-            input: serde_json::json!({"file_path": "/tmp/x.rs"}),
+            input: crate::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"file_path":"/tmp/x.rs"}"#,
+            )
+            .unwrap(),
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();
@@ -90,7 +144,15 @@ mod tests {
         let ev = OutputEvent::ToolResult {
             id,
             tool: "Read".into(),
-            result: serde_json::json!({"content": "fn main() {}"}),
+            model_text: crate::types::utf16_json::Utf16JsonProjection::root_string(
+                "fn main() {}".into(),
+                "fn main() {}".encode_utf16().collect(),
+            )
+            .unwrap(),
+            result: crate::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"content":"fn main() {}"}"#,
+            )
+            .unwrap(),
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();
@@ -139,12 +201,41 @@ mod tests {
         let info = HookInfo {
             name: "fmt-on-write".to_string(),
             event: "PostToolUse".to_string(),
-            matcher: Some("Write|Edit".to_string()),
+            matcher: Some("Write|Edit".into()),
             timeout_ms: 60_000,
             ..HookInfo::default()
         };
         assert_eq!(info.timeout_ms, 60_000);
-        assert_eq!(info.matcher.as_deref(), Some("Write|Edit"));
+        assert_eq!(
+            info.matcher
+                .as_ref()
+                .and_then(|matcher| matcher.string_at("")),
+            Some("Write|Edit")
+        );
+
+        let exact_if = Utf16JsonProjection::parse(r#""Write(*\ud800.ts)""#)
+            .expect("exact source string parses");
+        let exact_matcher = Utf16JsonProjection::parse(r#""^\ud801$""#)
+            .expect("exact matcher source string parses");
+        let with_if = HookInfo {
+            matcher: Some(exact_matcher.clone()),
+            if_condition: Some(exact_if.clone()),
+            ..HookInfo::default()
+        };
+        assert_eq!(
+            with_if
+                .matcher
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            exact_matcher.string_units("")
+        );
+        assert_eq!(
+            with_if
+                .if_condition
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            exact_if.string_units("")
+        );
     }
 
     #[test]
@@ -363,20 +454,20 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &crate::types::utf16_json::Utf16JsonProjection) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _input: &serde_json::Value,
+                _input: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_tool_result(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _model_text: &str,
-                _result: &serde_json::Value,
+                _model_text: &crate::types::utf16_json::Utf16JsonProjection,
+                _result: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -444,20 +535,20 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &crate::types::utf16_json::Utf16JsonProjection) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _input: &serde_json::Value,
+                _input: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_tool_result(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
-                _model_text: &str,
-                _result: &serde_json::Value,
+                _model_text: &crate::types::utf16_json::Utf16JsonProjection,
+                _result: &crate::types::utf16_json::Utf16JsonProjection,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -978,5 +1069,32 @@ mod curated_model_tests {
         let refs = curated_model_refs(&listings, &[], "deepseek-flash", None);
 
         assert_eq!(refs[0], "deepseek/deepseek-flash");
+    }
+}
+
+#[test]
+fn prompt_snapshot_invalid_rendering_hint_keeps_static_context() {
+    for hint in [
+        serde_json::json!(42),
+        serde_json::json!("unknown"),
+        serde_json::json!({}),
+        serde_json::Value::Null,
+    ] {
+        let snapshot: PromptSnapshot = serde_json::from_value(serde_json::json!({
+            "systemPrompt": ["current static prompt"],
+            "contextRendering": hint,
+            "tools": [{"name":"Read", "description":"current Read"}]
+        }))
+        .expect("native fmn catches the hint independently");
+        assert_eq!(snapshot.system_prompt, ["current static prompt"]);
+        assert_eq!(
+            snapshot.tools[0].description.string_at(""),
+            Some("current Read")
+        );
+        assert_eq!(snapshot.context_rendering, None);
+        assert!(serde_json::to_value(snapshot)
+            .unwrap()
+            .get("contextRendering")
+            .is_none());
     }
 }

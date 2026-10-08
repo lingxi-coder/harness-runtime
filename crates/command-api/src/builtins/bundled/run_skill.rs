@@ -7,7 +7,7 @@
 //! Request` block appended when invoked with an argument, mirroring the
 //! reference `getPromptForCommand` (see [`super::verify_skill`] for the shape).
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// The frontmatter-stripped skill body (`$g(SKILL_MD).content.trimStart()`),
 /// verbatim from the 2.1.205 binary with `.claude/` rebranded to `.lingxi/`.
@@ -20,11 +20,15 @@ pub(crate) const RUN_DESCRIPTION: &str = "Launch and drive this project's app to
 pub struct RunPromptFn;
 
 impl BundledPromptFn for RunPromptFn {
-    fn build(&self, args: &str) -> String {
-        if args.is_empty() {
-            RUN_BODY.to_string()
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            RUN_BODY.into()
         } else {
-            format!("{RUN_BODY}\n\n## User Request\n\n{args}")
+            let prefix = format!("{RUN_BODY}\n\n## User Request\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -32,6 +36,7 @@ impl BundledPromptFn for RunPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_frontmatter_stripped_and_branded() {
@@ -43,11 +48,9 @@ mod tests {
 
     #[test]
     fn build_empty_returns_body_and_arg_appends_user_request() {
-        assert_eq!(RunPromptFn.build(""), RUN_BODY);
-        let out = RunPromptFn.build("start the dev server");
-        assert_eq!(
-            out,
-            format!("{RUN_BODY}\n\n## User Request\n\nstart the dev server")
-        );
+        assert_eq!(RunPromptFn.build(&"".into()).string_at(""), Some(RUN_BODY));
+        let out = RunPromptFn.build(&"start the dev server".into());
+        let expected = format!("{RUN_BODY}\n\n## User Request\n\nstart the dev server");
+        assert_eq!(out.string_at(""), Some(expected.as_str()));
     }
 }

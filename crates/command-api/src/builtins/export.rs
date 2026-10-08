@@ -20,6 +20,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::path::Path;
 use std::sync::Arc;
@@ -41,11 +42,16 @@ impl ExportHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ExportHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some("Export filename must be valid Unicode text.".into()),
+            };
+        };
         let messages = self.handle.conversation_transcript().await;
         let snap = self.handle.get_status_snapshot().await;
         let content = render_messages_to_plain_text(&messages);
 
-        let filename_arg = args.raw_args.trim();
+        let filename_arg = raw_args.trim();
         let filename = if filename_arg.is_empty() {
             default_filename(&messages)
         } else {
@@ -53,12 +59,17 @@ impl BuiltinCommandHandler for ExportHandler {
         };
         let filepath = snap.cwd.join(&filename);
 
-        let display = match std::fs::write(&filepath, content) {
+        let file_text = String::from_utf16_lossy(
+            &content
+                .string_units("")
+                .expect("transcript renderer returns a root string"),
+        );
+        let display = match std::fs::write(&filepath, file_text) {
             Ok(()) => format!("Conversation exported to: {}", filepath.display()),
             Err(e) => format!("Failed to export conversation: {e}"),
         };
         CommandResult::Done {
-            display: Some(display),
+            display: Some((display).into()),
         }
     }
     fn name(&self) -> &str {
@@ -77,62 +88,108 @@ impl BuiltinCommandHandler for ExportHandler {
 /// calls and results are rendered as labeled lines so the export remains a
 /// faithful record of the turn.
 #[must_use]
-fn render_messages_to_plain_text(messages: &[ConversationMessage]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(messages.len());
-    for msg in messages {
+fn render_messages_to_plain_text(messages: &[ConversationMessage]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for (index, msg) in messages.iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
         let (label, body) = match msg {
             ConversationMessage::User { content, .. } => ("User", render_blocks(content)),
             ConversationMessage::Assistant { content, .. } => ("Assistant", render_blocks(content)),
-            ConversationMessage::System { content, .. } => ("System", content.clone()),
+            ConversationMessage::System { content, .. } => ("System", source_string_units(content)),
         };
-        parts.push(format!("{label}: {body}"));
+        units.extend(label.encode_utf16());
+        units.extend(": ".encode_utf16());
+        units.extend(body);
     }
-    parts.join("\n\n")
+    source_string(units)
 }
 
 /// Render a message's content blocks to plain text. Text blocks pass through;
 /// tool-use / tool-result / thinking / image blocks render a labeled summary.
-fn render_blocks(content: &[ContentBlock]) -> String {
-    let mut lines: Vec<String> = Vec::with_capacity(content.len());
+fn render_blocks(content: &[ContentBlock]) -> Vec<u16> {
+    let mut units = Vec::new();
+    let mut first = true;
     for block in content {
-        match block {
-            ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                lines.push(text.clone())
-            }
+        let line = match block {
+            ContentBlock::Text { text, .. } => text.encode_utf16().collect(),
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => utf16_code_units.clone(),
             ContentBlock::ToolUse { name, input, .. } => {
-                lines.push(format!("[tool: {name}] {input}"));
+                labeled_source_units("[tool: ", name, "] ", input)
             }
             ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
-                let tag = if *is_error {
-                    "tool error"
+                let tag = if is_error.unwrap_or(false) {
+                    "[tool error] "
                 } else {
-                    "tool result"
+                    "[tool result] "
                 };
-                lines.push(format!("[{tag}] {content}"));
+                let mut line = tag.encode_utf16().collect::<Vec<_>>();
+                line.extend(source_string_units(content));
+                line
             }
             ContentBlock::Thinking { thinking, .. } => {
-                lines.push(format!("[thinking] {thinking}"));
+                let mut line = "[thinking] ".encode_utf16().collect::<Vec<_>>();
+                line.extend(thinking.encode_utf16());
+                line
             }
-            ContentBlock::Image { .. } => lines.push("[image]".to_string()),
-            ContentBlock::Document { .. } => lines.push("[document]".to_string()),
-            ContentBlock::RedactedThinking { .. } => {
-                lines.push("[redacted thinking]".to_string());
-            }
+            ContentBlock::Image { .. } => "[image]".encode_utf16().collect(),
+            ContentBlock::Document { .. } => "[document]".encode_utf16().collect(),
+            ContentBlock::RedactedThinking { .. } => "[redacted thinking]".encode_utf16().collect(),
             ContentBlock::ServerToolUse { name, input, .. } => {
-                lines.push(format!("[server tool: {name}] {input}"));
+                labeled_source_units("[server tool: ", name, "] ", input)
             }
             ContentBlock::ConnectorText { connector_text, .. } => {
-                lines.push(format!("[connector] {connector_text}"));
+                let mut line = "[connector] ".encode_utf16().collect::<Vec<_>>();
+                line.extend(connector_text.encode_utf16());
+                line
             }
             ContentBlock::AdvisorToolResult { content, .. } => {
-                lines.push(format!("[advisor result] {content}"));
+                let mut line = "[advisor result] ".encode_utf16().collect::<Vec<_>>();
+                line.extend(source_string_units(content));
+                line
             }
-            ContentBlock::MediaAnalysis { .. } | ContentBlock::ProviderContent { .. } => {}
+            ContentBlock::MediaAnalysis { .. } | ContentBlock::ProviderContent { .. } => continue,
+        };
+        if !first {
+            units.push(b'\n' as u16);
         }
+        first = false;
+        units.extend(line);
     }
-    lines.join("\n")
+    units
+}
+
+fn labeled_source_units(
+    prefix: &str,
+    name: &str,
+    middle: &str,
+    source: &Utf16JsonProjection,
+) -> Vec<u16> {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(name.encode_utf16());
+    units.extend(middle.encode_utf16());
+    units.extend(source_string_units(source));
+    units
+}
+
+fn source_string_units(source: &Utf16JsonProjection) -> Vec<u16> {
+    source.string_units("").unwrap_or_else(|| {
+        source
+            .to_json_string()
+            .expect("source JSON projection serializes")
+            .encode_utf16()
+            .collect()
+    })
+}
+
+fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display string is derived from exact UTF-16 units")
 }
 
 /// Replace any trailing extension on `name` with `.txt`, 1:1 with the TS
@@ -189,7 +246,7 @@ fn extract_first_prompt(messages: &[ConversationMessage]) -> String {
     let text = content
         .iter()
         .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.trim()),
+            ContentBlock::Text { text, .. } => Some(text.trim()),
             _ => None,
         })
         .unwrap_or("");
@@ -280,6 +337,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         }
@@ -289,7 +347,7 @@ mod tests {
     fn renders_role_prefixed_transcript() {
         let msgs = vec![user("hello"), assistant("hi there")];
         let s = render_messages_to_plain_text(&msgs);
-        assert_eq!(s, "User: hello\n\nAssistant: hi there");
+        assert_eq!(s.string_at(""), Some("User: hello\n\nAssistant: hi there"));
     }
 
     #[test]
@@ -299,19 +357,24 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "running".to_string(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: lingxi_core::types::ToolUseId::new(),
-                    name: "Read".to_string(),
-                    input: serde_json::json!({"file_path": "/x"}),
+                    name: "Read".into(),
+                    input: Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"file_path": "/x"}),
+                    )
+                    .unwrap(),
                     provider_id: None,
                 },
             ],
             stop_reason: None,
         }];
         let s = render_messages_to_plain_text(&msgs);
-        assert!(s.contains("Assistant: running"));
-        assert!(s.contains("[tool: Read]"));
+        let rendered = s.string_at("").expect("valid display string");
+        assert!(rendered.contains("Assistant: running"));
+        assert!(rendered.contains("[tool: Read]"));
     }
 
     #[test]
@@ -321,6 +384,7 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "hello".to_string(),
+                    citations: None,
                 },
                 ContentBlock::MediaAnalysis {
                     analysis: lingxi_core::types::MediaAnalysis {
@@ -341,8 +405,11 @@ mod tests {
             is_visible_in_transcript_only: false,
         }];
         let rendered = render_messages_to_plain_text(&msgs);
-        assert_eq!(rendered, "User: hello");
-        assert!(!rendered.contains("internal-question-key"));
+        assert_eq!(rendered.string_at(""), Some("User: hello"));
+        assert!(!rendered
+            .string_at("")
+            .expect("valid display string")
+            .contains("internal-question-key"));
     }
 
     #[test]
@@ -417,9 +484,9 @@ mod tests {
         });
         let h = ExportHandler::new(mock);
         let args = ParsedSlashCommand {
-            name: "export".to_string(),
-            raw_args: "out".to_string(),
-            positional_args: vec!["out".to_string()],
+            name: "export".into(),
+            raw_args: "out".into(),
+            positional_args: vec!["out".into()],
         };
         let display = match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => s,

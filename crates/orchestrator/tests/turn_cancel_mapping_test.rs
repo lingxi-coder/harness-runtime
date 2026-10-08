@@ -22,7 +22,6 @@
 //! assumptions.
 
 use async_trait::async_trait;
-use lingxi_core::types::ConversationMessage;
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -50,11 +49,7 @@ struct CancelsThenSucceeds {
 impl OrchestratorApiClient for CancelsThenSucceeds {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Fire the cancel BEFORE answering, so the step resolves into an
@@ -63,7 +58,7 @@ impl OrchestratorApiClient for CancelsThenSucceeds {
         Ok(mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "finished the work".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ))

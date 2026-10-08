@@ -17,8 +17,9 @@
 //! See spec §15.4.
 
 use crate::manifest::PluginManifest;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use secret::CredentialManager;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use thiserror::Error;
 
 /// Failure modes for [`resolve_user_config`].
@@ -39,7 +40,7 @@ pub enum LoaderError {
 ///
 /// `plugin_key` is the plugin identity secrets are namespaced under (the
 /// installed `name@marketplace` id, or the bare `name` for a local plugin);
-/// `options` is the plugin's `pluginConfigs[plugin].options` map at the active
+/// `options` is the plugin's `pluginConfigs[plugin].options` source object at the active
 /// settings scope (empty when the plugin has no persisted non-sensitive config).
 ///
 /// Sensitive fields are read live from [`CredentialManager::get_plugin_secret`]
@@ -49,13 +50,13 @@ pub enum LoaderError {
 pub async fn resolve_user_config(
     manifest: &PluginManifest,
     plugin_key: &str,
-    options: &Map<String, Value>,
+    options: &Utf16JsonProjection,
     credentials: &CredentialManager,
-) -> Result<Value, LoaderError> {
+) -> Result<Utf16JsonProjection, LoaderError> {
     let Some(schema) = &manifest.user_config else {
-        return Ok(Value::Object(Map::new()));
+        return Ok(empty_source_object());
     };
-    let mut out = Map::new();
+    let mut out = Vec::new();
     for (key, field) in &schema.fields {
         if field.sensitive {
             // Secrets live ONLY in secure storage, keyed by (plugin, field).
@@ -65,24 +66,47 @@ pub async fn resolve_user_config(
                 .map_err(|e| LoaderError::Credential(e.to_string()))?
             {
                 Some(secret) => {
-                    out.insert(key.clone(), Value::String(secret.expose_secret().clone()));
+                    out.push((
+                        key.clone(),
+                        Utf16JsonProjection::from(secret.expose_secret().as_str()),
+                    ));
                 }
                 None if field.required => return Err(LoaderError::MissingRequired(key.clone())),
                 None => {}
             }
         } else {
             // Non-sensitive: pluginConfigs options, then the declared default.
-            let value = options.get(key).cloned().or_else(|| field.default.clone());
+            let value = source_option(options, key).or_else(|| {
+                field.default.as_ref().map(|default| {
+                    Utf16JsonProjection::from_serde_value(default)
+                        .expect("plugin userConfig default is valid JSON")
+                })
+            });
             match value {
                 Some(v) => {
-                    out.insert(key.clone(), v);
+                    out.push((key.clone(), v));
                 }
                 None if field.required => return Err(LoaderError::MissingRequired(key.clone())),
                 None => {}
             }
         }
     }
-    Ok(Value::Object(out))
+    Ok(Utf16JsonProjection::object(out).expect("resolved plugin userConfig is valid JSON"))
+}
+
+fn source_option(options: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    let key_units = key.encode_utf16().collect::<Vec<_>>();
+    let present = options
+        .object_entries()?
+        .iter()
+        .any(|entry| entry.code_units == key_units);
+    present
+        .then(|| options.subprojection_property_units(&key_units).ok())
+        .flatten()
+}
+
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty plugin userConfig is valid JSON")
 }
 
 #[cfg(test)]
@@ -99,6 +123,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::SystemTime;
+
+    fn empty_options() -> Utf16JsonProjection {
+        Utf16JsonProjection::parse("{}").expect("empty options object is valid JSON")
+    }
 
     #[derive(Default)]
     struct MemStorage {
@@ -237,10 +265,12 @@ mod tests {
         let (_s, cm) = creds();
         let mut m = manifest_with(vec![]);
         m.user_config = None;
-        let out = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let out = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap();
-        assert_eq!(out, Value::Object(Map::new()));
+        assert!(out
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty()));
     }
 
     #[tokio::test]
@@ -250,17 +280,17 @@ mod tests {
             .await
             .unwrap();
         let m = manifest_with(vec![("API_KEY", field(true, true, None))]);
-        let out = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let out = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap();
-        assert_eq!(out["API_KEY"], Value::String("sk-live".into()));
+        assert_eq!(out.string_at("/API_KEY"), Some("sk-live"));
     }
 
     #[tokio::test]
     async fn required_sensitive_missing_errors_not_null() {
         let (_s, cm) = creds();
         let m = manifest_with(vec![("API_KEY", field(true, true, None))]);
-        let err = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let err = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap_err();
         assert!(matches!(err, LoaderError::MissingRequired(k) if k == "API_KEY"));
@@ -270,42 +300,61 @@ mod tests {
     async fn optional_sensitive_missing_is_skipped_not_null() {
         let (_s, cm) = creds();
         let m = manifest_with(vec![("API_KEY", field(true, false, None))]);
-        let out = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let out = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap();
         // Absent optional secret is SKIPPED (not inserted as Null).
-        assert!(out.as_object().unwrap().get("API_KEY").is_none());
+        assert!(!out.contains_property("API_KEY"));
     }
 
     #[tokio::test]
     async fn nonsensitive_reads_from_options_not_manifest_settings() {
         let (_s, cm) = creds();
         let m = manifest_with(vec![("REGION", field(false, true, None))]);
-        let mut opts = Map::new();
-        opts.insert("REGION".into(), Value::String("us-east".into()));
+        let opts = Utf16JsonProjection::parse(r#"{"REGION":"us-east"}"#).unwrap();
         let out = resolve_user_config(&m, "weather@acme", &opts, &cm)
             .await
             .unwrap();
-        assert_eq!(out["REGION"], Value::String("us-east".into()));
+        assert_eq!(out.string_at("/REGION"), Some("us-east"));
     }
 
     #[tokio::test]
     async fn nonsensitive_falls_back_to_default() {
         let (_s, cm) = creds();
         let m = manifest_with(vec![("PORT", field(false, true, Some(Value::from(8080))))]);
-        let out = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let out = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap();
-        assert_eq!(out["PORT"], Value::from(8080));
+        assert_eq!(out.number_at("/PORT"), Some(8080.0));
     }
 
     #[tokio::test]
     async fn required_nonsensitive_missing_errors() {
         let (_s, cm) = creds();
         let m = manifest_with(vec![("REGION", field(false, true, None))]);
-        let err = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
+        let err = resolve_user_config(&m, "weather@acme", &empty_options(), &cm)
             .await
             .unwrap_err();
         assert!(matches!(err, LoaderError::MissingRequired(k) if k == "REGION"));
+    }
+
+    #[tokio::test]
+    async fn nonsensitive_option_preserves_lone_utf16_units() {
+        let (_s, cm) = creds();
+        let m = manifest_with(vec![("REGION", field(false, true, None))]);
+        let opts = Utf16JsonProjection::parse(r#"{"REGION":"pre\ud800post"}"#).unwrap();
+        let out = resolve_user_config(&m, "weather@acme", &opts, &cm)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.string_units("/REGION"),
+            Some(
+                "pre"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain("post".encode_utf16())
+                    .collect()
+            )
+        );
     }
 }

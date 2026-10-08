@@ -117,7 +117,7 @@ impl BuiltinCommandHandler for StopHandler {
         // Step 5: request exit and report done.
         self.handle.request_exit().await;
         CommandResult::Done {
-            display: Some("Session stopped.".to_string()),
+            display: Some(("Session stopped.".to_string()).into()),
         }
     }
 
@@ -249,8 +249,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "stop".to_string(),
-            raw_args: String::new(),
+            name: "stop".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

@@ -53,24 +53,28 @@ pub const BASH_TOOL_NAME: &str = "Bash";
 /// after trimming trailing whitespace". Implemented as the literal loop so the
 /// off-by-one stays visible.
 ///
-/// (`String.prototype.trimEnd` also strips U+FEFF, which Rust's `trim_end`
-/// does not; no realistic stdout is affected.)
+/// Trimming uses JavaScript whitespace, including U+FEFF and excluding U+0085.
 #[must_use]
 pub fn is_long_output(stdout: &str) -> bool {
-    let trimmed = stdout.trim_end();
-    let bytes = trimmed.as_bytes();
-    let mut n: Option<usize> = Some(0);
-    for _ in 0..=TERMINAL_PREVIEW_LINES {
-        let from = n.expect("loop breaks on None");
-        match bytes[from..].iter().position(|b| *b == b'\n') {
-            Some(rel) => n = Some(from + rel + 1),
-            None => {
-                n = None;
-                break;
-            }
-        }
-    }
-    matches!(n, Some(idx) if idx < bytes.len())
+    is_long_output_units(&stdout.encode_utf16().collect::<Vec<_>>())
+}
+
+fn is_long_output_units(stdout: &[u16]) -> bool {
+    let end = stdout
+        .iter()
+        .rposition(|unit| {
+            !matches!(unit,
+                0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a |
+                0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+            )
+        })
+        .map_or(0, |index| index + 1);
+    stdout[..end]
+        .iter()
+        .filter(|unit| **unit == 10)
+        .take(TERMINAL_PREVIEW_LINES + 1)
+        .count()
+        > TERMINAL_PREVIEW_LINES
 }
 
 /// The `JJr("bash_output_audience_note", …)` arm reachable from the port.
@@ -85,20 +89,24 @@ pub fn is_enabled() -> bool {
 /// `data` is the tool's structured `toolUseResult` payload (the orchestrator's
 /// `tool_use_results` entry); `interactive` is `!Dn()`.
 #[must_use]
-pub fn should_attach(tool_name: &str, data: Option<&serde_json::Value>, interactive: bool) -> bool {
+pub fn should_attach(
+    tool_name: &str,
+    data: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    interactive: bool,
+) -> bool {
     if tool_name != BASH_TOOL_NAME || !interactive {
         return false;
     }
-    let Some(stdout) = data.and_then(|d| d.get("stdout")).and_then(|v| v.as_str()) else {
+    let Some(stdout) = data.and_then(|data| data.string_units("/stdout")) else {
         return false;
     };
-    is_long_output(stdout) && is_enabled()
+    is_long_output_units(&stdout) && is_enabled()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     #[test]
     fn note_is_byte_exact_against_2_1_238() {
@@ -129,14 +137,27 @@ mod tests {
     }
 
     #[test]
+    fn javascript_trim_end_does_not_discard_lone_units_or_next_line_characters() {
+        assert!(!is_long_output("1\n2\n3\n4\n\u{feff}"));
+        assert!(is_long_output("1\n2\n3\n4\n\u{0085}"));
+        assert!(is_long_output_units(&[
+            49, 10, 50, 10, 51, 10, 52, 10, 0xd800
+        ]));
+    }
+
+    #[test]
     fn only_bash_with_a_string_stdout_qualifies() {
-        let long = json!({ "stdout": "1\n2\n3\n4\n5" });
+        let long = Utf16JsonProjection::parse(r#"{"stdout":"1\n2\n3\n4\n5"}"#).unwrap();
         // Env gate is OFF by default, so even a qualifying result is skipped.
         assert!(!should_attach("Bash", Some(&long), true));
         // Wrong tool / non-interactive / missing stdout short-circuit earlier.
         assert!(!should_attach("Read", Some(&long), true));
         assert!(!should_attach("Bash", Some(&long), false));
-        assert!(!should_attach("Bash", Some(&json!({ "stdout": 5 })), true));
+        assert!(!should_attach(
+            "Bash",
+            Some(&Utf16JsonProjection::parse(r#"{"stdout":5}"#).unwrap()),
+            true
+        ));
         assert!(!should_attach("Bash", None, true));
     }
 }

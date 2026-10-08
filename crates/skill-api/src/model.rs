@@ -3,7 +3,7 @@
 //!
 //! See spec §18 for the Skill subsystem overview.
 
-use lingxi_core::types::PluginId;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, PluginId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
@@ -14,12 +14,16 @@ use std::path::PathBuf;
 pub struct Skill {
     /// Canonical skill name (matches the tool input "name" field).
     pub name: String,
-    /// Short human-readable description shown to the model.
-    pub description: String,
+    /// Short human-readable description shown to the model, retained as exact
+    /// JavaScript UTF-16 text from source-backed producers such as MCP.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     /// Parsed YAML frontmatter from the originating markdown file.
     pub frontmatter: SkillFrontmatter,
-    /// Body of the skill markdown (after the frontmatter block, trimmed).
-    pub content: String,
+    /// Body of the skill markdown (after the frontmatter block, trimmed),
+    /// retained as exact source text through model-facing prompt construction.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub content: Utf16JsonProjection,
     /// Origin classification (bundled / user / project / plugin / managed / mcp).
     pub source: SkillSource,
     /// Mechanism by which the registry discovered this skill.
@@ -37,13 +41,19 @@ pub struct Skill {
 /// `argument-hint`, `arguments`, `disable-model-invocation`, `user-invocable`,
 /// `effort`, `shell`, `version`, `when_to_use`, `paths`, `hooks`, `context`,
 /// `agent`, `created_by`, `improved_by`, `hide-from-slash-command-tool`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillFrontmatter {
     /// Skill name (must match the filename slug in practice).
     pub name: String,
-    /// Short description shown to the model.
-    pub description: String,
+    /// Short description shown to the model, retained as exact UTF-16 source.
+    /// Markdown YAML ingress is UTF-8 and is converted directly into this
+    /// source carrier; MCP ingress can provide exact UTF-16 units.
+    #[serde(
+        default = "empty_source_string",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    pub description: Utf16JsonProjection,
     /// Long-form guidance about when the model should invoke this skill.
     pub when_to_use: Option<String>,
     /// Optional allow-list of tool names this skill may use.
@@ -148,6 +158,40 @@ pub struct SkillFrontmatter {
     /// Phrases that should trigger discovery of this skill.
     /// LingXi-only extension (not in binary's frontmatter key list).
     pub triggers: Vec<String>,
+}
+
+impl Default for SkillFrontmatter {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: empty_source_string(),
+            when_to_use: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            user_invocable: None,
+            disable_model_invocation: false,
+            argument_hint: None,
+            named_arguments: None,
+            effort: None,
+            shell: None,
+            version: None,
+            paths: None,
+            hooks: None,
+            context: None,
+            agent: None,
+            background: None,
+            model: None,
+            hide_from_slash_command_tool: false,
+            created_by: None,
+            improved_by: None,
+            auto_search: false,
+            triggers: Vec::new(),
+        }
+    }
+}
+
+fn empty_source_string() -> Utf16JsonProjection {
+    Utf16JsonProjection::from("")
 }
 
 fn default_true() -> bool {

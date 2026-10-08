@@ -6,13 +6,15 @@
 
 #![forbid(unsafe_code)]
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::de::{Deserializer, Error as DeError};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 
-use crate::response::{HookDecision, HookResponse, PermissionRequestResult};
+use crate::response::{
+    ExactHookText, HookDecision, HookJson, HookResponse, PermissionRequestResult,
+};
 
 /// Marker unit struct that serializes/deserializes as the literal `"PreToolUse"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,10 +181,16 @@ pub struct HookBackgroundTask {
     #[serde(rename = "type")]
     pub r#type: String,
     pub status: String,
-    pub description: String,
+    #[serde(with = "crate::definition::hook_if_pattern_source")]
+    pub description: Utf16JsonProjection,
     /// `local_bash` only.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub command: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::definition::hook_if_pattern_source::serialize_option",
+        deserialize_with = "crate::definition::hook_if_pattern_source::deserialize_option"
+    )]
+    pub command: Option<Utf16JsonProjection>,
     /// `local_agent` only.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
@@ -207,7 +215,8 @@ pub struct HookSessionCron {
     pub id: String,
     pub schedule: String,
     pub recurring: bool,
-    pub prompt: String,
+    #[serde(with = "crate::definition::hook_if_pattern_source")]
+    pub prompt: Utf16JsonProjection,
 }
 
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
@@ -236,7 +245,8 @@ pub struct PreToolUsePayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub tool_name: String,
-    pub tool_input: Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: HookJson,
     pub tool_use_id: String,
 }
 
@@ -262,8 +272,10 @@ pub struct PostToolUsePayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub tool_name: String,
-    pub tool_input: Value,
-    pub tool_response: Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: HookJson,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_response: HookJson,
     pub tool_use_id: String,
     /// Tool execution time in ms (binary appends `duration_ms` last; schema
     /// `.number().optional()` — "Tool execution time in milliseconds. Excludes
@@ -365,9 +377,15 @@ pub struct TaskCompletedPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub task_id: String,
-    pub task_subject: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub task_description: Option<String>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub task_subject: Utf16JsonProjection,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub task_description: Option<Utf16JsonProjection>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub teammate_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -399,9 +417,15 @@ pub struct TaskCreatedPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub task_id: String,
-    pub task_subject: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub task_description: Option<String>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub task_subject: Utf16JsonProjection,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub task_description: Option<Utf16JsonProjection>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub teammate_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -463,7 +487,8 @@ pub struct UserPromptSubmitPayload {
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
-    pub prompt: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub prompt: Utf16JsonProjection,
     /// Current session title at the time the prompt is submitted (optional,
     /// binary-confirmed `session_title` key at BIN off 201745825).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -561,9 +586,11 @@ pub struct PostToolUseFailurePayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub tool_name: String,
-    pub tool_input: Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: HookJson,
     pub tool_use_id: String,
-    pub error: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub error: Utf16JsonProjection,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub is_interrupt: Option<bool>,
     /// Tool execution time in ms (binary appends `duration_ms` after
@@ -625,7 +652,12 @@ pub struct PreCompactPayload {
     pub effort: Option<EffortLevel>,
     pub trigger: String,
     /// `.nullable()` in the schema — always present, `null` when absent.
-    pub custom_instructions: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub custom_instructions: Option<Utf16JsonProjection>,
 }
 
 /// Wire-format `PostCompact` payload (1:1 with `coreSchemas.ts:579-589`
@@ -653,7 +685,8 @@ pub struct PostCompactPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub trigger: String,
-    pub compact_summary: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub compact_summary: Utf16JsonProjection,
 }
 
 /// Wire-format `PreModelSwitch` payload (Claude Code 2.1.251
@@ -773,9 +806,15 @@ pub struct PermissionRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub tool_name: String,
-    pub tool_input: Value,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub permission_suggestions: Option<Vec<Value>>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: HookJson,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub permission_suggestions: Option<HookJson>,
 }
 
 /// Wire-format `PermissionDenied` payload (1:1 with `coreSchemas.ts:461-471`
@@ -804,9 +843,11 @@ pub struct PermissionDeniedPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub tool_name: String,
-    pub tool_input: Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub tool_input: HookJson,
     pub tool_use_id: String,
-    pub reason: String,
+    #[serde(with = "crate::definition::hook_if_pattern_source")]
+    pub reason: Utf16JsonProjection,
 }
 
 /// Wire-format `Setup` payload (1:1 with `coreSchemas.ts:504-511`
@@ -1081,15 +1122,31 @@ pub struct ElicitationPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub mcp_server_name: String,
-    pub message: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub message: Utf16JsonProjection,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mode: Option<crate::events::ElicitationMode>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub elicitation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub requested_schema: Option<Value>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub url: Option<Utf16JsonProjection>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub elicitation_id: Option<Utf16JsonProjection>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub requested_schema: Option<HookJson>,
 }
 
 /// Wire-format `ElicitationResult` payload. 1:1 with the binary's
@@ -1135,8 +1192,13 @@ pub struct ElicitationResultPayload {
     pub action: String,
     /// Structured form content returned by the user (optional). Extracted from
     /// `HookEvent::ElicitationResult.result["content"]`.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub content: Option<Value>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub content: Option<HookJson>,
 }
 
 /// Wire-format `WorktreeCreate` payload (1:1 with `coreSchemas.ts:709-716`
@@ -1216,11 +1278,19 @@ pub struct UserPromptExpansionPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub expansion_type: crate::events::PromptExpansionType,
-    pub command_name: String,
-    pub command_args: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub command_source: Option<String>,
-    pub prompt: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub command_name: Utf16JsonProjection,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub command_args: Utf16JsonProjection,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub command_source: Option<Utf16JsonProjection>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub prompt: Utf16JsonProjection,
 }
 
 /// Wire-format `MessageDisplay` payload (#39). 1:1 with claude-code's input
@@ -1252,16 +1322,39 @@ pub struct MessageDisplayPayload {
     pub index: u64,
     #[serde(rename = "final")]
     pub is_final: bool,
-    pub delta: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub delta: Utf16JsonProjection,
 }
 
 /// Envelope used to send one of either payload kind across the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 #[allow(missing_docs, reason = "variants delegate to documented payload types")]
 pub enum HookEventEnvelope {
     Pre(PreToolUsePayload),
     Post(PostToolUsePayload),
+}
+
+impl<'de> Deserialize<'de> for HookEventEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error as DeError;
+        use serde_json::value::RawValue;
+
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let projection = HookJson::parse(raw.get()).map_err(D::Error::custom)?;
+        match projection.string_at("/hook_event_name") {
+            Some("PreToolUse") => serde_json::from_str::<PreToolUsePayload>(raw.get())
+                .map(Self::Pre)
+                .map_err(D::Error::custom),
+            Some("PostToolUse") => serde_json::from_str::<PostToolUsePayload>(raw.get())
+                .map(Self::Post)
+                .map_err(D::Error::custom),
+            _ => Err(D::Error::custom("unknown hook event envelope")),
+        }
+    }
 }
 
 /// Failure modes from [`parse_response`].
@@ -1328,25 +1421,46 @@ pub enum HookResponseParseError {
     },
 }
 
-fn json_value_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+fn json_value_type(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> &'static str {
+    if value.is_null() {
+        "null"
+    } else if value.as_bool().is_some() {
+        "boolean"
+    } else if value.as_number().is_some() {
+        "number"
+    } else if value.as_str().is_some() {
+        "string"
+    } else if value.array_len().is_some() {
+        "array"
+    } else {
+        "object"
     }
 }
 
-fn validate_optional_field_type_at(
-    object: &serde_json::Map<String, Value>,
+fn is_json_string(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
+    value.as_str().is_some()
+}
+
+fn is_json_boolean(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
+    value.as_bool().is_some()
+}
+
+fn is_json_object(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
+    value.object_entries().is_some()
+}
+
+fn is_json_array(value: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
+    value.array_len().is_some()
+}
+
+fn validate_optional_field_type_at<'a>(
+    object: lingxi_core::types::utf16_json::JsonValueView<'a>,
     field: &str,
     path: &str,
     expected: &'static str,
-    is_expected: fn(&Value) -> bool,
+    is_expected: fn(lingxi_core::types::utf16_json::JsonValueView<'a>) -> bool,
 ) -> Result<(), HookResponseParseError> {
-    if let Some(value) = object.get(field) {
+    if let Some(value) = object.get_property(field) {
         if !is_expected(value) {
             return Err(HookResponseParseError::Schema {
                 field: path.to_string(),
@@ -1358,43 +1472,43 @@ fn validate_optional_field_type_at(
     Ok(())
 }
 
-fn validate_optional_field_type(
-    object: &serde_json::Map<String, Value>,
+fn validate_optional_field_type<'a>(
+    object: lingxi_core::types::utf16_json::JsonValueView<'a>,
     field: &str,
     expected: &'static str,
-    is_expected: fn(&Value) -> bool,
+    is_expected: fn(lingxi_core::types::utf16_json::JsonValueView<'a>) -> bool,
 ) -> Result<(), HookResponseParseError> {
     validate_optional_field_type_at(object, field, field, expected, is_expected)
 }
 
-fn validate_optional_nested_field_type(
-    object: &serde_json::Map<String, Value>,
+fn validate_optional_nested_field_type<'a>(
+    object: lingxi_core::types::utf16_json::JsonValueView<'a>,
     field: &str,
     expected: &'static str,
-    is_expected: fn(&Value) -> bool,
+    is_expected: fn(lingxi_core::types::utf16_json::JsonValueView<'a>) -> bool,
 ) -> Result<(), HookResponseParseError> {
     let path = format!("hookSpecificOutput.{field}");
     validate_optional_field_type_at(object, field, &path, expected, is_expected)
 }
 
-fn validate_optional_permission_decision_field_type(
-    object: &serde_json::Map<String, Value>,
+fn validate_optional_permission_decision_field_type<'a>(
+    object: lingxi_core::types::utf16_json::JsonValueView<'a>,
     field: &str,
     expected: &'static str,
-    is_expected: fn(&Value) -> bool,
+    is_expected: fn(lingxi_core::types::utf16_json::JsonValueView<'a>) -> bool,
 ) -> Result<(), HookResponseParseError> {
     let path = format!("hookSpecificOutput.decision.{field}");
     validate_optional_field_type_at(object, field, &path, expected, is_expected)
 }
 
-fn validate_required_field_type_at(
-    object: &serde_json::Map<String, Value>,
+fn validate_required_field_type_at<'a>(
+    object: lingxi_core::types::utf16_json::JsonValueView<'a>,
     field: &str,
     path: &str,
     expected: &'static str,
-    is_expected: fn(&Value) -> bool,
+    is_expected: fn(lingxi_core::types::utf16_json::JsonValueView<'a>) -> bool,
 ) -> Result<(), HookResponseParseError> {
-    let Some(value) = object.get(field) else {
+    let Some(value) = object.get_property(field) else {
         return Err(HookResponseParseError::MissingSchemaField {
             field: path.to_string(),
             expected,
@@ -1410,28 +1524,31 @@ fn validate_required_field_type_at(
     Ok(())
 }
 
-fn validate_permission_update_array(value: &Value) -> Result<(), HookResponseParseError> {
-    let Some(updates) = value.as_array() else {
+fn validate_permission_update_array(
+    value: lingxi_core::types::utf16_json::JsonValueView<'_>,
+) -> Result<(), HookResponseParseError> {
+    let Some(length) = value.array_len() else {
         return Err(HookResponseParseError::Schema {
             field: "hookSpecificOutput.decision.updatedPermissions".to_string(),
             expected: "array",
             actual: json_value_type(value),
         });
     };
-    for (index, update) in updates.iter().enumerate() {
+    for index in 0..length {
+        let update = value.get_index(index).expect("array index is in range");
         let path =
             |field: &str| format!("hookSpecificOutput.decision.updatedPermissions.{index}.{field}");
-        let Some(object) = update.as_object() else {
+        if !is_json_object(update) {
             return Err(HookResponseParseError::Schema {
                 field: format!("hookSpecificOutput.decision.updatedPermissions.{index}"),
                 expected: "object",
                 actual: json_value_type(update),
             });
-        };
-        validate_required_field_type_at(object, "type", &path("type"), "string", Value::is_string)?;
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
+        }
+        validate_required_field_type_at(update, "type", &path("type"), "string", is_json_string)?;
+        let kind = update
+            .get_property("type")
+            .and_then(|value| value.as_str())
             .unwrap_or_default();
         if !matches!(
             kind,
@@ -1449,15 +1566,15 @@ fn validate_permission_update_array(value: &Value) -> Result<(), HookResponsePar
             });
         }
         validate_required_field_type_at(
-            object,
+            update,
             "destination",
             &path("destination"),
             "string",
-            Value::is_string,
+            is_json_string,
         )?;
-        let destination = object
-            .get("destination")
-            .and_then(Value::as_str)
+        let destination = update
+            .get_property("destination")
+            .and_then(|value| value.as_str())
             .unwrap_or_default();
         if !matches!(
             destination,
@@ -1472,56 +1589,55 @@ fn validate_permission_update_array(value: &Value) -> Result<(), HookResponsePar
         match kind {
             "addRules" | "replaceRules" | "removeRules" => {
                 validate_required_field_type_at(
-                    object,
+                    update,
                     "rules",
                     &path("rules"),
                     "array",
-                    Value::is_array,
+                    is_json_array,
                 )?;
-                for (rule_index, rule) in object
-                    .get("rules")
-                    .and_then(Value::as_array)
-                    .expect("validated rules array")
-                    .iter()
-                    .enumerate()
-                {
+                let rules = update.get_property("rules").expect("rules was validated");
+                let rules_len = rules.array_len().expect("rules was validated as an array");
+                for rule_index in 0..rules_len {
                     let rule_path = |field: &str| {
                         format!(
                             "hookSpecificOutput.decision.updatedPermissions.{index}.rules.{rule_index}.{field}"
                         )
                     };
-                    let Some(rule) = rule.as_object() else {
+                    let rule = rules
+                        .get_index(rule_index)
+                        .expect("array index is in range");
+                    if !is_json_object(rule) {
                         return Err(HookResponseParseError::Schema {
                             field: rule_path(""),
                             expected: "object",
                             actual: json_value_type(rule),
                         });
-                    };
+                    }
                     validate_required_field_type_at(
                         rule,
                         "toolName",
                         &rule_path("toolName"),
                         "string",
-                        Value::is_string,
+                        is_json_string,
                     )?;
                     validate_optional_field_type_at(
                         rule,
                         "ruleContent",
                         &rule_path("ruleContent"),
                         "string",
-                        Value::is_string,
+                        is_json_string,
                     )?;
                 }
                 validate_required_field_type_at(
-                    object,
+                    update,
                     "behavior",
                     &path("behavior"),
                     "string",
-                    Value::is_string,
+                    is_json_string,
                 )?;
-                let behavior = object
-                    .get("behavior")
-                    .and_then(Value::as_str)
+                let behavior = update
+                    .get_property("behavior")
+                    .and_then(|value| value.as_str())
                     .unwrap_or_default();
                 if !matches!(behavior, "allow" | "deny" | "ask") {
                     return Err(HookResponseParseError::Schema {
@@ -1533,15 +1649,15 @@ fn validate_permission_update_array(value: &Value) -> Result<(), HookResponsePar
             }
             "setMode" => {
                 validate_required_field_type_at(
-                    object,
+                    update,
                     "mode",
                     &path("mode"),
                     "string",
-                    Value::is_string,
+                    is_json_string,
                 )?;
-                let mode = object
-                    .get("mode")
-                    .and_then(Value::as_str)
+                let mode = update
+                    .get_property("mode")
+                    .and_then(|value| value.as_str())
                     .unwrap_or_default();
                 if !matches!(
                     mode,
@@ -1556,20 +1672,23 @@ fn validate_permission_update_array(value: &Value) -> Result<(), HookResponsePar
             }
             "addDirectories" | "removeDirectories" => {
                 validate_required_field_type_at(
-                    object,
+                    update,
                     "directories",
                     &path("directories"),
                     "array",
-                    Value::is_array,
+                    is_json_array,
                 )?;
-                for (directory_index, directory) in object
-                    .get("directories")
-                    .and_then(Value::as_array)
-                    .expect("validated directories array")
-                    .iter()
-                    .enumerate()
-                {
-                    if !directory.is_string() {
+                let directories = update
+                    .get_property("directories")
+                    .expect("directories was validated");
+                let directories_len = directories
+                    .array_len()
+                    .expect("directories was validated as an array");
+                for directory_index in 0..directories_len {
+                    let directory = directories
+                        .get_index(directory_index)
+                        .expect("array index is in range");
+                    if !is_json_string(directory) {
                         return Err(HookResponseParseError::Schema {
                             field: format!(
                                 "hookSpecificOutput.decision.updatedPermissions.{index}.directories.{directory_index}"
@@ -1587,25 +1706,26 @@ fn validate_permission_update_array(value: &Value) -> Result<(), HookResponsePar
 }
 
 fn validate_optional_string_array(
-    object: &serde_json::Map<String, Value>,
+    object: lingxi_core::types::utf16_json::JsonValueView<'_>,
     field: &str,
 ) -> Result<(), HookResponseParseError> {
-    let Some(value) = object.get(field) else {
+    let Some(value) = object.get_property(field) else {
         return Ok(());
     };
-    let Some(values) = value.as_array() else {
+    let Some(length) = value.array_len() else {
         return Err(HookResponseParseError::Schema {
             field: format!("hookSpecificOutput.{field}"),
             expected: "array",
             actual: json_value_type(value),
         });
     };
-    for (index, value) in values.iter().enumerate() {
-        if !value.is_string() {
+    for index in 0..length {
+        let item = value.get_index(index).expect("array index is in range");
+        if !is_json_string(item) {
             return Err(HookResponseParseError::Schema {
                 field: format!("hookSpecificOutput.{field}.{index}"),
                 expected: "string",
-                actual: json_value_type(value),
+                actual: json_value_type(item),
             });
         }
     }
@@ -1613,28 +1733,26 @@ fn validate_optional_string_array(
 }
 
 fn validate_permission_request_decision(
-    object: &serde_json::Map<String, Value>,
+    object: lingxi_core::types::utf16_json::JsonValueView<'_>,
 ) -> Result<(), HookResponseParseError> {
-    let Some(value) = object.get("decision") else {
+    let Some(value) = object.get_property("decision") else {
         return Err(HookResponseParseError::MissingSchemaField {
             field: "hookSpecificOutput.decision".to_string(),
             expected: "object",
         });
     };
-    let Some(decision) = value.as_object() else {
+    if !is_json_object(value) {
         return Err(HookResponseParseError::Schema {
             field: "hookSpecificOutput.decision".to_string(),
             expected: "object",
             actual: json_value_type(value),
         });
-    };
-    validate_optional_permission_decision_field_type(
-        decision,
-        "behavior",
-        "string",
-        Value::is_string,
-    )?;
-    let Some(behavior) = decision.get("behavior").and_then(Value::as_str) else {
+    }
+    validate_optional_permission_decision_field_type(value, "behavior", "string", is_json_string)?;
+    let Some(behavior) = value
+        .get_property("behavior")
+        .and_then(|field| field.as_str())
+    else {
         return Err(HookResponseParseError::MissingSchemaField {
             field: "hookSpecificOutput.decision.behavior".to_string(),
             expected: "string",
@@ -1643,33 +1761,33 @@ fn validate_permission_request_decision(
     match behavior {
         "allow" => {
             validate_optional_permission_decision_field_type(
-                decision,
+                value,
                 "updatedInput",
                 "object",
-                Value::is_object,
+                is_json_object,
             )?;
             validate_optional_permission_decision_field_type(
-                decision,
+                value,
                 "updatedPermissions",
                 "array",
-                Value::is_array,
+                is_json_array,
             )?;
-            if let Some(updated_permissions) = decision.get("updatedPermissions") {
+            if let Some(updated_permissions) = value.get_property("updatedPermissions") {
                 validate_permission_update_array(updated_permissions)?;
             }
         }
         "deny" => {
             validate_optional_permission_decision_field_type(
-                decision,
+                value,
                 "message",
                 "string",
-                Value::is_string,
+                is_json_string,
             )?;
             validate_optional_permission_decision_field_type(
-                decision,
+                value,
                 "interrupt",
                 "boolean",
-                Value::is_boolean,
+                is_json_boolean,
             )?;
         }
         _ => {
@@ -1682,6 +1800,7 @@ fn validate_permission_request_decision(
     }
     Ok(())
 }
+
 /// PARITY 2.1.263 `imr(output, zodError)` — the three HINTS appended to a hook
 /// JSON validation failure. They tell a hook author which field they reached for
 /// instead of the one the event actually accepts, and they are keyed on the RAW
@@ -1700,19 +1819,26 @@ fn validate_permission_request_decision(
 /// Returned separately from [`HookResponseParseError`] so callers can append it
 /// to whichever diagnostic they surface; `None` when no hint applies.
 #[must_use]
-pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
-    let obj = raw.as_object()?;
-    if let Some(hso) = obj.get("hookSpecificOutput").and_then(|v| v.as_object()) {
-        if !hso.contains_key("hookEventName") {
+pub fn validation_hint(raw: &HookJson) -> Option<String> {
+    let obj = raw.at_pointer("")?;
+    if !is_json_object(obj) {
+        return None;
+    }
+    if let Some(hso) = obj
+        .get_property("hookSpecificOutput")
+        .filter(|value| is_json_object(*value))
+    {
+        if hso.get_property("hookEventName").is_none() {
             // NB: the binary REPLACES the message here rather than appending.
             return Some(
                 "hookSpecificOutput is missing required field \"hookEventName\"".to_string(),
             );
         }
-        if hso.get("hookEventName").and_then(|v| v.as_str()) == Some("PermissionRequest")
-            && !hso
-                .get("decision")
-                .is_some_and(serde_json::Value::is_object)
+        if hso
+            .get_property("hookEventName")
+            .and_then(|value| value.as_str())
+            == Some("PermissionRequest")
+            && !hso.get_property("decision").is_some_and(is_json_object)
         {
             return Some(
                 " (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})"
@@ -1722,7 +1848,10 @@ pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
         return None;
     }
     // A hook that put `allow`/`deny`/`ask` in the LEGACY top-level `decision`.
-    match obj.get("decision").and_then(|v| v.as_str()) {
+    match obj
+        .get_property("decision")
+        .and_then(|value| value.as_str())
+    {
         Some("ask") => Some(
             " (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)"
                 .to_string(),
@@ -1744,65 +1873,77 @@ pub fn parse_response(
     raw: &str,
     expected_event: &'static str,
 ) -> Result<HookResponse, HookResponseParseError> {
-    let v: Value =
-        serde_json::from_str(raw).map_err(|e| HookResponseParseError::Json(e.to_string()))?;
-    let obj = v.as_object().ok_or(HookResponseParseError::NotObject)?;
+    let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw)
+        .map_err(|e| HookResponseParseError::Json(e.to_string()))?;
+    parse_response_projection(&projection, expected_event)
+}
+
+/// Parse and validate a hook response already held in the core UTF-16 JSON
+/// projection. Function hooks use this entry point so QuickJS strings retain
+/// their exact units without a projection-to-JSON-to-projection round trip.
+pub fn parse_response_projection(
+    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    expected_event: &'static str,
+) -> Result<HookResponse, HookResponseParseError> {
+    projection
+        .validate()
+        .map_err(|e| HookResponseParseError::Json(e.to_string()))?;
+    let obj = projection
+        .at_pointer("")
+        .filter(|value| value.object_entries().is_some())
+        .ok_or(HookResponseParseError::NotObject)?;
 
     // Claude Code validates the known output schema before interpreting any
     // decision. Keep unknown fields forward-compatible, but never silently
     // coerce a known field of the wrong JSON type into an absent field.
-    validate_optional_field_type(obj, "continue", "boolean", Value::is_boolean)?;
-    validate_optional_field_type(obj, "stopReason", "string", Value::is_string)?;
-    validate_optional_field_type(obj, "suppressOutput", "boolean", Value::is_boolean)?;
-    validate_optional_field_type(obj, "systemMessage", "string", Value::is_string)?;
-    validate_optional_field_type(obj, "terminalSequence", "string", Value::is_string)?;
-    validate_optional_field_type(obj, "decision", "string", Value::is_string)?;
-    validate_optional_field_type(obj, "reason", "string", Value::is_string)?;
-    validate_optional_field_type(obj, "hookSpecificOutput", "object", Value::is_object)?;
+    validate_optional_field_type(obj, "continue", "boolean", is_json_boolean)?;
+    validate_optional_field_type(obj, "stopReason", "string", is_json_string)?;
+    validate_optional_field_type(obj, "suppressOutput", "boolean", is_json_boolean)?;
+    validate_optional_field_type(obj, "systemMessage", "string", is_json_string)?;
+    validate_optional_field_type(obj, "terminalSequence", "string", is_json_string)?;
+    validate_optional_field_type(obj, "decision", "string", is_json_string)?;
+    validate_optional_field_type(obj, "reason", "string", is_json_string)?;
+    validate_optional_field_type(obj, "hookSpecificOutput", "object", is_json_object)?;
     let mut resp = HookResponse::default();
 
     // continue / stopReason. `continue: false` is the *preventContinuation*
     // signal for lifecycle (Stop / SubagentStop / TaskCompleted) hooks
     // (claude-code `hooks.ts:404`, `query.ts:1278`): it terminates the agent
-    // loop regardless of any `decision: block`. `stopReason` becomes the
-    // surfaced `reason`. For non-lifecycle events the orchestrator ignores
-    // `prevent_continuation`, so this stays behavior-neutral there (B4).
-    let cont = obj.get("continue").and_then(Value::as_bool).unwrap_or(true);
+    // loop regardless of any `decision: block`. For non-lifecycle events the
+    // orchestrator ignores `prevent_continuation`, so this stays behavior-neutral.
+    let cont = obj
+        .get_property("continue")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
     if !cont {
         resp.prevent_continuation = true;
-        if let Some(reason) = obj.get("stopReason").and_then(Value::as_str) {
-            resp.reason = Some(reason.to_string());
+        if obj.get_property("stopReason").is_some() {
+            resp.reason = ExactHookText::from_json_projection(projection, "/stopReason");
         }
     }
 
-    // suppressOutput
-    if let Some(b) = obj.get("suppressOutput").and_then(Value::as_bool) {
-        resp.suppress_output = b;
+    if let Some(suppress) = obj
+        .get_property("suppressOutput")
+        .and_then(|value| value.as_bool())
+    {
+        resp.suppress_output = suppress;
+    }
+    if obj.get_property("systemMessage").is_some() {
+        resp.system_message = ExactHookText::from_json_projection(projection, "/systemMessage");
     }
 
-    // systemMessage
-    if let Some(s) = obj.get("systemMessage").and_then(Value::as_str) {
-        resp.system_message = Some(s.to_string());
+    // Top-level `terminalSequence` is captured for all hook result types.
+    if obj.get_property("terminalSequence").is_some() {
+        resp.terminal_sequence =
+            ExactHookText::from_json_projection(projection, "/terminalSequence");
     }
 
-    // #40 top-level `terminalSequence` (claude-code schema BIN off 200873127).
-    // A TOP-LEVEL field (NOT under hookSpecificOutput) read for ALL hook result
-    // types. The allowlist validation (`NEo`) runs at APPLY time (the consumer),
-    // so parse just captures the raw string here.
-    if let Some(ts) = obj.get("terminalSequence").and_then(Value::as_str) {
-        resp.terminal_sequence = Some(ts.to_string());
-    }
-
-    // Legacy top-level `decision` (claude-code `azn`'s FIRST switch, BIN off
-    // ~205721920: `if(e.decision)switch(e.decision){case"approve":…;case"block":
-    // …;default:throw Error("Unknown hook decision type: …. Valid types are:
-    // approve, block")}`). The `if(e.decision)` guard means a falsy value
-    // (absent / empty string / `null`) is skipped; a PRESENT but unrecognised
-    // string THROWS (rejects the whole hook output). We mirror both: only a
-    // non-empty string reaches the switch, and any value other than
-    // `approve`/`block` returns `UnknownDecision`.
-    match obj.get("decision").and_then(Value::as_str) {
-        // `if(e.decision)` is falsy for the empty string — skip it like the binary.
+    // Legacy top-level decision uses a JS truthiness guard: empty string is
+    // skipped, but an unrecognized non-empty string rejects the response.
+    match obj
+        .get_property("decision")
+        .and_then(|value| value.as_str())
+    {
         None | Some("") => {}
         Some("block") => resp.decision = Some(HookDecision::Block),
         Some("approve") => resp.decision = Some(HookDecision::Approve),
@@ -1813,38 +1954,20 @@ pub fn parse_response(
         }
     }
 
-    // NOTE: the binary NEVER reads a BARE top-level `e.permissionDecision`
-    // (`azn` only ever consults `e.hookSpecificOutput.permissionDecision`, and
-    // only when `hookSpecificOutput.hookEventName==="PreToolUse"`). The previous
-    // top-level `permissionDecision` parse was a non-parity divergence and has
-    // been removed (R-O2a) — `permissionDecision` is honoured ONLY under
-    // `hookSpecificOutput` below.
-    // Top-level `reason` (claude-code: the block-message resolution
-    // `blockingError = e.hookSpecificOutput.permissionDecisionReason || e.reason
-    // || "Blocked by hook"`, plus the general `{decision:"block", reason}` output
-    // shape). `permissionDecisionReason` is a hookSpecificOutput-ONLY field in
-    // CC's schema (`permissionDecisionReason:S.string().optional()` inside the
-    // hookSpecificOutput object) — there is NO top-level `permissionDecisionReason`,
-    // so the previous top-level read of that key was a phantom that both invented a
-    // non-existent field AND dropped the real top-level `reason` (a
-    // `{decision:"block", reason:"…"}` hook surfaced an empty block message). Read
-    // top-level `reason` here; the lower `hookSpecificOutput.permissionDecisionReason`
-    // parse (below) overrides it, preserving CC's `hsOut.permissionDecisionReason ||
-    // e.reason` precedence.
+    // The binary never reads a bare top-level `permissionDecision`.
     if expected_event != "PermissionRequest" {
-        if let Some(r) = obj.get("reason").and_then(Value::as_str) {
-            resp.reason = Some(r.to_string());
+        if obj.get_property("reason").is_some() {
+            resp.reason = ExactHookText::from_json_projection(projection, "/reason");
         }
     }
 
-    // hookSpecificOutput
-    if let Some(hs) = obj.get("hookSpecificOutput").and_then(Value::as_object) {
-        let name =
-            hs.get("hookEventName")
-                .ok_or_else(|| HookResponseParseError::MissingSchemaField {
-                    field: "hookSpecificOutput.hookEventName".to_string(),
-                    expected: "string",
-                })?;
+    if let Some(hs) = obj.get_property("hookSpecificOutput") {
+        let name = hs.get_property("hookEventName").ok_or_else(|| {
+            HookResponseParseError::MissingSchemaField {
+                field: "hookSpecificOutput.hookEventName".to_string(),
+                expected: "string",
+            }
+        })?;
         let name = name
             .as_str()
             .ok_or_else(|| HookResponseParseError::Schema {
@@ -1858,51 +1981,71 @@ pub fn parse_response(
                 got: name.to_string(),
             });
         }
-        // PermissionRequest's `updatedInput` belongs inside its nested
-        // `decision`; the top-level hookSpecificOutput field is the legacy
-        // PreToolUse shape and must not be reused for this event.
+
         if expected_event != "PermissionRequest" {
-            validate_optional_nested_field_type(hs, "updatedInput", "object", Value::is_object)?;
+            validate_optional_nested_field_type(hs, "updatedInput", "object", is_json_object)?;
         }
-        validate_optional_nested_field_type(hs, "classifierContext", "string", Value::is_string)?;
-        validate_optional_nested_field_type(hs, "additionalContext", "string", Value::is_string)?;
-        validate_optional_nested_field_type(hs, "retry", "boolean", Value::is_boolean)?;
-        validate_optional_nested_field_type(hs, "permissionDecision", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "classifierContext", "string", is_json_string)?;
+        validate_optional_nested_field_type(hs, "additionalContext", "string", is_json_string)?;
+        validate_optional_nested_field_type(hs, "retry", "boolean", is_json_boolean)?;
+        validate_optional_nested_field_type(hs, "permissionDecision", "string", is_json_string)?;
         validate_optional_nested_field_type(
             hs,
             "permissionDecisionReason",
             "string",
-            Value::is_string,
+            is_json_string,
         )?;
-        validate_optional_nested_field_type(hs, "action", "string", Value::is_string)?;
-        validate_optional_nested_field_type(hs, "sessionTitle", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "action", "string", is_json_string)?;
+        validate_optional_nested_field_type(hs, "sessionTitle", "string", is_json_string)?;
         validate_optional_nested_field_type(
             hs,
             "suppressOriginalPrompt",
             "boolean",
-            Value::is_boolean,
+            is_json_boolean,
         )?;
-        validate_optional_nested_field_type(hs, "displayContent", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "displayContent", "string", is_json_string)?;
         validate_optional_string_array(hs, "watchPaths")?;
-        validate_optional_nested_field_type(hs, "initialUserMessage", "string", Value::is_string)?;
-        validate_optional_nested_field_type(hs, "reloadSkills", "boolean", Value::is_boolean)?;
+        validate_optional_nested_field_type(hs, "initialUserMessage", "string", is_json_string)?;
+        validate_optional_nested_field_type(hs, "reloadSkills", "boolean", is_json_boolean)?;
+
         if expected_event == "PermissionRequest" {
             validate_permission_request_decision(hs)?;
             let decision = hs
-                .get("decision")
-                .and_then(Value::as_object)
+                .get_property("decision")
                 .expect("validated PermissionRequest decision object");
             let behavior = decision
-                .get("behavior")
-                .and_then(Value::as_str)
+                .get_property("behavior")
+                .and_then(|value| value.as_str())
                 .expect("validated PermissionRequest behavior");
             match behavior {
                 "allow" => {
-                    let updated_input = decision.get("updatedInput").cloned();
-                    let updated_permissions = decision
-                        .get("updatedPermissions")
-                        .and_then(Value::as_array)
-                        .cloned();
+                    let permission_decision = hs
+                        .get_property("decision")
+                        .expect("validated decision object");
+                    let updated_input = if permission_decision
+                        .get_property("updatedInput")
+                        .is_some()
+                    {
+                        Some(
+                            projection
+                                .subprojection("/hookSpecificOutput/decision/updatedInput")
+                                .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
+                    let updated_permissions = if permission_decision
+                        .get_property("updatedPermissions")
+                        .is_some()
+                    {
+                        Some(
+                            projection
+                                .subprojection("/hookSpecificOutput/decision/updatedPermissions")
+                                .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
                     resp.decision = Some(HookDecision::Allow);
                     resp.updated_input = updated_input.clone();
                     resp.updated_permissions = updated_permissions.clone();
@@ -1912,11 +2055,20 @@ pub fn parse_response(
                     });
                 }
                 "deny" => {
-                    let message = decision
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    let interrupt = decision.get("interrupt").and_then(Value::as_bool);
+                    let decision_pointer = hs
+                        .get_property("decision")
+                        .expect("validated decision object");
+                    let message = if decision_pointer.get_property("message").is_some() {
+                        ExactHookText::from_json_projection(
+                            projection,
+                            "/hookSpecificOutput/decision/message",
+                        )
+                    } else {
+                        None
+                    };
+                    let interrupt = decision_pointer
+                        .get_property("interrupt")
+                        .and_then(|value| value.as_bool());
                     resp.decision = Some(HookDecision::Block);
                     resp.reason = message.clone();
                     resp.interrupt = interrupt;
@@ -1925,104 +2077,65 @@ pub fn parse_response(
                 }
                 _ => unreachable!("validated PermissionRequest behavior"),
             }
-        } else if let Some(upd) = hs.get("updatedInput") {
-            resp.updated_input = Some(upd.clone());
+        } else if hs.get_property("updatedInput").is_some() {
+            resp.updated_input = Some(
+                projection
+                    .subprojection("/hookSpecificOutput/updatedInput")
+                    .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+            );
         }
-        // `hookSpecificOutput.updatedMCPToolOutput` (claude-code
-        // `parseHookJSONOutput`, `utils/hooks.ts:646-649`). The TS switch only
-        // reads this for the `PostToolUse` case, so we scope it to that event —
-        // a hook returning it on any other event has it ignored, exactly as in
-        // TS. TS guards on truthiness (`if (json.hookSpecificOutput
-        // .updatedMCPToolOutput)`), so a JSON `null` / `false` / `0` / `""` is
-        // NOT treated as a replacement; `Value::is_null()` covers the `null`
-        // case (the only one expressible once the key is present), keeping a
-        // hook that explicitly returns `null` a no-op like TS.
+
         if expected_event == "PostToolUse" {
-            // `hookSpecificOutput.updatedToolOutput` (claude-code BIN off
-            // 205724076: `if(e.hookSpecificOutput.updatedToolOutput!==void 0)
-            // u.updatedToolOutput=e.hookSpecificOutput.updatedToolOutput`).
-            // `!== void 0` semantics — the key being PRESENT (even with a JSON
-            // `null` value) IS a replacement, distinct from the legacy MCP field
-            // below which is truthiness-gated. `Map::get` returns `Some` only
-            // when the key is present, so this faithfully mirrors `!== void 0`:
-            // an explicit `null` becomes `Some(Some(Value::Null))` (a
-            // replacement with null), an omitted key leaves the outer `None`.
-            if let Some(out) = hs.get("updatedToolOutput") {
-                resp.updated_tool_output = Some(Some(out.clone()));
+            if hs.get_property("updatedToolOutput").is_some() {
+                resp.updated_tool_output = Some(
+                    projection
+                        .subprojection("/hookSpecificOutput/updatedToolOutput")
+                        .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+                );
             }
-            if let Some(out) = hs.get("updatedMCPToolOutput") {
-                if !out.is_null() {
-                    resp.updated_mcp_tool_output = Some(out.clone());
+            if let Some(output) = hs.get_property("updatedMCPToolOutput") {
+                if !output.is_null() {
+                    resp.updated_mcp_tool_output = Some(
+                        projection
+                            .subprojection("/hookSpecificOutput/updatedMCPToolOutput")
+                            .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+                    );
                 }
             }
-            // SH-01 — `hookSpecificOutput.classifierContext` (NEW in 2.1.238,
-            // oracle @ 296466460): `classifierContext:H().describe("Host-asserted
-            // context shown to the auto-mode permission classifier alongside this
-            // tool call's result. …").optional()`. Scoped to the `PostToolUse`
-            // arm of the `hookSpecificOutput` union exactly like
-            // `updatedToolOutput` above — a hook returning it on any other event
-            // has it ignored.
-            //
-            // The consumption site guards on TRUTHINESS (`if(z.classifierContext)`,
-            // @ 296974134), so an empty string contributes nothing; we mirror
-            // that here rather than storing a `Some("")` the fold would have to
-            // re-filter.
-            if let Some(ctx) = hs.get("classifierContext").and_then(Value::as_str) {
-                if !ctx.is_empty() {
-                    resp.classifier_context = Some(ctx.to_string());
+            if let Some(context) = hs
+                .get_property("classifierContext")
+                .and_then(|value| value.as_str())
+            {
+                if !context.is_empty() {
+                    resp.classifier_context = ExactHookText::from_json_projection(
+                        projection,
+                        "/hookSpecificOutput/classifierContext",
+                    );
                 }
             }
         }
-        // `hookSpecificOutput.additionalContext` (claude-code
-        // `result.additionalContext`, `utils/hooks.ts:622`). Kept DISTINCT from
-        // the top-level `systemMessage` — claude-code routes them to SEPARATE
-        // attachments (`hook_additional_context` vs `hook_system_message`) where
-        // only `additionalContext` reaches the model (`utils/messages.ts:4117`
-        // vs `:4258`). We must NOT merge them into one field.
-        if let Some(addl) = hs.get("additionalContext").and_then(Value::as_str) {
-            resp.additional_context = Some(addl.to_string());
+
+        if let Some(context) = hs
+            .get_property("additionalContext")
+            .and_then(|value| value.as_str())
+        {
+            let _ = context;
+            resp.additional_context = ExactHookText::from_json_projection(
+                projection,
+                "/hookSpecificOutput/additionalContext",
+            );
         }
-        // `hookSpecificOutput.retry` (claude-code `parseHookJSONOutput`,
-        // `case 'PermissionDenied': result.retry = json.hookSpecificOutput.retry`,
-        // `utils/hooks.ts:654-655`). The TS switch reads this ONLY for the
-        // `PermissionDenied` case, so we scope it to that event — a hook
-        // returning `retry` on any other event has it ignored, exactly as in TS.
         if expected_event == "PermissionDenied" {
-            if let Some(retry) = hs.get("retry").and_then(Value::as_bool) {
+            if let Some(retry) = hs.get_property("retry").and_then(|value| value.as_bool()) {
                 resp.retry = Some(retry);
             }
         }
-        // `hookSpecificOutput.permissionDecision` switch (claude-code `azn`'s
-        // SECOND switch, BIN off ~205721920:
-        // `if(e.hookSpecificOutput?.hookEventName==="PreToolUse" ||
-        // e.hookSpecificOutput?.hookEventName==="PreModelSwitch"
-        //   && e.hookSpecificOutput.permissionDecision)switch(...){
-        //     case"allow":u.permissionBehavior="allow";break;
-        //     case"deny":u.permissionBehavior="deny",…;break;
-        //     case"ask":u.permissionBehavior="ask";break;
-        //     case"defer":u.permissionBehavior="defer";break;
-        //     default:throw Error("Unknown hook permissionDecision type: …")}`).
-        // THREE parity rules captured here:
-        //   (R-O2b) GATED to `hookEventName === "PreToolUse"` or
-        //           `"PreModelSwitch"` — for any other
-        //           event the binary never enters this switch.
-        //   (R-D2)  UNCONDITIONAL reassignment — `permissionBehavior` is set
-        //           outright (no `if (decision != Block)` guard), so a hsOut
-        //           permissionDecision ALWAYS overrides a prior legacy
-        //           `decision:"block"`. Target: `{"decision":"block",
-        //           "hookSpecificOutput":{"permissionDecision":"allow"}}` →
-        //           Approve (the binary's `permissionBehavior="allow"`).
-        //   (R-O2c) `default: throw` — an unrecognised value rejects the whole
-        //           hook output (returns `UnknownPermissionDecision`).
-        // `allow`→`Approve` (skips the prompt), `deny`→`Block`, `ask`→`Ask`
-        // (R-D3, forces the interactive prompt), and `defer`→`Defer` only for
-        // PreToolUse. PreModelSwitch intentionally has no `defer` response in
-        // the upstream schema.
+
         if matches!(expected_event, "PreToolUse" | "PreModelSwitch") {
-            match hs.get("permissionDecision").and_then(Value::as_str) {
-                // The binary guards the switch on `&& e.hookSpecificOutput
-                // .permissionDecision` (truthy) — a missing key OR an empty
-                // string is falsy, so the switch is SKIPPED (no throw).
+            match hs
+                .get_property("permissionDecision")
+                .and_then(|value| value.as_str())
+            {
                 None | Some("") => {}
                 Some("allow") => resp.decision = Some(HookDecision::Approve),
                 Some("deny") => resp.decision = Some(HookDecision::Block),
@@ -2038,88 +2151,87 @@ pub fn parse_response(
             }
         }
         if expected_event != "PermissionRequest" {
-            if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
-                resp.reason = Some(r.to_string());
+            if hs.get_property("permissionDecisionReason").is_some() {
+                resp.reason = ExactHookText::from_json_projection(
+                    projection,
+                    "/hookSpecificOutput/permissionDecisionReason",
+                );
             }
         }
 
-        // Elicitation answer (claude-code `parseElicitationHookOutput`,
-        // `utils/hooks.ts:4434-4446`): `hookSpecificOutput.action` is the
-        // elicitation response action; `.content` the optional form content.
-        // A `decline` action additionally drives a block (the JS path sets a
-        // `blockingError` => the handler returns `{action:'decline'}`), so we
-        // map it onto `HookDecision::Block` here, preserving any earlier
-        // reason. Only set when an `action` is present, exactly like the JS
-        // `if (!specific.action) return {}`. Applies to both `Elicitation` and
-        // `ElicitationResult` events (binary-confirmed: both share the same
-        // hookSpecificOutput shape: `{hookEventName, action?, content?}`).
-        if let Some(action) = hs.get("action").and_then(Value::as_str) {
+        if let Some(action) = hs.get_property("action").and_then(|value| value.as_str()) {
+            let content = if hs.get_property("content").is_some() {
+                Some(
+                    projection
+                        .subprojection("/hookSpecificOutput/content")
+                        .map_err(|error| HookResponseParseError::Json(error.to_string()))?,
+                )
+            } else {
+                None
+            };
             resp.elicitation_response = Some(crate::response::ElicitationHookResponse {
-                action: action.to_string(),
-                content: hs.get("content").cloned(),
+                action: action.to_owned(),
+                content,
             });
             if action == "decline" {
                 resp.decision = Some(HookDecision::Block);
             }
         }
 
-        // `hookSpecificOutput.sessionTitle` (binary-confirmed at BIN off
-        // 201754804: gated to `hookEventName === "UserPromptSubmit"`).
-        // Allows a hook to rename the session. The orchestrator applies it
-        // via the session-title update path.
         if expected_event == "UserPromptSubmit" {
-            if let Some(title) = hs.get("sessionTitle").and_then(Value::as_str) {
-                resp.session_title = Some(title.to_string());
+            if hs.get_property("sessionTitle").is_some() {
+                resp.session_title = ExactHookText::from_json_projection(
+                    projection,
+                    "/hookSpecificOutput/sessionTitle",
+                );
             }
-            // `hookSpecificOutput.suppressOriginalPrompt` (binary-confirmed at
-            // BIN off 201754804: boolean, description "When decision is 'block',
-            // omit the original prompt from the block message"). Scoped to
-            // `UserPromptSubmit` only (the binary's schema gate).
-            if let Some(b) = hs.get("suppressOriginalPrompt").and_then(Value::as_bool) {
-                resp.suppress_original_prompt = b;
+            if let Some(suppress) = hs
+                .get_property("suppressOriginalPrompt")
+                .and_then(|value| value.as_bool())
+            {
+                resp.suppress_original_prompt = suppress;
             }
         }
-
-        // `hookSpecificOutput.displayContent` (binary-confirmed at BIN off
-        // 201757586: gated to `hookEventName === "MessageDisplay"`). Replaces
-        // the assistant delta on-screen; does NOT affect the stored message.
-        // Scoped to `MessageDisplay` (the binary's schema gate).
         if expected_event == "MessageDisplay" {
-            if let Some(dc) = hs.get("displayContent").and_then(Value::as_str) {
-                resp.display_content = Some(dc.to_string());
+            if hs.get_property("displayContent").is_some() {
+                resp.display_content = ExactHookText::from_json_projection(
+                    projection,
+                    "/hookSpecificOutput/displayContent",
+                );
             }
         }
-
-        // `hookSpecificOutput.watchPaths` (claude-code `parseHookJSONOutput`:
-        // `"watchPaths" in e.hookSpecificOutput && e.hookSpecificOutput.watchPaths`
-        // — captured on both the exec and MCP hook-result paths). A `FileChanged`
-        // / `CwdChanged` hook may add paths to the file-changed watch set. The
-        // binary's parse is NOT gated on `hookEventName` (unlike `sessionTitle` /
-        // `displayContent`) — the `"watchPaths" in hsOut` test stands alone — so we
-        // capture it for ANY event; only the file-changed watcher's FileChanged /
-        // CwdChanged flows consume it, leaving other events behavior-neutral.
-        // Present-key capture: a PRESENT array (even empty) becomes
-        // `Some(vec![...])` — JS arrays are always truthy, so `&& hsOut.watchPaths`
-        // keeps an empty `[]` — distinguishing it from an absent key (`None`); a
-        // non-array value has no `Vec<String>` representation and is ignored.
-        if let Some(arr) = hs.get("watchPaths").and_then(Value::as_array) {
+        if let Some(paths) = hs.get_property("watchPaths") {
+            let length = paths
+                .array_len()
+                .expect("watchPaths was validated as an array");
             resp.watch_paths = Some(
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
+                (0..length)
+                    .map(|index| {
+                        ExactHookText::from_json_projection(
+                            projection,
+                            &format!("/hookSpecificOutput/watchPaths/{index}"),
+                        )
+                        .expect("watchPaths items were validated as strings")
+                    })
                     .collect(),
             );
         }
-
-        // `hookSpecificOutput.{initialUserMessage,reloadSkills}` (claude-code
-        // `SessionStart` consumer: `if(p.initialUserMessage)$os=p.initialUserMessage`
-        // and `if(p.reloadSkills)u=!0`). Scoped to `SessionStart` (the binary reads
-        // these only in the SessionStart case of its result switch).
         if expected_event == "SessionStart" {
-            if let Some(m) = hs.get("initialUserMessage").and_then(Value::as_str) {
-                resp.initial_user_message = Some(m.to_string());
+            if hs
+                .get_property("initialUserMessage")
+                .and_then(|value| value.as_str())
+                .is_some()
+            {
+                resp.initial_user_message = ExactHookText::from_json_projection(
+                    projection,
+                    "/hookSpecificOutput/initialUserMessage",
+                );
             }
-            if let Some(b) = hs.get("reloadSkills").and_then(Value::as_bool) {
-                resp.reload_skills = Some(b);
+            if let Some(reload) = hs
+                .get_property("reloadSkills")
+                .and_then(|value| value.as_bool())
+            {
+                resp.reload_skills = Some(reload);
             }
         }
     }
@@ -2130,3 +2242,63 @@ pub fn parse_response(
 #[cfg(test)]
 #[path = "hook_payload_test.rs"]
 mod hook_payload_test;
+
+#[cfg(test)]
+mod flat_response_projection_tests {
+    use super::{parse_response_projection, HookJson};
+
+    #[test]
+    fn response_projection_keeps_arbitrary_text_units_and_null_presence() {
+        let source = r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":{"text":"\ud800","extra":[null]}}}"#;
+        let projection = HookJson::parse(source).unwrap();
+        let response = parse_response_projection(&projection, "PostToolUse").unwrap();
+        let output = response.updated_tool_output.unwrap();
+        assert_eq!(
+            output.to_json_string().unwrap(),
+            r#"{"text":"\ud800","extra":[null]}"#
+        );
+
+        let absent =
+            HookJson::parse(r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse"}}"#).unwrap();
+        assert!(parse_response_projection(&absent, "PostToolUse")
+            .unwrap()
+            .updated_tool_output
+            .is_none());
+
+        let explicit_null = HookJson::parse(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":null}}"#,
+        )
+        .unwrap();
+        assert!(parse_response_projection(&explicit_null, "PostToolUse")
+            .unwrap()
+            .updated_tool_output
+            .unwrap()
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+    }
+
+    #[test]
+    fn response_projection_does_not_materialize_deep_arbitrary_updates() {
+        let deep = format!("{}null{}", "[".repeat(512), "]".repeat(512));
+        let source = format!(
+            r#"{{"hookSpecificOutput":{{"hookEventName":"PostToolUse","updatedToolOutput":{deep}}}}}"#
+        );
+        let projection = HookJson::parse(&source).unwrap();
+        let response = parse_response_projection(&projection, "PostToolUse").unwrap();
+        let output = response.updated_tool_output.unwrap();
+        assert_eq!(output.to_json_string().unwrap(), deep);
+    }
+
+    #[test]
+    fn classifier_context_captures_exact_units_from_source() {
+        let projection = HookJson::parse(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","classifierContext":"\ud800"}}"#,
+        )
+        .unwrap();
+        let response = parse_response_projection(&projection, "PostToolUse").unwrap();
+        assert_eq!(
+            response.classifier_context.unwrap().utf16_code_units,
+            [0xD800]
+        );
+    }
+}

@@ -34,7 +34,7 @@ impl BuiltinCommandHandler for StatusHandler {
         let snap = self.handle.get_status_snapshot().await;
         telemetry::emit_command_completed(cmd_evt::STATUS_COMPLETED, "");
         CommandResult::Done {
-            display: Some(render_status(&snap)),
+            display: Some((render_status(&snap)).into()),
         }
     }
     fn name(&self) -> &str {
@@ -91,7 +91,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "status".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -144,6 +144,9 @@ Status:
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StatusHandler::new(mock);
         assert_eq!(h.name(), "status");
-        assert_eq!(h.description(), "Show LingXi status including version, model, account, API connectivity, and tool statuses");
+        assert_eq!(
+            h.description(),
+            "Show LingXi status including version, model, account, API connectivity, and tool statuses"
+        );
     }
 }

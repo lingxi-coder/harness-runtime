@@ -1,5 +1,9 @@
 //! Regression tests for transport execute test.
 
+#[path = "common/json_payload.rs"]
+mod json_payload_test;
+use json_payload_test::value as json_payload_value;
+
 use lingxi_llm_client::protocol::{ContentBlock, StopReason};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -128,7 +132,10 @@ async fn execute_sends_authenticated_request_and_decodes_response() {
         seen.headers.get("x-api-key").map(String::as_str),
         Some("transport-key")
     );
-    assert_eq!(seen.body_json["model"], "claude-sonnet-4-20250514");
+    assert_eq!(
+        json_payload_value(&seen.body_json)["model"],
+        "claude-sonnet-4-20250514"
+    );
 }
 
 #[tokio::test]
@@ -236,5 +243,8 @@ async fn provider_services_reuses_configured_model_routes_and_host_credentials()
         seen.headers.get("x-api-key").map(String::as_str),
         Some("transport-key")
     );
-    assert_eq!(seen.body_json["model"], "claude-sonnet-4-20250514");
+    assert_eq!(
+        json_payload_value(&seen.body_json)["model"],
+        "claude-sonnet-4-20250514"
+    );
 }

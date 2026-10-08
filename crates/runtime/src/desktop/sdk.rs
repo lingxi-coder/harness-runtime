@@ -29,9 +29,12 @@ impl SessionService for DesktopRuntime {
         input: RunInput,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, HandleError> {
+        let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            input.prompt.as_str(),
+        );
         OrchestratorHandle::run_turn_streaming_with_images(
             self.orchestrator.as_ref(),
-            &input.prompt,
+            &prompt,
             &input.images,
             cancel,
         )

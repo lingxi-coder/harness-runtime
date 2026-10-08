@@ -6,13 +6,13 @@
     clippy::unused_async
 )]
 
-use cost::pricing::PricingCatalog;
 use cost::CostTracker;
+use cost::pricing::PricingCatalog;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::SessionId;
 use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
@@ -29,6 +29,7 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
         content: vec![ContentBlock::Text {
             text: "Done.".to_string(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
@@ -47,7 +48,9 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
             ..Default::default()
         },
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+            .expect("null is valid JSON"),
+        resumable: None,
     }
 }
 

@@ -6,10 +6,9 @@
 
 use crate::mode::PermissionMode;
 use crate::rule::PermissionRule;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::RequestId;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 use std::time::SystemTime;
 
 /// The decision returned by `PermissionPolicy::authorize`.
@@ -23,7 +22,12 @@ pub enum PermissionResult {
         /// Why the call was allowed.
         reason: PermissionDecisionReason,
         /// Optional rewritten input the caller should use instead.
-        updated_input: Option<Value>,
+        #[serde(
+            default,
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        updated_input: Option<Utf16JsonProjection>,
         /// Optional destination for persisting a derived rule.
         update_destination: Option<PermissionUpdateDestination>,
         /// Audit metadata (matched rule names, etc.).
@@ -34,7 +38,13 @@ pub enum PermissionResult {
         /// Why the call was denied.
         reason: PermissionDecisionReason,
         /// Optional human-readable explanation surfaced to the user.
-        explanation: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        explanation: Option<Utf16JsonProjection>,
         /// Audit metadata.
         metadata: PermissionMetadata,
     },
@@ -89,8 +99,11 @@ pub enum PermissionDecisionReason {
     },
     /// A composite call (e.g. piped bash) — per-subcommand reasons.
     SubcommandResults {
-        /// Map from subcommand identifier to its individual result.
-        reasons: HashMap<String, Box<PermissionResult>>,
+        /// Subcommand results in producer order. Claude Code walks the native
+        /// `Map` in insertion order and reports the first rule whose behavior
+        /// matches the enclosing decision, so this must not be a hash map.
+        #[serde(with = "raw_subcommand_results")]
+        reasons: Vec<(Utf16JsonProjection, Box<PermissionResult>)>,
     },
     /// A custom external permission-prompt tool returned the decision.
     PermissionPromptTool {
@@ -112,7 +125,8 @@ pub enum PermissionDecisionReason {
         score: f64,
         /// Human-readable classifier explanation, forwarded as the oracle's
         /// `decisionReason.reason` text.
-        reason: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        reason: Utf16JsonProjection,
     },
     /// A `PreToolUse` hook overrode the rule-based decision.
     HookOverride {
@@ -121,12 +135,19 @@ pub enum PermissionDecisionReason {
         /// Configuration source that registered the hook (optional).
         source: Option<String>,
         /// Free-form reason from the hook (optional).
-        reason: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+        )]
+        reason: Option<Utf16JsonProjection>,
     },
     /// An async sub-agent returned the decision asynchronously.
     AsyncAgent {
         /// Free-form reason from the agent.
-        reason: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        reason: Utf16JsonProjection,
     },
     /// The sandbox layer overrode the decision.
     SandboxOverride {
@@ -136,12 +157,14 @@ pub enum PermissionDecisionReason {
     /// A working-directory check produced the decision.
     WorkingDirectory {
         /// Free-form reason (e.g. "path escapes project root").
-        reason: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        reason: Utf16JsonProjection,
     },
     /// A static safety check produced the decision.
     SafetyCheck {
         /// Free-form reason.
-        reason: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        reason: Utf16JsonProjection,
         /// Whether a classifier could still approve this call.
         classifier_approvable: bool,
         /// claude-code `decisionReason.circuitBreaker` — which safety circuit
@@ -152,7 +175,8 @@ pub enum PermissionDecisionReason {
     /// Anything not covered above.
     Other {
         /// Free-form reason.
-        reason: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        reason: Utf16JsonProjection,
     },
     /// Consecutive denials exceeded the configured limit.
     DenialLimitExceeded,
@@ -186,13 +210,25 @@ pub enum SandboxOverrideReason {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PermissionMetadata {
     /// Names of rules that contributed to the decision.
-    pub matched_rules: Vec<String>,
+    /// These are raw root-string projections because a rule may contain
+    /// arbitrary JavaScript UTF-16 units.
+    #[serde(
+        default,
+        serialize_with = "raw_text_array::serialize",
+        deserialize_with = "raw_text_array::deserialize"
+    )]
+    pub matched_rules: Vec<Utf16JsonProjection>,
     /// Raw `PermissionUpdate[]` suggestions offered with an Ask decision.
     /// Keeping the wire-shaped value here lets the lower permission engine
     /// retain tool-specific suggestions without depending on the CLI control
     /// protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_suggestions: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub permission_suggestions: Option<Utf16JsonProjection>,
     /// Concrete filesystem path that caused a path-scoped Ask, when the path
     /// validator can report it without parsing a human-readable reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,9 +241,109 @@ pub struct PermissionPrompt {
     /// Short title for the prompt.
     pub title: String,
     /// Longer message body.
-    pub message: String,
+    #[serde(
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize"
+    )]
+    pub message: Utf16JsonProjection,
     /// Action options offered to the user.
     pub options: Vec<String>,
+}
+
+/// Raw JSON-array adapters for exact root-string text projections.
+mod raw_text_array {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(values: &[Utf16JsonProjection], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let array =
+            Utf16JsonProjection::array(values.to_vec()).map_err(serde::ser::Error::custom)?;
+        lingxi_core::types::utf16_json::raw_json_serde::serialize(&array, serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let array = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let Some(count) = array.array_len("") else {
+            return Err(serde::de::Error::custom("matched_rules must be an array"));
+        };
+        (0..count)
+            .map(|index| {
+                let item = array
+                    .subprojection(&format!("/{index}"))
+                    .map_err(serde::de::Error::custom)?;
+                if item.string_units("").is_none() {
+                    return Err(serde::de::Error::custom(
+                        "matched_rules entries must be strings",
+                    ));
+                }
+                Ok(item)
+            })
+            .collect()
+    }
+}
+
+/// Serialize the ordered subcommand-result projection as the native JSON
+/// object while retaining exact JavaScript property-name units.
+mod raw_subcommand_results {
+    use super::PermissionResult;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        reasons: &Vec<(Utf16JsonProjection, Box<PermissionResult>)>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut entries = Vec::with_capacity(reasons.len());
+        for (command, result) in reasons {
+            let key = command
+                .string_units("")
+                .ok_or_else(|| serde::ser::Error::custom("subcommand key must be a string"))?;
+            let json = serde_json::to_string(result).map_err(serde::ser::Error::custom)?;
+            let value = Utf16JsonProjection::parse(&json).map_err(serde::ser::Error::custom)?;
+            entries.push((key, value));
+        }
+        let object =
+            Utf16JsonProjection::object_units(entries).map_err(serde::ser::Error::custom)?;
+        lingxi_core::types::utf16_json::raw_json_serde::serialize(&object, serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<(Utf16JsonProjection, Box<PermissionResult>)>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let object = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let entries = object
+            .at_pointer("")
+            .and_then(|root| root.object_entries())
+            .ok_or_else(|| serde::de::Error::custom("subcommand results must be an object"))?;
+        entries
+            .into_iter()
+            .map(|entry| {
+                let key = Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(entry.code_units),
+                    entry.code_units.to_vec(),
+                )
+                .map_err(serde::de::Error::custom)?;
+                let value = object
+                    .subprojection_property_units(entry.code_units)
+                    .map_err(serde::de::Error::custom)?;
+                let json = value.to_json_string().map_err(serde::de::Error::custom)?;
+                let result = serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
+                Ok((key, Box::new(result)))
+            })
+            .collect()
+    }
 }
 
 /// A classifier check that is still running when the decision is returned.
@@ -237,4 +373,105 @@ pub enum PermissionUpdateDestination {
     Session,
     /// Treat the rule as if it came from the CLI.
     CliArg,
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::PermissionMetadata;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn permission_suggestions_serialize_as_the_original_json_tree() {
+        let suggestions = Utf16JsonProjection::parse(r#"[{"kind":"ask","detail":"\ud800"}]"#)
+            .expect("test source is valid JSON");
+        let metadata = PermissionMetadata {
+            permission_suggestions: Some(suggestions.clone()),
+            ..PermissionMetadata::default()
+        };
+        let wire = serde_json::to_string(&metadata).unwrap();
+        assert!(wire.starts_with(
+            r#"{"matched_rules":[],"permission_suggestions":[{"kind":"ask","detail":"\ud800"}"#
+        ));
+        let decoded: PermissionMetadata = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.permission_suggestions, Some(suggestions));
+    }
+
+    #[test]
+    fn matched_rule_projection_round_trips_as_a_json_string_array() {
+        let rule =
+            Utf16JsonProjection::parse(r#""Bash(\ud800)""#).expect("test source is valid JSON");
+        let metadata = PermissionMetadata {
+            matched_rules: vec![rule.clone()],
+            ..PermissionMetadata::default()
+        };
+        let wire = serde_json::to_string(&metadata).unwrap();
+        assert!(wire.contains(r#""matched_rules":["Bash(\ud800)"]"#));
+        let decoded: PermissionMetadata = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.matched_rules, vec![rule]);
+    }
+
+    #[test]
+    fn permission_prompt_message_is_serialized_as_a_json_string() {
+        let message =
+            Utf16JsonProjection::parse(r#""ask \ud800""#).expect("test source is valid JSON");
+        let prompt = super::PermissionPrompt {
+            title: "Ask".into(),
+            message: message.clone(),
+            options: vec!["Allow".into()],
+        };
+        let wire = serde_json::to_string(&prompt).unwrap();
+        assert!(wire.contains(r#""message":"ask \ud800""#));
+        let decoded: super::PermissionPrompt = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.message, message);
+    }
+
+    #[test]
+    fn denial_explanation_keeps_exact_source_text_units() {
+        let explanation = Utf16JsonProjection::parse(r#""blocked \ud800 target""#)
+            .expect("deny explanation is valid JSON source text");
+        let result = super::PermissionResult::Deny {
+            reason: super::PermissionDecisionReason::Other {
+                reason: "blocked".into(),
+            },
+            explanation: Some(explanation.clone()),
+            metadata: super::PermissionMetadata::default(),
+        };
+        let wire = serde_json::to_string(&result).unwrap();
+        assert!(wire.contains(r#"blocked \ud800 target"#));
+        let decoded: super::PermissionResult = serde_json::from_str(&wire).unwrap();
+        let super::PermissionResult::Deny {
+            explanation: Some(decoded),
+            ..
+        } = decoded
+        else {
+            panic!("deny explanation remains present");
+        };
+        assert_eq!(decoded, explanation);
+    }
+
+    #[test]
+    fn ordered_subcommand_result_keys_keep_exact_utf16_units() {
+        let key = Utf16JsonProjection::parse(r#""command-\ud800""#)
+            .expect("subcommand key is valid JSON source text");
+        let reason = super::PermissionDecisionReason::SubcommandResults {
+            reasons: vec![(
+                key.clone(),
+                Box::new(super::PermissionResult::Allow {
+                    reason: super::PermissionDecisionReason::Other {
+                        reason: "Allowed".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: super::PermissionMetadata::default(),
+                }),
+            )],
+        };
+        let wire = serde_json::to_string(&reason).unwrap();
+        assert!(wire.contains(r#"command-\ud800"#));
+        let decoded: super::PermissionDecisionReason = serde_json::from_str(&wire).unwrap();
+        let super::PermissionDecisionReason::SubcommandResults { reasons } = decoded else {
+            panic!("subcommand reason retains its variant");
+        };
+        assert_eq!(reasons[0].0.string_units(""), key.string_units(""));
+    }
 }

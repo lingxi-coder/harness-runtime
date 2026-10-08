@@ -54,6 +54,7 @@
 //! What this module gives the caller is the pure KEEP / WARN / DROP decision
 //! and the (possibly rewritten) schema + description.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{Map, Value};
 
 /// `tengu_mcp_normalize_root_combinators` — array flag, default `[]`.
@@ -513,6 +514,327 @@ pub struct ToolSchemaDecision {
     /// fires one [`telemetry::tengu::mcp::DEGRADED`] event per nonzero
     /// bucket, NOT one per tool.
     pub classification: Option<telemetry::tengu::mcp::DegradedReason>,
+}
+
+/// Source-native result for an advertised MCP tool schema. The input schema
+/// remains a flat UTF-16 projection throughout normalization and routing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSchemaProjectionDecision {
+    pub schema: Utf16JsonProjection,
+    pub description_note: Option<String>,
+    pub drop_reason: Option<String>,
+    pub warning: Option<String>,
+    pub normalized: bool,
+    pub classification: Option<telemetry::tengu::mcp::DegradedReason>,
+}
+
+fn source_subtree(value: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    value.subprojection(&format!("/{key}")).ok()
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("schema projection keys are unique")
+}
+
+fn source_merge_properties(
+    schema: &Utf16JsonProjection,
+    output: &mut Vec<(Vec<u16>, Utf16JsonProjection)>,
+) {
+    let Ok(properties) = schema.subprojection("/properties") else {
+        return;
+    };
+    let Some(entries) = properties.object_entries() else {
+        return;
+    };
+    for entry in entries {
+        if !property_key_regex().is_match(entry.display_key)
+            || output
+                .iter()
+                .any(|(key, _)| key.as_slice() == entry.code_units)
+            || entry.value.object_entries().is_none()
+        {
+            continue;
+        }
+        if let Ok(value) = properties.subprojection_property_units(entry.code_units) {
+            output.push((entry.code_units.to_vec(), value));
+        }
+    }
+}
+
+fn source_resolve_local_ref<'a>(
+    node: &Utf16JsonProjection,
+    root: &'a Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
+    let reference = node.string_at("/$ref")?;
+    let rest = reference.strip_prefix("#/")?;
+    let (container, name) = rest.split_once('/')?;
+    if name.contains('/') || !matches!(container, "$defs" | "definitions") {
+        return None;
+    }
+    let bucket = root.subprojection(&format!("/{container}")).ok()?;
+    let target = bucket.subprojection(&format!("/{name}")).ok()?;
+    target.object_entries()?;
+    Some(target)
+}
+
+fn source_branch_summary(branch: &Utf16JsonProjection) -> Option<String> {
+    if let Some(required) = branch.subprojection("/required").ok() {
+        let length = required.array_len("")?;
+        if length > 0 {
+            let values = (0..length)
+                .map(|index| required.string_at(&format!("/{index}")).map(str::to_owned))
+                .collect::<Option<Vec<_>>>();
+            if let Some(values) = values {
+                return Some(values.join(", "));
+            }
+        }
+    }
+    let properties = branch.subprojection("/properties").ok()?;
+    let entries = properties.object_entries()?;
+    (!entries.is_empty()).then(|| {
+        entries
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+fn source_note(schema: &Utf16JsonProjection, combinators: &[&str]) -> String {
+    let has_any_or_one = combinators
+        .iter()
+        .any(|value| matches!(*value, "anyOf" | "oneOf"));
+    if !has_any_or_one {
+        return "Input constraint: all listed parameters apply together (flattened from a JSON Schema allOf).".to_owned();
+    }
+    let combinator = if combinators.contains(&"oneOf") {
+        "oneOf"
+    } else {
+        "anyOf"
+    };
+    let verb = if combinator == "oneOf" {
+        "Provide parameters for exactly one of"
+    } else {
+        "Provide parameters for at least one of"
+    };
+    let Some(branches) = source_subtree(schema, combinator) else {
+        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+    };
+    let Some(length) = branches.array_len("") else {
+        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+    };
+    let mut groups = Vec::<String>::new();
+    for index in 0..length {
+        let Ok(branch) = branches.subprojection(&format!("/{index}")) else {
+            continue;
+        };
+        let resolved = source_resolve_local_ref(&branch, schema).unwrap_or(branch);
+        if let Some(summary) = source_branch_summary(&resolved) {
+            if !groups.contains(&summary) {
+                groups.push(summary);
+            }
+        }
+    }
+    if groups.is_empty() {
+        return format!("Input constraint: {verb} the documented parameter groups (flattened from a JSON Schema {combinator}).");
+    }
+    let joined = groups
+        .iter()
+        .map(|group| format!("({group})"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("Input constraint: {verb}: {joined}.")
+}
+
+fn source_flatten_root_combinators(
+    schema: &Utf16JsonProjection,
+) -> Result<Option<(Utf16JsonProjection, String, Vec<&'static str>)>, String> {
+    if schema.object_entries().is_none() {
+        return Ok(None);
+    }
+    let present: Vec<&'static str> = ROOT_COMBINATORS
+        .iter()
+        .copied()
+        .filter(|key| schema.contains_property(key))
+        .collect();
+    if present.is_empty() {
+        return Ok(None);
+    }
+
+    let mut merged_properties = Vec::<(Vec<u16>, Utf16JsonProjection)>::new();
+    source_merge_properties(schema, &mut merged_properties);
+    for combinator in &present {
+        let branches = source_subtree(schema, combinator).ok_or_else(|| {
+            format!("input schema has top-level {combinator} that is not an array")
+        })?;
+        let Some(length) = branches.array_len("") else {
+            return Err(format!(
+                "input schema has top-level {combinator} that is not an array"
+            ));
+        };
+        for index in 0..length {
+            let Ok(branch) = branches.subprojection(&format!("/{index}")) else {
+                continue;
+            };
+            if branch.object_entries().is_none() {
+                continue;
+            }
+            let resolved = source_resolve_local_ref(&branch, schema).unwrap_or(branch);
+            source_merge_properties(&resolved, &mut merged_properties);
+        }
+    }
+
+    let properties = Utf16JsonProjection::object_units(merged_properties.clone())
+        .expect("filtered schema property keys are unique");
+    let mut required_units = Vec::<Vec<u16>>::new();
+    let mut merge_required = |branch: &Utf16JsonProjection| {
+        let Ok(required) = branch.subprojection("/required") else {
+            return;
+        };
+        let Some(length) = required.array_len("") else {
+            return;
+        };
+        for index in 0..length {
+            let Ok(item) = required.subprojection(&format!("/{index}")) else {
+                continue;
+            };
+            let Some(units) = item.string_units("") else {
+                continue;
+            };
+            if properties.contains_property(&String::from_utf16_lossy(&units))
+                && !required_units.contains(&units)
+            {
+                required_units.push(units);
+            }
+        }
+    };
+    merge_required(schema);
+    if let Ok(all_of) = schema.subprojection("/allOf") {
+        if let Some(length) = all_of.array_len("") {
+            for index in 0..length {
+                let Ok(branch) = all_of.subprojection(&format!("/{index}")) else {
+                    continue;
+                };
+                if branch.object_entries().is_none() {
+                    continue;
+                }
+                let resolved = source_resolve_local_ref(&branch, schema).unwrap_or(branch);
+                merge_required(&resolved);
+            }
+        }
+    }
+    let required = Utf16JsonProjection::array(
+        required_units
+            .into_iter()
+            .map(|units| {
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                    .expect("required source string is valid UTF-16")
+            })
+            .collect(),
+    )
+    .expect("required is an array");
+    let mut flattened = vec![
+        (
+            "type".to_owned(),
+            Utf16JsonProjection::parse(r#""object""#).unwrap(),
+        ),
+        ("properties".to_owned(), properties),
+        ("required".to_owned(), required),
+    ];
+    for key in CARRIED_ROOT_KEYS {
+        if let Some(value) = schema.get_property(key) {
+            let _ = value;
+            if let Some(value) = source_subtree(schema, key) {
+                flattened.push((key.to_owned(), value));
+            }
+        }
+    }
+    let note = source_note(schema, &present);
+    Ok(Some((source_object(flattened), note, present)))
+}
+
+fn source_first_invalid_property_key(schema: &Utf16JsonProjection) -> Option<String> {
+    let properties = source_subtree(schema, "properties")?;
+    properties
+        .object_entries()?
+        .into_iter()
+        .find(|entry| !property_key_regex().is_match(entry.display_key))
+        .map(|entry| entry.display_key.chars().take(80).collect())
+}
+
+/// Normalize or drop a tool schema without converting arbitrary schema data
+/// through `serde_json::Value`. Meta-schema checking remains deferred until a
+/// source-native schema-document validator is available.
+#[must_use]
+pub fn decide_tool_schema_source(
+    server_url: Option<&str>,
+    schema: &Utf16JsonProjection,
+) -> ToolSchemaProjectionDecision {
+    use telemetry::tengu::mcp::DegradedReason;
+
+    let normalize_gate = gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, server_url);
+    let drop_gate = gate_enabled(FLAG_DROP_INVALID_TOOL_SCHEMAS, server_url);
+    let (working, note, normalized) = match source_flatten_root_combinators(schema) {
+        Ok(None) => (schema.clone(), None, false),
+        Ok(Some((flattened, note, _))) if normalize_gate => (flattened, Some(note), true),
+        Ok(Some((_, _, combinators))) => {
+            return ToolSchemaProjectionDecision {
+                schema: schema.clone(),
+                description_note: None,
+                drop_reason: Some(format!(
+                    "its input schema uses top-level {}, which the Anthropic API does not accept",
+                    combinators.join("/")
+                )),
+                warning: None,
+                normalized: false,
+                classification: Some(DegradedReason::ToolSchemaNormalizeGated),
+            };
+        }
+        Err(reason) => {
+            return ToolSchemaProjectionDecision {
+                schema: schema.clone(),
+                description_note: None,
+                drop_reason: Some(reason),
+                warning: None,
+                normalized: false,
+                classification: Some(DegradedReason::ToolSchemaUnsupported),
+            };
+        }
+    };
+    if let Some(bad_key) = source_first_invalid_property_key(&working) {
+        let detail =
+            format!("property key {bad_key:?} does not match {PROPERTY_KEY_PATTERN_RENDERED}");
+        if drop_gate {
+            return ToolSchemaProjectionDecision {
+                schema: working,
+                description_note: note,
+                drop_reason: Some(format!(
+                    "its input schema would be rejected by the Anthropic API ({detail})"
+                )),
+                warning: None,
+                normalized,
+                classification: Some(DegradedReason::ToolPropertyKeyInvalid),
+            };
+        }
+        return ToolSchemaProjectionDecision {
+            schema: working,
+            description_note: note,
+            drop_reason: None,
+            warning: Some(format!(
+                "input schema would be rejected by the Anthropic API ({detail}); requests that include it may fail"
+            )),
+            normalized,
+            classification: Some(DegradedReason::ToolPropertyKeyInvalidGated),
+        };
+    }
+    ToolSchemaProjectionDecision {
+        schema: working,
+        description_note: note,
+        drop_reason: None,
+        warning: None,
+        normalized,
+        classification: None,
+    }
 }
 
 /// Process one tool's `inputSchema` (oracle's `M.flatMap` body inside `yn`,

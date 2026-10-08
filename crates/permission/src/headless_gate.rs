@@ -27,7 +27,7 @@
 use crate::gate::{PermissionDecision, PermissionGate};
 use crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE;
 use async_trait::async_trait;
-use serde_json::Value;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Non-interactive inner gate: turns an unresolved `Ask` into a `Deny`
 /// (claude-code headless / `--print` parity). See the module docs for why this
@@ -43,9 +43,9 @@ pub fn headless_deny_message(name: &str) -> String {
 
 #[async_trait]
 impl PermissionGate for DenyOnAskGate {
-    async fn check(&self, name: &str, _input: &Value) -> PermissionDecision {
+    async fn check(&self, name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
         PermissionDecision::Deny {
-            reason: headless_deny_message(name),
+            reason: headless_deny_message(name).into(),
         }
     }
 }
@@ -57,8 +57,11 @@ mod tests {
     #[tokio::test]
     async fn denies_with_byte_exact_gru_message() {
         let gate = DenyOnAskGate;
-        match gate.check("Bash", &serde_json::json!({})).await {
+        let input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty object is valid source JSON");
+        match gate.check("Bash", &input).await {
             PermissionDecision::Deny { reason } => {
+                let reason = reason.string_at("").unwrap_or_default();
                 // GRu("Bash") = "Permission to use Bash has been denied. " + Rws
                 assert!(
                     reason.starts_with("Permission to use Bash has been denied. "),

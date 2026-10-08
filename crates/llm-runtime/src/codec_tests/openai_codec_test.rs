@@ -1,3 +1,4 @@
+use super::json_payload;
 use crate::upstream::codec_fixtures::HistoryFixture;
 use crate::upstream::codec_fixtures::{FixtureCodec, OpenAiChatCodec};
 use base64::Engine as _;
@@ -111,7 +112,7 @@ fn encode_image_bytes_produces_data_uri_part() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let msg = &provider_request.body_json["messages"][0];
+    let msg = &super::json_payload_value(&provider_request.body_json)["messages"][0];
     // content must be an array (array form when image present)
     assert!(msg["content"].is_array());
     let part = &msg["content"][0];
@@ -131,7 +132,7 @@ fn encode_image_url_produces_url_part() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let msg = &provider_request.body_json["messages"][0];
+    let msg = &super::json_payload_value(&provider_request.body_json)["messages"][0];
     assert!(msg["content"].is_array());
     let part = &msg["content"][0];
     assert_eq!(part["type"], "image_url");
@@ -148,6 +149,7 @@ fn encode_mixed_text_and_image_becomes_array_form() {
             ContentBlock::Text {
                 text: "look at this".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::Image {
                 media_type: "image/jpeg".to_string(),
@@ -156,7 +158,7 @@ fn encode_mixed_text_and_image_becomes_array_form() {
         ],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
     assert!(content.is_array());
     let arr = content.as_array().unwrap();
     assert_eq!(arr.len(), 2);
@@ -170,7 +172,7 @@ fn encode_text_only_message_stays_plain_string() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let request = HistoryFixture::new("gpt-4o").with_user_text("just text");
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
     assert!(
         content.is_string(),
         "text-only should be plain string, got: {content}"
@@ -191,7 +193,7 @@ fn encode_document_produces_file_part() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
     // Document triggers array form (has_media=true).
     assert!(content.is_array(), "expected array form, got: {content}");
     let parts = content.as_array().unwrap();
@@ -217,6 +219,7 @@ fn encode_mixed_text_and_document_becomes_array_form() {
             ContentBlock::Text {
                 text: "see the attached".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::Document {
                 media_type: "application/pdf".to_string(),
@@ -225,7 +228,7 @@ fn encode_mixed_text_and_document_becomes_array_form() {
         ],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
     assert!(
         content.is_array(),
         "mixed text+document must produce array form"
@@ -244,16 +247,22 @@ fn encode_request_shape_is_openai_chat_completions() {
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
-        description: "d".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: "d".into(),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     }];
 
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert!(provider_request.url.ends_with("/chat/completions"));
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "system");
-    assert_eq!(provider_request.body_json["tools"][0]["type"], "function");
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "system"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["tools"][0]["type"],
+        "function"
+    );
 }
 
 #[test]
@@ -301,21 +310,38 @@ fn encode_sampling_controls() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["max_tokens"], 1024);
-    assert_eq!(provider_request.body_json["temperature"], 0.5);
-    assert_eq!(provider_request.body_json["top_p"], 0.9);
     assert_eq!(
-        provider_request.body_json["stop"],
+        super::json_payload_value(&provider_request.body_json)["max_tokens"],
+        1024
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["temperature"],
+        0.5
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["top_p"],
+        0.9
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["stop"],
         serde_json::json!(["END"])
     );
 
     let bare = codec
         .encode_request(&HistoryFixture::new("gpt-4o"))
         .unwrap();
-    assert!(bare.body_json.get("max_tokens").is_none());
-    assert!(bare.body_json.get("temperature").is_none());
-    assert!(bare.body_json.get("top_p").is_none());
-    assert!(bare.body_json.get("stop").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("max_tokens")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("temperature")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("top_p")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("stop")
+        .is_none());
 }
 
 #[test]
@@ -326,8 +352,8 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_1".to_string(),
-            output: serde_json::json!("done"),
-            is_error: false,
+            output: super::json_payload(serde_json::json!("done")),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -335,15 +361,23 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
     assert_eq!(
-        provider_request.body_json["messages"][0]["tool_call_id"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "tool"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["tool_call_id"],
         "call_1"
     );
-    assert_eq!(provider_request.body_json["messages"][0]["content"], "done");
-    assert!(provider_request.body_json["messages"][0]
-        .get("tool_calls")
-        .is_none());
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"],
+        "done"
+    );
+    assert!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]
+            .get("tool_calls")
+            .is_none()
+    );
 }
 
 #[test]
@@ -355,15 +389,15 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
         content: vec![
             ContentBlock::ToolResult {
                 tool_call_id: "call_1".to_string(),
-                output: serde_json::json!("first"),
-                is_error: false,
+                output: super::json_payload(serde_json::json!("first")),
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "call_2".to_string(),
-                output: serde_json::json!("second"),
-                is_error: false,
+                output: super::json_payload(serde_json::json!("second")),
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             },
@@ -372,26 +406,32 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
     assert_eq!(
-        provider_request.body_json["messages"][0]["tool_call_id"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "tool"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["tool_call_id"],
         "call_1"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"],
         "first"
     );
-    assert_eq!(provider_request.body_json["messages"][1]["role"], "tool");
     assert_eq!(
-        provider_request.body_json["messages"][1]["tool_call_id"],
+        super::json_payload_value(&provider_request.body_json)["messages"][1]["role"],
+        "tool"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][1]["tool_call_id"],
         "call_2"
     );
     assert_eq!(
-        provider_request.body_json["messages"][1]["content"],
+        super::json_payload_value(&provider_request.body_json)["messages"][1]["content"],
         "second"
     );
     assert_eq!(
-        provider_request.body_json["messages"]
+        super::json_payload_value(&provider_request.body_json)["messages"]
             .as_array()
             .unwrap()
             .len(),
@@ -464,6 +504,10 @@ fn sse_stream_reassembles_text_then_tool_call() {
             } => Some(partial_json.clone()),
             _ => None,
         })
+        .map(|fragment| {
+            String::from_utf16(fragment.utf16_code_units())
+                .expect("fixture tool-input fragments are valid UTF-16")
+        })
         .collect();
     assert_eq!(args, "{\"command\":\"ls\"}");
     assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
@@ -511,9 +555,12 @@ fn kimi_stream_requests_terminal_usage_and_decodes_top_level_cached_tokens() {
     request.request.stream = true;
 
     let encoded = codec.encode_request(&request).expect("encode Kimi stream");
-    assert_eq!(encoded.body_json["stream"], serde_json::json!(true));
     assert_eq!(
-        encoded.body_json["stream_options"]["include_usage"],
+        super::json_payload_value(&encoded.body_json)["stream"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        super::json_payload_value(&encoded.body_json)["stream_options"]["include_usage"],
         serde_json::json!(true)
     );
 
@@ -612,6 +659,10 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
             } => Some(partial_json.clone()),
             _ => None,
         })
+        .map(|fragment| {
+            String::from_utf16(fragment.utf16_code_units())
+                .expect("fixture tool-input fragments are valid UTF-16")
+        })
         .collect();
     assert_eq!(args, "{\"command\":\"ls\"}");
 }
@@ -642,25 +693,31 @@ fn system_blocks_join_into_one_system_message() {
     let mut request = HistoryFixture::new("gpt-4o");
     request.system = vec![
         llm_runtime::SystemBlock {
-            text: "a".to_string(),
+            text: "a".into(),
             cache_control: Some(llm_runtime::CacheControl::Ephemeral),
         },
         llm_runtime::SystemBlock {
-            text: "b".to_string(),
+            text: "b".into(),
             cache_control: None,
         },
     ];
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "system");
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "system"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"],
         "a\n\nb"
     );
 
     let bare = codec
         .encode_request(&HistoryFixture::new("gpt-4o").with_user_text("hi"))
         .unwrap();
-    assert_eq!(bare.body_json["messages"][0]["role"], "user");
+    assert_eq!(
+        super::json_payload_value(&bare.body_json)["messages"][0]["role"],
+        "user"
+    );
 }

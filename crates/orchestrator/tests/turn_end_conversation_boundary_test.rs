@@ -116,8 +116,11 @@ impl Tool for StubTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -245,19 +248,21 @@ fn streaming_end_conversation_returns_before_the_wakeup_check() {
             message_stop(),
         ];
 
-        let orch = ConversationOrchestrator::new_with_streaming(
-            config(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![stream])),
-            registry(&[("ScheduleWakeup", false)]),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            output.clone(),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_end_conversation_slot(end_slot.clone())
-        .with_loop_wakeup_armed_slot(wakeup_slot.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                config(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![stream])),
+                registry(&[("ScheduleWakeup", false)]),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_end_conversation_slot(end_slot.clone())
+            .with_loop_wakeup_armed_slot(wakeup_slot.clone()),
+        );
 
         orch.run_turn_streaming("ping").await.expect("streaming");
 
@@ -330,19 +335,21 @@ fn the_two_drivers_leave_different_wakeup_state_after_end_conversation() {
             message_delta_stop("tool_use"),
             message_stop(),
         ];
-        let orch_s = ConversationOrchestrator::new_with_streaming(
-            config(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![stream])),
-            registry(&[("ScheduleWakeup", false)]),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_end_conversation_slot(streaming_end.clone())
-        .with_loop_wakeup_armed_slot(streaming_wakeup.clone());
+        let orch_s = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                config(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![stream])),
+                registry(&[("ScheduleWakeup", false)]),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_end_conversation_slot(streaming_end.clone())
+            .with_loop_wakeup_armed_slot(streaming_wakeup.clone()),
+        );
         orch_s.run_turn_streaming("ping").await.expect("streaming");
 
         assert!(

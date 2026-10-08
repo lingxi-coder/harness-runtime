@@ -1,5 +1,9 @@
 //! Regression tests for client route test.
 
+#[path = "common/json_payload.rs"]
+mod json_payload_test;
+use json_payload_test::value as json_payload_value;
+
 use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest, ModelProfile,
@@ -92,7 +96,10 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
         prepared.provider_request.url,
         "https://api.openai.com/v1/chat/completions"
     );
-    assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
+    assert_eq!(
+        json_payload_value(&prepared.provider_request.body_json)["model"],
+        "gpt-4o"
+    );
 }
 
 #[tokio::test]
@@ -146,7 +153,8 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
             .expect("a known provider-qualified UI ref must remain routable");
         assert_eq!(prepared.route.resolved_route.profile_name, "deepseek");
         assert_eq!(
-            prepared.provider_request.body_json["model"], "deepseek-flash",
+            json_payload_value(&prepared.provider_request.body_json)["model"],
+            "deepseek-flash",
             "only the provider-native model id may reach the wire"
         );
     }
@@ -196,7 +204,7 @@ async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
         .await
         .expect("a slash-bearing provider-native model id must remain intact");
     assert_eq!(
-        prepared.provider_request.body_json["model"],
+        json_payload_value(&prepared.provider_request.body_json)["model"],
         "openrouter/auto"
     );
 }
@@ -248,7 +256,10 @@ async fn fast_speed_survives_only_on_the_builtin_anthropic_route() {
     let mut request = LlmRequest::new("claude-opus-5");
     request.set_speed(Some("fast".to_string())).unwrap();
     let prepared = direct.prepare(&request).await.unwrap();
-    assert_eq!(prepared.provider_request.body_json["speed"], "fast");
+    assert_eq!(
+        json_payload_value(&prepared.provider_request.body_json)["speed"],
+        "fast"
+    );
 
     let custom = ModelRuntime::from_config(ClientConfig {
         providers: vec![anthropic_fast_profile(
@@ -259,7 +270,9 @@ async fn fast_speed_survives_only_on_the_builtin_anthropic_route() {
     .unwrap();
     let prepared = custom.prepare(&request).await.unwrap();
     assert!(
-        prepared.provider_request.body_json.get("speed").is_none(),
+        json_payload_value(&prepared.provider_request.body_json)
+            .get("speed")
+            .is_none(),
         "custom Anthropic-compatible routes must not inherit first-party fast mode"
     );
 }
@@ -277,7 +290,11 @@ async fn fast_speed_is_removed_for_models_without_the_registry_capability() {
     let mut request = LlmRequest::new("claude-sonnet-5");
     request.set_speed(Some("fast".to_string())).unwrap();
     let prepared = client.prepare(&request).await.unwrap();
-    assert!(prepared.provider_request.body_json.get("speed").is_none());
+    assert!(
+        json_payload_value(&prepared.provider_request.body_json)
+            .get("speed")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -457,7 +474,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
         .await
         .expect("reasoning must be dropped, not hard-fail the request");
     // And the reasoning must not leak onto the wire body.
-    let body = prepared.provider_request.body_json.to_string();
+    let body = prepared.provider_request.body_json.as_json_source();
     assert!(
         !body.contains("reasoning") && !body.contains("thinking"),
         "reasoning must be stripped from the wire body: {body}"
@@ -481,6 +498,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
                     llm_runtime::ContentBlock::Text {
                         text: "the answer is 42".to_string(),
                         cache_control: None,
+                        citations: None,
                     },
                 ],
             },
@@ -489,6 +507,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "thanks".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         ],
@@ -498,7 +517,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
         .prepare(&resumed)
         .await
         .expect("history reasoning blocks must be stripped, not hard-fail");
-    let body = prepared.provider_request.body_json.to_string();
+    let body = prepared.provider_request.body_json.as_json_source();
     assert!(
         !body.contains("let me think"),
         "history reasoning block must be stripped from the wire body: {body}"
@@ -561,6 +580,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                 llm_runtime::ContentBlock::Text {
                     text: "describe this image".to_string(),
                     cache_control: None,
+                    citations: None,
                 },
                 llm_runtime::ContentBlock::Image {
                     media_type: "image/png".to_string(),
@@ -592,6 +612,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                     llm_runtime::ContentBlock::Text {
                         text: "look at this".to_string(),
                         cache_control: None,
+                        citations: None,
                     },
                     llm_runtime::ContentBlock::Image {
                         media_type: "image/png".to_string(),
@@ -604,6 +625,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "i see a photo".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
             llm_runtime::Message {
@@ -611,6 +633,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "ok what else".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         ],
@@ -756,7 +779,10 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
         prepared.provider_request.url,
         "https://api.openai.com/v1/responses"
     );
-    assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
+    assert_eq!(
+        json_payload_value(&prepared.provider_request.body_json)["model"],
+        "gpt-4o"
+    );
 }
 
 #[tokio::test]
@@ -955,7 +981,10 @@ async fn aliases_sharing_a_wire_id_keep_the_selected_rows_inference_contract() {
     let mut request = LlmRequest::new("low-row").with_user_text("hello");
     request.set_effort(Some(serde_json::json!("low"))).unwrap();
     let prepared = client.prepare(&request).await.unwrap();
-    assert_eq!(prepared.provider_request.body_json["model"], "gpt-5.6-sol");
+    assert_eq!(
+        json_payload_value(&prepared.provider_request.body_json)["model"],
+        "gpt-5.6-sol"
+    );
     assert_eq!(prepared.route.resolved_route.display_model, "low-row");
     request.input.model = "high-row".into();
     assert!(
@@ -978,4 +1007,124 @@ fn assign_history(request: &mut llm_runtime::LlmRequest, messages: &[llm_runtime
     request.input.messages = input.messages;
     request.input.prompt_cache = input.prompt_cache;
     request.execution.message_json_string_overrides = exact_strings;
+}
+
+#[tokio::test]
+async fn native_hook_prompt_keeps_exact_input_until_sdk_final_serialization() {
+    use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
+
+    let mut anthropic = llm_runtime::builtin_presets()
+        .providers
+        .into_iter()
+        .find(|profile| profile.profile_name == "anthropic")
+        .expect("bundled Anthropic profile");
+    anthropic.auth = AuthStrategy::None;
+    anthropic.credential = CredentialConfig::None;
+    let client = ModelRuntime::from_config(ClientConfig {
+        providers: vec![anthropic],
+    })
+    .unwrap();
+
+    let mut request = LlmRequest::new("claude-sonnet-4-6");
+    request.input.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        content: vec![ContentBlock::Text {
+            text: "\u{fffd}".into(),
+            thought_signature: None,
+            citations: None,
+        }],
+        native_options: Vec::new(),
+    });
+    request.execution.input_protocol = Some(ProtocolFamily::AnthropicMessages);
+    request.execution.query_source = Some("hook_prompt".into());
+    request
+        .execution
+        .message_json_string_overrides
+        .insert("/messages/0/content/0/text".into(), vec![0xd800]);
+
+    let prepared = client.prepare(&request).await.unwrap();
+    let body = json_payload_value(&prepared.provider_request.body_json);
+    let prompt_text = &body["messages"][0]["content"][0]["text"];
+    assert_eq!(prompt_text, "\u{fffd}");
+    assert_eq!(
+        prepared.provider_request.json_string_overrides["/messages/0/content/0/text"],
+        vec![0xd800],
+        "pre-serialization host view retains exact units"
+    );
+    let wire = prepared.provider_request.wire_body_bytes().unwrap();
+    let wire = String::from_utf8(wire).unwrap();
+    assert!(wire.contains("\u{fffd}"));
+    assert!(!wire.contains("\\ud800"));
+
+    let mut ordinary_request = request;
+    ordinary_request.execution.query_source = None;
+    let ordinary = client.prepare(&ordinary_request).await.unwrap();
+    assert_eq!(
+        ordinary.provider_request.json_string_overrides["/messages/0/content/0/text"],
+        vec![0xd800]
+    );
+    let ordinary_wire = ordinary.provider_request.wire_body_bytes().unwrap();
+    assert!(
+        String::from_utf8(ordinary_wire)
+            .unwrap()
+            .contains("\\ud800")
+    );
+}
+
+#[tokio::test]
+async fn openai_codecs_reindex_and_retain_exact_text_units() {
+    use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
+
+    for (protocol, encoded_pointer) in [
+        (ProtocolFamily::OpenAiChat, "/messages/0/content"),
+        (ProtocolFamily::OpenAiResponses, "/input/0/content/0/text"),
+    ] {
+        let mut openai = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "openai")
+            .expect("bundled OpenAI profile");
+        // Select the codec this control exercises explicitly. The current
+        // bundled OpenAI route otherwise selects Responses, not Chat.
+        openai.protocol = protocol;
+        openai.auth = AuthStrategy::None;
+        openai.credential = CredentialConfig::None;
+        let model = openai
+            .models
+            .iter()
+            .find(|model| model.request_model == "gpt-5.6-sol")
+            .expect("OpenAI model")
+            .request_model
+            .clone();
+        let client = ModelRuntime::from_config(ClientConfig {
+            providers: vec![openai],
+        })
+        .unwrap();
+
+        let mut request = LlmRequest::new(model);
+        request.input.messages.push(ConversationMessage {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "display".into(),
+                thought_signature: None,
+                citations: None,
+            }],
+            native_options: Vec::new(),
+        });
+        request.execution.input_protocol = Some(ProtocolFamily::OpenAiChat);
+        request
+            .execution
+            .message_json_string_overrides
+            .insert("/messages/0/content/0/text".into(), vec![0xd800]);
+
+        let prepared = client.prepare(&request).await.unwrap();
+        assert_eq!(prepared.route.protocol, protocol);
+        assert_eq!(
+            prepared.provider_request.json_string_overrides[encoded_pointer],
+            vec![0xd800]
+        );
+        let wire = String::from_utf8(prepared.provider_request.wire_body_bytes().unwrap()).unwrap();
+        assert!(wire.contains("\\ud800"));
+        assert!(!wire.contains("\\ufffd"));
+    }
 }

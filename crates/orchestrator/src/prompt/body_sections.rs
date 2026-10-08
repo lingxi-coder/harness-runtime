@@ -27,6 +27,8 @@
 //! production manifest tests.
 #![forbid(unsafe_code)]
 
+use super::{PromptSection, PromptSectionScope};
+
 /// Defensive-security / dual-use guidance — claude-code `zHo` (one literal,
 /// reused by `Pym`). This is the guidance that, in claude-code, lives in the
 /// system-prompt BODY — NOT as a per-file-read `<system-reminder>` (the
@@ -609,47 +611,139 @@ pub fn format(
     model: &str,
     skills_available: bool,
 ) -> String {
-    let mut sections: Vec<String> = Vec::with_capacity(9);
+    let sections = named_sections(
+        output_style_active,
+        keep_coding_instructions,
+        tool_names,
+        is_interactive,
+        has_agent_tool,
+        fork_mode_enabled,
+        model,
+        skills_available,
+        false,
+    );
+    sections
+        .iter()
+        .map(|section| section.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The same body as [`format`], before its section names and cache scopes are
+/// erased by string joining. The first section's leading LF belongs to the
+/// existing prompt boundary after `HEADER`.
+#[must_use]
+pub(crate) fn named_sections(
+    output_style_active: bool,
+    keep_coding_instructions: bool,
+    tool_names: &[String],
+    is_interactive: bool,
+    has_agent_tool: bool,
+    fork_mode_enabled: bool,
+    model: &str,
+    skills_available: bool,
+    exclude_dynamic_sections: bool,
+) -> Vec<PromptSection> {
+    let mut sections: Vec<PromptSection> = Vec::with_capacity(12);
+    let mut push = |id: &str, scope: PromptSectionScope, text: String| {
+        let text = if sections.is_empty() {
+            format!("\n{text}")
+        } else {
+            text
+        };
+        sections.push(PromptSection {
+            id: id.to_string(),
+            id_utf16_code_units: None,
+            text,
+            text_utf16_code_units: None,
+            scope,
+        });
+    };
     let lean = is_lean_prompt_model(model);
+    let lean_suffix = if lean { ":L" } else { "" };
     if lean {
         // `o ? [wMy(c,t)] : [...six]` — ONE section replaces all six statics.
-        sections.push(lean_body(output_style_active, model));
+        push(
+            "lean_body",
+            PromptSectionScope::Shared,
+            lean_body(output_style_active, model),
+        );
     } else {
-        sections.push(opening_paragraph(output_style_active));
-        sections.push(SYSTEM_SECTION.to_string());
+        push(
+            "intro",
+            PromptSectionScope::Shared,
+            opening_paragraph(output_style_active),
+        );
+        push(
+            "system",
+            PromptSectionScope::Shared,
+            SYSTEM_SECTION.to_string(),
+        );
         // `# Doing tasks` is dropped only for an active style with
         // `keepCodingInstructions: false` (default true keeps it).
         if !output_style_active || keep_coding_instructions {
-            sections.push(DOING_TASKS_SECTION.to_string());
+            push(
+                "doing_tasks",
+                PromptSectionScope::Shared,
+                DOING_TASKS_SECTION.to_string(),
+            );
         }
-        sections.push(EXECUTING_ACTIONS_SECTION.to_string());
+        push(
+            "actions",
+            PromptSectionScope::Shared,
+            EXECUTING_ACTIONS_SECTION.to_string(),
+        );
         if let Some(tools) = using_your_tools(tool_names) {
-            sections.push(tools);
+            push("tools", PromptSectionScope::Shared, tools);
         }
-        sections.push(TONE_AND_STYLE_SECTION.to_string());
+        push(
+            "tone",
+            PromptSectionScope::Shared,
+            TONE_AND_STYLE_SECTION.to_string(),
+        );
     }
     // GAP-1: the `anti_verbosity` slot (`UJh`) — model-gated in 2.1.206.
     // Binary position: after Tone and style, before session_guidance (jHm).
-    sections.push(anti_verbosity_section(model));
+    push(
+        &format!("communication{lean_suffix}"),
+        PromptSectionScope::Session,
+        anti_verbosity_section(model),
+    );
     // Dynamic slots in `O3`'s order: anti_verbosity, pronouns, action_caution,
     // ... , session_guidance. `pronouns` carries NO gate — every model gets it.
-    sections.push(PRONOUNS_SECTION.to_string());
+    push(
+        "pronouns",
+        PromptSectionScope::Session,
+        PRONOUNS_SECTION.to_string(),
+    );
     // `action_caution` is lean-ONLY: it is what the lean arm has instead of
     // `# Executing actions with care`.
     if lean {
-        sections.push(action_caution_section(model));
+        push(
+            &format!("action_caution{lean_suffix}"),
+            PromptSectionScope::Session,
+            action_caution_section(model),
+        );
     }
     if lingxi_core::host::model_capabilities::has_capability(
         model,
         lingxi_core::host::model_capabilities::ModelCapability::Fable5Mitigations,
     ) {
-        sections.push(FABLE_IDENTITY_SECTION.to_string());
+        push(
+            "fable_identity",
+            PromptSectionScope::Session,
+            FABLE_IDENTITY_SECTION.to_string(),
+        );
     }
     // SP-10 `tool_param_json` — slot order @297072456 puts it directly between
     // `fable_identity` and `session_guidance`. Inert by default; see
     // [`tool_param_json_enabled`].
     if tool_param_json_enabled(model) {
-        sections.push(TOOL_PARAM_JSON_SECTION.to_string());
+        push(
+            "tool_param_json",
+            PromptSectionScope::Session,
+            TOOL_PARAM_JSON_SECTION.to_string(),
+        );
     }
     // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
     // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
@@ -664,37 +758,67 @@ pub fn format(
         lean,
         tool_names.iter().any(|t| t == "Bash" || t == "Shell"),
     ) {
-        sections.push(sg);
+        let sdk_suffix = if exclude_dynamic_sections { ":sdk" } else { "" };
+        push(
+            &format!("session_guidance{lean_suffix}{sdk_suffix}:false"),
+            PromptSectionScope::Session,
+            sg,
+        );
     }
     // NOTE: `# Context management` (GAP-2) is emitted AFTER the env block
     // in claude-code's cx() ordering (after env_info_simple, language, output_style,
     // etc.). It is assembled in `mod.rs` `assemble_system_prompt_with_style`, NOT
     // here. Only the pre-env dynamic sections live in body_sections::format().
-    format!("\n{}", sections.join("\n\n"))
+    sections
 }
 
 /// Render sections that the 2.1.220 oracle places after
 /// [`CONTEXT_MANAGEMENT_SECTION`].
 #[must_use]
 pub fn post_context_sections(model: &str, output_style_active: bool) -> Vec<String> {
+    post_context_named_sections(model, output_style_active)
+        .into_iter()
+        .map(|section| section.text)
+        .collect()
+}
+
+#[must_use]
+pub(crate) fn post_context_named_sections(
+    model: &str,
+    output_style_active: bool,
+) -> Vec<PromptSection> {
     let mut sections = Vec::with_capacity(3);
     // `act_dont_rederive` is part of the default style. Claude Code suppresses
     // it when an explicit output style is active, while retaining the
     // model-specific delivery/correction or autonomy tail.
     if !output_style_active && act_dont_rederive_enabled() {
-        sections.push(ACT_DONT_REDERIVE_SECTION.to_string());
+        sections.push(PromptSection::new(
+            "act_dont_rederive",
+            ACT_DONT_REDERIVE_SECTION.to_string(),
+            PromptSectionScope::Session,
+        ));
     }
 
     if has_opus_5_prompt_bundle(model) {
-        sections.push(DELIVERING_WORK_SECTION.to_string());
-        sections.push(format!(
-            "{CORRECTIONS_SECTION}\n\n{OPUS_5_TERMINAL_RESTRICTIONS}"
+        sections.push(PromptSection::new(
+            "delivering_work_max",
+            DELIVERING_WORK_SECTION.to_string(),
+            PromptSectionScope::Session,
+        ));
+        sections.push(PromptSection::new(
+            "overcorrection",
+            format!("{CORRECTIONS_SECTION}\n\n{OPUS_5_TERMINAL_RESTRICTIONS}"),
+            PromptSectionScope::Session,
         ));
     } else if matches!(
         lingxi_core::host::model_capabilities::normalize_model_id(model).as_str(),
         "claude-fable-5-1" | "claude-mythos-5-1"
     ) {
-        sections.push(FABLE_MYTHOS_MITIGATIONS.to_string());
+        sections.push(PromptSection::new(
+            "autonomy_append",
+            FABLE_MYTHOS_MITIGATIONS.to_string(),
+            PromptSectionScope::Session,
+        ));
     }
     sections
 }

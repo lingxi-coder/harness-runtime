@@ -1,0 +1,12 @@
+[
+  {
+    "case": "source",
+    "input_raw": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\\ud800x\\udc00\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"source\"}",
+    "result_raw": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\\ud800x\\udc00\"}]},\"uuid\":\"source\"}"
+  },
+  {
+    "case": "rewrite",
+    "input_raw": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\\ud800\"}]},\"door\":\"user\",\"origin\":{\"kind\":\"core\"},\"uuid\":\"rewrite\"}",
+    "result_raw": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"prefix:\\ud800\"}]},\"uuid\":\"rewrite\"}"
+  }
+]

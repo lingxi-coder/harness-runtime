@@ -124,15 +124,16 @@ impl BuiltinCommandHandler for SkillDoctorHandler {
             Ok(mut entries) => {
                 sort_entries(&mut entries);
                 CommandResult::Done {
-                    display: Some(render_skill_doctor(&entries)),
+                    display: Some((render_skill_doctor(&entries)).into()),
                 }
             }
             // TS: `catch(n){return ke(...),{type:"text",value:`Couldn't compute
             // skill usage. Run with --debug for details. (${he(n)})`}}`
             Err(e) => CommandResult::Done {
-                display: Some(format!(
-                    "Couldn't compute skill usage. Run with --debug for details. ({e})"
-                )),
+                display: Some(
+                    (format!("Couldn't compute skill usage. Run with --debug for details. ({e})"))
+                        .into(),
+                ),
             },
         }
     }
@@ -167,7 +168,10 @@ enum SkillOwner {
 
 /// Record one real dispatch of a Markdown/skill-kind command: increments its
 /// usage count and stamps `last_used_unix` to now.
-pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> {
+pub fn record_skill_usage(
+    lingxi_home: &Path,
+    name: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<(), String> {
     crate::skill_usage::record_skill_usage(lingxi_home, name)
 }
 
@@ -215,27 +219,30 @@ fn days_between(last_used_unix: i64, now_unix: i64) -> u64 {
 }
 
 fn make_entry(
-    name: String,
+    name: lingxi_core::types::utf16_json::Utf16JsonProjection,
     display_name: String,
     source: String,
     owner: SkillOwner,
     listing_tokens: Option<u64>,
-    usage: &HashMap<String, SkillUsageRecord>,
+    usage: &HashMap<Vec<u16>, SkillUsageRecord>,
     weekly_tokens: &HashMap<String, u64>,
     now_unix: i64,
 ) -> SkillDoctorEntry {
-    let record = usage.get(&name).or_else(|| usage.get(&display_name));
+    let name_units = name.string_units("").unwrap_or_default();
+    let display_units = display_name.encode_utf16().collect::<Vec<_>>();
+    let record = usage.get(&name_units).or_else(|| usage.get(&display_units));
     let usage_count = record.map_or(0, |r| r.count);
     let days_since_use = record
         .and_then(|r| r.last_used_unix)
         .map(|last| days_between(last, now_unix));
+    let source_name = name.string_at("").unwrap_or_default();
     SkillDoctorEntry {
         name: display_name.clone(),
         source,
         owner,
         listing_tokens,
         week_tokens: weekly_tokens
-            .get(&name)
+            .get(source_name)
             .or_else(|| weekly_tokens.get(&display_name))
             .copied(),
         usage_count,
@@ -280,19 +287,21 @@ async fn load_entries(
     )
     .await;
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<Vec<u16>> = HashSet::new();
     let mut entries = Vec::new();
     for file in &skill_files {
         if !is_countable_source(file.source) {
             continue;
         }
         let cmd = build_skill_command(file, file.source);
-        if seen.insert(cmd.name.clone()) {
+        let name_units = cmd.name.string_units("").unwrap_or_default();
+        if seen.insert(name_units) {
             let listing_tokens =
                 (!cmd.disable_model_invocation).then(|| estimate_listing_tokens(&cmd));
+            let display_name = cmd.name.string_at("").unwrap_or_default().to_owned();
             entries.push(make_entry(
                 cmd.name.clone(),
-                cmd.name,
+                display_name,
                 source_label(file.source).to_string(),
                 SkillOwner::Settings,
                 listing_tokens,
@@ -307,12 +316,14 @@ async fn load_entries(
             continue;
         }
         let cmd = build_markdown_command(file, file.source);
-        if seen.insert(cmd.name.clone()) {
+        let name_units = cmd.name.string_units("").unwrap_or_default();
+        if seen.insert(name_units) {
             let listing_tokens =
                 (!cmd.disable_model_invocation).then(|| estimate_listing_tokens(&cmd));
+            let display_name = cmd.name.string_at("").unwrap_or_default().to_owned();
             entries.push(make_entry(
                 cmd.name.clone(),
-                cmd.name,
+                display_name,
                 source_label(file.source).to_string(),
                 SkillOwner::Settings,
                 listing_tokens,
@@ -353,26 +364,18 @@ async fn load_registry_entries(
                 ) =>
             {
                 (
-                    command.name.clone(),
+                    command.name.string_at("").unwrap_or_default().to_owned(),
                     source_label(command.source).to_string(),
                     SkillOwner::Settings,
                 )
             }
             SlashCommandKind::Plugin { .. } => {
                 let (plugin, unqualified) = split_qualified_name(&command.name);
-                (
-                    unqualified.to_string(),
-                    plugin.to_string(),
-                    SkillOwner::Plugin(plugin.to_string()),
-                )
+                (unqualified, plugin.clone(), SkillOwner::Plugin(plugin))
             }
             SlashCommandKind::Mcp { .. } => {
                 let (server, unqualified) = split_qualified_name(&command.name);
-                (
-                    unqualified.to_string(),
-                    server.to_string(),
-                    SkillOwner::Mcp(server.to_string()),
-                )
+                (unqualified, server.clone(), SkillOwner::Mcp(server))
             }
             _ => continue,
         };
@@ -394,12 +397,26 @@ async fn load_registry_entries(
     Ok(entries)
 }
 
-fn split_qualified_name(name: &str) -> (&str, &str) {
-    name.split_once(':').unwrap_or(("", name))
+fn split_qualified_name(
+    name: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> (String, String) {
+    let units = name.string_units("").unwrap_or_default();
+    let Some(index) = units.iter().position(|unit| *unit == b':' as u16) else {
+        return (String::new(), String::from_utf16_lossy(&units));
+    };
+    (
+        String::from_utf16_lossy(&units[..index]),
+        String::from_utf16_lossy(&units[index + 1..]),
+    )
 }
 
 fn estimate_listing_tokens(command: &SlashCommand) -> u64 {
-    let mut chars = command.name.chars().count() + command.description.chars().count() + 4;
+    let mut chars = command.name.string_units("").map_or(0, |units| units.len())
+        + command
+            .description
+            .string_units("")
+            .map_or(0, |units| units.len())
+        + 4;
     if let Some(when) = command.when_to_use.as_deref() {
         chars = chars.saturating_add(when.chars().count() + 3);
     }
@@ -785,7 +802,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "skill-doctor".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -799,14 +816,14 @@ mod tests {
 
     fn plugin_skill(name: &str, plugin_id: PluginId) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("Run {name}"),
             source: CommandSource::Plugin,
             kind: SlashCommandKind::Plugin {
                 plugin_id,
                 file_path: PathBuf::from("SKILL.md"),
                 frontmatter: CommandFrontmatter::default(),
-                prompt_template: "body".to_string(),
+                prompt_template: "body".into(),
             },
             loaded_from: Some("plugin".to_string()),
             ..SlashCommand::default()
@@ -815,7 +832,7 @@ mod tests {
 
     fn mcp_skill(name: &str) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("Run {name}"),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Mcp {
@@ -903,7 +920,7 @@ mod tests {
             &cwd.join(".lingxi").join("commands").join("foo.md"),
             "# Foo\n\nDo the foo",
         );
-        record_skill_usage(&lingxi_home, "foo").expect("record usage");
+        record_skill_usage(&lingxi_home, &"foo".into()).expect("record usage");
 
         let h = SkillDoctorHandler::new(cwd, lingxi_home, None, Vec::new());
         match h.handle(&args()).await {
@@ -942,7 +959,7 @@ mod tests {
             ],
         );
         registry.register_command(mcp_skill("github:review_pr"));
-        record_skill_usage(&lingxi_home, "reviewer:scan").unwrap();
+        record_skill_usage(&lingxi_home, &"reviewer:scan".into()).unwrap();
         let registry = Arc::new(RwLock::new(registry));
 
         let handler =
@@ -1075,11 +1092,20 @@ mod tests {
         let lingxi_home = root.join("home").join(".lingxi");
         fs::create_dir_all(&lingxi_home).unwrap();
 
-        record_skill_usage(&lingxi_home, "foo").unwrap();
-        record_skill_usage(&lingxi_home, "foo").unwrap();
+        record_skill_usage(&lingxi_home, &"foo".into()).unwrap();
+        record_skill_usage(&lingxi_home, &"foo".into()).unwrap();
         let usage = read_skill_usage(&lingxi_home).expect("read back");
-        assert_eq!(usage.get("foo").map(|r| r.count), Some(2));
-        assert!(usage.get("foo").unwrap().last_used_unix.is_some());
+        assert_eq!(
+            usage
+                .get(&"foo".encode_utf16().collect::<Vec<_>>())
+                .map(|r| r.count),
+            Some(2)
+        );
+        assert!(usage
+            .get(&"foo".encode_utf16().collect::<Vec<_>>())
+            .unwrap()
+            .last_used_unix
+            .is_some());
         fs::remove_dir_all(root).ok();
     }
 }

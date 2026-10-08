@@ -2065,7 +2065,7 @@ mod tests {
     #[cfg(feature = "bash-ast")]
     #[test]
     fn comment_quote_desync_passthrough_when_tree_present() {
-        assert!(message("echo hi # ' \" rest").map_or(true, |m| !m.contains("# comment")));
+        assert!(message("echo hi # ' \" rest").is_none_or(|m| !m.contains("# comment")));
     }
 
     // ── validateQuotedNewline ───────────────────────────────────────────

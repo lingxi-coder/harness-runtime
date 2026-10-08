@@ -1,11 +1,12 @@
 //! Trusted human inboxes. Model tools never acquire this origin or stop epoch.
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::VecDeque;
 
 #[derive(Default)]
 pub(super) struct HumanInbox {
     epoch: u64,
-    messages: VecDeque<(u64, u64, String)>,
+    messages: VecDeque<(u64, u64, Utf16JsonProjection)>,
     next_message: u64,
     resume: Arc<tokio::sync::Mutex<()>>,
     cancel: tokio_util::sync::CancellationToken,
@@ -34,7 +35,11 @@ impl TaskRegistry {
             })
     }
 
-    pub async fn send_human_task_message(&self, id: &str, message: &str) -> Result<(), TaskError> {
+    pub async fn send_human_task_message(
+        &self,
+        id: &str,
+        message: &Utf16JsonProjection,
+    ) -> Result<(), TaskError> {
         // A host can cancel the request future when its turn is replaced. The
         // accepted human resume must nevertheless finish its startup or its
         // rollback, otherwise it can leave a live worker behind a released
@@ -42,7 +47,7 @@ impl TaskRegistry {
         // was composed through an `Arc`.
         if let Some(registry) = self.owned_self() {
             let id = id.to_owned();
-            let message = message.to_owned();
+            let message = message.clone();
             return tokio::spawn(async move {
                 registry.send_human_task_message_inner(&id, &message).await
             })
@@ -57,9 +62,15 @@ impl TaskRegistry {
     async fn send_human_task_message_inner(
         &self,
         id: &str,
-        message: &str,
+        message: &Utf16JsonProjection,
     ) -> Result<(), TaskError> {
-        if message.trim().is_empty() {
+        let message_units = message
+            .string_units("")
+            .expect("human task message is a source string");
+        if message_units.iter().all(|unit| {
+            char::from_u32(u32::from(*unit))
+                .is_some_and(lingxi_core::host::subagent_output_guard::is_js_space)
+        }) {
             return Err(TaskError::Internal("message must not be empty".into()));
         }
         let id = self.canonical_or_raw(id).await;
@@ -75,7 +86,7 @@ impl TaskRegistry {
             inbox.next_message = inbox.next_message.wrapping_add(1);
             inbox
                 .messages
-                .push_back((inbox.epoch, message_id, message.to_owned()));
+                .push_back((inbox.epoch, message_id, message.clone()));
             (
                 inbox.epoch,
                 message_id,
@@ -178,7 +189,7 @@ impl TaskRegistry {
     pub async fn take_human_task_messages_for(
         &self,
         agent_id: lingxi_core::types::AgentId,
-    ) -> Vec<String> {
+    ) -> Vec<Utf16JsonProjection> {
         let rows = self.tasks.read().await;
         let Some((id, _)) = rows.iter().find(|(_, state)| matches!(state, TaskState::LocalAgent(agent) if agent.agent_id == agent_id && !state.is_terminated())) else { return Vec::new(); };
         let mut inboxes = self.human_messages.lock().unwrap();

@@ -7,76 +7,203 @@
 //! `crate::*` + `protocol`/`traits`/`telemetry` — never any orchestrator-internal
 //! path. The orchestrator's consumer-trait impls delegate to it 1:1.
 
-use crate::agent_cache_ttl_1h_override;
+use crate::agent_prompt_cache_ttl_override;
 use crate::convert::{
-    ensure_tool_result_pairing, normalize_messages_for_api_with_tool_search, to_llm_messages,
-    to_tool_declarations,
+    ensure_tool_result_pairing_with_sources,
+    normalize_messages_for_api_with_tool_search_and_sources, to_llm_messages,
+    ConversationMessagesWithSources,
+};
+use crate::dispatch_header::{
+    DispatchAttempt, DispatchFailure, DispatchFallback, DispatchHeaderState, DISPATCH_ID_HEADER,
 };
 use crate::model::betas::{
     apply_beta_header_with_auth_and_custom, bedrock_extra_body_betas, BetaContext, Endpoint,
     Provider, FAST_MODE,
 };
 use crate::model::rate_limit::{
-    formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
-    rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
+    formatted_reset_times_from_decoded, rate_limit_error_message, RateLimitInfo, RawUtilization,
+    SubscriptionContext,
 };
 use crate::model::retry::{
-    next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv,
-    RetryControl, RetryState,
+    resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState,
 };
+use crate::model::retry_scope::ModelCallRetryScope;
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use crate::{
-    CacheControl, CostEstimator, HistoryEvent, HistoryResponse, LlmError, LlmRequest, MediaRoute,
-    ModelRuntime, ResponsesSession, Transport,
+    CostEstimator, HistoryEvent, HistoryResponse, LlmError, LlmRequest, MediaRoute, ModelRuntime,
+    PromptCacheQuerySource, ResponsesSession, Transport,
 };
-use futures::stream::BoxStream;
-use lingxi_core::types::{is_nested_media_value, ContentBlock, ConversationMessage};
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
 
-/// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
-///
-/// Prompt caching is on by default; `DISABLE_PROMPT_CACHING` turns it off
-/// globally, and the per-family `DISABLE_PROMPT_CACHING_{HAIKU,SONNET,OPUS}`
-/// vars turn it off for a matching model. Truthiness follows TS `isEnvTruthy`
-/// (utils/envUtils.ts): only `1`/`true`/`yes`/`on` (case-insensitive) count.
-///
-/// PARITY-NOTE: TS compares `model` for exact equality with the *configured*
-/// small-fast / default-sonnet / default-opus IDs; here we match the family by
-/// substring, a close (slightly more lenient) approximation.
-/// Shared truthy-env reader (`1`/`true`/`yes`/`on`, case/space-insensitive) —
-/// used by the prompt-cache gates.
-fn cache_env_truthy(name: &str) -> bool {
-    std::env::var(name).ok().is_some_and(|v| {
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
         matches!(
-            v.trim().to_ascii_lowercase().as_str(),
+            value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
         )
     })
 }
 
-fn prompt_caching_enabled(model: &str) -> bool {
-    fn env_truthy(name: &str) -> bool {
-        cache_env_truthy(name)
+fn native_prompt_cache_bare_mode() -> bool {
+    if env_truthy("CLAUDE_CODE_SIMPLE") {
+        return true;
     }
-    if env_truthy("DISABLE_PROMPT_CACHING") {
-        return false;
+    for argument in std::env::args_os() {
+        if argument == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if argument == std::ffi::OsStr::new("--bare") {
+            return true;
+        }
     }
-    let m = model.to_ascii_lowercase();
-    if m.contains("haiku") && env_truthy("DISABLE_PROMPT_CACHING_HAIKU") {
-        return false;
-    }
-    if m.contains("sonnet") && env_truthy("DISABLE_PROMPT_CACHING_SONNET") {
-        return false;
-    }
-    if m.contains("opus") && env_truthy("DISABLE_PROMPT_CACHING_OPUS") {
-        return false;
-    }
-    true
+    false
 }
 
+fn native_anthropic_unix_socket_enabled() -> bool {
+    std::env::var_os("ANTHROPIC_UNIX_SOCKET").is_some_and(|value| !value.is_empty())
+}
+
+fn custom_system_prompt(
+    text: Option<&str>,
+) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput> {
+    text.map(|text| {
+        native_custom_system_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(text),
+        )
+    })
+}
+
+/// Convert a Host `customSystemPrompt` string at its Native input boundary.
+/// Native `MDo` applies `hwe` only to this string field; `overrideSystemPrompt`
+/// and already-typed source vectors must not pass through this splitter.
+pub fn native_custom_system_prompt(
+    text: lingxi_llm_client::providers::anthropic::system_prompt::PromptText,
+) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
+    use lingxi_llm_client::providers::anthropic::system_prompt::{
+        PromptText, SystemPromptInput, DYNAMIC_BOUNDARY,
+    };
+
+    let units = text.utf16_code_units();
+    let lines = units
+        .split(|unit| *unit == b'\n' as u16)
+        .collect::<Vec<_>>();
+    let marker_units = DYNAMIC_BOUNDARY.encode_utf16().collect::<Vec<_>>();
+    let Some(boundary) = lines
+        .iter()
+        .position(|line| js_trim_whitespace(line) == marker_units.as_slice())
+    else {
+        return SystemPromptInput::native_custom_prompt(text.clone(), vec![text]);
+    };
+
+    let mut elements = Vec::with_capacity(3);
+    let mut before = join_js_split_lines(&lines[..boundary]);
+    before.push(b'\n' as u16);
+    if !js_trim_whitespace(&before).is_empty() {
+        elements.push(PromptText::from_utf16(before));
+    }
+    elements.push(PromptText::from_string(DYNAMIC_BOUNDARY));
+
+    let mut after = vec![b'\n' as u16];
+    after.extend(join_js_split_lines(&lines[boundary + 1..]));
+    if !js_trim_whitespace(&after).is_empty() {
+        elements.push(PromptText::from_utf16(after));
+    }
+
+    SystemPromptInput::native_custom_prompt(text, elements)
+}
+
+fn native_custom_system_prompt_source(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput, LlmError> {
+    let units = source
+        .string_units("")
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: "side-query system prompt must be a root JSON string".into(),
+        })?;
+    Ok(native_custom_system_prompt(
+        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units),
+    ))
+}
+
+fn side_query_system_prompt(
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    captured: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+) -> Result<
+    Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+    LlmError,
+> {
+    match captured {
+        Some(input) => Ok(Some(input.clone())),
+        None => source.map(native_custom_system_prompt_source).transpose(),
+    }
+}
+
+fn join_js_split_lines(lines: &[&[u16]]) -> Vec<u16> {
+    let capacity = lines.iter().map(|line| line.len()).sum::<usize>() + lines.len();
+    let mut joined = Vec::with_capacity(capacity);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            joined.push(b'\n' as u16);
+        }
+        joined.extend_from_slice(line);
+    }
+    joined
+}
+
+fn js_trim_whitespace(mut units: &[u16]) -> &[u16] {
+    while units.first().is_some_and(|unit| is_js_whitespace(*unit)) {
+        units = &units[1..];
+    }
+    while units.last().is_some_and(|unit| is_js_whitespace(*unit)) {
+        units = &units[..units.len() - 1];
+    }
+    units
+}
+
+fn is_js_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009
+            | 0x000a
+            | 0x000b
+            | 0x000c
+            | 0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    ) || (0x2000..=0x200a).contains(&unit)
+}
+
+use futures::stream::BoxStream;
+use lingxi_core::types::{is_nested_media_value, ContentBlock, ConversationMessage};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
+
+tokio::task_local! {
+    static MOD_REQUEST_EFFORT: serde_json::Value;
+}
+
+/// Apply a Mod's effort override to requests assembled by this task only.
+/// The ordinary session request and concurrent side-query tasks keep their
+/// own effort setting.
+pub async fn with_mod_request_effort<T>(
+    effort: &str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    MOD_REQUEST_EFFORT
+        .scope(serde_json::Value::String(effort.to_owned()), future)
+        .await
+}
+
+/// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
+///
 /// Collapse a [`ReasoningConfig`] to a numeric budget for telemetry labels.
 /// `Adaptive` → 0, `Enabled{b}` → b.
 fn reasoning_budget(thinking: Option<&lingxi_llm_client::protocol::ThinkingConfig>) -> u32 {
@@ -100,7 +227,7 @@ fn strip_signature_blocks(messages: &mut [lingxi_llm_client::protocol::Conversat
                 lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
                     | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
             ) && !matches!(block, lingxi_llm_client::protocol::ContentBlock::ProviderContent { value, .. }
-                if value["type"] == "connector_text")
+                if value.string_at("/type").as_deref() == Some("connector_text"))
         });
     }
 }
@@ -124,8 +251,8 @@ fn strip_signature_blocks(messages: &mut [lingxi_llm_client::protocol::Conversat
 /// and no `tengu_model_fallback_triggered` is emitted: from the caller's point
 /// of view the same model simply answered.
 ///
-/// The retry budget is reset per connection: attempts burned against an
-/// endpoint that is rate-limited or down say nothing about the next one.
+/// Keep the logical call's ordinary retry count across endpoint changes.
+/// Only the consecutive-overload counter is specific to this connection.
 fn advance_connection(
     req: &mut crate::LlmRequest,
     state: &mut RetryState,
@@ -141,7 +268,6 @@ fn advance_connection(
     *index += 1;
     req.profile = Some(hop.profile_name.clone());
     req.input.model.clone_from(&hop.request_model);
-    state.attempt = 0;
     state.consecutive_overloaded = 0;
     Some(hop.profile_name.clone())
 }
@@ -229,6 +355,98 @@ pub struct SubscriberState {
     pub is_enterprise: bool,
 }
 
+/// Ordered model fallback policy for one logical non-streaming request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FallbackPolicy {
+    /// Keep the selected model for this logical request.
+    #[default]
+    Disabled,
+    /// Resolve the selected model's settings, then the global settings.
+    Configured,
+    /// Use exactly this ordered model chain, including an explicitly empty chain.
+    Models(Vec<String>),
+}
+
+impl FallbackPolicy {
+    /// Parse the current CLI's ordered comma-separated model list.
+    #[must_use]
+    pub fn from_models_csv(models: &str) -> Self {
+        Self::Models(parse_fallback_chain(models))
+    }
+}
+
+/// Controls consumed while assembling and executing a main request.
+#[derive(Debug, Clone, Default)]
+pub struct MessagesCreateOptions {
+    /// Output ceiling, applied before model-aware reasoning and context bounds.
+    pub max_output_tokens: Option<u32>,
+    /// Anthropic context-hint offer; the codec and beta policy consume it.
+    pub context_hint: Option<serde_json::Value>,
+    /// Activate the hint beta independently of whether an offer meets its floor.
+    pub context_hint_beta: bool,
+    /// Prior streaming overload count. `Some(0)` identifies a stream fallback.
+    pub initial_consecutive_overloaded: Option<u8>,
+    /// Ordered fallback policy for this logical request.
+    pub fallback: FallbackPolicy,
+    /// Trusted host accounting authority; never enters model input.
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
+    /// Sanitized Native `querySource` used by cache-TTL policy and accounting.
+    pub query_source: Option<String>,
+    /// Trusted elapsed-time fact from the failed streaming request.
+    pub failed_stream_outlasted_timeout: bool,
+    /// Native `skipGlobalCacheForSystemPrompt`, computed from registered active
+    /// tools before their provider schemas are flattened.
+    pub skip_global_cache_for_system_prompt: bool,
+    /// Host-owned admission checked immediately before SDK transport dispatch.
+    pub request_dispatch_admission: Option<crate::RequestDispatchAdmission>,
+}
+
+/// Current owned non-streaming main-message request.
+#[derive(Debug, Clone)]
+pub struct MessagesCreateRequest {
+    pub model: String,
+    pub profile: Option<String>,
+    pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+    pub messages: Vec<ConversationMessage>,
+    pub tools: Vec<crate::ToolDeclaration>,
+    pub opts: MessagesCreateOptions,
+}
+
+impl MessagesCreateRequest {
+    /// Own the assembled conversation and selected route for one logical call.
+    #[must_use]
+    pub fn new(
+        model: &str,
+        profile: Option<&str>,
+        system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<crate::ToolDeclaration>,
+    ) -> Self {
+        Self {
+            model: model.to_owned(),
+            profile: profile.map(str::to_owned),
+            system,
+            messages,
+            tools,
+            opts: MessagesCreateOptions::default(),
+        }
+    }
+}
+
+/// Header classification independent of a canonical request's body policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonStreamingRequestClass {
+    Main,
+    Auxiliary,
+}
+
+/// Retry controls shared by main and isolated canonical requests.
+#[derive(Debug, Clone, Default)]
+pub struct NonStreamingRetryOptions {
+    pub initial_consecutive_overloaded: Option<u8>,
+    pub fallback: FallbackPolicy,
+}
+
 // ── Stream state (used in drive_stream unfold) ────────────────────────────────
 
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
@@ -238,8 +456,15 @@ struct StreamState {
     frames: lingxi_llm_client::ModelStream,
     pricing: Option<lingxi_llm_client::FrozenPricing>,
     pricing_model: crate::PricingModelRef,
+    server_fallback_lane:
+        Option<lingxi_llm_client::providers::anthropic::fallback_request::ServerLane>,
+    server_fallback_quote_finalized: bool,
+    server_fallback_quote_candidate_seen: bool,
+    server_fallback_quote_metadata: Option<lingxi_llm_client::protocol::JsonPayload>,
+    server_fallback_quote_estimate: Option<crate::CostEstimate>,
+    pending_service_error: Option<LlmError>,
     /// First frame already pulled by the drive loop's dispatch body-phase
-    /// lookahead (see [`ApiService::note_dispatch_body_phase_failure`]).
+    /// lookahead.
     /// Consumed in place of the first `next_frame()` so decoding, watchdog and
     /// error handling stay identical to the un-seeded path. `None` on every
     /// stream that did not carry `anthropic-dispatch-id`.
@@ -282,6 +507,142 @@ fn frozen_stream_quote(
     crate::cost::project_estimate(estimate, pricing_model.clone()).ok()
 }
 
+fn server_fallback_quote_envelope(
+    quote: Option<&lingxi_llm_client::AnthropicFallbackCostQuote>,
+    summary_model: Option<&str>,
+    complete: bool,
+    reason: Option<&str>,
+) -> lingxi_llm_client::protocol::JsonPayload {
+    let mut value = serde_json::json!({
+        "kind": "anthropic_server_fallback_per_iteration",
+        "completeness": if complete { "complete" } else { "incomplete" },
+        "summaryModel": summary_model,
+        "quote": quote.and_then(|quote| serde_json::to_value(quote).ok()),
+    });
+    if let Some(reason) = reason {
+        value["reason"] = serde_json::Value::String(reason.into());
+    }
+    lingxi_llm_client::protocol::JsonPayload::from_generated_value(&value)
+        .expect("host-generated fallback quote metadata is serializable")
+}
+
+struct ServerFallbackQuoteProjection {
+    estimate: Option<crate::CostEstimate>,
+    metadata: lingxi_llm_client::protocol::JsonPayload,
+    summary_model: Option<String>,
+}
+
+/// `Some` means native cNe's served-fallback branch ran. The estimate may still
+/// be absent when the frozen profile cannot price every native component; that
+/// must suppress the ordinary dispatched-model aggregate estimate.
+fn frozen_server_fallback_quote(
+    pricing: Option<&lingxi_llm_client::FrozenPricing>,
+    pricing_model: &crate::PricingModelRef,
+    lane_model: &str,
+    fallback: Option<&lingxi_llm_client::providers::anthropic::fallback_response::FallbackResponse>,
+    inference: &lingxi_llm_client::protocol::InferenceReport,
+) -> Option<ServerFallbackQuoteProjection> {
+    use lingxi_llm_client::protocol::Submission;
+
+    let facts = fallback?;
+    let iterations = facts.iterations.as_ref()?;
+    // This is the native cNe branch predicate. Some("") is intentionally
+    // distinct from no model-bearing fallback iteration.
+    iterations.served_fallback_model.as_ref()?;
+    let resolved_summary_model = lingxi_llm_client::resolve_anthropic_server_fallback_summary_model(
+        Some(lane_model),
+        iterations,
+    );
+    let stop_reason = facts.final_stop_reason.as_deref();
+    let Some(pricing) = pricing else {
+        return Some(ServerFallbackQuoteProjection {
+            estimate: None,
+            metadata: server_fallback_quote_envelope(
+                None,
+                resolved_summary_model.as_deref(),
+                false,
+                Some("frozen_pricing_unavailable"),
+            ),
+            summary_model: resolved_summary_model,
+        });
+    };
+    match pricing.estimate_anthropic_server_fallback(
+        iterations,
+        Some(lane_model),
+        stop_reason,
+        inference,
+        Submission::default(),
+    ) {
+        Ok(Some(quote)) => {
+            let summary_model = Some(quote.summary_model.clone());
+            let estimate = quote
+                .clone()
+                .into_cost_estimate_if_complete()
+                .and_then(|estimate| {
+                    crate::cost::project_fallback_estimate(estimate, pricing_model).ok()
+                });
+            let complete = estimate.is_some();
+            let reason = (!complete).then_some("native_quote_incomplete");
+            Some(ServerFallbackQuoteProjection {
+                estimate,
+                metadata: server_fallback_quote_envelope(
+                    Some(&quote),
+                    summary_model.as_deref(),
+                    complete,
+                    reason,
+                ),
+                summary_model,
+            })
+        }
+        Ok(None) => Some(ServerFallbackQuoteProjection {
+            estimate: None,
+            metadata: server_fallback_quote_envelope(
+                None,
+                resolved_summary_model.as_deref(),
+                false,
+                Some("native_quote_unavailable"),
+            ),
+            summary_model: resolved_summary_model,
+        }),
+        Err(_) => Some(ServerFallbackQuoteProjection {
+            estimate: None,
+            metadata: server_fallback_quote_envelope(
+                None,
+                resolved_summary_model.as_deref(),
+                false,
+                Some("native_quote_failed"),
+            ),
+            summary_model: resolved_summary_model,
+        }),
+    }
+}
+
+/// A stream may expose iteration facts before its terminal stop reason and
+/// final iteration array arrive. Publish only a retractable marker at that
+/// point; pricing waits for the terminal snapshot so refusal exclusion and
+/// explicit empty-array replacement use the final facts.
+fn server_fallback_quote_candidate(
+    lane_model: &str,
+    fallback: Option<&lingxi_llm_client::providers::anthropic::fallback_response::FallbackResponse>,
+) -> Option<ServerFallbackQuoteProjection> {
+    let iterations = fallback?.iterations.as_ref()?;
+    iterations.served_fallback_model.as_ref()?;
+    let summary_model = lingxi_llm_client::resolve_anthropic_server_fallback_summary_model(
+        Some(lane_model),
+        iterations,
+    );
+    Some(ServerFallbackQuoteProjection {
+        estimate: None,
+        metadata: server_fallback_quote_envelope(
+            None,
+            summary_model.as_deref(),
+            false,
+            Some("awaiting_terminal_fallback_facts"),
+        ),
+        summary_model,
+    })
+}
+
 fn attach_frozen_stream_quote(events: &mut [HistoryEvent], quote: Option<&crate::CostEstimate>) {
     for event in events {
         if let HistoryEvent::MessageDelta {
@@ -301,7 +662,7 @@ pub enum RequestIdOrigin {
     /// The provider returned its own id in a known response header
     /// (authoritative — valid for provider-side log/support lookups).
     Server,
-    /// No server id header was present, so the client-generated `x-request-id`
+    /// No server id header was present, so the outgoing `x-client-request-id`
     /// we sent is used as a fallback. Correlation-only: a provider will NOT find
     /// this id in its logs.
     Client,
@@ -345,17 +706,17 @@ fn rate_limit_cannot_clear(profile: Option<&str>, model: &str) -> bool {
     is_free_tier_model(model) || is_subscription_profile(profile)
 }
 
-fn openrouter_free_rate_limit_message(body: Option<&serde_json::Value>) -> String {
+fn openrouter_free_rate_limit_message(
+    body: Option<&lingxi_llm_client::protocol::JsonPayload>,
+) -> String {
     let detail = body
         .and_then(|body| {
-            body.get("error")
-                .and_then(|error| error.get("message"))
-                .or_else(|| body.get("message"))
+            body.string_at("/error/message")
+                .or_else(|| body.string_at("/message"))
         })
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
+        .map(|message| message.trim().to_owned())
         .filter(|message| !message.is_empty())
-        .map(|message| message.trim_end_matches(['.', '!', '?']));
+        .map(|message| message.trim_end_matches(['.', '!', '?']).to_owned());
 
     match detail {
         Some(detail) => format!(
@@ -395,8 +756,54 @@ pub trait RetryReporter: Send + Sync {
     fn report(&self, info: RetryInfo);
 }
 
+type EffortSettingsSource =
+    Arc<dyn Fn() -> Vec<lingxi_core::host::effort::EffortSettingsLayer> + Send + Sync>;
+type PromptCacheTtlSettingsSource =
+    Arc<dyn Fn() -> lingxi_core::settings::schema::PromptCacheTtlSettings + Send + Sync>;
+
+fn native_prompt_cache_1h_allowlist() -> Vec<String> {
+    static LATCH: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
+    let latch = LATCH.get_or_init(|| Mutex::new(None));
+    let mut guard = latch.lock().unwrap_or_else(|error| error.into_inner());
+    guard
+        .get_or_insert_with(|| {
+            ::telemetry::flag_string_list(
+                lingxi_llm_client::providers::anthropic::system_prompt::PROMPT_CACHE_1H_ALLOWLIST_FEATURE,
+                lingxi_llm_client::providers::anthropic::system_prompt::PROMPT_CACHE_1H_ALLOWLIST_DEFAULT,
+            )
+        })
+        .clone()
+}
+
+fn sdk_prompt_cache_ttl_settings(
+    settings: lingxi_core::settings::schema::PromptCacheTtlSettings,
+) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtlSettings {
+    use lingxi_core::settings::schema::PromptCacheTtl as HostTtl;
+    use lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtl as SdkTtl;
+
+    let convert = |ttl: Option<HostTtl>| {
+        ttl.map(|ttl| match ttl {
+            HostTtl::FiveMinutes => SdkTtl::FiveMinutes,
+            HostTtl::OneHour => SdkTtl::OneHour,
+        })
+    };
+    lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtlSettings {
+        prompt_cache_ttl: convert(settings.main),
+        subagent_prompt_cache_ttl: convert(settings.subagent),
+    }
+}
+
 /// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
+    fast_policy: crate::model::fast_admission::PolicySource,
+    fast_availability: Arc<crate::model::fast_admission::Availability>,
+    account_change_observer: Arc<ApiServiceAccountObserver>,
+    account_change_observer_keepalive: Vec<Arc<dyn lingxi_core::host::auth::AccountChangeObserver>>,
+    effort_settings_source: Option<EffortSettingsSource>,
+    inherited_effort_settings: Option<Vec<lingxi_core::host::effort::EffortSettingsLayer>>,
+    prompt_cache_ttl_settings_source: Option<PromptCacheTtlSettingsSource>,
+    effort_table_options: lingxi_core::host::effort_table::TableOptions,
+    session_effort: RwLock<lingxi_core::host::effort_table::SessionEffort>,
     model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
     client: Arc<ModelRuntime>,
     transport: Arc<dyn Transport>,
@@ -471,7 +878,7 @@ pub struct ApiService {
     /// consecutive overload events: chain[0] fires first, chain[1] next, etc.
     fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
     /// Alias → display-model map built at construction from
-    /// `client.available_models()`. Used by `messages_create_with_fallback`
+    /// `client.available_models()`. Used by configured model fallback
     /// to normalize an alias request string to the display model before
     /// probing `fallback_overrides` (whose keys are display-normalized at
     /// parse time).
@@ -511,17 +918,18 @@ pub struct ApiService {
     /// on the adapter directly. A future task can thread it into the handle if
     /// needed.
     last_rate_limit: Mutex<Option<RateLimitInfo>>,
+    /// Scope-keyed Native overage facts and the auth generation they belong to.
+    prompt_cache_overage: Arc<PromptCacheOverageState>,
     /// The request id of the most recently recorded response, with its origin,
-    /// captured in [`Self::record_rate_limit_from_headers`] (the stream
+    /// captured in [`Self::record_rate_limit_from_headers_for_route`] (the stream
     /// connect-success + non-stream header pass). Read via the
     /// `last_request_id()` trait method to stamp the persisted assistant line's
     /// top-level `requestId`. The value is the provider's server-side id when a
     /// known id header is present ([`RequestIdOrigin::Server`]); otherwise it
-    /// falls back to the client-generated `x-request-id` we sent
-    /// ([`RequestIdOrigin::Client`]) so the field is never blank — but that
-    /// fallback is correlation-only and is NOT valid for provider-side log
-    /// lookups. `None` until the first recorded response (or when both are
-    /// absent).
+    /// falls back to the outgoing `x-client-request-id` we sent
+    /// ([`RequestIdOrigin::Client`]) when one exists. That fallback is
+    /// correlation-only and is NOT valid for provider-side log lookups. `None`
+    /// until a response is recorded or when neither ID is available.
     last_request_id: Mutex<Option<(String, RequestIdOrigin)>>,
     /// Number of budget-consuming retry attempts the most recent drive
     /// performed before its terminal outcome (`RetryState::attempt`). Recorded
@@ -540,7 +948,7 @@ pub struct ApiService {
     ///
     /// Task 2 (llm-runtime future-work batch 5): parsed via
     /// [`RawUtilization::from_headers`] alongside the [`RateLimitInfo`]
-    /// parse in `record_rate_limit_from_headers` — claude-code assigns
+    /// parse in `record_rate_limit_from_headers_for_route` — claude-code assigns
     /// `rawUtilization = extractRawUtilization(headers)` on the same passes
     /// that compute the limits (`claudeAiLimits.ts:476`). Assigned
     /// UNCONDITIONALLY on every recorded response (unlike `last_rate_limit`,
@@ -564,7 +972,7 @@ pub struct ApiService {
     /// rejected-limits view from the terminal 429's own headers and renders
     /// `getRateLimitErrorMessage` as the user-visible error content
     /// (`errors.ts:480-524`). Set on EVERY decoded 429 by
-    /// [`Self::record_rate_limit_from_429`] — Anthropic's composed limits copy
+    /// [`Self::record_rate_limit_from_429_for_route`] — Anthropic's composed limits copy
     /// when unified headers are present, or an actionable OpenRouter free-tier
     /// message (including `error.message`) for `…:free` models. Other
     /// headerless 429s leave this as `None`. Cleared on every successful
@@ -577,7 +985,7 @@ pub struct ApiService {
     /// B6-T1: claude-code updates the limits/raw module state ONLY in the
     /// terminal catch handler `extractQuotaStatusFromError`
     /// (claudeAiLimits.ts:487), never on a retried attempt that later
-    /// recovers. [`Self::record_rate_limit_from_429`] writes this slot on
+    /// recovers. [`Self::record_rate_limit_from_429_for_route`] writes this slot on
     /// every decoded 429; [`Self::promote_pending_429`] promotes it into
     /// `last_rate_limit` / `last_raw_utilization` only at the decode-terminal
     /// returns of both drive fns. Discarded at drive-entry and on any
@@ -623,35 +1031,40 @@ pub struct ApiService {
     responses_ws_session: tokio::sync::Mutex<ResponsesSession>,
 }
 
-/// (cc 2.1.219) Per-QUERY `anthropic-dispatch-id` state — the oracle's `Kt`/
-/// `no` pair.
-///
-/// Both live in the `let` list of the per-query generator `erp` (2.1.220
-/// @237543834: `…,_o=0,Kt=!1,no=!1,Dn=!1,…`), NOT at module scope: the module
-/// scope in that file holds only the `var` constants `S8s`/`Vtp` (@237594040).
-/// A fallback therefore lasts for the rest of the CURRENT query and the next
-/// query re-sends the header — the deliberate contrast is the afk-beta arm a
-/// few bytes earlier, which calls the global setters `F2(!1),gnn(!0)` and says
-/// "for this session".
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct DispatchHeaderState {
-    /// `fB(i.querySource)==="auxiliary"` — utility queries (compaction, recap,
-    /// title generation, …) never carry the header. `false` also covers the
-    /// oracle's `fB(void 0) === undefined` case, which passes the gate.
-    auxiliary: bool,
-    /// `Kt` — an attempt of THIS query that carried the header failed with a
-    /// 5xx / connection error, so every later attempt of this query omits it.
-    fallen_back: bool,
+impl DispatchHeaderState {
+    fn for_query_source(query_source: Option<&str>) -> Self {
+        Self {
+            auxiliary: query_source_category(query_source) == Some(QuerySourceCategory::Auxiliary),
+            ..Self::default()
+        }
+    }
 }
 
-impl DispatchHeaderState {
-    /// `fB(querySource) === "auxiliary"` — the side-query driver
-    /// ([`ApiService::messages_create_side_query`]), which serves the oracle's
-    /// compaction / recap / title-generation / memory utility queries.
-    const AUXILIARY: Self = Self {
-        auxiliary: true,
-        fallen_back: false,
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuerySourceCategory {
+    Main,
+    Subagent,
+    Auxiliary,
+}
+
+/// Native 2.1.287 `Ss`, src_180615120.js bytes [247071,247246).
+fn query_source_category(source: Option<&str>) -> Option<QuerySourceCategory> {
+    source.map(|source| {
+        if source.starts_with("repl_main_thread") || source == "sdk" {
+            QuerySourceCategory::Main
+        } else if source.starts_with("agent:") || source == "hook_agent" {
+            QuerySourceCategory::Subagent
+        } else {
+            QuerySourceCategory::Auxiliary
+        }
+    })
+}
+
+fn prompt_cache_query_source(source: Option<&str>) -> PromptCacheQuerySource<'_> {
+    source.map_or(
+        PromptCacheQuerySource::Unspecified,
+        PromptCacheQuerySource::Named,
+    )
 }
 
 /// 429-attempt state held until the retry loop declares the error TERMINAL —
@@ -667,6 +1080,96 @@ struct Pending429 {
     /// UNCONDITIONALLY (`extractRawUtilization`, ts:500 — independent of the
     /// limits gate).
     raw: RawUtilization,
+}
+
+#[derive(Default)]
+struct PromptCacheOverageState {
+    state: Mutex<PromptCacheOverageSnapshot>,
+}
+
+#[derive(Default)]
+struct PromptCacheOverageSnapshot {
+    account_epoch: u64,
+    by_scope: std::collections::HashMap<crate::CredentialScope, PromptCacheOverageObservation>,
+}
+
+#[derive(Clone, Copy)]
+struct PromptCacheOverageObservation {
+    is_using_overage: bool,
+    observed_at_ms: u128,
+}
+
+impl PromptCacheOverageState {
+    fn account_epoch(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .account_epoch
+    }
+
+    fn reset_for_account_change(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.account_epoch = state.account_epoch.wrapping_add(1);
+        state.by_scope.clear();
+    }
+
+    fn is_using_overage(&self, scope: &crate::CredentialScope, account_epoch: u64) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.account_epoch != account_epoch {
+            return false;
+        }
+        state
+            .by_scope
+            .get(scope)
+            .is_some_and(|observation| observation.is_using_overage)
+    }
+
+    fn record(
+        &self,
+        scope: &crate::CredentialScope,
+        account_epoch: u64,
+        is_using_overage: bool,
+        observed_at_ms: u128,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.account_epoch != account_epoch
+            || state
+                .by_scope
+                .get(scope)
+                .is_some_and(|previous| observed_at_ms < previous.observed_at_ms)
+        {
+            return false;
+        }
+        state.by_scope.insert(
+            scope.clone(),
+            PromptCacheOverageObservation {
+                is_using_overage,
+                observed_at_ms,
+            },
+        );
+        true
+    }
+}
+
+struct ApiServiceAccountObserver {
+    fast_availability: Arc<crate::model::fast_admission::Availability>,
+    prompt_cache_overage: Arc<PromptCacheOverageState>,
+}
+
+impl lingxi_core::host::auth::AccountChangeObserver for ApiServiceAccountObserver {
+    fn account_changed(&self) {
+        self.fast_availability.account_changed();
+        self.prompt_cache_overage.reset_for_account_change();
+    }
 }
 
 /// A previously-pinned cache_edits block plus the user-message index it must be
@@ -701,19 +1204,24 @@ fn parse_fallback_chain(raw: &str) -> Vec<String> {
     out
 }
 
-fn extra_body_object() -> Option<serde_json::Map<String, serde_json::Value>> {
+pub(crate) fn extra_body_object(
+) -> Result<Option<lingxi_llm_client::protocol::JsonPayload>, LlmError> {
     extra_body_object_uncached()
+        .map(lingxi_llm_client::providers::anthropic::request_policy::sanitize_extra_body)
+        .transpose()
+        .map_err(crate::upstream::error)
 }
 
-fn extra_body_object_uncached() -> Option<serde_json::Map<String, serde_json::Value>> {
+fn extra_body_object_uncached() -> Option<lingxi_llm_client::protocol::JsonPayload> {
     let Ok(t) = std::env::var("CLAUDE_CODE_EXTRA_BODY") else {
         return None;
     };
     if t.is_empty() {
         return None;
     }
-    match serde_json::from_str::<serde_json::Value>(&t) {
-        Ok(serde_json::Value::Object(map)) => Some(map),
+    match lingxi_llm_client::protocol::JsonPayload::parse(t.strip_prefix('\u{FEFF}').unwrap_or(&t))
+    {
+        Ok(body) if body.is_root_object() => Some(body),
         Ok(_) => {
             tracing::error!(
                 "CLAUDE_CODE_EXTRA_BODY env var must be a JSON object, but was given {t}"
@@ -789,6 +1297,7 @@ impl ApiService {
         mut request: LlmRequest,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let control = resolve_retry_control_with_settings(
             &request.input.model,
             None,
@@ -807,6 +1316,7 @@ impl ApiService {
         max_retries: u32,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
             None,
@@ -828,29 +1338,41 @@ impl ApiService {
         self.drive_stream(request).await
     }
 
-    /// Opt-aware panel stream. Context remains typed and never enters the body.
+    /// Stream a Host subagent request; its COGS label remains separate from
+    /// the typed subagent role used by prompt-cache policy.
     #[allow(clippy::too_many_arguments)]
     pub async fn stream_with_attempt_opts(
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
-        query_source: Option<&str>,
+        query_source_label: Option<&str>,
         model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut request =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let system = system.map(native_custom_system_prompt_source).transpose()?;
+        let mut request = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            true,
+            max_tokens,
+            false,
+            PromptCacheQuerySource::Subagent,
+        )?;
         request.set_effort(effort)?;
-        request.execution.query_source = query_source.map(str::to_string);
+        request.execution.query_source = query_source_label.map(str::to_string);
         request.execution.model_attempt = model_attempt;
-        if let Some(name) = forced_tool {
-            request.set_tool_choice(Some(crate::ToolChoice::Tool { name: name.into() }));
-        }
+        // Child tool choice belongs to this request, independently of a
+        // shared service's main-loop structured-output configuration.
+        request
+            .set_tool_choice(forced_tool.map(|name| crate::ToolChoice::Tool { name: name.into() }));
         self.drive_stream(request).await
     }
     /// Install the host's registered-attempt authority after composition.
@@ -926,6 +1448,10 @@ impl ApiService {
         use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
         let has_thinking = thinking.is_some_and(session_thinking_active);
+        req.execution.side_thinking_disabled = matches!(
+            thinking,
+            Some(crate::model::thinking::ThinkingConfig::Disabled)
+        );
         req.set_reasoning(thinking.and_then(|thinking| {
             crate::model::thinking::reasoning_for_request(thinking, model, req.input.max_tokens)
         }));
@@ -1042,7 +1568,7 @@ impl ApiService {
     ) -> Self {
         let models = client.available_models();
         let available_model_ids = models.iter().map(|m| m.display_model.clone()).collect();
-        // Build alias→display map once so `messages_create_with_fallback` can
+        // Build alias→display map once so configured model fallback can
         // normalize an alias request to the display model before looking up
         // per-model fallback overrides (whose keys are display-normalized).
         let mut alias_to_display = std::collections::BTreeMap::new();
@@ -1058,9 +1584,24 @@ impl ApiService {
             .as_deref()
             .map(parse_fallback_chain)
             .unwrap_or_default();
+        let fast_availability = Arc::new(crate::model::fast_admission::Availability::default());
+        let prompt_cache_overage = Arc::new(PromptCacheOverageState::default());
+        let account_change_observer = Arc::new(ApiServiceAccountObserver {
+            fast_availability: fast_availability.clone(),
+            prompt_cache_overage: prompt_cache_overage.clone(),
+        });
         Self {
+            fast_policy: Arc::new(crate::model::fast_admission::Policy::default),
+            fast_availability,
+            account_change_observer: account_change_observer.clone(),
+            account_change_observer_keepalive: vec![account_change_observer],
             client,
             model_attempt_hooks: RwLock::new(None),
+            effort_settings_source: None,
+            inherited_effort_settings: None,
+            prompt_cache_ttl_settings_source: None,
+            effort_table_options: Default::default(),
+            session_effort: RwLock::new(Default::default()),
             transport,
             subscriber,
             subscription: None,
@@ -1083,6 +1624,7 @@ impl ApiService {
             model_listings: models,
             estimator,
             last_rate_limit: Mutex::new(None),
+            prompt_cache_overage,
             last_request_id: Mutex::new(None),
             last_retry_count: Mutex::new(0),
             thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope::default(),
@@ -1172,8 +1714,9 @@ impl ApiService {
     }
 
     /// Report a retry backoff to the attached [`RetryReporter`] (no-op if none).
-    /// Called immediately before each retry sleep. `state.attempt` is the
-    /// upcoming attempt number; `ctl.max_retries` the cap.
+    /// Called immediately before each retry sleep. Capacity waits under the
+    /// watchdog report their separate ordinal; other retries report the
+    /// ordinary attempt number against `ctl.max_retries`.
     fn report_retry(
         &self,
         error: &LlmError,
@@ -1186,7 +1729,15 @@ impl ApiService {
                 // Oracle `OYr(e).formatted` = `sir(e)`, NOT the taxonomy's own
                 // `Display`. This is the text the retry banner shows.
                 message: crate::error::error_display_text(error),
-                attempt: state.attempt,
+                attempt: if ctl.watchdog
+                    && matches!(
+                        error.classification_source(),
+                        LlmError::Overloaded { .. } | LlmError::RateLimited { .. }
+                    ) {
+                    state.watchdog_capacity_waits
+                } else {
+                    state.attempt
+                },
                 max_retries: ctl.max_retries,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             });
@@ -1210,6 +1761,172 @@ impl ApiService {
     pub fn with_forced_tool_choice(mut self, choice: crate::ToolChoice) -> Self {
         self.forced_tool_choice = Some(choice);
         self
+    }
+
+    /// Install the host's admitted settings source. It is sampled before each
+    /// physical preparation, so edits and route fallback use current caps.
+    /// An empty result clears caps and never triggers ambient settings loading.
+    #[must_use]
+    pub fn with_effort_settings_source(mut self, source: EffortSettingsSource) -> Self {
+        self.inherited_effort_settings = Some(source());
+        self.effort_settings_source = Some(source);
+        self
+    }
+
+    /// Install the host's merged current main/subagent cache-TTL settings.
+    /// The source is sampled while building each request so file, CLI, managed,
+    /// and mobile settings updates reach the SDK's Native TTL resolver.
+    #[must_use]
+    pub fn with_prompt_cache_ttl_settings_source(
+        mut self,
+        source: PromptCacheTtlSettingsSource,
+    ) -> Self {
+        self.prompt_cache_ttl_settings_source = Some(source);
+        self
+    }
+
+    /// Supply the native first-start/managed override state without ambient discovery.
+    #[must_use]
+    pub fn with_effort_table_options(
+        mut self,
+        options: lingxi_core::host::effort_table::TableOptions,
+    ) -> Self {
+        self.effort_table_options = options;
+        self
+    }
+
+    pub fn set_session_effort(&self, effort: lingxi_core::host::effort_table::SessionEffort) {
+        *self
+            .session_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = effort;
+    }
+
+    /// Current route/model Fast gate, without authentication or transport.
+    pub fn fast_model_allowed(&self, model: &str, profile: Option<&str>) -> Result<bool, LlmError> {
+        if !self.client.fast_model_allowed(model, profile)? {
+            return Ok(false);
+        }
+        let account = self.client.fast_account_identity(model, profile)?;
+        let policy = (self.fast_policy)();
+        let (org, oauth) = self.fast_availability.observed(&account.profile, &policy);
+        let inputs = policy.inputs(&account, org, oauth, !self.interactive_session_for_policy());
+        Ok(lingxi_core::host::fast_mode::decline(&inputs).is_none())
+    }
+
+    fn interactive_session_for_policy(&self) -> bool {
+        self.interactive_session.unwrap_or_else(|| {
+            !lingxi_core::host::session_flags::effective_non_interactive_session()
+        })
+    }
+
+    /// Live root settings and managed-policy facts. No model-input field can
+    /// manufacture organization admission.
+    #[must_use]
+    pub fn with_fast_policy_source(
+        mut self,
+        source: crate::model::fast_admission::PolicySource,
+    ) -> Self {
+        self.fast_policy = source;
+        self
+    }
+
+    pub fn account_change_observer(
+        &self,
+    ) -> Arc<dyn lingxi_core::host::auth::AccountChangeObserver> {
+        self.account_change_observer.clone()
+    }
+
+    /// Keep an account observer alive while the auth owner retains only its
+    /// weak callback. Desktop uses this for its generation-guarded startup
+    /// profile refresh writer.
+    pub fn retain_account_change_observer(
+        mut self,
+        observer: Arc<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) -> Self {
+        self.account_change_observer_keepalive.push(observer);
+        self
+    }
+
+    /// Refresh the selected first-party account before accepting an explicit
+    /// enable. Off remains available independently of account status.
+    pub async fn validate_fast_enable(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(), LlmError> {
+        let identity = self.client.fast_account_identity(model, profile)?;
+        let policy = (self.fast_policy)();
+        if identity.first_party
+            && !policy.no_user_account
+            && !crate::structured_output::bool_environment(branding::DISABLE_FAST_MODE_ENV)
+        {
+            let account = self
+                .client
+                .load_fast_account(model, profile)
+                .await
+                .unwrap_or(identity);
+            let ua = user_agent(&self.ua, &self.version);
+            self.fast_availability
+                .refresh(&account, &policy, self.transport.as_ref(), &ua, || {
+                    self.client.refresh_fast_account(&account)
+                })
+                .await;
+            return self.validate_fast_snapshot(&account, &policy);
+        }
+        self.validate_fast_snapshot(&identity, &policy)
+    }
+
+    fn validate_fast_snapshot(
+        &self,
+        account: &crate::model::fast_admission::Account,
+        policy: &crate::model::fast_admission::Policy,
+    ) -> Result<(), LlmError> {
+        let (org, oauth) = self.fast_availability.observed(&account.profile, policy);
+        let mut input = policy.inputs(account, org, oauth, !self.interactive_session_for_policy());
+        input.session_only = input.non_interactive;
+        if let Some(reason) = lingxi_core::host::fast_mode::decline(&input) {
+            let message = reason.message(&input);
+            if !message.is_empty() {
+                return Err(LlmError::PermissionDenied {
+                    message: format!("Fast mode unavailable: {message}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Current command state uses the admitted boot defaults and live caps,
+    /// exactly like the next main preparation, without invoking authentication.
+    pub fn effort_command_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, LlmError> {
+        let mut request = LlmRequest::new(model);
+        request.profile = profile.map(str::to_owned);
+        request.execution.resolve_native_effort = true;
+        self.refresh_effort_settings(&mut request);
+        self.client.effort_command_snapshot(&request)
+    }
+
+    fn refresh_effort_settings(&self, request: &mut LlmRequest) {
+        request
+            .execution
+            .inherited_effort_settings
+            .clone_from(&self.inherited_effort_settings);
+        request
+            .execution
+            .effort_table_options
+            .clone_from(&self.effort_table_options);
+        request.execution.session_effort = self
+            .session_effort
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(source) = &self.effort_settings_source {
+            request.execution.effort_settings = Some(source());
+        }
     }
 
     /// Set the session thinking configuration. Builder-style; the default is
@@ -1335,41 +2052,40 @@ impl ApiService {
         }
     }
 
-    /// 1P global-cache-scope gate — parity `shouldUseGlobalCacheScope`
-    /// (`utils/betas.ts:227-232`): `getAPIProvider() === 'firstParty' &&
-    /// !CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
-    ///
-    /// LingXi resolves the concrete provider downstream of this provider-agnostic
-    /// request builder and has no GrowthBook rollout bucketing, so the feature is
-    /// kept **dormant**: it requires an explicit opt-in env
-    /// (`LINGXI_GLOBAL_CACHE_SCOPE`) — mirroring the experimental-beta gating
-    /// pattern used elsewhere — AND the subscriber (firstParty) signal, AND the
-    /// shared experimental-betas kill switch must not be set. Default: off.
-    fn should_use_global_cache_scope(&self) -> bool {
-        if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
-            return false;
+    fn prompt_cache_ttl_inputs(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptCacheTtlInputs {
+        use lingxi_llm_client::providers::anthropic::system_prompt::{
+            PromptCacheSubscriberState, PromptCacheTtlInputs,
+        };
+        PromptCacheTtlInputs {
+            subscriber: PromptCacheSubscriberState::Unknown,
+            is_using_overage: false,
+            subscriber_allowlist: Arc::new(native_prompt_cache_1h_allowlist),
         }
-        // `firstParty` approximation at this layer: a Claude.ai subscriber (the
-        // OAuth/first-party path). Opt-in env arms the otherwise-dormant feature.
-        cache_env_truthy("LINGXI_GLOBAL_CACHE_SCOPE") && self.effective_subscriber().is_subscriber
     }
 
-    /// 1h-TTL gate — parity `should1hCacheTTL` (`services/api/claude.ts:393-434`).
-    ///
-    /// The TS path is GrowthBook-allowlist + querySource gated (machinery LingXi
-    /// lacks) plus a Bedrock env opt-in (`ENABLE_PROMPT_CACHING_1H_BEDROCK`).
-    /// Kept **dormant**: honored only via the Bedrock-style explicit opt-in
-    /// env `ENABLE_PROMPT_CACHING_1H` (default off), since LingXi has no
-    /// querySource allowlist to consult. Folded into the emitted cache_control.
-    fn should_1h_cache_ttl(&self) -> bool {
-        if cache_env_truthy("ENABLE_PROMPT_CACHING_1H") {
-            return true;
-        }
-        // claude-code `agentCacheTtlOverride`: an agent's
-        // `experimental.cacheTtl` applies only when no setting/env asked for a
-        // TTL, so the env check above wins. `"5m"` resolves to `false` here —
-        // it is Anthropic's default lifetime and emits no `ttl` key.
-        agent_cache_ttl_1h_override()
+    /// Materialize the Native `systemPrompt: string[]` snapshot shape through
+    /// the SDK's selected-route gate. An unresolved route deliberately gets no
+    /// marker; the source sections themselves are still grouped and retained.
+    pub fn prompt_snapshot_source_vector(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        sections: &[lingxi_llm_client::providers::anthropic::system_prompt::SourceSection],
+    ) -> Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
+
+        let route_profile = self.client.prompt_cache_profile(model, profile);
+        let policy = prompt_cache::CachePolicy::from_process(
+            lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            agent_prompt_cache_ttl_override(),
+            false,
+            PromptCacheQuerySource::Unspecified,
+            prompt_cache::PromptCacheTtlSettings::default(),
+            prompt_cache::PromptCacheTtlInputs::default(),
+        );
+        prompt_cache::snapshot_source_vector(sections, route_profile.as_ref(), policy.gate())
     }
 
     /// 1P experimental cache-EDITING gate — parity `useCachedMC`
@@ -1390,19 +2106,25 @@ impl ApiService {
 
     // ── Shared request build ─────────────────────────────────────────────────
 
-    /// Convert orchestrator-layer inputs into an `LlmRequest`.
+    /// Convert typed host inputs into an `LlmRequest`.
     // An internal request-assembler: model + profile + system + msgs + tools +
     // stream + max_tokens are all genuinely distinct inputs (8/7).
+    #[allow(clippy::too_many_arguments)]
+    /// Build a provider request from the host's typed messages and tool
+    /// declarations. Source-backed JSON stays in `ToolDeclaration` until the
+    /// SDK codec emits each provider request.
     #[allow(clippy::too_many_arguments)]
     fn build_request(
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         stream: bool,
         max_tokens: Option<u32>,
+        skip_global_cache_for_system_prompt: bool,
+        query_source: PromptCacheQuerySource<'_>,
     ) -> Result<LlmRequest, LlmError> {
         // Auxiliary builders share normal policy, but the main turn alone
         // owns its computer continuation and durable receipt submission.
@@ -1425,33 +2147,37 @@ impl ApiService {
         let body = &prepared.provider_request.body_json;
         let is_deepseek = model.contains("deepseek")
             || body
-                .get("model")
-                .and_then(serde_json::Value::as_str)
+                .string_at("/model")
                 .is_some_and(|model| model.contains("deepseek"))
             || prepared.provider_request.url.contains("api.deepseek.com");
         if !is_deepseek {
             return;
         }
 
-        let (message_count, messages_with_reasoning_content, last_assistant_reasoning_len) = body
-            .get("messages")
-            .and_then(serde_json::Value::as_array)
-            .map_or((0usize, 0usize, 0usize), |messages| {
-                let with_reasoning = messages
-                    .iter()
-                    .filter(|message| message.get("reasoning_content").is_some())
-                    .count();
-                let last_assistant_reasoning_len = messages
-                    .iter()
-                    .rev()
-                    .find(|message| {
-                        message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+        let message_count = body.array_len("/messages").unwrap_or_default();
+        let messages_with_reasoning_content = (0..message_count)
+            .filter(|index| {
+                body.array_item_at("/messages", *index)
+                    .is_some_and(|message| {
+                        lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                            &message,
+                            &["reasoning_content"],
+                        )
                     })
-                    .and_then(|message| message.get("reasoning_content"))
-                    .and_then(serde_json::Value::as_str)
-                    .map_or(0, str::len);
-                (messages.len(), with_reasoning, last_assistant_reasoning_len)
-            });
+            })
+            .count();
+        let last_assistant = (0..message_count)
+            .rev()
+            .find(|index| {
+                body.array_item_at("/messages", *index)
+                    .is_some_and(|message| {
+                        message.string_at("/role").as_deref() == Some("assistant")
+                    })
+            })
+            .and_then(|index| body.array_item_at("/messages", index));
+        let last_assistant_reasoning_len = last_assistant
+            .and_then(|message| message.string_at("/reasoning_content"))
+            .map_or(0, |text| text.len());
         tracing::debug!(
             target = "llm_runtime::service",
             event = "deepseek_prepared_request",
@@ -1461,19 +2187,15 @@ impl ApiService {
             message_count = message_count,
             messages_with_reasoning_content = messages_with_reasoning_content,
             last_assistant_reasoning_len = last_assistant_reasoning_len,
-            tool_choice = ?body.get("tool_choice"),
-            tools = body
-                .get("tools")
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, |tools| tools.len()),
-            thinking = ?body.get("thinking"),
+            tool_choice = ?body.raw_source_at("/tool_choice"),
+            tools = body.array_len("/tools").unwrap_or_default(),
+            thinking = ?body.raw_source_at("/thinking"),
         );
     }
 
-    /// Inject betas + User-Agent + request-id headers onto a prepared request.
-    ///
-    /// **Header name `x-request-id`** — sourced from `api-client/src/anthropic.rs`
-    /// where it is written as `("x-request-id".into(), new_request_id())`.
+    /// Apply provider-aware beta, User-Agent, dispatch, and refusal headers to a
+    /// prepared request. Native client request-id generation belongs to the SDK
+    /// selected-route policy and is already sealed before this Host step.
     ///
     /// Reads [`Self::effective_subscriber`] directly (one resolver call per
     /// attempt — these injectors run once per prepare/execute attempt, so the
@@ -1488,56 +2210,101 @@ impl ApiService {
         let model = prepared
             .provider_request
             .body_json
-            .get("model")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/model")
             // Vertex/Bedrock codecs move the model into the URL; keep beta
             // capability checks tied to the resolved request model.
-            .unwrap_or(&prepared.route.resolved_route.request_model);
+            .unwrap_or_else(|| prepared.route.resolved_route.request_model.clone());
         let fast_mode = prepared
             .provider_request
             .body_json
-            .get("speed")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/speed")
+            .as_deref()
             == Some("fast");
-        // The `effort-2025-11-24` beta gates on the body carrying
-        // `output_config.effort`.
-        let has_effort = prepared
+        // YMe emits a beta for a resolved string or a supported main default.
+        let effort_present =
+            lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                &prepared.provider_request.body_json,
+                &["output_config", "effort"],
+            );
+        let body_effort_is_string = prepared
             .provider_request
             .body_json
-            .get("output_config")
-            .and_then(|oc| oc.get("effort"))
+            .string_at("/output_config/effort")
             .is_some();
+        let explicit_effort = prepared.anthropic_request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && prepared.extra_body.as_ref().is_some_and(|extra| {
+                lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                    extra,
+                    &["output_config", "effort"],
+                )
+            });
+        let automatic_schema =
+            lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                &prepared.provider_request.body_json,
+                &["output_config", "format"],
+            );
         let has_tool_search = prepared
             .provider_request
             .body_json
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|tools| {
-                tools.iter().any(|tool| {
-                    tool.get("name").and_then(serde_json::Value::as_str) == Some("ToolSearch")
-                        || tool
-                            .get("defer_loading")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
+            .array_len("/tools")
+            .is_some_and(|length| {
+                (0..length).any(|index| {
+                    prepared
+                        .provider_request
+                        .body_json
+                        .array_item_at("/tools", index)
+                        .is_some_and(|tool| {
+                            tool.string_at("/name").as_deref() == Some("ToolSearch")
+                                || tool.bool_at("/defer_loading") == Some(true)
+                        })
                 })
             });
         let interactive = self.interactive_session.unwrap_or_else(|| {
             !lingxi_core::host::session_flags::effective_non_interactive_session()
         });
-        BetaContext::for_model(model)
+        let beta_provider = match prepared.route.protocol {
+            crate::ProtocolFamily::FoundryClaude => Provider::Foundry,
+            crate::ProtocolFamily::VertexClaude => Provider::Vertex,
+            crate::ProtocolFamily::BedrockClaude => Provider::Bedrock,
+            _ => Provider::Anthropic,
+        };
+        let supported = prepared.effort_policy.as_ref().map_or_else(
+            || crate::model::betas::effort_capable(beta_provider, &model),
+            |policy| policy.supported,
+        );
+        let selected = match prepared.effort_policy.as_ref() {
+            Some(policy) => policy.value.as_ref(),
+            None => None,
+        };
+        let selected_is_string = match prepared.effort_policy.as_ref() {
+            Some(_) => selected.map_or(
+                prepared.anthropic_request_kind
+                    == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+                lingxi_llm_client::protocol::JsonPayload::is_root_string,
+            ),
+            None if effort_present => body_effort_is_string,
+            None => {
+                prepared.anthropic_request_kind
+                    == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            }
+        };
+        let automatic_effort = supported && !explicit_effort && selected_is_string;
+        BetaContext::for_model(&model)
             .with_interactive(interactive)
             .with_show_thinking_summaries(
                 lingxi_core::host::session_flags::show_thinking_summaries(),
             )
             .with_fast_mode(fast_mode)
-            .with_effort(has_effort)
+            .with_effort(automatic_effort)
+            .with_structured_output(automatic_schema)
+            .with_request_kind(prepared.anthropic_request_kind)
             .with_tool_search(has_tool_search)
             .with_context_hint(
-                prepared
-                    .provider_request
-                    .body_json
-                    .get("context_hint")
-                    .is_some(),
+                lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                    &prepared.provider_request.body_json,
+                    &["context_hint"],
+                ),
             )
     }
 
@@ -1575,29 +2342,77 @@ impl ApiService {
         })
     }
 
-    fn enforce_fast_route(prepared: &mut crate::PreparedLlmCall) {
-        let model = prepared
+    async fn capture_fast_account(
+        &self,
+        prepared: &mut crate::PreparedLlmCall,
+    ) -> Result<(), LlmError> {
+        if !Self::direct_anthropic_api_route(prepared)
+            || !prepared.fast_mode_allowed
+            || lingxi_core::host::fast_mode::ModelRejections::for_process().blocked(
+                &self.fast_rejection_identity(&prepared.route.resolved_route.request_model),
+            )
+        {
+            return Ok(());
+        }
+        let fast_requested = prepared
             .provider_request
             .body_json
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(&prepared.route.resolved_route.request_model);
+            .string_at("/speed")
+            .as_deref()
+            == Some("fast")
+            || prepared
+                .extra_body
+                .as_ref()
+                .is_some_and(|body| body.string_at("/speed").as_deref() == Some("fast"));
+        if fast_requested {
+            let generation = self.fast_availability.generation();
+            let credential = prepared.authenticator.captured_credential().await?;
+            prepared.fast_account_binding = Some(crate::model::fast_admission::Binding::new(
+                credential.as_ref(),
+                generation,
+            ));
+        }
+        Ok(())
+    }
+
+    fn enforce_fast_route(&self, prepared: &mut crate::PreparedLlmCall) -> Result<(), LlmError> {
+        let route = &prepared.route.resolved_route;
+        let admitted = self
+            .client
+            .fast_account_identity(&route.request_model, Some(&route.profile_name))
+            .is_ok_and(|account| {
+                let policy = (self.fast_policy)();
+                let (org, oauth) = prepared.fast_account_binding.map_or_else(
+                    || self.fast_availability.observed(&account.profile, &policy),
+                    |binding| {
+                        self.fast_availability
+                            .observed_for(&account.profile, &policy, binding)
+                    },
+                );
+                let mut inputs =
+                    policy.inputs(&account, org, oauth, !self.interactive_session_for_policy());
+                // Model/global admission was captured before SDK/credential work.
+                inputs.disabled = false;
+                inputs.model_fast = prepared.fast_mode_allowed;
+                lingxi_core::host::fast_mode::decline(&inputs).is_none()
+            });
         let allowed = Self::direct_anthropic_api_route(prepared)
-            && lingxi_core::host::model_capabilities::has_capability(
-                model,
-                lingxi_core::host::model_capabilities::ModelCapability::FastMode,
+            && prepared.fast_mode_allowed
+            && admitted
+            && !lingxi_core::host::fast_mode::ModelRejections::for_process().blocked(
+                &self.fast_rejection_identity(&prepared.route.resolved_route.request_model),
             );
         if allowed {
-            return;
+            return Ok(());
         }
-        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
-            disallowed_fast_beta: Some(FAST_MODE.to_string()),
-            ..Default::default()
-        }
-        .apply(
+        lingxi_llm_client::providers::anthropic::request_policy::remove_fast_source(
             &mut prepared.provider_request.body_json,
             &mut prepared.provider_request.headers,
-        );
+            &mut prepared.provider_request.json_string_overrides,
+            FAST_MODE,
+        )
+        .map_err(crate::upstream::error)?;
+        Ok(())
     }
 
     /// `true` for protocols that speak to Anthropic models (first-party or via
@@ -1653,34 +2468,333 @@ impl ApiService {
     /// `CLAUDE_CODE_EXTRA_METADATA` at [`ApiService::build_api_metadata_user_id`])
     /// — these are wire-parity vars preserved verbatim through the `LINGXI_` rename.
     #[cfg(test)]
-    fn parse_extra_body(betas: &[String]) -> serde_json::Map<String, serde_json::Value> {
-        lingxi_llm_client::providers::anthropic::request_policy::beta_body(
-            extra_body_object().unwrap_or_default(),
+    fn parse_extra_body(betas: &[String]) -> serde_json::Value {
+        let payload = lingxi_llm_client::providers::anthropic::request_policy::beta_body(
+            extra_body_object()
+                .expect("valid extra body")
+                .unwrap_or_else(|| {
+                    lingxi_llm_client::protocol::JsonPayload::parse("{}")
+                        .expect("empty object is valid JSON")
+                }),
             betas,
+        )
+        .expect("beta body is valid JSON");
+        serde_json::from_str(payload.as_json_source()).expect("beta body is valid JSON")
+    }
+
+    fn is_main_thinking_display_call(prepared: &crate::PreparedLlmCall) -> bool {
+        prepared.anthropic_request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && prepared.route.protocol == crate::ProtocolFamily::AnthropicMessages
+            && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty
+    }
+
+    fn settle_thinking_display_probe(
+        prepared: &crate::PreparedLlmCall,
+        scope: &ModelCallRetryScope,
+    ) {
+        if Self::is_main_thinking_display_call(prepared) {
+            scope.display_probe_succeeded(&prepared.beta_rejection_state);
+        }
+    }
+
+    /// Try the SDK's unclaimed display repair before ordinary API retries.
+    fn probe_thinking_display_error(
+        &self,
+        prepared: &crate::PreparedLlmCall,
+        scope: &ModelCallRetryScope,
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+    ) -> bool {
+        use lingxi_llm_client::providers::anthropic::thinking_display;
+        if !Self::is_main_thinking_display_call(prepared) {
+            return false;
+        }
+        let named = lingxi_llm_client::providers::anthropic::beta_repair::request_rejections(
+            status,
+            body,
+            &prepared.computed_beta_headers,
+        );
+        if !named.is_empty() {
+            lingxi_llm_client::providers::anthropic::beta_repair::reject_named(
+                &named, &prepared.beta_rejection_state,
+                Some(&prepared.route.resolved_route.request_model),
+                &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(),
+            );
+            return true;
+        }
+        let identity = self.fast_rejection_identity(&prepared.route.resolved_route.request_model);
+        let admission = thinking_display::probe_admission(
+            status,
+            body,
+            prepared
+                .computed_beta_headers
+                .iter()
+                .any(|beta| beta == thinking_display::UPDATES_BETA),
+            Self::direct_anthropic_api_route(prepared),
+            lingxi_llm_client::providers::anthropic::error_recognition::RecognitionContext {
+                request_model: &prepared.route.resolved_route.request_model,
+                refusal_fallback_target: prepared.refusal_fallback_context.as_ref().is_some_and(
+                    |context| {
+                        context.is_target(&prepared.route.resolved_route.request_model, |model| {
+                            self.fast_rejection_identity(model)
+                        })
+                    },
+                ),
+                previous_fast_rejection:
+                    lingxi_core::host::fast_mode::ModelRejections::for_process()
+                        .known_rejected(&identity),
+                prefix_heal_declined: false,
+            },
+            |model| self.fast_rejection_identity(model),
+        );
+        scope.display_probe_error(
+            status,
+            admission,
+            &thinking_display::DisplayProbeBudget::for_process(),
         )
     }
 
-    /// Merge `CLAUDE_CODE_EXTRA_BODY` into a prepared Anthropic-family request body
-    /// (claude-code `B0t` spread — 2.1.207). No-op for non-Anthropic routes and
-    /// when the env var is unset/empty, so those bodies stay byte-identical.
-    ///
-    /// `output_config` is peeled from the extra body and the computed
-    /// `output_config` is layered on top so computed keys win (claude-code
-    /// `Ii={...extra.output_config}; <compute mutates Ii>`); the merged object is
-    /// emitted only when non-empty. The computed top-level `speed` is likewise
-    /// re-applied after the spread so it wins over an extra-body `speed`
-    /// (claude-code spreads `...Vs` BEFORE `...ze!==void 0&&{speed:ze}`).
-    /// Remaining keys follow JS object-spread collision semantics — a colliding
-    /// key keeps its position but takes the extra value, a new key appends at the
-    /// tail (`serde_json` `preserve_order`).
-    ///
-    /// Runs after the beta/User-Agent header injectors so a user-supplied
-    /// `speed`/`output_config` in the extra body never leaks into the computed
-    /// `anthropic-beta` header ([`ApiService::beta_context`] reads the pre-merge
-    /// body).
-    fn merge_extra_body(&self, prepared: &mut crate::PreparedLlmCall) {
-        if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
+    fn fast_rejection_identity(&self, model: &str) -> String {
+        let lower = model.to_lowercase();
+        let model = self
+            .alias_to_display
+            .get(model)
+            .or_else(|| self.alias_to_display.get(&lower))
+            .map_or(lower.as_str(), String::as_str);
+        let canonical = crate::model::betas::beta_canonical(model);
+        canonical
+            .strip_suffix("[1m]")
+            .unwrap_or(&canonical)
+            .to_string()
+    }
+
+    fn repair_fast_model_rejection(
+        &self,
+        req: &mut LlmRequest,
+        prepared: &crate::PreparedLlmCall,
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+    ) -> bool {
+        if req.input.service_tier != Some(lingxi_llm_client::protocol::ServiceTier::Fast) {
+            return false;
+        }
+        if Self::is_main_thinking_display_call(prepared)
+            && prepared
+                .provider_request
+                .body_json
+                .string_at("/speed")
+                .as_deref()
+                != Some("fast")
+        {
+            return false;
+        }
+        if lingxi_llm_client::providers::anthropic::error_recognition::fast_not_enabled(
+            status, body,
+        ) {
+            req.input.service_tier = None;
+            return true;
+        }
+        if !Self::is_main_thinking_display_call(prepared) {
+            return false;
+        }
+        let model = &prepared.route.resolved_route.request_model;
+        let identity = self.fast_rejection_identity(model);
+        let models = lingxi_core::host::fast_mode::ModelRejections::for_process();
+        let target = prepared
+            .refusal_fallback_context
+            .as_ref()
+            .is_some_and(|context| {
+                context.is_target(model, |name| self.fast_rejection_identity(name))
+            });
+        if !(target || models.known_rejected(&identity))
+            || !lingxi_llm_client::providers::anthropic::error_recognition::speed_rejected_for(
+                status,
+                body,
+                model,
+                |name| self.fast_rejection_identity(name),
+            )
+        {
+            return false;
+        }
+        models.reject(&identity);
+        req.input.service_tier = None;
+        true
+    }
+
+    fn apply_refusal_headers(prepared: &mut crate::PreparedLlmCall) {
+        let Some(context) = &prepared.refusal_fallback_context else {
             return;
+        };
+        let first_party = Self::dispatch_first_party(prepared);
+        lingxi_llm_client::providers::anthropic::refusal_fallback::apply_request_headers(
+            &mut prepared.provider_request.headers,
+            first_party,
+            context.refusal_header_armed,
+            context.refusal_occurred,
+            context.refusal_lane_enabled,
+            context.refusal_origin_request_id.as_deref(),
+        );
+    }
+
+    fn apply_server_fallback(prepared: &mut crate::PreparedLlmCall) -> Result<(), LlmError> {
+        if prepared.anthropic_request_kind
+            != lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            || !matches!(
+                prepared.route.protocol,
+                crate::ProtocolFamily::AnthropicMessages
+                    | crate::ProtocolFamily::FoundryClaude
+                    | crate::ProtocolFamily::BedrockClaude
+                    | crate::ProtocolFamily::VertexClaude
+            )
+        {
+            return Ok(());
+        }
+        use lingxi_llm_client::providers::anthropic::fallback_request::{
+            LaneMode, RequestPolicy, ServerLane,
+        };
+        let mut policy = prepared
+            .server_fallback
+            .clone()
+            .or_else(|| {
+                let facts = prepared
+                    .refusal_fallback_context
+                    .as_ref()?
+                    .server_fallback
+                    .as_ref()?;
+                let mut host_policy = facts.policy.clone();
+                let sticky = prepared.server_fallback_betas.snapshot();
+                host_policy.explicit_beta_rejected |= sticky.explicit_rejected;
+                host_policy.default_beta_rejected |= sticky.default_rejected;
+                let decision = host_policy.decide(&facts.model, &facts.query);
+                Some(RequestPolicy {
+                    lane: decision.server_lane.map(|lane| ServerLane {
+                        for_model: lane.for_model,
+                        model: lane.model,
+                        mode: match lane.mode {
+                            lingxi_core::host::refusal_server::Mode::Default => LaneMode::Default,
+                            lingxi_core::host::refusal_server::Mode::Explicit => LaneMode::Explicit,
+                        },
+                    }),
+                    explicit_target_eligible: host_policy.explicit_target_eligible,
+                    silent_arm: host_policy.silent_arm,
+                    threaded_request: host_policy.threaded_request,
+                    beta_transport_enabled: host_policy.beta_transport_enabled,
+                    simulated_proxy_usage: false,
+                })
+            })
+            .unwrap_or(RequestPolicy {
+                beta_transport_enabled: true,
+                ..Default::default()
+            });
+        policy.simulated_proxy_usage |=
+            crate::structured_output::bool_environment("CLAUDE_CODE_SIMULATE_PROXY_USAGE");
+        let first_party = Self::dispatch_first_party(prepared);
+        prepared.server_fallback_lane = first_party.then(|| policy.lane.clone()).flatten();
+        policy
+            .apply(
+                &prepared.route.resolved_route.request_model,
+                first_party,
+                &prepared.server_fallback_betas,
+                &mut prepared.provider_request.body_json,
+                &mut prepared.provider_request.headers,
+                &mut prepared.provider_request.json_string_overrides,
+            )
+            .map_err(crate::upstream::error)
+    }
+
+    /// Consume the SDK's typed server-fallback beta repair fact for this query.
+    /// The parameter-presence input is captured before the extra-body spread,
+    /// matching native `a1`; the SDK facts helper owns the native cause and
+    /// one-shot guards, while the prepared call supplies the conversation-local
+    /// state handle.
+    fn repair_server_fallback_beta_rejection(
+        prepared: &crate::PreparedLlmCall,
+        status: u16,
+        body: &lingxi_llm_client::protocol::JsonPayload,
+        server_fallback_parameter_added: bool,
+        repair_already_attempted: bool,
+    ) -> bool {
+        // Native r3e catches this SDK-classified error across all Anthropic
+        // Messages transports, including the cloud Claude wrappers.
+        if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
+            return false;
+        }
+        use lingxi_llm_client::providers::anthropic::fallback_request;
+        let Some(cause) = fallback_request::classify_server_fallback_rejection(status, body) else {
+            return false;
+        };
+        let Some(facts) = fallback_request::server_fallback_repair_facts(
+            cause,
+            server_fallback_parameter_added,
+            repair_already_attempted,
+        ) else {
+            return false;
+        };
+        prepared.server_fallback_betas.reject(facts.rejected_mode);
+        true
+    }
+
+    fn apply_automatic_thinking_display(
+        &self,
+        prepared: &mut crate::PreparedLlmCall,
+    ) -> Result<(), LlmError> {
+        use lingxi_llm_client::providers::anthropic::thinking_display::{self, UpdatesAdmission};
+        if !Self::is_main_thinking_display_call(prepared) {
+            return Ok(());
+        }
+        lingxi_llm_client::providers::anthropic::beta_repair::apply_rejections(
+            &mut prepared.provider_request.headers,
+            &mut prepared.provider_request.body_json,
+            &prepared.beta_rejection_state,
+            Some(&prepared.route.resolved_route.request_model),
+            &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(
+            ),
+        )
+        .map_err(crate::upstream::error)?;
+        if crate::structured_output::experimental_betas_disabled() {
+            return Ok(());
+        }
+        let model = &prepared.route.resolved_route.request_model;
+        let canonical = crate::model::thinking::canonical(model);
+        let updates = std::env::var(branding::THINKING_DISPLAY_UPDATES_ENV)
+            .ok()
+            .is_none_or(|value| crate::structured_output::bool_value(&value));
+        let mode = thinking_display::connector_mode(
+            None,
+            false,
+            lingxi_core::host::session_flags::show_thinking_summaries(),
+            updates,
+        );
+        thinking_display::apply_request_updates(
+            &mut prepared.provider_request.body_json,
+            &mut prepared.provider_request.headers,
+            &mut prepared.provider_request.json_string_overrides,
+            UpdatesAdmission {
+                mode,
+                supports_interleaved: !canonical.starts_with("claude-3-")
+                    && canonical != "claude-haiku-4-5",
+                extra_has_thinking: prepared.extra_body.as_ref().is_some_and(|extra| {
+                    lingxi_llm_client::providers::anthropic::request_policy::has_field(
+                        extra, "thinking",
+                    )
+                }),
+                simulated_proxy: crate::structured_output::bool_environment(
+                    "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+                ),
+            },
+            &prepared.beta_rejection_state,
+            &prepared.thinking_display_probe,
+        )
+        .map_err(crate::upstream::error)?;
+        Ok(())
+    }
+
+    /// Apply the main/side extra-body policy after automatic fields and beta
+    /// selection, preserving JS spread collisions and property ordering.
+    fn merge_extra_body(&self, prepared: &mut crate::PreparedLlmCall) -> Result<(), LlmError> {
+        if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
+            return Ok(());
         }
         // Bedrock carries a narrow beta subset in `anthropic_beta` inside the
         // body. Other Anthropic-family routes carry their betas in headers.
@@ -1692,15 +2806,73 @@ impl ApiService {
         } else {
             Vec::new()
         };
+        let extra_body = prepared.extra_body.clone().unwrap_or_else(|| {
+            lingxi_llm_client::protocol::JsonPayload::parse("{}")
+                .expect("empty object is valid JSON")
+        });
         lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
-            extra_body: extra_body_object().unwrap_or_default(),
+            request_kind: prepared.anthropic_request_kind,
+            extra_body,
             body_betas,
+            effort: prepared.effort_policy.clone(),
+            message_header_parameters: matches!(
+                prepared.route.protocol,
+                crate::ProtocolFamily::AnthropicMessages
+                    | crate::ProtocolFamily::FoundryClaude
+                    | crate::ProtocolFamily::BedrockClaude
+                    | crate::ProtocolFamily::VertexClaude
+            ),
             ..Default::default()
         }
         .apply(
             &mut prepared.provider_request.body_json,
             &mut prepared.provider_request.headers,
-        );
+            &mut prepared.provider_request.json_string_overrides,
+            &mut prepared.provider_request.url,
+        )
+        .map_err(crate::upstream::error)?;
+        if prepared.stream_fallback
+            && prepared.route.protocol == crate::ProtocolFamily::AnthropicMessages
+        {
+            lingxi_llm_client::providers::anthropic::request_policy::nonstream_fallback_parameters_source(
+                &mut prepared.provider_request.body_json,
+                &mut prepared.provider_request.json_string_overrides,
+            )
+            .map_err(crate::upstream::error)?;
+        }
+        Ok(())
+    }
+
+    fn apply_structured_output_beta(prepared: &mut crate::PreparedLlmCall) {
+        if matches!(
+            prepared.route.protocol,
+            crate::ProtocolFamily::AnthropicMessages
+                | crate::ProtocolFamily::FoundryClaude
+                | crate::ProtocolFamily::BedrockClaude
+                | crate::ProtocolFamily::VertexClaude
+        ) && !Self::extra_replaces_message_betas(prepared)
+            && lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                &prepared.provider_request.body_json,
+                &["output_config", "format"],
+            )
+        {
+            lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+                &mut prepared.provider_request.headers,
+                &[crate::model::betas::STRUCTURED_OUTPUTS.to_string()],
+            );
+        }
+    }
+
+    fn extra_replaces_message_betas(prepared: &crate::PreparedLlmCall) -> bool {
+        matches!(
+            prepared.route.protocol,
+            crate::ProtocolFamily::AnthropicMessages
+                | crate::ProtocolFamily::FoundryClaude
+                | crate::ProtocolFamily::BedrockClaude
+                | crate::ProtocolFamily::VertexClaude
+        ) && prepared.extra_body.as_ref().is_some_and(|extra| {
+            lingxi_llm_client::providers::anthropic::request_policy::has_field(extra, "betas")
+        })
     }
 
     /// (cc 2.1.219) Opt-in `anthropic-dispatch-id: v2s` resolver —
@@ -1733,7 +2905,7 @@ impl ApiService {
         if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
             return false;
         }
-        if cache_env_truthy("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
+        if env_truthy("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
             return true;
         }
         // The port always resolves a concrete base (default
@@ -1748,134 +2920,124 @@ impl ApiService {
         })
     }
 
-    /// (cc 2.1.219) Add `anthropic-dispatch-id: v2s` (`pi[S8s]=Vtp`) to an
-    /// attempt: `!Kt && fB(i.querySource)!=="auxiliary" && Ooe() && (flag)`
-    /// (2.1.220 @237553955), in that order.
-    fn apply_dispatch_header(prepared: &mut crate::PreparedLlmCall, state: DispatchHeaderState) {
-        if state.fallen_back
-            || state.auxiliary
-            || !Self::dispatch_first_party(prepared)
-            || !Self::dispatch_v2s_opt_in()
-        {
-            return;
-        }
-        lingxi_llm_client::providers::anthropic::request_policy::set_header(
-            &mut prepared.provider_request.headers,
-            DISPATCH_ID_HEADER,
-            DISPATCH_ID_V2S,
+    /// Native XMe/hYe: recovery uses v2p for the remainder of this query.
+    fn apply_dispatch_header(
+        prepared: &mut crate::PreparedLlmCall,
+        state: DispatchHeaderState,
+    ) -> DispatchAttempt {
+        let first_party = Self::dispatch_first_party(prepared);
+        let value = state.header(
+            first_party,
+            ::telemetry::flag_bool("tengu_dreamy_frost", false),
+            Self::dispatch_v2s_opt_in(),
         );
-        // `w(`[dispatch] sent ${S8s}=${Vtp}`)` — default (debug) log level.
-        tracing::debug!("[dispatch] sent {DISPATCH_ID_HEADER}={DISPATCH_ID_V2S}");
+        if let Some(value) = value {
+            lingxi_llm_client::providers::anthropic::request_policy::set_header(
+                &mut prepared.provider_request.headers,
+                DISPATCH_ID_HEADER,
+                value,
+            );
+            tracing::debug!("[dispatch] sent {DISPATCH_ID_HEADER}={value}");
+        }
+        DispatchAttempt {
+            value: value.map(str::to_owned),
+            first_party,
+        }
     }
 
-    /// (cc 2.1.219) Dispatch-header degradation check: when THIS attempt
-    /// carried the header and the failure is an HTTP 5xx or a connection
-    /// error, latch the per-query fallback (`Kt=!0`) and report
-    /// `(reason, status)` for the `tengu_dispatch_header_fallback` telemetry —
-    /// the caller then retries immediately WITHOUT consuming retry budget
-    /// (the oracle's `"retry:dispatch-header-strip"` step). `None` ⇒ not a
-    /// dispatch-header failure; normal retry classification applies.
     fn note_dispatch_header_failure(
         state: &mut DispatchHeaderState,
-        prepared: &crate::PreparedLlmCall,
+        attempt: &DispatchAttempt,
         err: &LlmError,
-    ) -> Option<(&'static str, Option<u16>)> {
-        let carried = prepared
-            .provider_request
-            .headers
-            .contains_key(DISPATCH_ID_HEADER);
-        Self::note_dispatch_header_failure_carried(state, carried, err)
-    }
-
-    /// [`Self::note_dispatch_header_failure`] twin for callers whose prepared
-    /// call was already moved (the stream open path) — `carried` is captured
-    /// before the move.
-    fn note_dispatch_header_failure_carried(
-        state: &mut DispatchHeaderState,
-        carried: bool,
-        err: &LlmError,
-    ) -> Option<(&'static str, Option<u16>)> {
-        // `no && !Kt`.
-        if !carried || state.fallen_back {
-            return None;
-        }
-        let http_5xx = Self::status_of(err).filter(|s| *s >= 500);
-        if http_5xx.is_none() && !Self::is_dispatch_conn_err(err) {
-            return None;
-        }
-        state.fallen_back = true;
-        // Byte template: `[dispatch] ${Nu?`HTTP ${ss}`:"connection error"}
-        // with ${S8s}; retrying without it` at level warn.
-        let what = http_5xx.map_or_else(|| "connection error".to_string(), |s| format!("HTTP {s}"));
-        tracing::warn!("[dispatch] {what} with {DISPATCH_ID_HEADER}; retrying without it");
-        Some((
-            if http_5xx.is_some() {
-                "5xx"
-            } else {
-                "conn_err"
+        response: Option<(u16, bool)>,
+    ) -> Option<DispatchFallback> {
+        state.on_failure(
+            attempt,
+            DispatchFailure {
+                status: response
+                    .map(|(status, _)| status)
+                    .or_else(|| Self::status_of(err)),
+                connection: Self::is_dispatch_conn_err(err),
+                declined: response.is_some_and(|(_, declined)| declined),
             },
-            http_5xx,
-        ))
+        )
     }
 
-    /// (cc 2.1.219) The oracle's SECOND dispatch-fallback arm (2.1.220
-    /// @237577972): `if(no&&!Kt&&Bs!==null&&!oc)` — a CONNECTION error raised
-    /// while reading the stream body, before the first stream event was
-    /// yielded. It latches `Kt`, emits `tengu_dispatch_header_fallback` with
-    /// `reason:"body_phase"`/`status:"none"` and `continue e`s, so unlike the
-    /// stale-connection arm right below it (`ko<jt`) it costs no retry budget.
-    ///
-    /// `!oc` ("nothing yielded yet") is why the port can only take this arm on
-    /// a ONE-FRAME lookahead in [`Self::drive_stream`]: once the stream is
-    /// handed to the caller there is no attempt loop left to `continue`.
-    /// `x2(Qo)` classifies node connection errors, so the watchdog's
-    /// [`LlmError::StreamInterrupted`] is correctly excluded.
-    fn note_dispatch_body_phase_failure(
-        state: &mut DispatchHeaderState,
-        carried: bool,
-        err: &LlmError,
-    ) -> bool {
-        if !carried || state.fallen_back || !Self::is_dispatch_conn_err(err) {
-            return false;
-        }
-        state.fallen_back = true;
-        // Byte template: `[dispatch] Stream connection error (${Bs.code}) with
-        // anthropic-dispatch-id before first event; retrying without it`. The
-        // port has no node `errno` string, so the transport message stands in
-        // for `Bs.code`.
-        tracing::warn!(
-            "[dispatch] Stream connection error ({err}) with {DISPATCH_ID_HEADER} before first event; retrying without it"
+    async fn report_dispatch_fallback(
+        &self,
+        req: &LlmRequest,
+        fallback: DispatchFallback,
+        request_id: Option<&str>,
+    ) {
+        let what = fallback
+            .status
+            .map_or_else(|| "connection error".to_string(), |s| format!("HTTP {s}"));
+        let previous = fallback.previous.as_deref().map_or_else(
+            || format!("no {DISPATCH_ID_HEADER}"),
+            |value| format!("{DISPATCH_ID_HEADER}={value}"),
         );
-        true
+        tracing::warn!(
+            "[dispatch] {what} with {previous}; retrying once with {DISPATCH_ID_HEADER}=v2p"
+        );
+        telemetry::emit_dispatch_header_fallback(
+            &self.analytics,
+            telemetry::DispatchFallbackEvent {
+                model: &req.input.model,
+                dispatch: fallback.previous.as_deref(),
+                reason: fallback.reason,
+                status: fallback.status,
+                query_source: req.execution.query_source.as_deref(),
+                request_id,
+            },
+        )
+        .await;
+        let delay = fallback.delay(rand::random::<f64>());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
     }
 
-    /// `x2()` — the connection-error classification both dispatch-fallback arms
-    /// key on (a TLS failure is a connect failure, not a provider response).
+    /// Native yYe checks APIConnectionError, including its timeout subclass.
+    /// Body-phase x2 cause classification remains separate below.
     fn is_dispatch_conn_err(err: &LlmError) -> bool {
-        matches!(err, LlmError::Transport { .. } | LlmError::TlsCert { .. })
+        matches!(
+            err.classification_source(),
+            LlmError::Transport { .. }
+                | LlmError::TransportTimeout { .. }
+                | LlmError::TlsCert { .. }
+        )
     }
 
     fn inject_headers(
         &self,
         prepared: &mut crate::PreparedLlmCall,
-        request_id: &str,
         dispatch: DispatchHeaderState,
-    ) {
+    ) -> Result<(DispatchAttempt, bool), LlmError> {
         // Provider-specific tool-search beta: first-party/Foundry use
         // advanced-tool-use, Vertex uses tool-search-tool, and Bedrock carries
         // tool-search-tool in the request body's anthropic_beta array.
         let beta_provider = match prepared.route.protocol {
             crate::ProtocolFamily::AnthropicMessages
-                if Self::direct_anthropic_api_route(prepared) =>
+                if prepared.route.resolved_route.provider_id
+                    == crate::ProviderId::AnthropicFirstParty =>
             {
                 Some(Provider::Anthropic)
             }
-            crate::ProtocolFamily::FoundryClaude => Some(Provider::Anthropic),
+            crate::ProtocolFamily::FoundryClaude => Some(Provider::Foundry),
             crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
+            crate::ProtocolFamily::BedrockClaude => Some(Provider::Bedrock),
             _ => None,
         };
-        if let Some(provider) = beta_provider {
-            let ctx = self.beta_context(prepared);
+        if let Some(provider) =
+            beta_provider.filter(|_| !Self::extra_replaces_message_betas(prepared))
+        {
+            let ctx = self.beta_context(prepared).with_context_hint(
+                dispatch.context_hint_beta
+                    || lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                        &prepared.provider_request.body_json,
+                        &["context_hint"],
+                    ),
+            );
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
@@ -1886,44 +3048,61 @@ impl ApiService {
                 &custom_betas,
             );
         }
+        Self::apply_structured_output_beta(prepared);
         // User-Agent (Task 3) — provider-aware (see apply_user_agent).
         self.apply_user_agent(prepared);
-        // Client-traceable request id (matches api-client header name).
-        lingxi_llm_client::providers::anthropic::request_policy::set_header(
-            &mut prepared.provider_request.headers,
-            "x-request-id",
-            request_id,
-        );
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
-        Self::apply_dispatch_header(prepared, dispatch);
+        let attempt = Self::apply_dispatch_header(prepared, dispatch);
+        Self::apply_refusal_headers(prepared);
+        Self::apply_server_fallback(prepared)?;
+        let server_fallback_parameter_added =
+            lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                &prepared.provider_request.body_json,
+                &["fallbacks"],
+            );
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        self.merge_extra_body(prepared);
+        self.apply_automatic_thinking_display(prepared)?;
+        prepared.computed_beta_headers =
+            lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
+                &prepared.provider_request.headers,
+            );
+        self.merge_extra_body(prepared)?;
         // Final resolved-route guard. `CLAUDE_CODE_EXTRA_BODY` is merged above,
         // so this must run last to prevent it from reintroducing first-party
         // speed/beta fields on custom or unsupported routes.
-        Self::enforce_fast_route(prepared);
+        self.enforce_fast_route(prepared)?;
+        Ok((attempt, server_fallback_parameter_added))
     }
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
     fn inject_stream_headers(
         &self,
         prepared: &mut crate::PreparedLlmCall,
-        request_id: &str,
         dispatch: DispatchHeaderState,
-    ) {
+    ) -> Result<(DispatchAttempt, bool), LlmError> {
         let beta_provider = match prepared.route.protocol {
             crate::ProtocolFamily::AnthropicMessages
-                if Self::direct_anthropic_api_route(prepared) =>
+                if prepared.route.resolved_route.provider_id
+                    == crate::ProviderId::AnthropicFirstParty =>
             {
                 Some(Provider::Anthropic)
             }
-            crate::ProtocolFamily::FoundryClaude => Some(Provider::Anthropic),
+            crate::ProtocolFamily::FoundryClaude => Some(Provider::Foundry),
             crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
+            crate::ProtocolFamily::BedrockClaude => Some(Provider::Bedrock),
             _ => None,
         };
-        if let Some(provider) = beta_provider {
-            let ctx = self.beta_context(prepared);
+        if let Some(provider) =
+            beta_provider.filter(|_| !Self::extra_replaces_message_betas(prepared))
+        {
+            let ctx = self.beta_context(prepared).with_context_hint(
+                dispatch.context_hint_beta
+                    || lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                        &prepared.provider_request.body_json,
+                        &["context_hint"],
+                    ),
+            );
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
@@ -1934,54 +3113,57 @@ impl ApiService {
                 &custom_betas,
             );
         }
+        Self::apply_structured_output_beta(prepared);
         self.apply_user_agent(prepared);
-        lingxi_llm_client::providers::anthropic::request_policy::set_header(
-            &mut prepared.provider_request.headers,
-            "x-request-id",
-            request_id,
-        );
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
-        Self::apply_dispatch_header(prepared, dispatch);
+        let attempt = Self::apply_dispatch_header(prepared, dispatch);
+        Self::apply_refusal_headers(prepared);
+        Self::apply_server_fallback(prepared)?;
+        let server_fallback_parameter_added =
+            lingxi_llm_client::providers::anthropic::request_policy::has_field_path(
+                &prepared.provider_request.body_json,
+                &["fallbacks"],
+            );
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
-        self.merge_extra_body(prepared);
-        Self::enforce_fast_route(prepared);
+        self.apply_automatic_thinking_display(prepared)?;
+        prepared.computed_beta_headers =
+            lingxi_llm_client::providers::anthropic::beta_repair::request_betas(
+                &prepared.provider_request.headers,
+            );
+        self.merge_extra_body(prepared)?;
+        self.enforce_fast_route(prepared)?;
+        Ok((attempt, server_fallback_parameter_added))
     }
 
     // ── 429 retry-after resolution (reset ladder) ─────────────────────────────
 
     /// Resolve the 429 retry delay using the server-sent reset ladder:
-    /// `retry-after` → `anthropic-ratelimit-unified-reset` → `anthropic-ratelimit-requests-reset` → 1 s.
+    /// `retry-after` → `anthropic-ratelimit-unified-reset` → `anthropic-ratelimit-requests-reset` → no server hint.
     fn resolve_retry_after(
         headers: &std::collections::BTreeMap<String, String>,
-    ) -> std::time::Duration {
-        // Convert BTreeMap to vec for parse helpers.
-        let hvec: Vec<(String, String)> = headers
+        protocol: lingxi_llm_client::protocol::ProtocolFamily,
+        provider_id: &str,
+    ) -> Option<std::time::Duration> {
+        let wire_headers: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let now = std::time::SystemTime::now();
-
-        // 1. Retry-After (RFC 7231 delta-seconds).
-        if let Some(d) = parse_retry_after(&hvec) {
-            return d;
-        }
-        // 2. anthropic-ratelimit-unified-reset (epoch seconds).
-        if let Some(d) = parse_unified_reset(&hvec, now) {
-            return d;
-        }
-        // 3. anthropic-ratelimit-requests-reset (ISO8601 UTC).
-        if let Some(d) = crate::model::rate_limit::parse_anthropic_ratelimit_reset(&hvec, now) {
-            return d;
-        }
-        // 4. OpenAI x-ratelimit-reset-requests / -tokens (Go-duration). Without
-        // this a non-Anthropic 429 falls to the 1s blind wait and hammers the
-        // still-exhausted window. Provider-neutral: only matches when present.
-        if let Some(d) = crate::model::rate_limit::parse_openai_reset(&hvec) {
-            return d;
-        }
-        // 5. Fallback: 1 s.
-        std::time::Duration::from_secs(1)
+        let metadata =
+            lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+                protocol,
+                provider_id,
+                &wire_headers,
+                now,
+            );
+        // Host retains source priority; the SDK owns provider header names and
+        // wire parsing, including Anthropic vs. OpenAI reset formats.
+        metadata
+            .retry_after
+            .or(metadata.anthropic_unified_reset)
+            .or(metadata.anthropic_request_reset)
+            .or(metadata.openai_reset)
     }
 
     // ── error_kind label (for telemetry) ─────────────────────────────────────
@@ -2010,7 +3192,7 @@ impl ApiService {
     /// | *(llm-runtime only)*    | `FileUploadOutcomeUnknown`         | `"file_upload_outcome_unknown"` |
     /// | *(llm-runtime only)*    | `UnsupportedCapability`            | `"unsupported_capability"` |
     fn error_kind(err: &LlmError) -> &'static str {
-        match err {
+        match err.classification_source() {
             // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153).
             // A dead OAuth session is an auth failure like any other here; it
             // differs only in the copy the orchestrator renders for it.
@@ -2018,7 +3200,7 @@ impl ApiService {
             | LlmError::OAuthRefreshDead
             | LlmError::PermissionDenied { .. } => "unauthorized",
             // "server" — api-client `Server { .. } => "server"` (:1157)
-            LlmError::ProviderInternal => "server",
+            LlmError::ProviderInternal | LlmError::ProviderTimeout { .. } => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
             // A timeout is still an HTTP-layer failure for telemetry.
             LlmError::Transport { .. } | LlmError::TransportTimeout { .. } => "http",
@@ -2040,6 +3222,7 @@ impl ApiService {
             LlmError::RequestTooLarge => "request_too_large",
             // llm-runtime-only classes — no api-client analogue; use descriptive names.
             LlmError::InvalidRequest { .. } => "invalid_request",
+            LlmError::RequestDispatchRejected { .. } => "request_dispatch_rejected",
             LlmError::QuotaExceeded => "quota_exceeded",
             LlmError::ModelUnavailable => "model_unavailable",
             LlmError::CostUnavailable { .. } => "cost_unavailable",
@@ -2047,6 +3230,9 @@ impl ApiService {
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
+            LlmError::ProviderErrorText { .. } => {
+                unreachable!("classification_source removes provider text wrappers")
+            }
         }
     }
 
@@ -2067,7 +3253,7 @@ impl ApiService {
     /// The request id of the most recently recorded response. Backs the
     /// `OrchestratorApiClient::last_request_id` trait override (used to stamp the
     /// persisted assistant line's top-level `requestId`). Returns the server id
-    /// when present, else the client-generated fallback (see
+    /// when present, else the actual outgoing client-ID fallback (see
     /// [`Self::last_request_id_origin`]). `None` until the first recorded
     /// response (or when both are absent).
     #[must_use]
@@ -2081,7 +3267,7 @@ impl ApiService {
 
     /// Origin of the value returned by [`Self::last_request_id`] —
     /// [`RequestIdOrigin::Server`] when it came from a provider response header,
-    /// [`RequestIdOrigin::Client`] when it is the client-generated fallback.
+    /// [`RequestIdOrigin::Client`] when it is the actual outgoing client-ID fallback.
     /// `None` when no request id has been recorded.
     #[must_use]
     pub fn last_request_id_origin(&self) -> Option<RequestIdOrigin> {
@@ -2229,18 +3415,28 @@ impl ApiService {
         }
     }
 
-    fn record_rate_limit_from_headers(
+    fn record_rate_limit_from_headers_for_route(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
-        client_request_id: &str,
+        client_request_id: Option<&str>,
+        protocol: lingxi_llm_client::protocol::ProtocolFamily,
+        provider_id: &str,
     ) {
-        self.record_rate_limit_from_headers_at(headers, client_request_id, Self::now_ms());
+        self.record_rate_limit_from_headers_at_for_route(
+            headers,
+            client_request_id,
+            protocol,
+            provider_id,
+            Self::now_ms(),
+        );
     }
 
-    fn record_rate_limit_from_headers_at(
+    fn record_rate_limit_from_headers_at_for_route(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
-        client_request_id: &str,
+        client_request_id: Option<&str>,
+        protocol: lingxi_llm_client::protocol::ProtocolFamily,
+        provider_id: &str,
         ts_ms: u128,
     ) {
         let hvec: Vec<(String, String)> = headers
@@ -2250,21 +3446,18 @@ impl ApiService {
         // Capture the request id on every recorded response — the SDK's
         // `response._request_id`, which claude-code persists as the assistant
         // line's top-level `requestId`. Provider-aware: tries each provider's
-        // canonical id header (Anthropic `request-id`, OpenAI `x-request-id`,
-        // Azure `apim-request-id`, Bedrock `x-amzn-requestid`, …) via the shared
-        // transport extractor. When the provider returns none, fall back to the
-        // client-generated `x-request-id` we sent (origin = Client) so the field
-        // is never blank — this is correlation-only and NOT valid for
-        // provider-side lookups. `None` only when both are absent (so a stale id
-        // never leaks onto a later line).
+        // canonical request-id header for the selected route. If absent, use
+        // the actual SDK/caller `x-client-request-id`; without one, keep the
+        // Host correlation field absent.
         *self.last_request_id.lock().unwrap() =
-            match crate::execution::extract_response_request_id(headers) {
+            match crate::execution::extract_response_request_id(protocol, provider_id, headers) {
                 Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
-                None if !client_request_id.is_empty() => {
+                None if client_request_id.is_some_and(|id| !id.is_empty()) => {
+                    let client_request_id = client_request_id.unwrap_or_default();
                     tracing::debug!(
                         client_request_id,
                         "no provider request-id header on response; \
-                         falling back to client-generated id (correlation-only)"
+                         falling back to outgoing client request-id for correlation only"
                     );
                     Some((client_request_id.to_string(), RequestIdOrigin::Client))
                 }
@@ -2280,11 +3473,20 @@ impl ApiService {
         // snapshot on EVERY recorded (non-stale) headers pass — `rawUtilization
         // = extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
         // gated on `has_unified_headers()` like the limits snapshot below.
-        let raw = RawUtilization::from_headers(&hvec);
+        let decoded =
+            lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+                protocol,
+                provider_id,
+                &hvec,
+                std::time::SystemTime::now(),
+            )
+            .anthropic_rate_limits
+            .unwrap_or_default();
+        let raw = RawUtilization::from_decoded(&decoded);
         if !stale {
             *self.last_raw_utilization.lock().unwrap() = Some(raw);
         }
-        let info = RateLimitInfo::from_headers(&hvec);
+        let info = RateLimitInfo::from_decoded_at(&decoded, std::time::SystemTime::now());
         if !stale {
             self.update_near_limit_wrap_up_state(&info, raw, ts_ms);
         }
@@ -2316,6 +3518,128 @@ impl ApiService {
         // earlier retried attempt (TS resets module state to the success's
         // `status`, never leaving a stale `rejected` behind).
         self.clear_pending_429();
+    }
+
+    #[cfg(test)]
+    fn record_rate_limit_from_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        client_request_id: &str,
+    ) {
+        self.record_rate_limit_from_headers_for_route(
+            headers,
+            (!client_request_id.is_empty()).then_some(client_request_id),
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        );
+    }
+
+    #[cfg(test)]
+    fn record_rate_limit_from_headers_at(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        client_request_id: &str,
+        ts_ms: u128,
+    ) {
+        self.record_rate_limit_from_headers_at_for_route(
+            headers,
+            (!client_request_id.is_empty()).then_some(client_request_id),
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+            ts_ms,
+        );
+    }
+
+    fn record_prompt_cache_overage_from_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        prepared: Option<&crate::client::PreparedPromptCacheContext>,
+    ) {
+        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
+            return;
+        };
+        let headers = headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let decoded =
+            lingxi_llm_client::providers::anthropic::limits::quota_status_from_headers(&headers);
+        if self.prompt_cache_overage.record(
+            &prepared.scope,
+            prepared.account_epoch,
+            decoded.is_using_overage,
+            Self::now_ms(),
+        ) {
+            *prepared
+                .pending_overage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    fn stage_prompt_cache_overage_from_429(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        prepared: Option<&crate::client::PreparedPromptCacheContext>,
+    ) {
+        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
+            return;
+        };
+        let headers = headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let decoded =
+            lingxi_llm_client::providers::anthropic::limits::quota_status_from_429_headers(
+                &headers,
+            );
+        *prepared
+            .pending_overage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(crate::PendingPromptCacheObservation {
+                scope: prepared.scope.clone(),
+                account_epoch: prepared.account_epoch,
+                is_using_overage: decoded.is_using_overage,
+                observed_at_ms: Self::now_ms(),
+            });
+    }
+
+    fn record_prompt_cache_overage_from_quota_wait(
+        &self,
+        status_code: u16,
+        headers: &std::collections::BTreeMap<String, String>,
+        retry_watchdog_enabled: bool,
+        prepared: Option<&crate::client::PreparedPromptCacheContext>,
+    ) {
+        let Some(prepared) = prepared.filter(|facts| facts.is_subscriber) else {
+            return;
+        };
+        let headers = headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let Some(wait) =
+            lingxi_llm_client::providers::anthropic::limits::retry_quota_window_wait_from_headers(
+                status_code,
+                &headers,
+                retry_watchdog_enabled,
+                std::time::SystemTime::now(),
+            )
+        else {
+            return;
+        };
+        if self.prompt_cache_overage.record(
+            &prepared.scope,
+            prepared.account_epoch,
+            wait.status.is_using_overage,
+            Self::now_ms(),
+        ) {
+            *prepared
+                .pending_overage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
     }
 
     /// Whether the live subscription snapshot is a Pro or Enterprise plan —
@@ -2380,30 +3704,71 @@ impl ApiService {
     /// threads it through to [`crate::RateLimitInfo::from_429_error`] so the
     /// `Nqi(e)` `credits_required` / body-derived `overage_disabled_reason`
     /// can be recovered from the error BODY (not just the response headers).
-    fn record_rate_limit_from_429(
+    fn record_rate_limit_from_429_for_route(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
-        body: Option<&serde_json::Value>,
+        body: Option<&lingxi_llm_client::protocol::JsonPayload>,
         model: &str,
-    ) {
-        self.record_rate_limit_from_429_at(headers, body, model, Self::now_ms());
+        client_request_id: Option<&str>,
+        protocol: lingxi_llm_client::protocol::ProtocolFamily,
+        provider_id: &str,
+    ) -> bool {
+        self.record_rate_limit_from_429_at_for_route(
+            headers,
+            body,
+            model,
+            client_request_id,
+            protocol,
+            provider_id,
+            Self::now_ms(),
+        )
     }
 
-    fn record_rate_limit_from_429_at(
+    fn record_rate_limit_from_429_at_for_route(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
-        body: Option<&serde_json::Value>,
+        body: Option<&lingxi_llm_client::protocol::JsonPayload>,
         model: &str,
+        client_request_id: Option<&str>,
+        protocol: lingxi_llm_client::protocol::ProtocolFamily,
+        provider_id: &str,
         ts_ms: u128,
-    ) {
+    ) -> bool {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        *self.last_request_id.lock().unwrap() =
+            match crate::execution::extract_response_request_id(protocol, provider_id, headers) {
+                Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
+                None if client_request_id.is_some_and(|id| !id.is_empty()) => {
+                    let client_request_id = client_request_id.unwrap_or_default();
+                    Some((client_request_id.to_string(), RequestIdOrigin::Client))
+                }
+                None => None,
+            };
         // `extractRawUtilization(headersToUse)` (claudeAiLimits.ts:500) runs
         // for ANY error headers, independent of the limits gate below.
-        let raw = RawUtilization::from_headers(&hvec);
-        let info = RateLimitInfo::from_429_error(&hvec, body);
+        let decoded =
+            lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+                protocol,
+                provider_id,
+                &hvec,
+                std::time::SystemTime::now(),
+            )
+            .anthropic_rate_limits
+            .unwrap_or_default();
+        let raw = RawUtilization::from_decoded(&decoded);
+        let info = (protocol == lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages)
+            .then(|| {
+                lingxi_llm_client::providers::response_headers::AnthropicRateLimitHeaders::decode_429_error(
+                    &hvec,
+                    body,
+                )
+            })
+            .flatten()
+            .as_ref()
+            .map(RateLimitInfo::from_decoded_429_error);
 
         // MESSAGE composition ports errors.ts:482-516 (a LOCAL limits object
         // built from the error headers) — kept verbatim; it is NOT staged and
@@ -2412,7 +3777,7 @@ impl ApiService {
         let composed = info.as_ref().map(|info| {
             // `formatResetTime(…, true)` analogue for both reset headers
             // (`rateLimitMessages.ts:144-148`), formatted at error time.
-            let formatted = formatted_reset_times_from_headers(&hvec);
+            let formatted = formatted_reset_times_from_decoded(&decoded);
             rate_limit_error_message(
                 info,
                 &formatted.as_reset_times(),
@@ -2430,18 +3795,36 @@ impl ApiService {
         // state. The composed message above is per-attempt (most-recent-429)
         // and stays unconditional; only the promotable staged slot is gated.
         if self.rate_limit_record_stale(ts_ms) {
-            return;
+            return false;
         }
         // Stage EVERY non-stale 429 so the terminal promote can also write the
         // EMPTY raw snapshot and thereby clear stale raw-window state.
         *self.pending_429.lock().unwrap() = Some(Pending429 { info, raw });
+        true
+    }
+
+    #[cfg(test)]
+    fn record_rate_limit_from_429(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: Option<&lingxi_llm_client::protocol::JsonPayload>,
+        model: &str,
+    ) -> bool {
+        self.record_rate_limit_from_429_for_route(
+            headers,
+            body,
+            model,
+            None,
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        )
     }
 
     /// Discard any staged 429 snapshot. Called at drive entry and on success so
     /// a retried-then-recovered 429 (or a non-RateLimited terminal that leaves a
     /// staged slot) cannot promote into a LATER drive. Defensive backstop: the
     /// active cross-drive isolation is the per-attempt record stage-or-clear in
-    /// [`Self::record_rate_limit_from_429`] (a fresh attempt always overwrites
+    /// [`Self::record_rate_limit_from_429_for_route`] (a fresh attempt always overwrites
     /// or clears the slot before the terminal promote runs); this guards against
     /// a future refactor that adds a promote-without-record path.
     fn clear_pending_429(&self) {
@@ -2463,14 +3846,34 @@ impl ApiService {
     /// event stream, but the client cache preserves it so stale state can be
     /// cleared at the next seam that wants the exact current snapshot.
     /// Idempotent via `.take()`: a second call after promotion is a no-op.
-    fn promote_pending_429(&self) {
-        let Some(pending) = self.pending_429.lock().unwrap().take() else {
+    fn promote_pending_429(
+        &self,
+        prompt_cache: Option<&crate::client::PreparedPromptCacheContext>,
+    ) {
+        if let Some(pending) = self.pending_429.lock().unwrap().take() {
+            if let Some(info) = pending.info {
+                *self.last_rate_limit.lock().unwrap() = Some(info);
+            }
+            *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
+        }
+        let Some(prepared) = prompt_cache.filter(|facts| facts.is_subscriber) else {
             return;
         };
-        if let Some(info) = pending.info {
-            *self.last_rate_limit.lock().unwrap() = Some(info);
+        let pending = prepared
+            .pending_overage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pending) = pending {
+            if pending.scope == prepared.scope && pending.account_epoch == prepared.account_epoch {
+                self.prompt_cache_overage.record(
+                    &pending.scope,
+                    pending.account_epoch,
+                    pending.is_using_overage,
+                    pending.observed_at_ms,
+                );
+            }
         }
-        *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
     }
 
     fn near_limit_wrap_up_threshold(&self) -> f64 {
@@ -2545,13 +3948,14 @@ impl ApiService {
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
     /// variants that carry an HTTP status are non-None).
     fn status_of(err: &LlmError) -> Option<u16> {
-        match err {
+        match err.classification_source() {
             LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => Some(401),
             LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. } => Some(400),
             LlmError::RequestTooLarge => Some(413),
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),
+            LlmError::ProviderTimeout { .. } => err.http_status(),
             LlmError::Overloaded { .. } => Some(529),
             // No HTTP status: the request never reached the model API. The
             // refresh call to the IdP failed locally, so inventing a 401 here
@@ -2566,25 +3970,18 @@ impl ApiService {
             | LlmError::FileUploadOutcomeUnknown { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
-            | LlmError::MediaDelegationPartial { .. } => None,
+            | LlmError::MediaDelegationPartial { .. }
+            | LlmError::RequestDispatchRejected { .. } => None,
+            LlmError::ProviderErrorText { .. } => {
+                unreachable!("classification_source removes provider text wrappers")
+            }
         }
-    }
-
-    /// claude-code `YNd`: a `speed:"fast"` request whose account/model does not
-    /// support fast mode is rejected with a 400 whose message includes
-    /// `"Fast mode is not enabled"` (`e.status===400 && e.message?.includes(
-    /// "Fast mode is not enabled")`). The drive loop responds by clearing
-    /// `req.speed` and retrying (uncounted) rather than failing the turn
-    /// (`if(T && YNd(v)){o.fastMode=!1;continue}`).
-    fn is_fast_mode_not_enabled(err: &LlmError) -> bool {
-        matches!(err, LlmError::InvalidRequest { message } if message.contains("Fast mode is not enabled"))
     }
 
     // ── Non-stream drive (Step 1 + 1b) ───────────────────────────────────────
 
     /// Shared non-stream retry driver. Accepts an already-built `LlmRequest` so
-    /// the two call-paths (`messages_create` and `messages_create_with_fallback`)
-    /// can both route here.
+    /// purpose-specific canonical request entry points can route here.
     ///
     /// Step 1b: before classifying a retryable 5xx, the driver checks
     /// `x-should-retry: false` — that header makes the response terminal (same
@@ -2612,7 +4009,7 @@ impl ApiService {
     ///
     /// `chain` is the ordered slice of fallback models to walk on consecutive
     /// overload events.  `retry_control` must already carry `chain[0]` as
-    /// `fallback_model` (set by [`Self::messages_create_with_fallback`]); on
+    /// `fallback_model` (set by [`Self::execute_non_stream_request`]); on
     /// each [`DriveStep::Fallback`] the loop advances `chain_idx` and rebuilds
     /// `retry_control` with `chain[chain_idx]` (or disables fallback when
     /// exhausted).
@@ -2644,11 +4041,20 @@ impl ApiService {
         chain: &[String],
         mut dispatch: DispatchHeaderState,
     ) -> Result<HistoryResponse, LlmError> {
+        dispatch.context_hint_beta = req.execution.context_hint_beta;
+        if req.execution.thinking_recovery_scope.is_none() {
+            req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
+        }
+
+        if req.execution.query_source.is_some() {
+            dispatch.auxiliary = query_source_category(req.execution.query_source.as_deref())
+                == Some(QuerySourceCategory::Auxiliary);
+        }
         if req.execution.input_protocol.is_none() {
             req.execution.input_protocol =
                 Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
         }
-        let request_id = new_request_id();
+        let request_id = new_telemetry_id();
         let started = Instant::now();
         let allow_replay = allows_automatic_replay(&req);
         // Sibling connections of this model's provider group, captured from the
@@ -2684,6 +4090,8 @@ impl ApiService {
             rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.input.model),
             ..RetryState::default()
         };
+        let retry_scope = ModelCallRetryScope::current_or_new();
+        retry_control = retry_scope.configure(&retry_control, &mut state);
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         // Index into `chain` for the NEXT fallback entry to use.
@@ -2691,24 +4099,32 @@ impl ApiService {
         // After a Fallback step, chain_idx advances to point at the next entry.
         // When chain_idx >= chain.len(), the chain is exhausted.
         let mut chain_idx: usize = 0;
-        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
-        let mut aws_auth_attempts: u32 = 0;
         let mut max_tokens_adjusted = false;
+        let mut any_dispatched = false;
+        // Native `oSe` is scoped to this logical query and survives every
+        // prepare/retry within it; a later query gets a fresh one-shot repair.
+        let mut server_fallback_beta_repair_attempted = false;
+        let timeout = crate::model::request_timeout::non_stream_timeout()?;
+        let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
         loop {
             // Strip rejected thinking before encode so Gemini / OpenAI-compat
             // thinking models can prepare. DeepSeek / Kimi skip this.
             // prepare → inject headers → execute.
-            let timeout = crate::execution::non_stream_timeout();
             let preparing = tokio::time::Instant::now();
             let prepared = crate::execution::non_stream_bound(timeout, async {
+                self.refresh_effort_settings(&mut req);
+                req.execution.resolve_native_effort = true;
                 let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+                self.capture_fast_account(&mut prepared).await?;
+                prepared.thinking_display_probe = retry_scope.display_probe();
                 Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
-                self.inject_headers(&mut prepared, &request_id, dispatch);
+                let (dispatch_attempt, server_fallback_parameter_added) =
+                    self.inject_headers(&mut prepared, dispatch)?;
                 self.client.seal_prepared(&mut prepared).await?;
-                Ok(prepared)
+                Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
             })
             .await;
-            let mut prepared = match prepared {
+            let (mut prepared, dispatch_attempt, server_fallback_parameter_added) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     telemetry::emit_failed(
@@ -2728,7 +4144,8 @@ impl ApiService {
                 failover = prepared.route.resolved_route.failover;
             }
             // Pause the provider deadline while waiting for host admission.
-            let remaining = timeout.saturating_sub(preparing.elapsed());
+            let prepare_elapsed = preparing.elapsed();
+            let remaining = timeout.saturating_sub(prepare_elapsed);
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             let dispatch_started = tokio::time::Instant::now();
             let admission = req.execution.request_dispatch_admission.clone();
@@ -2795,7 +4212,30 @@ impl ApiService {
 
             match resp_result {
                 Err(transport_err) => {
+                    if admission_rejected {
+                        attempt.finish().await?;
+                        return Err(LlmError::RequestDispatchRejected {
+                            prior_dispatch: any_dispatched,
+                        });
+                    }
+                    let timeout_limit_exhausted = timeout_retries.exhausted_from_environment(
+                        req.execution.failed_stream_outlasted_timeout,
+                        &transport_err,
+                        timeout,
+                        prepare_elapsed.saturating_add(dispatch_started.elapsed()),
+                    );
                     attempt.finish().await?;
+                    if timeout_limit_exhausted {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.input.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            None,
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
                     if !allow_replay {
                         telemetry::emit_failed(
                             &self.analytics,
@@ -2807,21 +4247,13 @@ impl ApiService {
                         .await;
                         return Err(transport_err);
                     }
-                    // (cc 2.1.219) dispatch-header degradation: a connection
-                    // error on an attempt that carried anthropic-dispatch-id
-                    // strips it for the rest of this query and retries
-                    // immediately WITHOUT consuming retry budget
-                    // ("retry:dispatch-header-strip").
-                    if let Some((reason, status)) =
-                        Self::note_dispatch_header_failure(&mut dispatch, &prepared, &transport_err)
-                    {
-                        telemetry::emit_dispatch_header_fallback(
-                            &self.analytics,
-                            &req.input.model,
-                            reason,
-                            status,
-                        )
-                        .await;
+                    if let Some(fallback) = Self::note_dispatch_header_failure(
+                        &mut dispatch,
+                        &dispatch_attempt,
+                        &transport_err,
+                        None,
+                    ) {
+                        self.report_dispatch_fallback(&req, fallback, None).await;
                         continue;
                     }
                     if let Some(next) = advance_connection(
@@ -2840,7 +4272,7 @@ impl ApiService {
                         continue;
                     }
                     // Transport-layer failure; feed into the retry driver.
-                    let step = next_step_with_backoff(
+                    let step = retry_scope.next_step(
                         &mut state,
                         &retry_control,
                         &transport_err,
@@ -2863,33 +4295,93 @@ impl ApiService {
                     return Err(transport_err);
                 }
                 Ok(collected) => {
-                    let provider_resp = crate::execution::response(collected.response());
+                    let provider_resp = crate::execution::response(
+                        collected.response(),
+                        prepared.route.protocol,
+                        crate::execution::response_provider_id(
+                            &prepared.route.resolved_route.provider_id,
+                        ),
+                    );
+                    let outgoing_client_request_id =
+                        collected.client_request_id().map(str::to_owned);
                     // Step 1b: x-should-retry: false is terminal for retryable 5xx.
                     let x_should_retry_false = provider_resp
                         .headers
                         .get("x-should-retry")
                         .is_some_and(|v| v.as_str() == "false");
 
-                    let estimate = frozen_stream_quote(
-                        pricing.as_ref(),
-                        &prepared.route.resolved_route.pricing_model,
-                        collected.usage_report(),
-                        collected.inference_report(),
-                    );
+                    let server_fallback_facts = collected.anthropic_fallback();
+                    let server_fallback_quote =
+                        prepared.server_fallback_lane.as_ref().and_then(|lane| {
+                            frozen_server_fallback_quote(
+                                pricing.as_ref(),
+                                &prepared.route.resolved_route.pricing_model,
+                                &lane.model,
+                                server_fallback_facts.as_ref(),
+                                collected.inference_report(),
+                            )
+                        });
+                    let estimate = match &server_fallback_quote {
+                        Some(quote) => quote.estimate.clone(),
+                        None => frozen_stream_quote(
+                            pricing.as_ref(),
+                            &prepared.route.resolved_route.pricing_model,
+                            collected.usage_report(),
+                            collected.inference_report(),
+                        ),
+                    };
                     let mut extracted_usage = crate::upstream::usage(
                         collected.usage_report(),
                         collected.inference_report(),
                     );
                     if let Some((usage, completeness)) = &mut extracted_usage {
                         usage.cost_estimate = estimate.clone();
+                        if let Some(quote) = &server_fallback_quote {
+                            crate::history_projection::attach_server_fallback_cost_quote(
+                                &mut usage.provider_metadata,
+                                quote.metadata.clone(),
+                            )?;
+                        }
                         attempt.observe(usage, *completeness);
                     }
-                    let decoded = crate::execution::decode(&collected).and_then(|decoded| {
-                        crate::history_projection::project_response(
+                    let decoded = crate::execution::decode(&collected).and_then(|mut decoded| {
+                        let server_event=prepared.server_fallback_lane.as_ref().and_then(|_|lingxi_llm_client::providers::anthropic::fallback_response::project_nonstream(&mut decoded,&prepared.route.resolved_route.request_model,provider_resp.request_id.clone()));
+                        let mut response=crate::history_projection::project_response(
                             decoded,
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
-                        )
+                        )?;
+                        response.usage.cost_estimate = estimate.clone();
+                        if let Some(quote) = &server_fallback_quote {
+                            crate::history_projection::attach_server_fallback_cost_quote(
+                                &mut response.provider_metadata,
+                                quote.metadata.clone(),
+                            )?;
+                            crate::history_projection::attach_server_fallback_cost_quote(
+                                &mut response.usage.provider_metadata,
+                                quote.metadata.clone(),
+                            )?;
+                        }
+                        if let (Some(event),Some(lane))=(server_event,prepared.server_fallback_lane.clone()) {
+                            let event = serde_json::to_value(crate::history::HistoryServerFallback {
+                                event,
+                                profile: prepared.route.resolved_route.profile_name.clone(),
+                                lane,
+                            })
+                            .map_err(|error| LlmError::InvalidRequest {
+                                message: error.to_string(),
+                            })?;
+                            let event = lingxi_llm_client::protocol::JsonPayload::from_generated_value(&event)
+                                .map_err(|error| LlmError::InvalidRequest {
+                                    message: error.to_string(),
+                                })?;
+                            crate::history_projection::append_observation(
+                                &mut response.provider_metadata,
+                                "server_fallback_events",
+                                event,
+                            )?;
+                        }
+                        Ok(response)
                     });
                     if extracted_usage.is_none() {
                         if let Ok(response) = &decoded {
@@ -2910,13 +4402,21 @@ impl ApiService {
                                 crate::history_projection::attach_computer_binding(
                                     &mut response.provider_metadata,
                                     binding,
-                                );
+                                )?;
                             }
                             Self::settle_thinking_display_probe(&prepared, &retry_scope);
                             // Feed rate-limit headers from every 2xx success response.
-                            self.record_rate_limit_from_headers(
+                            self.record_rate_limit_from_headers_for_route(
                                 &provider_resp.headers,
-                                &request_id,
+                                outgoing_client_request_id.as_deref(),
+                                prepared.route.protocol,
+                                crate::execution::response_provider_id(
+                                    &prepared.route.resolved_route.provider_id,
+                                ),
+                            );
+                            self.record_prompt_cache_overage_from_headers(
+                                &provider_resp.headers,
+                                prepared.prompt_cache.as_ref(),
                             );
                             // 3c-T3: populate response.cost when an estimator is wired.
                             // Unpriced or unknown models leave response.cost = None — never an error.
@@ -2932,26 +4432,88 @@ impl ApiService {
                             )
                             .await;
                             if req.execution.capture_retry_count {
-                                if !response.provider_metadata.is_object() {
-                                    response.provider_metadata = serde_json::json!({});
+                                if !response.provider_metadata.is_root_object() {
+                                    response.provider_metadata =
+                                        lingxi_llm_client::protocol::JsonPayload::parse("{}")
+                                            .expect("empty metadata object is valid JSON");
                                 }
-                                let metadata = response
+                                let retry_count = serde_json::to_value(retry_scope.retry_count())
+                                    .map_err(|error| LlmError::InvalidRequest {
+                                    message: error.to_string(),
+                                })?;
+                                let retry_count =
+                                    lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                                        &retry_count,
+                                    )
+                                    .map_err(|error| {
+                                        LlmError::InvalidRequest {
+                                            message: error.to_string(),
+                                        }
+                                    })?;
+                                response.provider_metadata = response
                                     .provider_metadata
-                                    .as_object_mut()
-                                    .expect("provider metadata normalized to an object");
-                                metadata.insert(
-                                    "_lingxi_retry_count".to_string(),
-                                    serde_json::Value::from(state.attempt),
-                                );
+                                    .with_object_field("_lingxi_retry_count", &retry_count)
+                                    .map_err(crate::upstream::error)?;
                             }
                             // #5: surface this drive's retry count to the cost
                             // path via `last_retry_count()`.
-                            *self.last_retry_count.lock().unwrap() = state.attempt;
+                            *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
                             return Ok(response);
                         }
                         Err(decode_err) => {
-                            // Step 1b: honour x-should-retry: false as terminal.
-                            if x_should_retry_false {
+                            if Self::repair_server_fallback_beta_rejection(
+                                &prepared,
+                                provider_resp.status,
+                                &provider_resp.body_json,
+                                server_fallback_parameter_added,
+                                server_fallback_beta_repair_attempted,
+                            ) {
+                                server_fallback_beta_repair_attempted = true;
+                                continue;
+                            }
+                            if allow_replay
+                                && self.probe_thinking_display_error(
+                                    &prepared,
+                                    &retry_scope,
+                                    provider_resp.status,
+                                    &provider_resp.body_json,
+                                )
+                            {
+                                continue;
+                            }
+                            if allow_replay
+                                && self.repair_fast_model_rejection(
+                                    &mut req,
+                                    &prepared,
+                                    provider_resp.status,
+                                    &provider_resp.body_json,
+                                )
+                            {
+                                continue;
+                            }
+                            if allow_replay {
+                                if let Some(fallback) = Self::note_dispatch_header_failure(
+                                    &mut dispatch,
+                                    &dispatch_attempt,
+                                    &decode_err,
+                                    Some((provider_resp.status, x_should_retry_false)),
+                                ) {
+                                    self.report_dispatch_fallback(
+                                        &req,
+                                        fallback,
+                                        provider_resp.request_id.as_deref(),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                            // Capacity acceptance precedes retry-decline headers in native eWo.
+                            if crate::model::retry_scope::http_retry_decline_is_terminal(
+                                provider_resp.status,
+                                x_should_retry_false,
+                                lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&provider_resp.body_json),
+                                crate::model::retry::retry_watchdog_from_env(),
+                            ) {
                                 telemetry::emit_failed(
                                     &self.analytics,
                                     &req.input.model,
@@ -2964,33 +4526,59 @@ impl ApiService {
                             }
 
                             // Rate-limited: resolve delay from headers.
-                            let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            let mut effective_err = decode_err.clone();
+                            if let LlmError::RateLimited { retry_after, .. } =
+                                decode_err.classification_source()
+                            {
                                 // Task 6 (batch 5): capture the 429's OWN
                                 // unified headers (errors.ts:471-516) so a
                                 // terminal 429 can surface the limits copy.
-                                self.record_rate_limit_from_429(
+                                self.record_rate_limit_from_429_for_route(
                                     &provider_resp.headers,
                                     Some(&provider_resp.body_json),
                                     &req.input.model,
+                                    outgoing_client_request_id.as_deref(),
+                                    prepared.route.protocol,
+                                    crate::execution::response_provider_id(
+                                        &prepared.route.resolved_route.provider_id,
+                                    ),
                                 );
-                                let delay = Self::resolve_retry_after(&provider_resp.headers);
-                                telemetry::emit_rate_limited(
-                                    &self.analytics,
-                                    &req.input.model,
-                                    u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                                )
-                                .await;
-                                LlmError::RateLimited {
-                                    retry_after: Some(delay),
-                                    scope: None,
+                                self.stage_prompt_cache_overage_from_429(
+                                    &provider_resp.headers,
+                                    prepared.prompt_cache.as_ref(),
+                                );
+                                let delay = retry_after.or_else(|| {
+                                    Self::resolve_retry_after(
+                                        &provider_resp.headers,
+                                        prepared.route.protocol,
+                                        crate::execution::response_provider_id(
+                                            &prepared.route.resolved_route.provider_id,
+                                        ),
+                                    )
+                                });
+                                if let Some(delay) = delay {
+                                    telemetry::emit_rate_limited(
+                                        &self.analytics,
+                                        &req.input.model,
+                                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                                    )
+                                    .await;
                                 }
-                            } else {
-                                decode_err.clone()
-                            };
+                                if let LlmError::RateLimited {
+                                    retry_after: effective_retry_after,
+                                    ..
+                                } = effective_err.classification_source_mut()
+                                {
+                                    *effective_retry_after = delay;
+                                }
+                            }
 
                             if !allow_replay {
-                                if matches!(decode_err, LlmError::RateLimited { .. }) {
-                                    self.promote_pending_429();
+                                if matches!(
+                                    decode_err.classification_source(),
+                                    LlmError::RateLimited { .. }
+                                ) {
+                                    self.promote_pending_429(prepared.prompt_cache.as_ref());
                                 }
                                 telemetry::emit_failed(
                                     &self.analytics,
@@ -3016,61 +4604,14 @@ impl ApiService {
                             // (Authentication ⇒ Terminal — the binary's
                             // `api_request_aws_auth_exhausted` throw).
                             if let Some(aws) = &self.aws_auth {
-                                if aws_auth_attempts
-                                    < crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS
-                                    && crate::auth::external_aws::is_aws_auth_error(
-                                        &decode_err,
-                                        &prepared.route.resolved_route.provider_id,
-                                    )
+                                if crate::auth::external_aws::is_aws_auth_error(
+                                    &decode_err,
+                                    &prepared.route.resolved_route.provider_id,
+                                ) && retry_scope.take_credential_renewal()
                                 {
-                                    aws_auth_attempts += 1;
                                     aws.refresh().await;
                                     continue;
                                 }
-                            }
-
-                            // Fast-mode-400 (claude-code `if(T && YNd(v)){Klc(),
-                            // o.fastMode=!1;continue}`): a `speed:"fast"` request
-                            // whose account/model doesn't support fast mode gets a
-                            // 400 "Fast mode is not enabled". Clear `req.speed`
-                            // (so the re-prepared body drops the `speed` key) and
-                            // retry WITHOUT counting it against the retry budget,
-                            // rather than surfacing the 400 as a terminal
-                            // InvalidRequest that fails the /fast user's turn.
-                            // Guarded on fast mode being ON so a genuine 400
-                            // without fast mode still terminates; once cleared the
-                            // 400 cannot recur (the body carries no `speed`).
-                            if req.input.service_tier
-                                == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
-                                && Self::is_fast_mode_not_enabled(&decode_err)
-                            {
-                                tracing::info!(
-                                    event = "fast_mode_disabled_retry",
-                                    "fast mode not enabled for this account/model; disabling and retrying"
-                                );
-                                req.input.service_tier = None;
-                                continue;
-                            }
-
-                            // (cc 2.1.219) dispatch-header degradation: an
-                            // HTTP 5xx on an attempt that carried
-                            // anthropic-dispatch-id strips it for the rest of
-                            // this query and retries immediately WITHOUT
-                            // consuming retry budget
-                            // ("retry:dispatch-header-strip").
-                            if let Some((reason, status)) = Self::note_dispatch_header_failure(
-                                &mut dispatch,
-                                &prepared,
-                                &decode_err,
-                            ) {
-                                telemetry::emit_dispatch_header_fallback(
-                                    &self.analytics,
-                                    &req.input.model,
-                                    reason,
-                                    status,
-                                )
-                                .await;
-                                continue;
                             }
 
                             if let Some(next) = advance_connection(
@@ -3089,7 +4630,7 @@ impl ApiService {
                                 continue;
                             }
                             let step = guard_max_tokens_adjustment(
-                                next_step_with_backoff(
+                                retry_scope.next_step(
                                     &mut state,
                                     &retry_control,
                                     &effective_err,
@@ -3101,6 +4642,12 @@ impl ApiService {
                             );
                             match step {
                                 DriveStep::RetryAfter(delay) => {
+                                    self.record_prompt_cache_overage_from_quota_wait(
+                                        provider_resp.status,
+                                        &provider_resp.headers,
+                                        retry_control.watchdog,
+                                        prepared.prompt_cache.as_ref(),
+                                    );
                                     self.report_and_sleep_retry(
                                         &effective_err,
                                         delay,
@@ -3162,6 +4709,7 @@ impl ApiService {
                                     // Reset the consecutive-overload counter so
                                     // the new primary model's 529 budget is fresh.
                                     state.consecutive_overloaded = 0;
+                                    retry_scope.reset_model_overloads();
                                     // Rebuild retry_control with the next chain
                                     // entry (None when exhausted).
                                     let next_fallback = chain.get(chain_idx).cloned();
@@ -3176,6 +4724,8 @@ impl ApiService {
                                     if allow_fallback {
                                         retry_control.allow_fallback = true;
                                     }
+                                    retry_control =
+                                        retry_scope.configure(&retry_control, &mut state);
                                     continue;
                                 }
                                 DriveStep::Terminal => {
@@ -3186,8 +4736,11 @@ impl ApiService {
                                     // claudeAiLimits.ts:487). Gated on the
                                     // RateLimited discriminant so a non-429
                                     // terminal never promotes a stale slot.
-                                    if matches!(decode_err, LlmError::RateLimited { .. }) {
-                                        self.promote_pending_429();
+                                    if matches!(
+                                        decode_err.classification_source(),
+                                        LlmError::RateLimited { .. }
+                                    ) {
+                                        self.promote_pending_429(prepared.prompt_cache.as_ref());
                                     }
                                     telemetry::emit_failed(
                                         &self.analytics,
@@ -3226,85 +4779,62 @@ impl ApiService {
 
     // ── Inherent provider-neutral entry points ───────────────────────────────
 
-    /// Non-streaming call (provider-neutral). The drive logic of the
-    /// orchestrator's `OrchestratorApiClient::messages_create`. `profile` is the
-    /// optional provider profile (the orchestrator threads `SessionState`'s; the
-    /// subagent seam passes `None`).
+    /// Build a main request without clearing the session's structured-output
+    /// or thinking policy, then execute every requested control together.
     pub async fn messages_create(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        request: MessagesCreateRequest,
     ) -> Result<HistoryResponse, LlmError> {
         let (req, retry) = self.build_main_message_request(request, false)?;
         self.execute_non_stream_request(req, NonStreamingRequestClass::Main, retry)
             .await
     }
 
-    /// Non-streaming call carrying a `context_hint` offer.
-    ///
-    /// Identical to [`Self::messages_create`] except the request sets
-    /// [`crate::LlmRequest::context_hint`], which the Anthropic codec emits as
-    /// the top-level `context_hint` body key and [`Self::beta_context`] reads
-    /// back to add the `context-hint-2026-04-09` beta.
-    ///
-    /// `None` is byte-identical to [`Self::messages_create`] — which is the
-    /// state every request is in unless a host turns the controller on.
-    pub async fn messages_create_with_context_hint(
+    /// Execute a canonical request through the physical retry, watchdog and
+    /// registered-attempt driver without changing its body policy.
+    pub async fn execute_non_stream_request(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        context_hint: Option<serde_json::Value>,
+        mut request: LlmRequest,
+        class: NonStreamingRequestClass,
+        retry: NonStreamingRetryOptions,
     ) -> Result<HistoryResponse, LlmError> {
-        let mut req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        req.input.controls.anthropic.context_hint = context_hint;
-        let ctl = resolve_retry_control_with_settings(
+        request.stream = false;
+        let model = &request.input.model;
+        let display_model = self
+            .alias_to_display
+            .get(model)
+            .map_or(model.as_str(), String::as_str);
+        let chain = match retry.fallback {
+            FallbackPolicy::Disabled => Vec::new(),
+            FallbackPolicy::Models(models) => models,
+            FallbackPolicy::Configured => self
+                .fallback_overrides
+                .get(display_model)
+                .cloned()
+                .unwrap_or_else(|| self.fallback_models.clone()),
+        };
+        let mut control = resolve_retry_control_with_settings(
             model,
-            None,
+            chain.first().cloned(),
             self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
-            .await
-    }
-
-    /// Non-streaming call with an explicit `max_tokens` escalation override
-    /// (provider-neutral). The drive logic of the orchestrator's
-    /// `OrchestratorApiClient::messages_create_with_opts`. `profile` is the
-    /// optional provider profile.
-    pub async fn messages_create_with_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        max_tokens: u32,
-    ) -> Result<HistoryResponse, LlmError> {
-        let req = self.build_request(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            false,
-            Some(max_tokens),
-        )?;
-        let ctl = resolve_retry_control_with_settings(
-            model,
-            None,
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
-            .await
+        if !chain.is_empty() {
+            control.allow_fallback = true;
+        }
+        let dispatch = match class {
+            NonStreamingRequestClass::Main => DispatchHeaderState::default(),
+            NonStreamingRequestClass::Auxiliary => DispatchHeaderState::AUXILIARY,
+        };
+        self.drive_non_stream_seeded_with_chain(
+            request,
+            control,
+            retry.initial_consecutive_overloaded.unwrap_or(0),
+            &chain,
+            dispatch,
+        )
+        .await
     }
 
     /// Build the canonical non-strict side-query request used by both
@@ -3314,9 +4844,13 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        system_input: Option<
+            &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -3325,12 +4859,31 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmRequest, LlmError> {
+        let system = side_query_system_prompt(system, system_input)?;
         let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+            self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                false,
+                max_tokens,
+                skip_global_cache_for_system_prompt,
+                prompt_cache_query_source(query_source),
+            )
         })?;
+        // A main turn's Mod effort is task-local. Side queries assembled in
+        // that same task keep their own explicit/default effort instead.
+        if MOD_REQUEST_EFFORT.try_with(|_| ()).is_ok() {
+            if let Some(thinking) = req.input.thinking.as_mut() {
+                thinking.effort = None;
+            }
+        }
         req.set_tool_choice(tool_choice);
         req.input.stop_sequences = stop_sequences;
         req.execution.capture_retry_count = true;
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
         req.set_effort(effort)?;
@@ -3344,7 +4897,10 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        system_input: Option<
+            &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         messages: Vec<ConversationMessage>,
         schema: serde_json::Value,
         max_tokens: Option<u32>,
@@ -3353,19 +4909,26 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmRequest, LlmError> {
+        let system = side_query_system_prompt(system, system_input)?;
         let mut req = self.build_request(
             model,
             profile,
-            system,
+            system.as_ref(),
             messages,
             Vec::new(),
             true,
             max_tokens,
+            false,
+            prompt_cache_query_source(query_source),
         )?;
         req.input.tool_choice = lingxi_llm_client::protocol::ToolChoice::Auto;
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
             name: "response".into(),
-            schema,
+            schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&schema)
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("JSON schema could not be encoded as source: {error}"),
+                })?,
             strict: true,
         };
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
@@ -3402,20 +4965,32 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<HistoryResponse, LlmError> {
+        let system = custom_system_prompt(system);
         let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+            self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                false,
+                max_tokens,
+                false,
+                prompt_cache_query_source(query_source),
+            )
         })?;
 
         // `build_request` applies main-turn-only overrides. A forked summary
         // owns these fields independently, so restore its explicit values.
         req.set_tool_choice(tool_choice);
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.input.stop_sequences = stop_sequences;
         req.input.temperature = temperature;
         req.execution.query_source = query_source.map(str::to_string);
@@ -3441,9 +5016,13 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        system_input: Option<
+            &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -3456,6 +5035,8 @@ impl ApiService {
             model,
             profile,
             system,
+            system_input,
+            skip_global_cache_for_system_prompt,
             messages,
             tools,
             max_tokens,
@@ -3488,17 +5069,29 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let system = custom_system_prompt(system);
         let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+            self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                max_tokens,
+                false,
+                prompt_cache_query_source(query_source),
+            )
         })?;
         req.set_tool_choice(tool_choice);
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.input.stop_sequences = stop_sequences;
         req.input.temperature = temperature;
         req.execution.query_source = query_source.map(str::to_string);
@@ -3513,7 +5106,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -3521,93 +5114,26 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let system = custom_system_prompt(system);
         let mut req = crate::thinking_scope::isolated(|| {
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+            self.build_request(
+                model,
+                profile,
+                system.as_ref(),
+                messages,
+                tools,
+                true,
+                max_tokens,
+                false,
+                prompt_cache_query_source(query_source),
+            )
         })?;
         req.set_tool_choice(tool_choice);
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.input.stop_sequences = stop_sequences;
         req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
         self.drive_stream(req).await
-    }
-
-    /// Non-streaming call with the **Opus-fallback** policy wired
-    /// (provider-neutral). The drive logic of the orchestrator's
-    /// `OrchestratorApiClient::messages_create_with_fallback`.
-    ///
-    /// Routes through [`resolve_retry_control_with_settings`] which computes
-    /// `allow_fallback` from the env + subscriber state. The
-    /// `_is_subscriber` / `_is_enterprise` parameters are **ignored** — the
-    /// service always reads subscriber state via [`Self::effective_subscriber`]
-    /// (the live shared snapshot when attached, else the construction-time copy).
-    /// The underscore prefix signals that these call-site values are not used;
-    /// the parameters are kept for API compatibility.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn messages_create_with_fallback(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        fallback_model: Option<&str>,
-        _is_subscriber: bool,
-        _is_enterprise: bool,
-    ) -> Result<HistoryResponse, LlmError> {
-        // Per-model settings fallback wins over global fallback_model.
-        // Call-site fallback_model (from OrchestratorApiClient) wins over both when
-        // it's explicitly passed.
-        //
-        // Normalize the request model via alias_to_display so that an alias
-        // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
-        // still finds the per-model fallback entry whose key is the display model.
-        let display_model = self
-            .alias_to_display
-            .get(model)
-            .map_or(model, String::as_str);
-
-        // Build the effective chain:
-        //   1. explicit call-site fallback_model → single-entry chain (legacy path)
-        //   2. per-model settings chain          → full multi-entry chain
-        //   3. global fallback_model             → single-entry chain
-        // The chain is walked entry-by-entry in the drive loop.
-        let effective_chain: Vec<String> = if let Some(fb) = fallback_model {
-            // The legacy call-site parameter remains a string for API
-            // compatibility, but Claude's CLI value is an ordered CSV list.
-            parse_fallback_chain(fb)
-        } else if let Some(chain) = self.fallback_overrides.get(display_model) {
-            chain.clone()
-        } else if !self.fallback_models.is_empty() {
-            self.fallback_models.clone()
-        } else {
-            vec![]
-        };
-
-        // Primary request uses the passed profile; fallback requests use None
-        // (the fallback config string has no associated profile).
-        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        // Initial ctl: chain[0] as fallback_model (None when chain is empty).
-        let mut ctl = resolve_retry_control_with_settings(
-            model,
-            effective_chain.first().cloned(),
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        // If any fallback is configured, honour allow_fallback regardless of
-        // the model-type heuristic (preserves the pre-Task-8 contract: an
-        // explicit or configured fallback always enables the gate).
-        if !effective_chain.is_empty() {
-            ctl.allow_fallback = true;
-        }
-        self.drive_non_stream_seeded_with_chain(
-            req,
-            ctl,
-            0,
-            &effective_chain,
-            DispatchHeaderState::default(),
-        )
-        .await
     }
 
     /// Count the input tokens a non-streaming `messages.create` for
@@ -3623,9 +5149,20 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
     ) -> Result<u64, LlmError> {
-        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        let system = custom_system_prompt(system);
+        let req = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            false,
+            None,
+            false,
+            PromptCacheQuerySource::Unspecified,
+        )?;
         crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.clone(), &req)
             .await
     }
@@ -3640,46 +5177,24 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
     ) -> Result<Option<u64>, LlmError> {
-        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        let system = custom_system_prompt(system);
+        let req = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            false,
+            None,
+            false,
+            PromptCacheQuerySource::Unspecified,
+        )?;
         crate::model::count_tokens::try_count_tokens_exact(
             self.client.as_ref(),
             self.transport.clone(),
             &req,
-        )
-        .await
-    }
-
-    /// Non-streaming call seeded with a pre-counted consecutive-529 value
-    /// (provider-neutral). The drive logic of the orchestrator's
-    /// `OrchestratorApiClient::messages_create_seeded`: used by the mid-stream 529
-    /// fallback (Task 7) so the streaming 529 that triggered the fallback is
-    /// pre-counted into the retry budget. Mirrors TS `claude.ts:2559`
-    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
-    pub async fn messages_create_seeded(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        initial_consecutive_overloaded: u8,
-    ) -> Result<HistoryResponse, LlmError> {
-        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        let ctl = resolve_retry_control_with_settings(
-            model,
-            None,
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        self.drive_non_stream_seeded_with_chain(
-            req,
-            ctl,
-            initial_consecutive_overloaded,
-            &[],
-            DispatchHeaderState::default(),
         )
         .await
     }
@@ -3761,16 +5276,28 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&crate::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
+        skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
-        let req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            true,
+            None,
+            skip_global_cache_for_system_prompt,
+            PromptCacheQuerySource::Unspecified,
+        )?;
+        self.refresh_effort_settings(&mut req);
+        req.execution.resolve_native_effort = true;
         let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
-        let request_id = new_request_id();
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.
-        self.inject_stream_headers(&mut prepared, &request_id, DispatchHeaderState::default());
+        self.inject_stream_headers(&mut prepared, DispatchHeaderState::default())?;
         let mut session = self.responses_ws_session.lock().await;
         self.client
             .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
@@ -3819,8 +5346,12 @@ impl ApiService {
             req.execution.input_protocol =
                 Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
         }
-        let request_id = new_request_id();
+        let request_id = new_telemetry_id();
         let allow_replay = allows_automatic_replay(&req);
+        if req.execution.thinking_recovery_scope.is_none() {
+            req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
+        }
+
         telemetry::emit_started(&self.analytics, &req.input.model, &request_id, true).await;
         if let Some(query_source) = req.execution.query_source.as_deref() {
             telemetry::emit_query_source(&self.analytics, &req.input.model, query_source).await;
@@ -3848,6 +5379,8 @@ impl ApiService {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
+        let retry_scope = ModelCallRetryScope::current_or_new();
+        let ctl = retry_scope.configure(&ctl, &mut state);
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         // Connection failover state — see the non-stream drive for why the chain
         // is captured once. The stream connect phase had NO fallback of any kind
@@ -3857,19 +5390,21 @@ impl ApiService {
         let mut connection_index = 0usize;
         let mut failover = crate::FailoverTriggers::NONE;
         let mut connections_captured = false;
-        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
-        let mut aws_auth_attempts: u32 = 0;
-        // `StreamNoResponse` owns a separate one-retry ledger in the oracle.
-        // It is intentionally independent from the ordinary retry budget.
-        let mut no_response_retries: u8 = 0;
         let mut max_tokens_adjusted = false;
-        // (cc 2.1.219) `Kt`/`no` — per-query, reset with every drive. Streams
-        // are main-thread or subagent turns, never `fB()==="auxiliary"`.
-        let mut dispatch = DispatchHeaderState::default();
+        let mut any_dispatched = false;
+        // Native `oSe` is per query, not per HTTP attempt.
+        let mut server_fallback_beta_repair_attempted = false;
+        // Reset per-query state and classify the actual source independently
+        // of stream/body policy: prompt hooks and scheduled streams are auxiliary.
+        let mut dispatch =
+            DispatchHeaderState::for_query_source(req.execution.query_source.as_deref());
+        dispatch.context_hint_beta = req.execution.context_hint_beta;
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
             // a thin wrapper transport that uses our already-modified request.
+            self.refresh_effort_settings(&mut req);
+            req.execution.resolve_native_effort = true;
             let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
                 Ok(p) => p,
                 Err(e) => return Err(e),
@@ -3881,14 +5416,10 @@ impl ApiService {
             }
             Self::log_deepseek_prepared_request(&req.input.model, &prepared, true);
             tracing::debug!(model = %req.input.model, event = "request_prepared");
-            self.inject_stream_headers(&mut prepared, &request_id, dispatch);
-            // Captured before the move below — the dispatch degradation check
-            // in the Err arm needs to know whether THIS attempt carried the
-            // header.
-            let attempt_carried_dispatch = prepared
-                .provider_request
-                .headers
-                .contains_key(DISPATCH_ID_HEADER);
+            self.capture_fast_account(&mut prepared).await?;
+            prepared.thinking_display_probe = retry_scope.display_probe();
+            let (dispatch_attempt, server_fallback_parameter_added) =
+                self.inject_stream_headers(&mut prepared, dispatch)?;
 
             let provider = &prepared.route.resolved_route.provider_id;
             let body_bytes = prepared.provider_request.wire_body_bytes()?.len();
@@ -3899,6 +5430,8 @@ impl ApiService {
             });
 
             let mut attempt = crate::model_attempt::WireAttempt::new(None);
+            let admission = req.execution.request_dispatch_admission.clone();
+            let mut admission_rejected = false;
 
             // Open stream through the prepared-call path so injected headers are
             // preserved while OpenAI Responses providers can reuse a WebSocket
@@ -3969,6 +5502,12 @@ impl ApiService {
             .await;
             match opened {
                 Err(transport_err) => {
+                    if admission_rejected {
+                        attempt.finish().await?;
+                        return Err(LlmError::RequestDispatchRejected {
+                            prior_dispatch: any_dispatched,
+                        });
+                    }
                     attempt.finish().await?;
                     if !allow_replay {
                         telemetry::emit_failed(
@@ -3985,27 +5524,18 @@ impl ApiService {
                     // whole request, then terminates before generic retry logic.
                     // On the first occurrence it still flows through dispatch
                     // degradation and the normal retry/backoff classifier.
-                    if crate::model::stream_watchdog::is_stream_no_response(&transport_err) {
-                        if no_response_retries >= 1 {
-                            return Err(transport_err);
-                        }
-                        no_response_retries += 1;
+                    if crate::model::stream_watchdog::is_stream_no_response(&transport_err)
+                        && !retry_scope.take_no_response_retry()
+                    {
+                        return Err(transport_err);
                     }
-                    // (cc 2.1.219) dispatch-header degradation, arm 1 (2.1.220
-                    // @237555467) on the stream CONNECT phase: strip for the
-                    // rest of this query + immediate budget-free retry.
-                    if let Some((reason, status)) = Self::note_dispatch_header_failure_carried(
+                    if let Some(fallback) = Self::note_dispatch_header_failure(
                         &mut dispatch,
-                        attempt_carried_dispatch,
+                        &dispatch_attempt,
                         &transport_err,
+                        None,
                     ) {
-                        telemetry::emit_dispatch_header_fallback(
-                            &self.analytics,
-                            &req.input.model,
-                            reason,
-                            status,
-                        )
-                        .await;
+                        self.report_dispatch_fallback(&req, fallback, None).await;
                         continue;
                     }
                     if let Some(next) = advance_connection(
@@ -4023,7 +5553,7 @@ impl ApiService {
                         );
                         continue;
                     }
-                    let step = next_step_with_backoff(
+                    let step = retry_scope.next_step(
                         &mut state,
                         &ctl,
                         &transport_err,
@@ -4040,6 +5570,8 @@ impl ApiService {
                     }
                 }
                 Ok((prepared, streaming)) => {
+                    let outgoing_client_request_id =
+                        streaming.client_request_id().map(str::to_owned);
                     let response_headers: std::collections::BTreeMap<String, String> = streaming
                         .headers()
                         .iter()
@@ -4052,6 +5584,7 @@ impl ApiService {
                     );
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status() >= 400 {
+                        let response_status = streaming.status();
                         // Error responses do not enter the event watchdog below.
                         // Bound their body collection too, respecting the host's
                         // explicit watchdog-disable setting.
@@ -4077,7 +5610,16 @@ impl ApiService {
                                 return Err(error);
                             }
                         };
-                        let body_json = crate::execution::response(collected.response()).body_json;
+                        let body_json = crate::execution::response(
+                            collected.response(),
+                            prepared.route.protocol,
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                        )
+                        .body_json;
+                        let outgoing_client_request_id =
+                            collected.client_request_id().map(str::to_owned);
                         if let Some((usage, completeness)) = crate::upstream::usage(
                             collected.usage_report(),
                             collected.inference_report(),
@@ -4094,28 +5636,122 @@ impl ApiService {
 
                         // Mirror the non-stream path: for 429s, resolve the
                         // actual retry delay from the real response headers
-                        // (retry-after / anthropic-ratelimit-*).  Empty headers
-                        // fall through to the 1 s fallback inside
-                        // `resolve_retry_after`.
-                        let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                        // (retry-after / anthropic-ratelimit-*).  Absent hints leave delay selection to the retry policy.
+                        let mut effective_err = decode_err.clone();
+                        if let LlmError::RateLimited { retry_after, .. } =
+                            decode_err.classification_source()
+                        {
                             // Task 6 (batch 5): same 429-error-header capture
                             // as the non-stream path (errors.ts:471-516).
-                            self.record_rate_limit_from_429(
+                            self.record_rate_limit_from_429_for_route(
                                 &response_headers,
                                 Some(&body_json),
                                 &req.input.model,
+                                outgoing_client_request_id.as_deref(),
+                                prepared.route.protocol,
+                                crate::execution::response_provider_id(
+                                    &prepared.route.resolved_route.provider_id,
+                                ),
                             );
-                            LlmError::RateLimited {
-                                retry_after: Some(Self::resolve_retry_after(&response_headers)),
-                                scope: None,
+                            self.stage_prompt_cache_overage_from_429(
+                                &response_headers,
+                                prepared.prompt_cache.as_ref(),
+                            );
+                            let delay = retry_after.or_else(|| {
+                                Self::resolve_retry_after(
+                                    &response_headers,
+                                    prepared.route.protocol,
+                                    crate::execution::response_provider_id(
+                                        &prepared.route.resolved_route.provider_id,
+                                    ),
+                                )
+                            });
+                            if let LlmError::RateLimited {
+                                retry_after: effective_retry_after,
+                                ..
+                            } = effective_err.classification_source_mut()
+                            {
+                                *effective_retry_after = delay;
                             }
-                        } else {
-                            decode_err.clone()
-                        };
+                        }
 
-                        if !allow_replay {
-                            if matches!(decode_err, LlmError::RateLimited { .. }) {
-                                self.promote_pending_429();
+                        if Self::repair_server_fallback_beta_rejection(
+                            &prepared,
+                            response_status,
+                            &body_json,
+                            server_fallback_parameter_added,
+                            server_fallback_beta_repair_attempted,
+                        ) {
+                            server_fallback_beta_repair_attempted = true;
+                            continue;
+                        }
+
+                        if allow_replay
+                            && self.probe_thinking_display_error(
+                                &prepared,
+                                &retry_scope,
+                                response_status,
+                                &body_json,
+                            )
+                        {
+                            continue;
+                        }
+
+                        let declined = response_headers
+                            .get("x-should-retry")
+                            .is_some_and(|value| value == "false");
+                        // Native server/overload model gates precede retry hints.
+                        // SDK stateful execution still requires an explicit host decision.
+                        if allow_replay && retry_scope.request_http_model_fallback(response_status, lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json))
+                        {
+                            return Err(decode_err);
+                        }
+                        if allow_replay
+                            && self.repair_fast_model_rejection(
+                                &mut req,
+                                &prepared,
+                                response_status,
+                                &body_json,
+                            )
+                        {
+                            continue;
+                        }
+                        if allow_replay {
+                            if let Some(fallback) = Self::note_dispatch_header_failure(
+                                &mut dispatch,
+                                &dispatch_attempt,
+                                &decode_err,
+                                Some((response_status, declined)),
+                            ) {
+                                self.report_dispatch_fallback(
+                                    &req,
+                                    fallback,
+                                    crate::execution::extract_response_request_id(
+                                        prepared.route.protocol,
+                                        crate::execution::response_provider_id(
+                                            &prepared.route.resolved_route.provider_id,
+                                        ),
+                                        &response_headers,
+                                    )
+                                    .as_deref(),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        if !allow_replay
+                            || crate::model::retry_scope::http_retry_decline_is_terminal(
+                                response_status,
+                                declined,
+                                lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json),
+                                crate::model::retry::retry_watchdog_from_env(),
+                            )
+                        {
+                            if matches!(
+                                decode_err.classification_source(),
+                                LlmError::RateLimited { .. }
+                            ) {
+                                self.promote_pending_429(prepared.prompt_cache.as_ref());
                             }
                             telemetry::emit_failed(
                                 &self.analytics,
@@ -4132,33 +5768,14 @@ impl ApiService {
                         // twin of the non-stream AWS auth-refresh hook (see
                         // `drive_non_stream_seeded_with_chain`).
                         if let Some(aws) = &self.aws_auth {
-                            if aws_auth_attempts < crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS
-                                && crate::auth::external_aws::is_aws_auth_error(
-                                    &decode_err,
-                                    &prepared.route.resolved_route.provider_id,
-                                )
+                            if crate::auth::external_aws::is_aws_auth_error(
+                                &decode_err,
+                                &prepared.route.resolved_route.provider_id,
+                            ) && retry_scope.take_credential_renewal()
                             {
-                                aws_auth_attempts += 1;
                                 aws.refresh().await;
                                 continue;
                             }
-                        }
-
-                        // Fast-mode-400 (stream twin of the non-stream `YNd`
-                        // handler): a `speed:"fast"` request the account/model
-                        // rejects with a 400 "Fast mode is not enabled" clears
-                        // `req.speed` and retries (uncounted) instead of failing
-                        // the /fast user's streamed turn.
-                        if req.input.service_tier
-                            == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
-                            && Self::is_fast_mode_not_enabled(&decode_err)
-                        {
-                            tracing::info!(
-                                event = "fast_mode_disabled_retry",
-                                "fast mode not enabled for this account/model; disabling and retrying (stream)"
-                            );
-                            req.input.service_tier = None;
-                            continue;
                         }
 
                         if let Some(next) = advance_connection(
@@ -4177,7 +5794,7 @@ impl ApiService {
                             continue;
                         }
                         let step = guard_max_tokens_adjustment(
-                            next_step_with_backoff(
+                            retry_scope.next_step(
                                 &mut state,
                                 &ctl,
                                 &effective_err,
@@ -4189,13 +5806,21 @@ impl ApiService {
                         );
                         match step {
                             DriveStep::RetryAfter(delay) => {
+                                self.record_prompt_cache_overage_from_quota_wait(
+                                    response_status,
+                                    &response_headers,
+                                    ctl.watchdog,
+                                    prepared.prompt_cache.as_ref(),
+                                );
                                 self.report_and_sleep_retry(&effective_err, delay, &state, &ctl)
                                     .await;
                                 // Re-prepare on next iteration so headers stay fresh.
                                 continue;
                             }
                             DriveStep::AdjustMaxTokens(new_max) => {
-                                if let LlmError::InvalidRequest { message } = &decode_err {
+                                if let LlmError::InvalidRequest { message } =
+                                    decode_err.classification_source()
+                                {
                                     if let Some(overflow) =
                                         crate::model::overflow::parse_overflow_message(message)
                                     {
@@ -4226,8 +5851,11 @@ impl ApiService {
                         // handler, claudeAiLimits.ts:487). Gated on the
                         // RateLimited discriminant so a non-429 terminal never
                         // promotes a stale slot.
-                        if matches!(decode_err, LlmError::RateLimited { .. }) {
-                            self.promote_pending_429();
+                        if matches!(
+                            decode_err.classification_source(),
+                            LlmError::RateLimited { .. }
+                        ) {
+                            self.promote_pending_429(prepared.prompt_cache.as_ref());
                         }
                         // Terminal twin for the connect-phase emit_started
                         // (mirrors the non-stream terminal arms).
@@ -4242,17 +5870,28 @@ impl ApiService {
                         return Err(decode_err);
                     }
 
-                    self.record_rate_limit_from_headers(&response_headers, &request_id);
-                    *self.last_retry_count.lock().unwrap() = state.attempt;
-                    let decoder = crate::history_projection::HistoryProjector::projection(
+                    self.record_rate_limit_from_headers_for_route(
+                        &response_headers,
+                        outgoing_client_request_id.as_deref(),
+                        prepared.route.protocol,
+                        crate::execution::response_provider_id(
+                            &prepared.route.resolved_route.provider_id,
+                        ),
+                    );
+                    self.record_prompt_cache_overage_from_headers(
+                        &response_headers,
+                        prepared.prompt_cache.as_ref(),
+                    );
+                    *self.last_retry_count.lock().unwrap() = retry_scope.retry_count();
+                    let mut decoder = crate::history_projection::HistoryProjector::projection(
                         crate::upstream::family(&prepared.route.protocol),
                         crate::stream_provider_metadata_from_headers(&response_headers),
-                    );
+                    )?;
                     if let Some(binding) = prepared.computer_binding.as_ref() {
                         crate::history_projection::attach_computer_binding(
                             &mut decoder.metadata,
                             binding,
-                        );
+                        )?;
                     }
                     decoder.admit_server_fallback(
                         prepared.server_fallback_lane.clone(),
@@ -4265,7 +5904,7 @@ impl ApiService {
                             ),
                             &response_headers,
                         ),
-                    );
+                    )?;
                     let mut frames = streaming
                         .into_stream()
                         .map_err(|_| LlmError::ProviderInternal)?;
@@ -4282,6 +5921,8 @@ impl ApiService {
                             )
                         });
 
+                    Self::settle_thinking_display_probe(&prepared, &retry_scope);
+
                     // Clone analytics + metadata into the unfold state so
                     // emit_succeeded / emit_failed can fire from inside the async closure.
                     let stream_started = Instant::now();
@@ -4295,20 +5936,10 @@ impl ApiService {
                         .stream_idle_timeout_override
                         .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
 
-                    // (cc 2.1.219) dispatch-header degradation, arm 2 (2.1.220
-                    // @237577972 — `reason:"body_phase"`): the oracle re-checks
-                    // the header inside the stream BODY catch, so a connection
-                    // error raised before the first event (`!oc`) strips it and
-                    // `continue e`s — ahead of, and without consuming, the
-                    // stale-connection budget (`ko<jt`). The port hands the
-                    // stream to the caller here, so the only point where an
-                    // attempt loop still exists is a one-frame lookahead. It is
-                    // taken ONLY when this attempt carried the header, i.e.
-                    // never on the default-off path; the frame it reads is
-                    // seeded back into the unfold so decoding is unchanged.
-                    let mut seed: Option<Result<Option<lingxi_llm_client::StreamBatch>, LlmError>> =
-                        None;
-                    if attempt_carried_dispatch && allow_replay {
+                    // Native body-phase recovery requires a carried dispatch header
+                    // and a connection failure before the first forwarded event.
+                    let mut seed = None;
+                    if dispatch_attempt.value.is_some() && allow_replay {
                         let first = match stream_idle_timeout {
                             Some(t) => {
                                 // Wall clock across the same wait the monotonic
@@ -4336,12 +5967,22 @@ impl ApiService {
                             if let Some((mut usage, completeness)) =
                                 crate::upstream::usage(&batch.usage, &batch.inference)
                             {
-                                usage.cost_estimate = frozen_stream_quote(
-                                    pricing.as_ref(),
-                                    &pricing_model,
-                                    &batch.usage,
-                                    &batch.inference,
-                                );
+                                // An admitted server lane can still resolve to
+                                // an ordinary response. Defer its quote until
+                                // typed fallback iterations arrive or the
+                                // terminal boundary proves there is no cNe
+                                // branch; otherwise a later native quote would
+                                // be preceded by a false request-model total.
+                                usage.cost_estimate = if prepared.server_fallback_lane.is_none() {
+                                    frozen_stream_quote(
+                                        pricing.as_ref(),
+                                        &pricing_model,
+                                        &batch.usage,
+                                        &batch.inference,
+                                    )
+                                } else {
+                                    None
+                                };
                                 attempt.observe(&usage, completeness);
                             }
                         }
@@ -4358,20 +5999,30 @@ impl ApiService {
                             other => other,
                         };
                         if let Err(first_err) = &first {
-                            if Self::note_dispatch_body_phase_failure(
-                                &mut dispatch,
-                                attempt_carried_dispatch,
+                            // Native x2 body classification requires a connection cause;
+                            // SDK timeout/abort errors alone do not supply that cause.
+                            if matches!(
                                 first_err,
+                                LlmError::Transport { .. } | LlmError::TlsCert { .. }
                             ) {
-                                attempt.finish().await?;
-                                telemetry::emit_dispatch_header_fallback(
-                                    &self.analytics,
-                                    &req.input.model,
-                                    "body_phase",
-                                    None,
-                                )
-                                .await;
-                                continue;
+                                if let Some(fallback) = dispatch.on_body_failure(&dispatch_attempt)
+                                {
+                                    attempt.finish().await?;
+                                    self.report_dispatch_fallback(
+                                        &req,
+                                        fallback,
+                                        crate::execution::extract_response_request_id(
+                                            prepared.route.protocol,
+                                            crate::execution::response_provider_id(
+                                                &prepared.route.resolved_route.provider_id,
+                                            ),
+                                            &response_headers,
+                                        )
+                                        .as_deref(),
+                                    )
+                                    .await;
+                                    continue;
+                                }
                             }
                         }
                         seed = Some(first);
@@ -4385,6 +6036,12 @@ impl ApiService {
                         frames,
                         pricing,
                         pricing_model,
+                        server_fallback_lane: prepared.server_fallback_lane.clone(),
+                        server_fallback_quote_finalized: false,
+                        server_fallback_quote_candidate_seen: false,
+                        server_fallback_quote_metadata: None,
+                        server_fallback_quote_estimate: None,
+                        pending_service_error: None,
                         seed,
                         queue: VecDeque::new(),
                         finished: false,
@@ -4427,6 +6084,22 @@ impl ApiService {
                                     }
                                     return Some((Ok(event), s));
                                 }
+                                if let Some(error) = s.pending_service_error.take() {
+                                    let error = s.attempt.finish().await.err().unwrap_or(error);
+                                    s.finished = true;
+                                    if !s.done {
+                                        s.done = true;
+                                        telemetry::emit_failed(
+                                            &s.analytics,
+                                            &s.model,
+                                            &s.request_id,
+                                            ApiService::error_kind(&error),
+                                            ApiService::status_of(&error),
+                                        )
+                                        .await;
+                                    }
+                                    return Some((Err(error), s));
+                                }
                                 if let Some(error) = s.decoder.take_error() {
                                     let error = s.attempt.finish().await.err().unwrap_or(error);
                                     s.finished = true;
@@ -4454,7 +6127,8 @@ impl ApiService {
                                 // elapse, abort the stream with a detectable
                                 // idle-timeout error (binary
                                 // `tengu_streaming_watchdog_retry` surface).
-                                let seed_has_usage = s.seed.as_ref().is_some_and(|seed| matches!(seed, Ok(Some(batch)) if batch.usage.usage.is_some()));
+                                let seed_has_usage = s.server_fallback_lane.is_none()
+                                    && s.seed.as_ref().is_some_and(|seed| matches!(seed, Ok(Some(batch)) if batch.usage.usage.is_some()));
                                 let frame = match s.seed.take() {
                                     Some(seeded) => seeded,
                                     None => match s.idle_timeout {
@@ -4473,23 +6147,246 @@ impl ApiService {
                                 };
                                 match frame {
                                     Ok(Some(frame)) => {
-                                        let quote = frozen_stream_quote(
-                                            s.pricing.as_ref(),
-                                            &s.pricing_model,
-                                            &frame.usage,
-                                            &frame.inference,
-                                        );
-                                        s.decoder.observe_model_metadata(&s.frames);
+                                        let terminal_frame = frame.events.iter().any(|event| {
+                                            matches!(event, Ok(lingxi_llm_client::protocol::StreamEvent::End { .. }))
+                                        });
+                                        let terminal_fallback_boundary = frame.events.iter().any(|event| {
+                                            let Ok(lingxi_llm_client::protocol::StreamEvent::NativeControl {
+                                                protocol: lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+                                                control,
+                                            }) = event else {
+                                                return false;
+                                            };
+                                            matches!(
+                                                control.decode::<lingxi_llm_client::providers::anthropic::fallback_response::FallbackControl>(),
+                                                Ok(lingxi_llm_client::providers::anthropic::fallback_response::FallbackControl::Boundary {
+                                                    stop_reason: Some(_),
+                                                    ..
+                                                })
+                                            )
+                                        });
+                                        let terminal_quote_frame =
+                                            terminal_frame || terminal_fallback_boundary;
+                                        let iteration_array_cleared = frame.events.iter().any(|event| {
+                                            let Ok(lingxi_llm_client::protocol::StreamEvent::NativeControl {
+                                                protocol: lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+                                                control,
+                                            }) = event else {
+                                                return false;
+                                            };
+                                            let Ok(lingxi_llm_client::providers::anthropic::fallback_response::FallbackControl::Boundary {
+                                                iterations,
+                                                iterations_present: true,
+                                                ..
+                                            }) = control.decode::<lingxi_llm_client::providers::anthropic::fallback_response::FallbackControl>() else {
+                                                return false;
+                                            };
+                                            iterations.served_fallback_model.is_none()
+                                        });
+                                        if iteration_array_cleared
+                                            && s.server_fallback_quote_candidate_seen
+                                        {
+                                            // Keep the provider-facing usage snapshot clean from
+                                            // this Boundary onward; the stop-reason-bearing
+                                            // Boundary decides which quote branch won.
+                                            if let Err(error) =
+                                                s.decoder.clear_server_fallback_cost_quote()
+                                            {
+                                                s.pending_service_error = Some(error);
+                                                s.finished = true;
+                                                continue;
+                                            }
+                                            s.server_fallback_quote_metadata = None;
+                                        }
+                                        let mut quote_observation = None;
+                                        let quote = if let Some(lane) =
+                                            s.server_fallback_lane.as_ref()
+                                        {
+                                            let fallback = s.frames.anthropic_fallback();
+                                            let native_branch = fallback
+                                                .and_then(|facts| facts.iterations.as_ref())
+                                                .is_some_and(|iterations| {
+                                                    iterations.served_fallback_model.is_some()
+                                                });
+                                            if terminal_quote_frame
+                                                && !s.server_fallback_quote_finalized
+                                                && native_branch
+                                            {
+                                                // A typed terminal Boundary owns the final stop
+                                                // reason and iteration array. Do not let an
+                                                // earlier provisional observation lock the quote.
+                                                if let Some(ServerFallbackQuoteProjection {
+                                                    estimate,
+                                                    metadata,
+                                                    summary_model,
+                                                }) = frozen_server_fallback_quote(
+                                                    s.pricing.as_ref(),
+                                                    &s.pricing_model,
+                                                    &lane.model,
+                                                    fallback,
+                                                    &frame.inference,
+                                                ) {
+                                                    s.server_fallback_quote_finalized = true;
+                                                    s.server_fallback_quote_estimate =
+                                                        estimate.clone();
+                                                    quote_observation =
+                                                        Some(HistoryEvent::CostQuoteObserved {
+                                                            estimate: estimate.clone(),
+                                                            native_server_fallback: true,
+                                                            summary_model,
+                                                        });
+                                                    if let Err(error) = s
+                                                        .decoder
+                                                        .observe_server_fallback_cost_quote(
+                                                            metadata.clone(),
+                                                        )
+                                                    {
+                                                        s.pending_service_error = Some(error);
+                                                        s.finished = true;
+                                                        continue;
+                                                    }
+                                                    s.server_fallback_quote_metadata =
+                                                        Some(metadata);
+                                                    estimate
+                                                } else {
+                                                    None
+                                                }
+                                            } else if terminal_frame
+                                                && !s.server_fallback_quote_finalized
+                                                && s.server_fallback_quote_candidate_seen
+                                            {
+                                                // An explicit final `iterations: []` revokes
+                                                // the earlier cNe branch. Clear its reserved
+                                                // marker and use the ordinary aggregate quote.
+                                                let estimate = frozen_stream_quote(
+                                                    s.pricing.as_ref(),
+                                                    &s.pricing_model,
+                                                    &frame.usage,
+                                                    &frame.inference,
+                                                );
+                                                s.server_fallback_quote_finalized = true;
+                                                s.server_fallback_quote_estimate = estimate.clone();
+                                                s.server_fallback_quote_metadata = None;
+                                                if let Err(error) =
+                                                    s.decoder.clear_server_fallback_cost_quote()
+                                                {
+                                                    s.pending_service_error = Some(error);
+                                                    s.finished = true;
+                                                    continue;
+                                                }
+                                                quote_observation =
+                                                    Some(HistoryEvent::CostQuoteObserved {
+                                                        estimate: estimate.clone(),
+                                                        native_server_fallback: false,
+                                                        summary_model: None,
+                                                    });
+                                                estimate
+                                            } else if terminal_quote_frame
+                                                && s.server_fallback_quote_finalized
+                                            {
+                                                s.server_fallback_quote_estimate.clone()
+                                            } else if !terminal_quote_frame && !native_branch {
+                                                // Keep an earlier candidate until terminal facts
+                                                // confirm or revoke it. A partial usage boundary
+                                                // can omit the iteration array entirely.
+                                                None
+                                            } else if !terminal_quote_frame && native_branch {
+                                                if let Some(ServerFallbackQuoteProjection {
+                                                    estimate: _,
+                                                    metadata,
+                                                    summary_model,
+                                                }) = server_fallback_quote_candidate(
+                                                    &lane.model,
+                                                    fallback,
+                                                ) {
+                                                    s.server_fallback_quote_candidate_seen = true;
+                                                    if s.server_fallback_quote_metadata.as_ref()
+                                                        != Some(&metadata)
+                                                    {
+                                                        quote_observation =
+                                                            Some(HistoryEvent::CostQuoteObserved {
+                                                                estimate: None,
+                                                                native_server_fallback: true,
+                                                                summary_model,
+                                                            });
+                                                        if let Err(error) = s
+                                                            .decoder
+                                                            .observe_server_fallback_cost_quote(
+                                                                metadata.clone(),
+                                                            )
+                                                        {
+                                                            s.pending_service_error = Some(error);
+                                                            s.finished = true;
+                                                            continue;
+                                                        }
+                                                        s.server_fallback_quote_metadata =
+                                                            Some(metadata);
+                                                    }
+                                                }
+                                                None
+                                            } else {
+                                                frozen_stream_quote(
+                                                    s.pricing.as_ref(),
+                                                    &s.pricing_model,
+                                                    &frame.usage,
+                                                    &frame.inference,
+                                                )
+                                            }
+                                        } else {
+                                            frozen_stream_quote(
+                                                s.pricing.as_ref(),
+                                                &s.pricing_model,
+                                                &frame.usage,
+                                                &frame.inference,
+                                            )
+                                        };
+                                        if let Err(error) =
+                                            s.decoder.observe_model_metadata(&s.frames)
+                                        {
+                                            s.pending_service_error = Some(error);
+                                            s.finished = true;
+                                            continue;
+                                        }
                                         match s.decoder.project_batch(frame) {
                                             Ok(mut events) => {
                                                 attach_frozen_stream_quote(
                                                     &mut events,
                                                     quote.as_ref(),
                                                 );
+                                                if let Some(observation) = quote_observation {
+                                                    // The physical response may still carry a
+                                                    // billable quote if the host session later
+                                                    // declines its controller-facing hop.
+                                                    let terminal = events.iter().position(|event| {
+                                                        matches!(
+                                                            event,
+                                                            HistoryEvent::ServerFallback { .. }
+                                                                | HistoryEvent::MessageDelta { .. }
+                                                                | HistoryEvent::MessageStop
+                                                                | HistoryEvent::Completed { .. }
+                                                        )
+                                                    });
+                                                    events.insert(
+                                                        terminal.unwrap_or(events.len()),
+                                                        observation,
+                                                    );
+                                                }
                                                 if let Some((mut usage, completeness)) =
                                                     s.decoder.observed_usage()
                                                 {
                                                     usage.cost_estimate = quote.clone();
+                                                    if let Some(metadata) =
+                                                        &s.server_fallback_quote_metadata
+                                                    {
+                                                        if let Err(error) = crate::history_projection::attach_server_fallback_cost_quote(
+                                                            &mut usage.provider_metadata,
+                                                            metadata.clone(),
+                                                        ) {
+                                                            s.pending_service_error = Some(error);
+                                                            s.finished = true;
+                                                            continue;
+                                                        }
+                                                    }
                                                     if !seed_has_usage {
                                                         s.attempt.observe(&usage, completeness);
                                                     }
@@ -4503,6 +6400,18 @@ impl ApiService {
                                                     s.decoder.observed_usage()
                                                 {
                                                     usage.cost_estimate = quote.clone();
+                                                    if let Some(metadata) =
+                                                        &s.server_fallback_quote_metadata
+                                                    {
+                                                        if let Err(error) = crate::history_projection::attach_server_fallback_cost_quote(
+                                                            &mut usage.provider_metadata,
+                                                            metadata.clone(),
+                                                        ) {
+                                                            s.pending_service_error = Some(error);
+                                                            s.finished = true;
+                                                            continue;
+                                                        }
+                                                    }
                                                     if !seed_has_usage {
                                                         s.attempt.observe(&usage, completeness);
                                                     }
@@ -4520,18 +6429,34 @@ impl ApiService {
                                                     )
                                                     .await;
                                                 }
+                                                if let Some(observation) = quote_observation {
+                                                    s.pending_service_error = Some(e);
+                                                    return Some((Ok(observation), s));
+                                                }
                                                 return Some((Err(e), s));
                                             }
                                         }
                                     }
                                     Ok(None) => {
                                         s.finished = true;
-                                        let quote = frozen_stream_quote(
-                                            s.pricing.as_ref(),
-                                            &s.pricing_model,
-                                            &s.frames.usage_report(),
-                                            &s.frames.inference_report(),
-                                        );
+                                        // EOF may follow an End frame that already
+                                        // selected native per-iteration accounting.
+                                        // Preserve that quote (including None for an
+                                        // incomplete native quote) instead of replacing
+                                        // it with the dispatched-model aggregate price.
+                                        let quote = if s.server_fallback_quote_finalized
+                                            || s.server_fallback_quote_candidate_seen
+                                            || s.server_fallback_quote_metadata.is_some()
+                                        {
+                                            s.server_fallback_quote_estimate.clone()
+                                        } else {
+                                            frozen_stream_quote(
+                                                s.pricing.as_ref(),
+                                                &s.pricing_model,
+                                                &s.frames.usage_report(),
+                                                &s.frames.inference_report(),
+                                            )
+                                        };
                                         match s.decoder.finish() {
                                             Ok(mut events) => {
                                                 attach_frozen_stream_quote(
@@ -4542,6 +6467,18 @@ impl ApiService {
                                                     s.decoder.observed_usage()
                                                 {
                                                     usage.cost_estimate = quote.clone();
+                                                    if let Some(metadata) =
+                                                        &s.server_fallback_quote_metadata
+                                                    {
+                                                        if let Err(error) = crate::history_projection::attach_server_fallback_cost_quote(
+                                                            &mut usage.provider_metadata,
+                                                            metadata.clone(),
+                                                        ) {
+                                                            s.pending_service_error = Some(error);
+                                                            s.finished = true;
+                                                            continue;
+                                                        }
+                                                    }
                                                     s.attempt.observe(&usage, completeness);
                                                 } else {
                                                     s.attempt.observe_events(&events);
@@ -4553,6 +6490,18 @@ impl ApiService {
                                                     s.decoder.observed_usage()
                                                 {
                                                     usage.cost_estimate = quote.clone();
+                                                    if let Some(metadata) =
+                                                        &s.server_fallback_quote_metadata
+                                                    {
+                                                        if let Err(error) = crate::history_projection::attach_server_fallback_cost_quote(
+                                                            &mut usage.provider_metadata,
+                                                            metadata.clone(),
+                                                        ) {
+                                                            s.pending_service_error = Some(error);
+                                                            s.finished = true;
+                                                            continue;
+                                                        }
+                                                    }
                                                     s.attempt.observe(&usage, completeness);
                                                 }
                                                 let e = s.attempt.finish().await.err().unwrap_or(e);
@@ -4614,7 +6563,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -4647,11 +6596,22 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        let system = custom_system_prompt(system);
+        let mut req = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            true,
+            None,
+            false,
+            PromptCacheQuerySource::Subagent,
+        )?;
         req.set_effort(effort)?;
         if let Some(name) = forced_tool {
             req.set_tool_choice(Some(crate::ToolChoice::Tool {
@@ -4662,9 +6622,10 @@ impl ApiService {
     }
 
     /// Like [`Self::stream`], but ALSO threads a per-turn output-token ceiling
-    /// and a COGS query-source label onto the WIRE request (the agent crate's
-    /// `SubagentApiCallOpts` seam — Fusion panels and any other opts-aware
-    /// subagent caller). `max_tokens: None` and `query_source: None` keep the
+    /// and a COGS query-source label onto request execution metadata (the agent
+    /// crate's `SubagentApiCallOpts` seam — Fusion panels and other opts-aware
+    /// subagent callers). The cache policy receives the typed subagent role,
+    /// never the COGS label. `max_tokens: None` and `query_source_label: None` keep the
     /// body byte-identical to [`Self::stream`] (auto-computed ceiling, no
     /// label).
     #[allow(clippy::too_many_arguments)]
@@ -4674,15 +6635,25 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
-        query_source: Option<&str>,
+        query_source_label: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let system = custom_system_prompt(system);
+        let mut req = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            true,
+            max_tokens,
+            false,
+            PromptCacheQuerySource::Subagent,
+        )?;
         req.set_effort(effort)?;
-        req.execution.query_source = query_source.map(str::to_string);
+        req.execution.query_source = query_source_label.map(str::to_string);
         self.drive_stream(req).await
     }
 
@@ -4695,21 +6666,31 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
-        query_source: Option<&str>,
+        query_source_label: Option<&str>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let system = custom_system_prompt(system);
+        let mut req = self.build_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            true,
+            max_tokens,
+            false,
+            PromptCacheQuerySource::Subagent,
+        )?;
         req.set_effort(effort)?;
         if let Some(name) = forced_tool {
             req.set_tool_choice(Some(crate::ToolChoice::Tool {
                 name: name.to_string(),
             }));
         }
-        req.execution.query_source = query_source.map(str::to_string);
+        req.execution.query_source = query_source_label.map(str::to_string);
         self.drive_stream(req).await
     }
 
@@ -4734,24 +6715,31 @@ impl ApiService {
         max_tokens: Option<u32>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let system = custom_system_prompt(system);
         let mut req = self.build_request(
             model,
             profile,
-            system,
+            system.as_ref(),
             messages,
             Vec::new(),
             true,
             max_tokens,
+            false,
+            PromptCacheQuerySource::Unspecified,
         )?;
         // JSON-schema side queries are independent structured-output requests,
         // not forced-tool calls. A parent `--json-schema` turn may have set a
         // session-level `forced_tool_choice`; do not send that choice with the
         // empty tool list used by this request.
         req.input.tool_choice = lingxi_llm_client::protocol::ToolChoice::Auto;
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         req.set_effort(effort)?;
         req.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
             name: "response".into(),
-            schema,
+            schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&schema)
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("JSON schema could not be encoded as source: {error}"),
+                })?,
             strict: true,
         };
         self.drive_stream(req).await
@@ -4783,7 +6771,10 @@ impl ApiService {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        system_input: Option<
+            &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         messages: Vec<ConversationMessage>,
         schema: serde_json::Value,
         max_tokens: Option<u32>,
@@ -4796,6 +6787,7 @@ impl ApiService {
             model,
             profile,
             system,
+            system_input,
             messages,
             schema,
             max_tokens,
@@ -4813,7 +6805,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         stream: bool,
         max_tokens: Option<u32>,
         skip_global_cache_for_system_prompt: bool,
@@ -4862,11 +6854,8 @@ impl ApiService {
             );
         }
         let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
-        let available_tool_names: std::collections::HashSet<String> = tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
-            .map(str::to_string)
-            .collect();
+        let available_tool_names: std::collections::HashSet<String> =
+            tools.iter().map(|tool| tool.name.clone()).collect();
         let messages = ensure_tool_result_pairing_with_sources(
             normalize_messages_for_api_with_tool_search_and_sources(
                 strip_excess_media_with_sources(
@@ -4879,8 +6868,6 @@ impl ApiService {
         );
         let request_message_source_ids = messages.contributing_message_ids();
         let mut messages = to_llm_messages(messages.messages)?;
-        let tool_decls = to_tool_declarations(tools)?;
-
         let mut req = LlmRequest::new(model);
         req.execution.request_message_source_ids = request_message_source_ids;
         req.execution.refusal_fallback_context =
@@ -4941,7 +6928,7 @@ impl ApiService {
         }
 
         let (mut input, overrides) =
-            crate::convert::history_input(model, &messages, &[], &tool_decls, family)?;
+            crate::convert::history_input(model, &messages, &[], &tools, family)?;
         req.input = input;
         req.execution.input_protocol = Some(family);
         req.execution.message_json_string_overrides = overrides;
@@ -5038,11 +7025,17 @@ impl ApiService {
 
         // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
         // identity wired) omits the object — byte-identical to the prior request.
-        req.input.metadata = self
-            .request_metadata
-            .as_ref()
-            .map(|m| serde_json::json!({"user_id":m.user_id}))
-            .unwrap_or(serde_json::Value::Null);
+        req.input.metadata = if let Some(metadata) = self.request_metadata.as_ref() {
+            lingxi_llm_client::protocol::JsonPayload::parse("{}")
+                .expect("empty object is valid JSON")
+                .with_object_field(
+                    "user_id",
+                    &lingxi_llm_client::protocol::JsonPayload::string(&metadata.user_id),
+                )
+                .map_err(crate::upstream::error)?
+        } else {
+            lingxi_llm_client::protocol::JsonPayload::parse("null").expect("null is valid JSON")
+        };
 
         if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
             req.set_effort(Some(effort))?;
@@ -5088,7 +7081,14 @@ impl ApiService {
             opts.skip_global_cache_for_system_prompt,
             prompt_cache_query_source(opts.query_source.as_deref()),
         )?;
-        req.input.controls.anthropic.context_hint = opts.context_hint;
+        req.input.controls.anthropic.context_hint = opts
+            .context_hint
+            .as_ref()
+            .map(lingxi_llm_client::protocol::JsonPayload::from_generated_value)
+            .transpose()
+            .map_err(|error| LlmError::InvalidRequest {
+                message: format!("context hint could not be encoded as source: {error}"),
+            })?;
         req.execution.context_hint_beta = opts.context_hint_beta;
         req.execution.model_attempt = opts.model_attempt;
         req.execution
@@ -5139,7 +7139,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<crate::ToolDeclaration>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
         skip_global_cache_for_system_prompt: bool,
@@ -5173,17 +7173,54 @@ impl ApiService {
 const MAX_MEDIA_PER_REQUEST: usize = 100;
 
 /// (cc 2.1.219) `S8s` — the dispatch-routing opt-in header name.
-const DISPATCH_ID_HEADER: &str = "anthropic-dispatch-id";
 /// (cc 2.1.219) `Vtp` — the dispatch-routing opt-in header value.
-const DISPATCH_ID_V2S: &str = "v2s";
 /// `T1e`'s allow-list — the only host `Yd()` accepts as first-party.
 const FIRST_PARTY_API_HOST: &str = "api.anthropic.com";
 
 /// True when a nested `tool_result.content` block (a raw JSON value, e.g. an MCP
 /// image/resource result) is a media item — `type === "image" || "document"`,
 /// matching claude-code `isMedia` (`claude.ts:943`).
-fn is_media_value(v: &serde_json::Value) -> bool {
+fn is_media_value(v: lingxi_core::types::utf16_json::JsonValueView<'_>) -> bool {
     is_nested_media_value(v)
+}
+
+fn nested_media_count(blocks: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> usize {
+    let Some(values) = blocks.at_pointer("") else {
+        return 0;
+    };
+    let Some(length) = values.array_len() else {
+        return 0;
+    };
+    (0..length)
+        .filter(|index| values.get_index(*index).is_some_and(is_media_value))
+        .count()
+}
+
+fn strip_nested_media(
+    blocks: &mut lingxi_core::types::utf16_json::Utf16JsonProjection,
+    to_remove: &mut usize,
+) {
+    let Some(length) = blocks.array_len("") else {
+        return;
+    };
+    if *to_remove == 0 {
+        return;
+    }
+    let mut retained = Vec::with_capacity(length);
+    for index in 0..length {
+        let item = blocks
+            .subprojection(&format!("/{index}"))
+            .expect("content-block array item is a valid JSON subtree");
+        if *to_remove > 0 && item.at_pointer("").is_some_and(is_media_value) {
+            *to_remove -= 1;
+        } else {
+            retained.push(item);
+        }
+    }
+    if retained.len() != length {
+        *blocks = lingxi_core::types::utf16_json::Utf16JsonProjection::array(retained)
+            .expect("retained content-block items form a valid JSON array");
+    }
 }
 
 /// Count media (image/document) content blocks across all messages, INCLUDING
@@ -5202,7 +7239,7 @@ fn count_media(msgs: &[ConversationMessage]) -> usize {
                     ContentBlock::ToolResult {
                         content_blocks: Some(blocks),
                         ..
-                    } => blocks.iter().filter(|v| is_media_value(v)).count(),
+                    } => nested_media_count(blocks),
                     _ => 0,
                 })
                 .sum::<usize>(),
@@ -5216,16 +7253,20 @@ fn count_media(msgs: &[ConversationMessage]) -> usize {
 /// for each message (oldest-first), strip media NESTED in `tool_result.content`
 /// FIRST (the `.map`, `:982-999`), then TOP-LEVEL media (the `.filter`,
 /// `:1000-1006`).
-fn strip_excess_media(
-    mut msgs: Vec<ConversationMessage>,
+fn strip_excess_media(msgs: Vec<ConversationMessage>, limit: usize) -> Vec<ConversationMessage> {
+    strip_excess_media_with_sources(ConversationMessagesWithSources::new(msgs), limit).messages
+}
+
+fn strip_excess_media_with_sources(
+    mut msgs: ConversationMessagesWithSources,
     limit: usize,
-) -> Vec<ConversationMessage> {
-    let total = count_media(&msgs);
+) -> ConversationMessagesWithSources {
+    let total = count_media(&msgs.messages);
     if total <= limit {
         return msgs;
     }
     let mut to_remove = total - limit;
-    for m in &mut msgs {
+    for (m, block_sources) in msgs.messages.iter_mut().zip(&mut msgs.block_sources) {
         if to_remove == 0 {
             break;
         }
@@ -5244,28 +7285,25 @@ fn strip_excess_media(
                 ..
             } = block
             {
-                blocks.retain(|v| {
-                    if to_remove > 0 && is_media_value(v) {
-                        to_remove -= 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
+                strip_nested_media(blocks, &mut to_remove);
             }
         }
         // (2) Top-level media (claude-code `.filter`).
-        content.retain(|b| {
+        let mut retained_content = Vec::with_capacity(content.len());
+        let mut retained_sources = Vec::with_capacity(block_sources.len());
+        for (block, sources) in content.drain(..).zip(block_sources.drain(..)) {
             if to_remove > 0
-                && (matches!(b, ContentBlock::Image { .. })
-                    || matches!(b, ContentBlock::Document { .. }))
+                && (matches!(&block, ContentBlock::Image { .. })
+                    || matches!(&block, ContentBlock::Document { .. }))
             {
                 to_remove -= 1;
-                false
             } else {
-                true
+                retained_content.push(block);
+                retained_sources.push(sources);
             }
-        });
+        }
+        *content = retained_content;
+        *block_sources = retained_sources;
     }
     msgs
 }
@@ -5297,6 +7335,7 @@ fn insert_block_after_tool_results(
             content.push(Cb::Text {
                 text: ".".to_string(),
                 cache_control: None,
+                citations: None,
             });
         }
     } else {
@@ -5422,11 +7461,9 @@ fn apply_cache_editing(
     }
 }
 
-/// Generate a short client-side request id (same alphabet as api-client).
-///
-/// **Header name**: `x-request-id` — sourced from `api-client/src/anthropic.rs:868`.
+/// Generate a local Host telemetry ID; provider request IDs belong to the SDK.
 #[must_use]
-fn new_request_id() -> String {
+fn new_telemetry_id() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-";
     let mut rng = rand::rng();

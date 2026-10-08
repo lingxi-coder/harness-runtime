@@ -4,8 +4,8 @@
 
 use jsonrpc::Connection;
 use lsp::passive_feedback::publish_for_test;
-use lsp::{DiagnosticEntry, LspDiagnosticRegistry, PassiveDiagnosticSubscriber};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
+use lsp::{DiagnosticEntry, LspDiagnosticRegistry, PassiveDiagnosticSubscriber, SourceDiagnostic};
+use lsp_types::{DiagnosticSeverity, Position, Range, Url};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +20,16 @@ async fn write_frame(w: &mut (impl tokio::io::AsyncWrite + Unpin), val: &serde_j
     w.flush().await.unwrap();
 }
 
-fn diag(message: &str, severity: DiagnosticSeverity) -> Diagnostic {
-    Diagnostic {
-        range: Range {
+async fn write_raw_frame(w: &mut (impl tokio::io::AsyncWrite + Unpin), body: &str) {
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    w.write_all(header.as_bytes()).await.unwrap();
+    w.write_all(body.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+}
+
+fn diag(message: &str, severity: DiagnosticSeverity) -> SourceDiagnostic {
+    SourceDiagnostic::new(
+        Range {
             start: Position {
                 line: 0,
                 character: 0,
@@ -32,10 +39,9 @@ fn diag(message: &str, severity: DiagnosticSeverity) -> Diagnostic {
                 character: 1,
             },
         },
-        severity: Some(severity),
-        message: message.into(),
-        ..Default::default()
-    }
+        Some(severity),
+        message.into(),
+    )
 }
 
 #[tokio::test]
@@ -61,7 +67,7 @@ async fn latest_publish_wins() {
 
     let latest = registry.get(&uri).await;
     assert_eq!(latest.len(), 1);
-    assert_eq!(latest[0].message, "second");
+    assert_eq!(latest[0].message.string_at(""), Some("second"));
     assert_eq!(latest[0].severity, Some(DiagnosticSeverity::ERROR));
     assert_eq!(registry.len().await, 1);
 }
@@ -93,7 +99,7 @@ async fn stale_version_is_dropped() {
 
     let latest = registry.get(&uri).await;
     assert_eq!(latest.len(), 1);
-    assert_eq!(latest[0].message, "v5");
+    assert_eq!(latest[0].message.string_at(""), Some("v5"));
 }
 
 #[tokio::test]
@@ -202,7 +208,7 @@ async fn subscriber_routes_publish_diagnostics_into_registry() {
         let entries = registry.get(&parsed_uri).await;
         if !entries.is_empty() {
             assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].message, "unused import");
+            assert_eq!(entries[0].message.string_at(""), Some("unused import"));
             assert_eq!(entries[0].severity, Some(DiagnosticSeverity::ERROR));
             // The stray window/logMessage notification must not have
             // created any other URI entries.
@@ -216,5 +222,53 @@ async fn subscriber_routes_publish_diagnostics_into_registry() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    subscriber.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscriber_retains_unpaired_diagnostic_text_from_raw_json() {
+    const FRAME_BUFFER: usize = 64 * 1024;
+    let (client_io, server_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (_server_read, mut server_write) = tokio::io::split(server_io);
+    let connection = Arc::new(Connection::new_lsp(client_read, client_write));
+    let registry = LspDiagnosticRegistry::new();
+    let subscriber = PassiveDiagnosticSubscriber::spawn(
+        &connection,
+        "test-server".to_string(),
+        registry.clone(),
+    );
+
+    write_raw_frame(
+        &mut server_write,
+        r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///tmp/surrogate.ts","diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"message":"x\ud800"}]}}"#,
+    )
+    .await;
+
+    let uri = Url::parse("file:///tmp/surrogate.ts").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let diagnostics = registry.get(&uri).await;
+        if !diagnostics.is_empty() {
+            assert_eq!(
+                diagnostics[0].message.string_units(""),
+                Some(vec![b'x' as u16, 0xd800])
+            );
+            let block = registry
+                .take_new_diagnostics_block()
+                .await
+                .expect("model block");
+            let units = block.string_units("").unwrap();
+            assert!(units
+                .windows(2)
+                .any(|window| window == [b'x' as u16, 0xd800]));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "diagnostic never landed in registry"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     subscriber.abort();
 }

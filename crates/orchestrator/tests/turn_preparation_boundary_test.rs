@@ -24,20 +24,21 @@
 //! in `turn_loop.rs` (today) or in a `BatchedRound` strategy (after PR 2).
 
 use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse, LlmError,
 };
 use orchestrator::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider, noop_hook_executor,
 };
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, TurnOutcome,
 };
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
@@ -70,12 +71,15 @@ fn text_response(text: &str) -> HistoryResponse {
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: Usage::default(),
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+            .expect("null is valid JSON"),
+        resumable: None,
     }
 }
 
@@ -106,12 +110,13 @@ impl ScriptedApi {
 impl OrchestratorApiClient for ScriptedApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        let msgs = match request {
+            orchestrator::OrchestratorApiRequest::Main(request) => request.messages,
+            orchestrator::OrchestratorApiRequest::HookPrompt(request) => request.messages,
+        };
+
         self.captured.lock().await.push(msgs);
         self.script.lock().await.pop_front().unwrap_or_else(|| {
             Err(LlmError::Transport {
@@ -134,7 +139,7 @@ struct ParkingDiagnostics {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for ParkingDiagnostics {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
         self.entries.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         self.release.notified().await;
@@ -280,21 +285,23 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: format!("round-{i} assistant reply with filler text to give it weight"),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         });
     }
 }
 
 /// A consume-once reminder source that reports how many times it was drained.
 struct CountingDiagnostics {
-    block: String,
+    block: Utf16JsonProjection,
     drains: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for CountingDiagnostics {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
         // Consume-once: the first drain yields the block, later ones yield
         // nothing — the same shape as the real source.
         if self.drains.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -337,7 +344,7 @@ fn a_ptl_retry_reuses_this_steps_reminders_without_redraining_them() {
                 PathBuf::from("/tmp"),
             )
             .with_new_diagnostics_source(Arc::new(CountingDiagnostics {
-                block: block.to_string(),
+                block: block.to_string().into(),
                 drains: drains.clone(),
             })),
         );
@@ -376,6 +383,73 @@ fn a_ptl_retry_reuses_this_steps_reminders_without_redraining_them() {
     });
 }
 
+#[test]
+fn a_reactive_overflow_honors_session_compact_mod_skip() {
+    run_with_large_stack(|| async {
+        let dir = tempfile::tempdir().expect("mod directory");
+        let module = dir.path().join("skip-compact.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+                on('session.compact', async ($, e, next) => {
+                    await $.ui.log(`reactive:${e.trigger}`);
+                    return { skip: 'keep the conversation' };
+                });
+            }"#,
+        )
+        .expect("mod source");
+        let host = hooks::mods::ModHost::start(None).await.expect("mod host");
+        host.load("skip-compact", dir.path(), &module, serde_json::json!({}))
+            .await
+            .expect("load mod");
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let api = Arc::new(ScriptedApi::new(
+            (0..8)
+                .map(|_| Err(LlmError::ContextOverflow { token_gap: 100 }))
+                .collect(),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = with_reactive_recovery(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                api,
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry))),
+        );
+        seed_rounds(&orch, 8).await;
+
+        orch.run_turn("ping")
+            .await
+            .expect("overflow is a terminal outcome");
+
+        let events = output.snapshot().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModLog { text, .. }
+                if text.string_at("") == Some("reactive:auto")
+        )));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            lingxi_core::host::OutputEvent::CompactionCompleted { .. }
+        )));
+        assert!(
+            !output
+                .compaction_phase_snapshot()
+                .await
+                .iter()
+                .any(|phase| phase == "summarizing"),
+            "a session.compact skip must avoid the summary request"
+        );
+    });
+}
+
 /// The streaming path's non-streaming fallback must reuse the same way.
 ///
 /// The stream open returns `ContextOverflow`, which drops the turn into the same
@@ -394,21 +468,23 @@ fn a_stream_fallback_reuses_this_steps_reminders_without_redraining_them() {
         ));
         let batched = Arc::new(MockApiClient::new(vec![text_response("recovered")]));
 
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched.clone(),
-            streaming.clone(),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_new_diagnostics_source(Arc::new(CountingDiagnostics {
-            block: block.to_string(),
-            drains: drains.clone(),
-        }));
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched.clone(),
+                streaming.clone(),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_new_diagnostics_source(Arc::new(CountingDiagnostics {
+                block: block.to_string().into(),
+                drains: drains.clone(),
+            })),
+        );
 
         orch.run_turn_streaming("ping")
             .await

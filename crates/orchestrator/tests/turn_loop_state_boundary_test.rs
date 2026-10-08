@@ -19,17 +19,17 @@
 
 use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
+    message_start, message_stop, noop_hook_executor, text_delta,
 };
 use orchestrator::{
-    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome,
+    ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome, scripted,
 };
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 
@@ -63,12 +63,15 @@ fn response(text: &str) -> HistoryResponse {
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: Usage::default(),
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+            .expect("null is valid JSON"),
+        resumable: None,
     }
 }
 

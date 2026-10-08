@@ -1,94 +1,50 @@
-use super::*;
+use super::super::compaction_impl::read_restored_text_prefix;
 
-#[tokio::test]
-async fn post_compact_reader_never_loads_past_its_byte_budget() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("large.txt");
-    std::fs::write(&path, "x".repeat(64 * 1024)).expect("write fixture");
-
-    let read = read_utf8_prefix(&path, 1_023, 1_023)
-        .await
-        .expect("bounded read");
-
-    assert_eq!(read.content.len(), 1_023);
-    assert!(read.content.bytes().all(|byte| byte == b'x'));
-    assert!(read.truncated);
+async fn read_fixture(raw: &[u8], max_bytes: usize) -> (String, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("read.txt");
+    std::fs::write(&path, raw).unwrap();
+    read_restored_text_prefix(&path, max_bytes).await.unwrap()
 }
 
 #[tokio::test]
-async fn post_compact_reader_drops_only_a_split_utf8_tail() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("utf8.txt");
-    std::fs::write(&path, "aéz").expect("write fixture");
-
-    let read = read_utf8_prefix(&path, 2, 2).await.expect("bounded read");
-
-    assert_eq!(read.content, "a");
-    assert!(read.truncated);
+async fn post_compact_reader_bounds_bytes_and_detects_exact_fit() {
+    let raw = vec![b'x'; 64 * 1024];
+    let (content, truncated) = read_fixture(&raw, 1_023).await;
+    assert_eq!(content, "x".repeat(1_023));
+    assert!(truncated);
+    assert_eq!(read_fixture(b"exact", 5).await, ("exact".into(), false));
 }
 
 #[tokio::test]
-async fn post_compact_reader_discards_utf8_padding_after_the_character_cap() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("padding.txt");
-    std::fs::write(&path, "x".repeat(60_003)).expect("write fixture");
-
-    let read = read_utf8_prefix(&path, 60_003, 20_000)
-        .await
-        .expect("bounded read");
-
-    assert_eq!(read.content.len(), 20_000);
-    assert_eq!(read.content.chars().count(), 20_000);
-    assert!(read.truncated);
-}
-
-#[tokio::test]
-async fn post_compact_reader_handles_a_four_byte_scalar_split_in_the_padding() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("padding-utf8.txt");
-    std::fs::write(&path, format!("{}🦀", "x".repeat(20_000))).expect("write fixture");
-
-    let read = read_utf8_prefix(&path, 60_003, 20_000)
-        .await
-        .expect("bounded read");
-
-    assert_eq!(read.content, "x".repeat(20_000));
-    assert!(read.truncated);
-}
-
-#[tokio::test]
-async fn post_compact_reader_distinguishes_an_exact_fit_from_truncation() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("exact.txt");
-    std::fs::write(&path, "x".repeat(20_000)).expect("write fixture");
-
-    let read = read_utf8_prefix(&path, 60_003, 20_000)
-        .await
-        .expect("bounded read");
-
-    assert_eq!(read.content.len(), 20_000);
-    assert!(!read.truncated);
-}
-
-#[tokio::test]
-async fn post_compact_reader_counts_utf16_units_for_cjk_and_astral_text() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("unicode.txt");
-    let content = format!("{}🦀", "界".repeat(20_000));
-    std::fs::write(&path, &content).expect("write fixture");
-
-    let read = read_utf8_prefix(
-        &path,
-        compaction::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
-        compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
-    )
-    .await
-    .expect("bounded read");
-
-    assert_eq!(read.content, "界".repeat(20_000));
-    assert!(
-        read.truncated,
-        "the trailing astral scalar exceeds the unit cap"
+async fn post_compact_reader_lossily_decodes_invalid_and_split_utf8() {
+    assert_eq!(
+        read_fixture(b"a\xffz", 3).await,
+        ("a\u{fffd}z".into(), false)
     );
-    assert_eq!(read.content.encode_utf16().count(), 20_000);
+    assert_eq!(
+        read_fixture("aéz".as_bytes(), 2).await,
+        ("a\u{fffd}".into(), true)
+    );
+}
+
+#[tokio::test]
+async fn post_compact_reader_normalizes_bom_crlf_and_final_cr_only() {
+    let raw = "\u{feff}first\r\nsecond\rinterior\r".as_bytes();
+    assert_eq!(
+        read_fixture(raw, raw.len()).await,
+        ("first\nsecond\rinterior".into(), false)
+    );
+}
+
+#[tokio::test]
+async fn post_compact_reader_preserves_unicode_for_native_token_budgeting() {
+    let raw = format!("{}🦀", "界".repeat(20_000));
+    let (content, truncated) = read_fixture(raw.as_bytes(), raw.len()).await;
+    assert_eq!(content, raw);
+    assert_eq!(content.encode_utf16().count(), 20_002);
+    assert!(
+        !truncated,
+        "the producer applies its token budget after the bounded read"
+    );
 }

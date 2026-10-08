@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{anthropic_models, apply_mobile_profile_allowlist};
 
@@ -71,11 +71,13 @@ fn file_provider_settings_override_launch_defaults_and_enable_new_profiles() {
         routing: Some(routing.clone()),
     });
     apply_mobile_profile_allowlist(&mut assembled, Some(&routing));
-    assert!(assembled
-        .client_config
-        .providers
-        .iter()
-        .any(|p| p.profile_name == "beta"));
+    assert!(
+        assembled
+            .client_config
+            .providers
+            .iter()
+            .any(|p| p.profile_name == "beta")
+    );
     assert_eq!(assembled.chains.aliases["selected"], "beta/model-b");
 }
 

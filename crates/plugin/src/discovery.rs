@@ -50,6 +50,7 @@ use crate::trust::default_trust_for_source;
 use hooks::loader::parse_hooks_from_settings_json;
 use hooks::HookSource;
 use indexmap::IndexMap;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::PluginId;
 use serde::Deserialize;
 use serde_json::Value;
@@ -154,8 +155,12 @@ struct RawManifest {
     #[serde(rename = "mcpServers", default)]
     mcp_servers: Option<serde_json::Value>,
     /// Explicitly declared LSP server configs. Binary: `lspServers`.
-    #[serde(rename = "lspServers", default)]
-    lsp_servers: Option<serde_json::Value>,
+    #[serde(
+        rename = "lspServers",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    lsp_servers: Option<Utf16JsonProjection>,
     /// Explicit hook declarations. Binary: `hooks`.
     #[serde(default)]
     hooks: Option<serde_json::Value>,
@@ -3173,7 +3178,7 @@ async fn detect_components(
     // `readdir()` calls with no subdirectory recursion.
     let default_themes = glob_ext_flat(&plugin_dir.join("themes"), "json").await;
     let default_workflows = glob_ext_flat(&plugin_dir.join("workflows"), "js").await;
-    let default_hooks = load_standard_hooks(plugin_dir).await;
+    let standard_hooks = load_standard_hooks(plugin_dir).await;
     let default_mcp_servers = if skip_mcp_discovery {
         HashMap::new()
     } else {
@@ -3216,7 +3221,7 @@ async fn detect_components(
         Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "js").await,
         None => default_workflows,
     };
-    let mut hooks = default_hooks;
+    let mut hooks = standard_hooks.hooks;
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
     if !skip_mcp_discovery {
@@ -3255,6 +3260,7 @@ async fn detect_components(
         binaries,
         monitors,
         hooks,
+        mod_module: standard_hooks.mod_module,
         hooks_declared,
         mcp_servers,
         mcp_servers_declared,
@@ -3898,7 +3904,7 @@ async fn load_lsp_servers(
         return IndexMap::new();
     };
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
-    let parsed: IndexMap<String, Value> = match serde_json::from_str(raw) {
+    let parsed = match Utf16JsonProjection::parse(raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .lsp.json");
@@ -4078,26 +4084,28 @@ struct RawHooksFile {
 /// [`HookSource::Plugin`] — see [`RawHooksFile`] for the wrapper shape and
 /// the `hooks`/`modules` constraints enforced here.
 ///
-/// A `modules` entry is recognized and validated (the 1-entry cap; the
-/// "hooks or modules, or both" requirement) but NOT executed: running the
-/// JS module it names needs a JS-module-execution subsystem this crate does
-/// not have, so its declared hooks are simply never registered (a warning
-/// names the module path so this is not a silent gap for whoever authored
-/// the plugin).
-async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
+#[derive(Default)]
+struct StandardHooksComponents {
+    hooks: Vec<hooks::HookDefinition>,
+    mod_module: Option<PathBuf>,
+}
+
+/// Resolve both the declarative hooks and the programmatic module. A bad
+/// wrapper rejects both halves, matching Claude Code 2.1.287.
+async fn load_standard_hooks(plugin_dir: &Path) -> StandardHooksComponents {
     let path = plugin_dir.join("hooks").join("hooks.json");
     let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
-        return Vec::new();
+        return StandardHooksComponents::default();
     };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-        return Vec::new();
+        return StandardHooksComponents::default();
     };
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
     let wrapper: RawHooksFile = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed hooks.json");
-            return Vec::new();
+            return StandardHooksComponents::default();
         }
     };
     let module_count = wrapper.modules.as_ref().map_or(0, Vec::len);
@@ -4107,7 +4115,7 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
             "skipping hooks.json: `modules` names one hooks module per plugin; \
              a second entry is refused"
         );
-        return Vec::new();
+        return StandardHooksComponents::default();
     }
     if wrapper.hooks.is_none() && module_count == 0 {
         tracing::warn!(
@@ -4115,21 +4123,40 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
             "skipping hooks.json: must have `hooks` (the hook matchers) or `modules` \
              (hooks modules), or both"
         );
-        return Vec::new();
+        return StandardHooksComponents::default();
     }
-    if let Some(module_path) = wrapper.modules.as_ref().and_then(|m| m.first()) {
-        tracing::warn!(
-            path = %path.display(),
-            module = %module_path,
-            "hooks.json declares a `modules` hooks module, but this engine cannot execute \
-             hooks modules yet — its programmatically-registered hooks will not run"
-        );
+    let mod_module = wrapper
+        .modules
+        .as_ref()
+        .and_then(|modules| modules.first())
+        .and_then(|raw| {
+            let relative = Path::new(raw);
+            if relative.is_absolute() {
+                return None;
+            }
+            let candidate = path.parent()?.join(relative);
+            let resolved = canonical_regular_path_under(plugin_dir, &candidate)?;
+            let resolved = std::fs::canonicalize(resolved).ok()?;
+            matches!(
+                resolved.extension().and_then(|ext| ext.to_str()),
+                Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+            )
+            .then_some(resolved)
+        });
+    if wrapper
+        .modules
+        .as_ref()
+        .is_some_and(|modules| !modules.is_empty())
+        && mod_module.is_none()
+    {
+        tracing::warn!(path = %path.display(), "skipping invalid hooks module path");
+        return StandardHooksComponents::default();
     }
-    let Some(inner) = wrapper.hooks else {
-        return Vec::new();
-    };
-    // The file wraps the settings-shaped hooks under a `hooks` key.
-    parse_hooks_value(&serde_json::json!({ "hooks": inner }), &path)
+    let hooks = wrapper.hooks.map_or_else(Vec::new, |inner| {
+        // The file wraps the settings-shaped hooks under a `hooks` key.
+        parse_hooks_value(&serde_json::json!({ "hooks": inner }), &path)
+    });
+    StandardHooksComponents { hooks, mod_module }
 }
 
 fn parse_hooks_value(value: &Value, path: &Path) -> Vec<hooks::HookDefinition> {
@@ -4418,58 +4445,147 @@ async fn load_mcpb_mcp_server(
 
 async fn load_declared_lsp_servers(
     plugin_dir: &Path,
-    value: Option<Value>,
+    value: Option<Utf16JsonProjection>,
 ) -> IndexMap<String, lingxi_core::host::LspServerConfig> {
     let Some(value) = value else {
         return IndexMap::new();
     };
-    let items = match value {
-        Value::Array(items) => items,
-        one => vec![one],
+    let items = if let Some(count) = value.array_len("") {
+        (0..count)
+            .filter_map(|index| value.subprojection(&format!("/{index}")).ok())
+            .collect::<Vec<_>>()
+    } else {
+        vec![value]
     };
     let mut out = IndexMap::new();
     for item in items {
-        let parsed = match item {
-            Value::String(raw_path) => {
-                let Some(path) = resolve_declared_relative_path(plugin_dir, &raw_path) else {
-                    tracing::warn!(path = %raw_path, "skipping invalid plugin manifest json path");
-                    continue;
-                };
-                let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-                    continue;
-                };
-                serde_json::from_str::<IndexMap<String, Value>>(&raw)
+        if item.string_units("").is_some() {
+            let Some(raw_path) = item
+                .string_units("")
+                .and_then(|units| String::from_utf16(&units).ok())
+            else {
+                tracing::warn!("skipping plugin manifest LSP JSON path with unpaired UTF-16");
+                continue;
+            };
+            let Some(path) = resolve_declared_relative_path(plugin_dir, &raw_path) else {
+                tracing::warn!(path = %raw_path, "skipping invalid plugin manifest json path");
+                continue;
+            };
+            let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            match Utf16JsonProjection::parse(&raw) {
+                Ok(records) => out.extend(parse_lsp_records(records)),
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "skipping malformed plugin LSP server file")
+                }
             }
-            inline @ Value::Object(_) => serde_json::from_value::<IndexMap<String, Value>>(inline),
-            _ => continue,
-        };
-        if let Ok(parsed) = parsed {
-            out.extend(parse_lsp_records(parsed));
+        } else if item.object_entries().is_some() {
+            out.extend(parse_lsp_records(item));
+        } else {
+            continue;
         }
     }
     out
 }
 
 fn parse_lsp_records(
-    records: IndexMap<String, Value>,
+    records: Utf16JsonProjection,
 ) -> IndexMap<String, lingxi_core::host::LspServerConfig> {
-    records
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let mut config = match serde_json::from_value::<lingxi_core::host::LspServerConfig>(value) {
-                Ok(config) => config,
-                Err(error) => {
-                    tracing::warn!(server = %key, %error, "skipping malformed plugin LSP server configuration");
-                    return None;
-                }
-            };
-            // The record key is authoritative in Claude Code's public shape;
-            // an extra legacy `name` field must not rename or collide with a
-            // sibling server.
-            config.name.clone_from(&key);
-            validate_lsp_config(&config).then(|| (config.name.clone(), config))
+    let Some(entries) = records.object_entries() else {
+        return IndexMap::new();
+    };
+    let mut configs = IndexMap::new();
+    for entry in entries {
+        let Ok(key) = String::from_utf16(entry.code_units) else {
+            tracing::warn!("skipping plugin LSP server with unpaired UTF-16 name");
+            continue;
+        };
+        let mut pointer = vec![u16::from(b'/')];
+        for unit in entry.code_units {
+            match unit {
+                0x007e => pointer.extend([u16::from(b'~'), u16::from(b'0')]),
+                0x002f => pointer.extend([u16::from(b'~'), u16::from(b'1')]),
+                _ => pointer.push(*unit),
+            }
+        }
+        let Ok(config_source) = records.subprojection_units(&pointer) else {
+            continue;
+        };
+        if !lsp_os_strings_are_representable(&config_source) {
+            tracing::warn!(server = %key, "skipping plugin LSP config with unpaired UTF-16 in an OS-facing field");
+            continue;
+        }
+        let Ok(raw) = config_source.to_json_string() else {
+            continue;
+        };
+        let mut config = match serde_json::from_str::<lingxi_core::host::LspServerConfig>(&raw) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(server = %key, %error, "skipping malformed plugin LSP server configuration");
+                continue;
+            }
+        };
+        // The record key is authoritative in Claude Code's public shape; an
+        // extra `name` member cannot rename or collide with a sibling server.
+        config.name.clone_from(&key);
+        if validate_lsp_config(&config) {
+            configs.insert(config.name.clone(), config);
+        }
+    }
+    configs
+}
+
+fn lsp_os_strings_are_representable(source: &Utf16JsonProjection) -> bool {
+    fn scalar_is_representable(value: Option<JsonValueView<'_>>) -> bool {
+        value
+            .and_then(JsonValueView::code_units)
+            .is_none_or(|units| String::from_utf16(units).is_ok())
+    }
+
+    fn array_strings_are_representable(source: &Utf16JsonProjection, pointer: &str) -> bool {
+        let Some(array) = source.at_pointer(pointer) else {
+            return true;
+        };
+        let Some(length) = array.array_len() else {
+            return true;
+        };
+        (0..length).all(|index| scalar_is_representable(array.get_index(index)))
+    }
+
+    fn object_strings_are_representable(source: &Utf16JsonProjection, pointer: &str) -> bool {
+        let Some(object) = source.at_pointer(pointer) else {
+            return true;
+        };
+        let Some(entries) = object.object_entries() else {
+            return true;
+        };
+        entries.iter().all(|entry| {
+            String::from_utf16(entry.code_units).is_ok()
+                && scalar_is_representable(Some(entry.value))
         })
-        .collect()
+    }
+
+    [
+        "/command",
+        "/transport",
+        "/workspaceFolder",
+        "/workspace_folder",
+    ]
+    .into_iter()
+    .all(|pointer| scalar_is_representable(source.at_pointer(pointer)))
+        && [
+            "/args",
+            "/triggerLanguages",
+            "/trigger_languages",
+            "/rootDirMarkers",
+            "/root_dir_markers",
+        ]
+        .into_iter()
+        .all(|pointer| array_strings_are_representable(source, pointer))
+        && ["/env", "/extensionToLanguage", "/extension_to_language"]
+            .into_iter()
+            .all(|pointer| object_strings_are_representable(source, pointer))
 }
 
 fn validate_lsp_config(config: &lingxi_core::host::LspServerConfig) -> bool {
@@ -5708,6 +5824,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lsp_config_loader_retains_raw_initialization_and_settings_strings() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join(".lsp.json"),
+            r#"{"typescript":{"command":"tsserver","extensionToLanguage":{".ts":"typescript"},"initializationOptions":{"probe":"\ud800"},"settings":{"probe":"\ud800"}}}"#,
+        )
+        .unwrap();
+
+        let configs = load_lsp_servers(tmp.path()).await;
+        let config = configs.get("typescript").expect("server config loads");
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .unwrap()
+                .string_units("/probe"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            config.settings.as_ref().unwrap().string_units("/probe"),
+            Some(vec![0xd800])
+        );
+    }
+
+    #[tokio::test]
     async fn declared_lsp_array_preserves_path_and_inline_order() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
@@ -5717,10 +5858,12 @@ mod tests {
         .unwrap();
         let configs = load_declared_lsp_servers(
             tmp.path(),
-            Some(serde_json::json!([
-                "./from-file.json",
-                {"second":{"command":"two","extensionToLanguage":{".b":"b"}}}
-            ])),
+            Some(
+                Utf16JsonProjection::parse(
+                    r#"["./from-file.json",{"second":{"command":"two","extensionToLanguage":{".b":"b"}}}]"#,
+                )
+                .unwrap(),
+            ),
         )
         .await;
         assert_eq!(
@@ -5736,6 +5879,7 @@ mod tests {
             tmp.path().join(".lsp.json"),
             r#"{
                 "broken": {"args": ["--stdio"], "extensionToLanguage": {".bad": "bad"}},
+                "badUnicode": {"command": "bad\ud800", "extensionToLanguage": {".bad": "bad"}},
                 "working": {"name": "spoofed", "command": "good-lsp", "extensionToLanguage": {".ok": "ok"}}
             }"#,
         )
@@ -5743,6 +5887,7 @@ mod tests {
 
         let configs = load_lsp_servers(tmp.path()).await;
         assert!(!configs.contains_key("broken"));
+        assert!(!configs.contains_key("badUnicode"));
         assert!(!configs.contains_key("spoofed"));
         assert_eq!(configs["working"].name, "working");
         assert_eq!(configs["working"].command, "good-lsp");
@@ -5759,7 +5904,7 @@ mod tests {
                 "name":"demo",
                 "commands":"../escape",
                 "mcpServers":{"inline":{"type":"stdio","command":"echo"}},
-                "lspServers":{"rust":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"}}}
+                "lspServers":{"rust":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"},"settings":{"probe":"\ud800"}}}
             }"#,
         )
         .unwrap();
@@ -5768,6 +5913,14 @@ mod tests {
         assert!(manifest.components.commands.is_empty());
         assert!(manifest.components.mcp_servers.contains_key("inline"));
         assert!(manifest.components.lsp_servers.contains_key("rust"));
+        assert_eq!(
+            manifest.components.lsp_servers["rust"]
+                .settings
+                .as_ref()
+                .unwrap()
+                .string_units("/probe"),
+            Some(vec![0xd800])
+        );
     }
 
     #[tokio::test]
@@ -5912,7 +6065,7 @@ mod tests {
         )
         .unwrap();
 
-        let hooks = load_standard_hooks(plugin).await;
+        let hooks = load_standard_hooks(plugin).await.hooks;
         assert_eq!(
             hooks.len(),
             1,
@@ -6149,10 +6302,10 @@ mod tests {
         )
         .unwrap();
 
-        let value = serde_json::json!([
-            "./extra-lsp.json",
-            {"python": {"name": "python", "command": "pyright", "args": [], "env": {}, "trigger_languages": ["python"], "root_dir_markers": ["pyproject.toml"], "initialization_options": null, "extensionToLanguage": {".py": "python"}}}
-        ]);
+        let value = Utf16JsonProjection::parse(
+            r#"["./extra-lsp.json",{"python":{"name":"python","command":"pyright","args":[],"env":{},"trigger_languages":["python"],"root_dir_markers":["pyproject.toml"],"initialization_options":null,"extensionToLanguage":{".py":"python"}}}]"#,
+        )
+        .unwrap();
 
         let servers = load_declared_lsp_servers(plugin, Some(value)).await;
         assert!(
@@ -6371,7 +6524,7 @@ mod tests {
     // ---------- §14 row 2: hooks.json `modules` ----------
 
     #[tokio::test]
-    async fn hooks_json_with_only_modules_and_no_hooks_is_accepted_but_registers_nothing() {
+    async fn hooks_json_with_only_modules_and_no_hooks_resolves_module() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join("hooks")).unwrap();
@@ -6380,12 +6533,58 @@ mod tests {
             r#"{"modules": ["./register.js"]}"#,
         )
         .unwrap();
-        let hooks = load_standard_hooks(plugin).await;
-        assert!(
-            hooks.is_empty(),
-            "a modules-only hooks.json has no declarative hooks to register (the module \
-             itself is not executed by this engine), got {hooks:?}"
+        fs::write(
+            plugin.join("hooks/register.js"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        let components = load_standard_hooks(plugin).await;
+        assert!(components.hooks.is_empty());
+        assert_eq!(
+            components.mod_module,
+            Some(fs::canonicalize(plugin.join("hooks/register.js")).unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn hooks_module_paths_follow_287_relative_and_extension_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plugin");
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("register.ts"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["../register.ts"]}"#,
+        )
+        .unwrap();
+        let found = load_standard_hooks(&plugin).await;
+        assert_eq!(
+            found.mod_module,
+            Some(fs::canonicalize(plugin.join("register.ts")).unwrap())
+        );
+
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["../../outside.js"]}"#,
+        )
+        .unwrap();
+        assert!(load_standard_hooks(&plugin).await.mod_module.is_none());
+
+        fs::write(
+            plugin.join("hooks/register.txt"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["./register.txt"]}"#,
+        )
+        .unwrap();
+        assert!(load_standard_hooks(&plugin).await.mod_module.is_none());
     }
 
     #[tokio::test]
@@ -6399,7 +6598,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "oracle: \"a second entry is refused\" — a 2-entry `modules` array must not load"
         );
     }
@@ -6415,7 +6614,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "oracle: hooks.json must have `hooks` or `modules`, or both"
         );
     }
@@ -6434,7 +6633,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "a 2-entry `modules` array must refuse the WHOLE hooks.json, even a valid \
              declarative `hooks` half — an unvalidated port would keep parsing `hooks` \
              and ignore the modules-count violation entirely"
@@ -6454,7 +6653,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let hooks = load_standard_hooks(plugin).await;
+        let hooks = load_standard_hooks(plugin).await.hooks;
         assert_eq!(
             hooks.len(),
             1,

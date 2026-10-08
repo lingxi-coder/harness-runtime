@@ -1,0 +1,5 @@
+hook-return.fixture
+
+<system-reminder>
+<total_tokens>14999994 tokens left</total_tokens>
+</system-reminder>

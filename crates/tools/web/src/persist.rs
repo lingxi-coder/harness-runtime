@@ -218,18 +218,22 @@ pub fn persist_binary_content(
 /// `result` is returned unchanged.
 #[must_use]
 pub fn append_binary_footer(
-    mut result: String,
+    result: crate::source::Source,
     persisted_path: Option<&str>,
     content_type: &str,
     persisted_size: Option<usize>,
     bytes: usize,
-) -> String {
+) -> crate::source::Source {
     if let Some(path) = persisted_path {
         let size = persisted_size.unwrap_or(bytes) as u64;
-        result.push_str(&format!(
-            "\n\n[Binary content ({content_type}, {}) also saved to {path}]",
-            human_size(size)
-        ));
+        return crate::source::affix(
+            "",
+            &result,
+            &format!(
+                "\n\n[Binary content ({content_type}, {}) also saved to {path}]",
+                human_size(size)
+            ),
+        );
     }
     result
 }
@@ -332,36 +336,56 @@ mod tests {
     #[test]
     fn footer_appended_when_persisted() {
         let out = append_binary_footer(
-            "model summary".to_string(),
+            "model summary".into(),
             Some("/tmp/tool-results/webfetch-1-abc123.pdf"),
             "application/pdf",
             Some(2_097_152),
             999,
         );
+        let expected = "model summary\n\n[Binary content (application/pdf, 2MB) also saved to /tmp/tool-results/webfetch-1-abc123.pdf]";
         assert_eq!(
-            out,
-            "model summary\n\n[Binary content (application/pdf, 2MB) also saved to /tmp/tool-results/webfetch-1-abc123.pdf]"
+            out.string_units(""),
+            Some(expected.encode_utf16().collect())
         );
     }
 
     #[test]
     fn footer_uses_bytes_when_persisted_size_absent() {
         let out = append_binary_footer(
-            "x".to_string(),
+            "x".into(),
             Some("/p/webfetch-2-def456.bin"),
             "application/octet-stream",
             None,
             1536,
         );
+        let expected = "x\n\n[Binary content (application/octet-stream, 1.5KB) also saved to /p/webfetch-2-def456.bin]";
         assert_eq!(
-            out,
-            "x\n\n[Binary content (application/octet-stream, 1.5KB) also saved to /p/webfetch-2-def456.bin]"
+            out.string_units(""),
+            Some(expected.encode_utf16().collect())
         );
     }
 
     #[test]
     fn footer_noop_when_not_persisted() {
-        let out = append_binary_footer("raw".to_string(), None, "text/html", None, 10);
-        assert_eq!(out, "raw");
+        let out = append_binary_footer("raw".into(), None, "text/html", None, 10);
+        assert_eq!(out.string_units(""), Some("raw".encode_utf16().collect()));
+    }
+
+    #[test]
+    fn footer_preserves_unpaired_result_units() {
+        let original = vec![b'x' as u16, 0xd800, b'y' as u16];
+        let out = append_binary_footer(
+            crate::source::text(original.clone()),
+            Some("/p/file.pdf"),
+            "application/pdf",
+            None,
+            0,
+        );
+        let mut expected = original;
+        expected.extend(
+            "\n\n[Binary content (application/pdf, 0 bytes) also saved to /p/file.pdf]"
+                .encode_utf16(),
+        );
+        assert_eq!(out.string_units(""), Some(expected));
     }
 }

@@ -134,7 +134,7 @@ impl BuiltinCommandHandler for RecapHandler {
         if !Self::has_qualifying_turn(&history) {
             telemetry::emit_command_completed("tengu_command_recap_completed", "no-turn");
             return CommandResult::Done {
-                display: Some(NO_TURN_MESSAGE.to_string()),
+                display: Some((NO_TURN_MESSAGE.to_string()).into()),
             };
         }
 
@@ -155,13 +155,13 @@ impl BuiltinCommandHandler for RecapHandler {
             Ok(RecapOutcome::Cancelled) => {
                 telemetry::emit_command_completed("tengu_command_recap_completed", "cancelled");
                 CommandResult::Done {
-                    display: Some(CANCELLED_MESSAGE.to_string()),
+                    display: Some((CANCELLED_MESSAGE.to_string()).into()),
                 }
             }
             Err(e) => {
                 telemetry::emit_command_failed("tengu_command_recap_failed", &e.to_string());
                 CommandResult::Done {
-                    display: Some(GENERIC_FAILURE_MESSAGE.to_string()),
+                    display: Some((GENERIC_FAILURE_MESSAGE.to_string()).into()),
                 }
             }
         }
@@ -184,8 +184,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "recap".to_string(),
-            raw_args: String::new(),
+            name: "recap".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -199,6 +199,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         }
@@ -318,7 +319,10 @@ mod tests {
         let h = RecapHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Nothing to recap yet — send a message first.");
+                assert_eq!(
+                    s.string_at(""),
+                    Some("Nothing to recap yet — send a message first.")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -333,7 +337,10 @@ mod tests {
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Nothing to recap yet — send a message first.");
+                assert_eq!(
+                    s.string_at(""),
+                    Some("Nothing to recap yet — send a message first.")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -353,8 +360,8 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
-                    s,
-                    "Couldn't generate a recap. Run with --debug for details."
+                    s.string_at(""),
+                    Some("Couldn't generate a recap. Run with --debug for details.")
                 );
             }
             other => panic!("expected Done, got {other:?}"),
@@ -374,8 +381,8 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
-                    s,
-                    "Couldn't generate a recap. Run with --debug for details."
+                    s.string_at(""),
+                    Some("Couldn't generate a recap. Run with --debug for details.")
                 );
             }
             other => panic!("expected Done, got {other:?}"),
@@ -389,15 +396,37 @@ mod tests {
         let handle = Arc::new(TranscriptStub::with_recap(
             vec![user_text("please fix the bug"), assistant_text("Fixed it.")],
             Ok(RecapOutcome::Text(
-                "Fixing the parser; next, run the tests.".to_string(),
+                "Fixing the parser; next, run the tests.".into(),
             )),
         ));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Fixing the parser; next, run the tests.");
+                assert_eq!(
+                    s.string_at(""),
+                    Some("Fixing the parser; next, run the tests.")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wired_recap_keeps_exact_source_units_in_command_result() {
+        let source =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""recap \ud800Ω""#)
+                .unwrap();
+        let handle = Arc::new(TranscriptStub::with_recap(
+            vec![user_text("please fix the bug"), assistant_text("Fixed it.")],
+            Ok(RecapOutcome::Text(source.clone())),
+        ));
+        let handler = RecapHandler::new(handle);
+
+        match handler.handle(&args()).await {
+            CommandResult::Done {
+                display: Some(display),
+            } => assert_eq!(display.string_units(""), source.string_units("")),
+            other => panic!("expected source-backed recap display, got {other:?}"),
         }
     }
 
@@ -412,7 +441,7 @@ mod tests {
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Recap cancelled.");
+                assert_eq!(s.string_at(""), Some("Recap cancelled."));
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -429,8 +458,8 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
-                    s,
-                    "Couldn't generate a recap. Run with --debug for details."
+                    s.string_at(""),
+                    Some("Couldn't generate a recap. Run with --debug for details.")
                 );
             }
             other => panic!("expected Done, got {other:?}"),

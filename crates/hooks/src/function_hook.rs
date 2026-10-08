@@ -61,6 +61,7 @@
 //! Denial of service within those bounds is out of scope: a hook that burns its
 //! whole budget every time is a slow session, not a compromised one.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -160,8 +161,8 @@ impl Sandbox {
     pub fn eval_abandonable(
         self,
         source: &str,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, FunctionHookError> {
+        input: &Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, FunctionHookError> {
         let sandbox = self.clamped();
         // A small grace so the in-engine interrupt gets to report `TimedOut`
         // (with its cheaper cleanup) before the outer deadline gives up.
@@ -189,8 +190,8 @@ impl Sandbox {
     pub fn eval(
         self,
         source: &str,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, FunctionHookError> {
+        input: &Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, FunctionHookError> {
         let runtime = rquickjs::Runtime::new()
             .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
         runtime.set_memory_limit(self.memory_limit);
@@ -217,7 +218,8 @@ impl Sandbox {
         // `input` is marshalled as JSON TEXT and parsed inside the sandbox
         // rather than bridged value-by-value: it keeps the host/guest boundary
         // to one string and leaves no Rust callback reachable from the guest.
-        let payload = serde_json::to_string(input)
+        let payload = input
+            .to_json_string()
             .map_err(|error| FunctionHookError::NotSerialisable(error.to_string()))?;
         let program = format!(
             "(function(){{\nconst input = JSON.parse({});\nreturn JSON.stringify((function(){{\n{}\n}})());\n}})()",
@@ -232,11 +234,11 @@ impl Sandbox {
                 .remove("queueMicrotask")
                 .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
             match ctx.eval::<Option<String>, _>(program.as_str()) {
-                Ok(Some(text)) => serde_json::from_str(&text)
+                Ok(Some(text)) => lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&text)
                     .map_err(|error| FunctionHookError::NotSerialisable(error.to_string())),
                 // `JSON.stringify(undefined)` is `undefined`: the hook declined
                 // to answer, which is a valid "no opinion", not an error.
-                Ok(None) => Ok(serde_json::Value::Null),
+                Ok(None) => Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON")),
                 Err(error) => {
                     if tripped.load(Ordering::SeqCst) {
                         return Err(FunctionHookError::TimedOut);
@@ -261,8 +263,8 @@ fn json_string_literal(value: &str) -> String {
     // `serde_json` already escapes quotes/backslashes/control chars. The two
     // line separators below are valid JSON but NOT valid inside a JS string
     // literal, so they must be escaped again or the program fails to parse.
-    serde_json::Value::String(value.to_string())
-        .to_string()
+    serde_json::to_string(value)
+        .expect("a Rust string is serializable as JSON")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
 }
@@ -270,10 +272,22 @@ fn json_string_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-    fn run(source: &str) -> Result<serde_json::Value, FunctionHookError> {
-        Sandbox::default().eval(source, &json!({"tool": "Bash"}))
+    fn json(source: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(source).expect("fixture is valid JSON")
+    }
+
+    fn assert_json(actual: &Utf16JsonProjection, expected: &str) {
+        assert!(
+            actual.semantically_eq(&json(expected)),
+            "actual JSON: {}",
+            actual.to_json_string().expect("projection serializes")
+        );
+    }
+
+    fn run(source: &str) -> Result<Utf16JsonProjection, FunctionHookError> {
+        Sandbox::default().eval(source, &json(r#"{"tool":"Bash"}"#))
     }
 
     /// 🚨 THE security test. Every name below is a host capability that must be
@@ -309,7 +323,7 @@ mod tests {
             let out = run(&format!("return typeof {name};")).expect(name);
             assert_eq!(
                 out,
-                json!("undefined"),
+                json(r#""undefined""#),
                 "`{name}` is reachable from a function hook — plugin code must \
                  not be able to touch the host"
             );
@@ -333,11 +347,11 @@ mod tests {
         let kind = run("const p = import('fs'); return p && typeof p.then;").unwrap();
         assert_eq!(
             kind,
-            json!("function"),
+            json(r#""function""#),
             "import() must yield a promise, never a module object"
         );
         let module_object = run("const p = import('fs'); return typeof p.readFileSync;").unwrap();
-        assert_eq!(module_object, json!("undefined"));
+        assert_json(&module_object, r#""undefined""#);
 
         // A static import is a syntax error in script context.
         assert!(matches!(
@@ -365,7 +379,7 @@ mod tests {
         };
         let started = Instant::now();
         let result =
-            sandbox.eval_abandonable("return /^(a+)+$/.test('a'.repeat(40) + '!');", &json!({}));
+            sandbox.eval_abandonable("return /^(a+)+$/.test('a'.repeat(40) + '!');", &json("{}"));
         assert_eq!(result, Err(FunctionHookError::TimedOut));
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -386,7 +400,7 @@ mod tests {
         assert_eq!(greedy.clamped().budget, MAX_FUNCTION_HOOK_BUDGET);
 
         let started = Instant::now();
-        let result = greedy.eval_abandonable("while (true) {}", &json!({}));
+        let result = greedy.eval_abandonable("while (true) {}", &json("{}"));
         assert_eq!(result, Err(FunctionHookError::TimedOut));
         assert!(
             started.elapsed() < MAX_FUNCTION_HOOK_BUDGET + Duration::from_secs(2),
@@ -413,7 +427,7 @@ mod tests {
             ..Sandbox::default()
         };
         let started = Instant::now();
-        let result = sandbox.eval("while (true) {}", &json!({}));
+        let result = sandbox.eval("while (true) {}", &json("{}"));
         assert_eq!(result, Err(FunctionHookError::TimedOut));
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -431,7 +445,7 @@ mod tests {
         };
         let result = sandbox.eval(
             "const a = []; while (true) { a.push('x'.repeat(4096)); } ",
-            &json!({}),
+            &json("{}"),
         );
         // ⚠️ `is_err()` is NOT enough and used to be all this asserted: the
         // test also sets a budget, so it passed identically when the memory
@@ -459,7 +473,7 @@ mod tests {
     fn no_state_survives_between_invocations() {
         let _ = run("globalThis.__leak = 'from the first hook'; return 1;").unwrap();
         let second = run("return typeof globalThis.__leak;").unwrap();
-        assert_eq!(second, json!("undefined"));
+        assert_json(&second, r#""undefined""#);
     }
 
     #[test]
@@ -467,16 +481,52 @@ mod tests {
         let out = Sandbox::default()
             .eval(
                 "return {seen: input.tool, ok: true};",
-                &json!({"tool": "Bash"}),
+                &json(r#"{"tool":"Bash"}"#),
             )
             .unwrap();
-        assert_eq!(out, json!({"seen": "Bash", "ok": true}));
+        assert_json(&out, r#"{"seen":"Bash","ok":true}"#);
+    }
+
+    #[test]
+    fn function_result_projection_preserves_escaped_lone_surrogates() {
+        let projection = Sandbox::default()
+            .eval_abandonable(
+                r#"return {systemMessage:"\uD800x",hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:"a\uDC00",initialUserMessage:"\uD800"}};"#,
+                &json("{}"),
+            )
+            .unwrap();
+        assert_eq!(
+            projection.string_units("/systemMessage"),
+            Some(vec![0xD800, u16::from(b'x')])
+        );
+        assert_eq!(
+            projection.string_units("/hookSpecificOutput/additionalContext"),
+            Some(vec![u16::from(b'a'), 0xDC00])
+        );
+        assert_eq!(
+            projection.string_units("/hookSpecificOutput/initialUserMessage"),
+            Some(vec![0xD800])
+        );
+    }
+
+    #[test]
+    fn function_input_projection_preserves_lone_utf16_keys_and_values() {
+        let input = json(r#"{"\ud800":"\udc00"}"#);
+        let output = Sandbox::default()
+            .eval(
+                "const key = Object.keys(input)[0]; return {key, value: input[key]};",
+                &input,
+            )
+            .unwrap();
+
+        assert_eq!(output.string_units("/key"), Some(vec![0xD800]));
+        assert_eq!(output.string_units("/value"), Some(vec![0xDC00]));
     }
 
     /// A hook with no opinion returns nothing; that is not an error.
     #[test]
     fn returning_nothing_is_a_valid_no_opinion() {
-        assert_eq!(run("return;").unwrap(), serde_json::Value::Null);
+        assert_json(&run("return;").unwrap(), "null");
     }
 
     #[test]
@@ -505,16 +555,15 @@ mod tests {
         let out = Sandbox::default()
             .eval(
                 "return input.text.length;",
-                &json!({"text": "a\u{2028}b\u{2029}c"}),
+                &json(r#"{"text":"a\u2028b\u2029c"}"#),
             )
             .unwrap();
-        assert_eq!(out, json!(5));
+        assert_json(&out, "5");
         let round_tripped = Sandbox::default()
-            .eval("return input.text;", &json!({"text": "a\u{2028}b"}))
+            .eval("return input.text;", &json(r#"{"text":"a\u2028b"}"#))
             .unwrap();
-        assert_eq!(
-            round_tripped,
-            json!("a\u{2028}b"),
+        assert!(
+            round_tripped.semantically_eq(&json(r#""a\u2028b""#)),
             "the separator must survive verbatim"
         );
     }
@@ -522,11 +571,11 @@ mod tests {
     /// A payload that looks like source must not become source.
     #[test]
     fn a_payload_cannot_inject_code() {
-        let hostile = json!({"text": "\"); globalThis.__pwned = true; (\""});
+        let hostile = json(r#"{"text":"\"); globalThis.__pwned = true; (\""}"#);
         let out = Sandbox::default()
             .eval("return typeof globalThis.__pwned;", &hostile)
             .unwrap();
-        assert_eq!(out, json!("undefined"));
+        assert_json(&out, r#""undefined""#);
     }
 }
 

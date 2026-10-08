@@ -6,11 +6,12 @@ use client::protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use lingxi_core::host::{Clock, FileSystem, OrchestratorHandle, Platform};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::{build_mobile_inner, MobileConfig, MobileEngineError, MobileEngineHandle};
+use super::{MobileConfig, MobileEngineError, MobileEngineHandle, build_mobile_inner};
 
 /// Per-job wall-clock budget for a fired cron turn. This remains a second
 /// safety limit beneath WorkManager's outer lifecycle budget.
@@ -103,6 +104,10 @@ pub struct CronDueOccurrenceDto {
     pub scheduled_at_ms: u64,
 }
 
+fn source_display(prompt: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&prompt.string_units("").unwrap_or_default())
+}
+
 /// A discarding [`ClientEventListener`] that captures only assistant text, so a
 /// headless cron turn's final message can be surfaced in a notification without
 /// streaming anything to the user's live UI.
@@ -122,7 +127,7 @@ impl ClientEventListener for CapturingListener {
     }
     async fn on_event(&self, event: ClientEvent) {
         if let ClientEvent::TextDelta { text } = event {
-            self.text.lock().await.push_str(&text);
+            self.text.lock().await.push_str(&text.display());
         }
     }
 }
@@ -246,7 +251,7 @@ where
             .and_then(|automation| automation.runs.into_iter().find(|run| run.id == request.run_id));
         let same_claim = persisted.as_ref().is_some_and(|run| run.claim_generation == Some(request.claim_generation));
         let queued = matches!(disposition, cron::AutomationFinishDisposition::Queued)
-            && persisted.as_ref().map_or(true, |run| run.claim_generation == Some(request.claim_generation) && run.status == cron::AutomationRunStatus::Queued);
+            && persisted.as_ref().is_none_or(|run| run.claim_generation == Some(request.claim_generation) && run.status == cron::AutomationRunStatus::Queued);
         // Binding may atomically cancel this exact claim before execution (for
         // example, pause or expiry). Completion then correctly returns false
         // because it must not overwrite that terminal record. Still surface
@@ -322,8 +327,8 @@ pub(super) struct MobileTurnFirer {
 
 #[async_trait]
 impl cron::CronJobFirer for MobileTurnFirer {
-    async fn fire(&self, _id: &str, prompt: &str) -> Result<String, String> {
-        self.fire_session(prompt, None, None)
+    async fn fire(&self, _id: &str, prompt: &Utf16JsonProjection) -> Result<String, String> {
+        self.fire_session(prompt.clone(), None, None)
             .await
             .map(|result| result.summary)
     }
@@ -333,7 +338,7 @@ impl cron::CronJobFirer for MobileTurnFirer {
         request: &cron::AutomationRunRequest,
     ) -> Result<cron::AutomationRunResult, String> {
         self.fire_session(
-            &request.task.prompt,
+            request.task.prompt.clone(),
             request.task.automation.as_ref(),
             Some(request),
         )
@@ -344,7 +349,7 @@ impl cron::CronJobFirer for MobileTurnFirer {
 impl MobileTurnFirer {
     pub(super) async fn fire_session(
         &self,
-        prompt: &str,
+        prompt: Utf16JsonProjection,
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
     ) -> Result<cron::AutomationRunResult, String> {
@@ -518,15 +523,26 @@ impl MobileTurnFirer {
                         .map_err(|e| format!("paused: {e}"))?
                 };
                 rt.orchestrator
-                    .run_scheduled_turn(prompt, &automation.model, reasoning, turn_cancel.clone())
+                    .run_scheduled_turn(
+                        prompt.clone(),
+                        &automation.model,
+                        reasoning,
+                        turn_cancel.clone(),
+                    )
                     .await
                     .and_then(cron_scheduled_turn_outcome)
             } else {
                 rt.orchestrator
-                    .run_turn_streaming(prompt)
+                    .run_turn_streaming_source_with_origin(
+                        prompt.clone(),
+                        Vec::new(),
+                        turn_cancel.clone(),
+                        None,
+                        true,
+                    )
                     .await
                     .map_err(|e| e.to_string())
-                    .and_then(cron_legacy_turn_outcome)
+                    .and_then(cron_scheduled_turn_outcome)
             }
         };
 
@@ -718,7 +734,7 @@ pub(super) fn cron_task_dto(task: cron::CronTask, now: std::time::SystemTime) ->
         },
         id: task.id,
         cron: task.cron,
-        prompt: task.prompt,
+        prompt: source_display(&task.prompt),
         created_at_ms: task.created_at,
         last_fired_at_ms: task.last_fired_at,
         recurring,
@@ -754,7 +770,7 @@ pub(super) fn fired_cron_dto(
         Ok(text) => FiredCronJobDto {
             session_id: None,
             id: task.id.clone(),
-            prompt: task.prompt.clone(),
+            prompt: source_display(&task.prompt),
             result_text: Some(text),
             status: CronFireStatusDto::Ok,
             retryable: false,
@@ -762,7 +778,7 @@ pub(super) fn fired_cron_dto(
         Err(message) => FiredCronJobDto {
             session_id: None,
             id: task.id.clone(),
-            prompt: task.prompt.clone(),
+            prompt: source_display(&task.prompt),
             result_text: None,
             retryable: cron_failure_is_retryable(&message),
             status: CronFireStatusDto::Failed { message },
@@ -960,7 +976,7 @@ impl MobileCronStoreHandle {
             .as_millis() as u64;
         let mut changed = false;
         for task in &mut document.tasks {
-            let needs_defaults = task.automation.as_ref().map_or(true, |a| {
+            let needs_defaults = task.automation.as_ref().is_none_or(|a| {
                 a.model.is_empty()
                     && a.status_reason.as_deref()
                         == Some("Choose a model to enable this migrated task")
@@ -1072,7 +1088,7 @@ impl MobileCronStoreHandle {
                 Err(error) => {
                     return Err(MobileEngineError::Internal(format!(
                         "read scheduled_tasks.json: {error}"
-                    )))
+                    )));
                 }
             };
         let now = self.clock.now();
@@ -1084,7 +1100,7 @@ impl MobileCronStoreHandle {
             creator: Default::default(),
             id: tool_cron::schedule_cron::generate_cron_task_id(),
             cron: cron_expr,
-            prompt,
+            prompt: prompt.into(),
             created_at: now_ms,
             last_fired_at: None,
             recurring: Some(recurring),
@@ -1163,7 +1179,7 @@ impl MobileCronStoreHandle {
             task.automation = Some(automation);
         }
         task.cron = cron_expr;
-        task.prompt = prompt;
+        task.prompt = prompt.into();
         task.recurring = Some(recurring);
         task.created_at = now_ms;
         task.last_fired_at = None;
@@ -1323,9 +1339,9 @@ impl MobileCronStoreHandle {
 }
 
 pub(super) fn cron_task_active(task: &cron::CronTask) -> bool {
-    task.automation.as_ref().map_or(true, |automation| {
-        automation.status == cron::AutomationStatus::Active
-    })
+    task.automation
+        .as_ref()
+        .is_none_or(|automation| automation.status == cron::AutomationStatus::Active)
 }
 
 pub(super) fn decode_cron_automation(

@@ -1,162 +1,173 @@
-//! Build the `Anthropic`-shape request body from session state + new user input.
+//! Assemble the provider-neutral model request emitted by the Core reducer.
 //!
-//! M1.1: minimal — no system prompt yet, no tools, no thinking config.
-//! Later plans extend with `system_prompt`, tools list, thinking budget, etc.
+//! This boundary keeps conversation messages as typed source-bearing DTOs.
+//! Provider codecs and request-body projection belong to `llm-client`.
 
 use crate::session::SessionState;
-use serde_json::{json, Value};
+use crate::types::effects::ModelRequest;
 
-/// Assemble the JSON request body for one turn given the current session and a new user message.
+/// Current Core output limit used by the reducer's model request effect.
+pub const DEFAULT_MODEL_OUTPUT_TOKENS: u32 = 8192;
+
+/// Build the semantic request from the current session state.
+///
+/// Conversation messages are cloned as typed DTOs so exact UTF-16 strings,
+/// arbitrary provider JSON payloads, and current outer metadata retain their
+/// source. This is not a provider-wire serializer.
 #[must_use]
-pub fn assemble_request(session: &SessionState, user_message: &str) -> Value {
-    let mut messages: Vec<Value> = session.history.iter().map(message_to_api_shape).collect();
-    messages.push(json!({"role": "user", "content": user_message}));
-
-    json!({
-        "model": session.model,
-        "max_tokens": 8192,
-        "messages": messages,
-    })
-}
-
-fn message_to_api_shape(m: &crate::types::ConversationMessage) -> Value {
-    use crate::types::ConversationMessage;
-    match m {
-        ConversationMessage::User { content, .. } => {
-            json!({"role": "user", "content": content_blocks_to_api(content)})
-        }
-        ConversationMessage::Assistant { content, .. } => {
-            json!({"role": "assistant", "content": content_blocks_to_api(content)})
-        }
-        ConversationMessage::System { content, .. } => {
-            json!({"role": "system", "content": content})
-        }
+pub fn assemble_model_request(session: &SessionState) -> ModelRequest {
+    ModelRequest {
+        model: session.model.clone(),
+        profile: session.model_profile.clone(),
+        messages: session.history.clone(),
+        max_output_tokens: DEFAULT_MODEL_OUTPUT_TOKENS,
     }
-}
-
-fn content_blocks_to_api(blocks: &[crate::types::ContentBlock]) -> Value {
-    use crate::types::ContentBlock;
-    let arr: Vec<Value> = blocks
-        .iter()
-        .map(|b| match b {
-            ContentBlock::ProviderContent { value, .. } => value.clone(),
-            ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                json!({"type": "text", "text": text})
-            }
-            ContentBlock::ToolUse {
-                id,
-                name,
-                input,
-                provider_id,
-            } => {
-                // Replay the verbatim provider id when preserved; else the
-                // serde form of the minted `ToolUseId` (bare uuid).
-                let wire_id = provider_id
-                    .clone()
-                    .map_or_else(|| json!(id), Value::String);
-                json!({"type": "tool_use", "id": wire_id, "name": name, "input": input})
-            }
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                provider_tool_use_id,
-                content_blocks,
-            } => {
-                let wire_id = provider_tool_use_id
-                    .clone()
-                    .map_or_else(|| json!(tool_use_id), Value::String);
-                // claude-code passes a structured content-block array VERBATIM as
-                // `tool_result.content` (`mapToolResultToToolResultBlockParam`);
-                // fall back to the stringified text when absent.
-                let wire_content = content_blocks
-                    .as_ref()
-                    .map_or_else(|| json!(content), |b| json!(b));
-                json!({"type": "tool_result", "tool_use_id": wire_id,
-                       "content": wire_content, "is_error": is_error})
-            }
-            ContentBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                json!({"type": "thinking", "thinking": thinking, "signature": signature})
-            }
-            ContentBlock::Image { source } => {
-                json!({"type": "image", "source": source})
-            }
-            ContentBlock::Document { source } => {
-                json!({"type": "document", "source": source})
-            }
-            ContentBlock::RedactedThinking { data } => {
-                json!({"type": "redacted_thinking", "data": data})
-            }
-            ContentBlock::ServerToolUse { id, name, input } => {
-                json!({"type": "server_tool_use", "id": id, "name": name, "input": input})
-            }
-            ContentBlock::ConnectorText {
-                connector_text,
-                signature,
-            } => {
-                json!({"type": "connector_text", "connector_text": connector_text, "signature": signature})
-            }
-            ContentBlock::AdvisorToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                json!({"type": "advisor_tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
-            }
-            ContentBlock::MediaAnalysis { analysis } => {
-                json!({"type": "text", "text": format!("[Media analysis sidecar]\n{}", serde_json::to_string(analysis).unwrap_or_else(|_| "{}".to_string()))})
-            }
-        })
-        .collect();
-    Value::Array(arr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::SessionState;
-    use crate::types::SessionId;
+    use crate::types::effects::ModelRequest;
+    use crate::types::messages::UsageLimitNote;
+    use crate::types::utf16_json::Utf16JsonProjection;
+    use crate::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
 
-    #[test]
-    fn assemble_includes_history_and_new_user_message() {
-        let session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
-        let req = assemble_request(&session, "what's 2+2?");
-        let body = req.as_object().unwrap();
-        assert_eq!(body["model"], "claude-opus-4-6");
-        let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
+    fn projection(source: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(source).expect("valid JSON source")
     }
 
     #[test]
-    fn assemble_appends_prior_history() {
-        use crate::types::{ConversationMessage, MessageId};
+    fn assembly_copies_current_session_model_and_history() {
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
+        session.model_profile = Some("anthropic".into());
         session.history.push(ConversationMessage::user(
             MessageId::nil(),
-            "earlier".into(),
+            "what's 2+2?".into(),
         ));
-        let req = assemble_request(&session, "now");
-        let messages = req["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "user");
+
+        let request = assemble_model_request(&session);
+        assert_eq!(request.model, "claude-opus-4-6");
+        assert_eq!(request.profile.as_deref(), Some("anthropic"));
+        assert_eq!(request.max_output_tokens, DEFAULT_MODEL_OUTPUT_TOKENS);
+        assert_eq!(request.messages, session.history);
     }
 
     #[test]
-    fn image_block_encodes_to_anthropic_image_shape() {
-        use crate::types::{ContentBlock, ImageSource};
-        let v = content_blocks_to_api(&[ContentBlock::Image {
-            source: ImageSource::Base64 {
-                media_type: "image/png".to_string(),
-                data: "YQ==".to_string(),
-            },
-        }]);
-        assert_eq!(v[0]["type"], "image");
-        assert_eq!(v[0]["source"]["type"], "base64");
-        assert_eq!(v[0]["source"]["media_type"], "image/png");
-        assert_eq!(v[0]["source"]["data"], "YQ==");
+    fn assembly_retains_exact_utf16_and_arbitrary_source_fields() {
+        let citations = projection(r#"{"opaque":[{"text":"\ud800"}]}"#);
+        let provider_value = projection(r#"{"unknown":{"\ud800":["\ud800",null]}}"#);
+        let tool_input = projection(r#"{"unknown":{"deep":[1,{"key":"\ud800"}]}}"#);
+        let origin = projection(r#"{"source":"hook","unknown":{"\ud800":true}}"#);
+        let turn_origin =
+            Utf16JsonProjection::root_string("mod".into(), "mod".encode_utf16().collect())
+                .expect("valid turn origin");
+        let resumable = projection("null");
+        let exact_units = vec![u16::from(b'x'), 0xD800];
+
+        let user = ConversationMessage::User {
+            id: MessageId::nil(),
+            content: vec![
+                ContentBlock::TextJsUtf16 {
+                    text: "x�".into(),
+                    utf16_code_units: exact_units.clone(),
+                    citations: Some(Some(citations.clone())),
+                },
+                ContentBlock::ProviderContent {
+                    protocol: "anthropic".into(),
+                    value: provider_value.clone(),
+                },
+                ContentBlock::ToolUse {
+                    id: crate::types::ToolUseId::from("call_1"),
+                    name: "custom".into(),
+                    input: tool_input.clone(),
+                    provider_id: Some("call_provider_1".into()),
+                },
+            ],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: Some(Some(true)),
+            usage_limit_note: Some(Some(UsageLimitNote::NearLimit)),
+            origin: Some(origin.clone()),
+            turn_origin: Some(turn_origin.clone()),
+        };
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::nil(),
+            content: vec![ContentBlock::Text {
+                text: "answer".into(),
+                citations: None,
+            }],
+            stop_reason: Some("max_tokens".into()),
+            resumable: Some(resumable.clone()),
+        };
+        let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
+        session.history = vec![user, assistant];
+
+        let request = assemble_model_request(&session);
+        assert_eq!(request.messages, session.history);
+
+        let ConversationMessage::User {
+            content,
+            turn_companion,
+            usage_limit_note,
+            origin: request_origin,
+            turn_origin: request_turn_origin,
+            ..
+        } = &request.messages[0]
+        else {
+            panic!("user message remains in request history");
+        };
+        assert_eq!(*turn_companion, Some(Some(true)));
+        assert_eq!(*usage_limit_note, Some(Some(UsageLimitNote::NearLimit)));
+        assert_eq!(request_origin.as_ref(), Some(&origin));
+        assert_eq!(request_turn_origin.as_ref(), Some(&turn_origin));
+        assert!(matches!(
+            &content[0],
+            ContentBlock::TextJsUtf16 { utf16_code_units, citations: Some(Some(value)), .. }
+                if utf16_code_units == &exact_units && value == &citations
+        ));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::ProviderContent { value, .. } if value == &provider_value
+        ));
+        assert!(matches!(
+            &content[2],
+            ContentBlock::ToolUse { input, provider_id: Some(id), .. }
+                if input == &tool_input && id == "call_provider_1"
+        ));
+        assert!(matches!(
+            &request.messages[1],
+            ConversationMessage::Assistant { resumable: Some(value), .. } if value == &resumable
+        ));
+
+        // Exercise the current raw-value Serde boundary as well as in-memory
+        // copying: unknown source, exact keys/values, and optional metadata
+        // survive without an intermediate recursive projection.
+        let wire = serde_json::to_string(&request).expect("serialize semantic request");
+        assert!(wire.contains(r#""\ud800":["\ud800",null]"#), "{wire}");
+        assert!(wire.contains(r#""resumable":null"#), "{wire}");
+        let decoded: ModelRequest =
+            serde_json::from_str(&wire).expect("deserialize semantic request");
+        assert_eq!(decoded.messages, request.messages);
+
+        let ConversationMessage::User { content, .. } = &decoded.messages[0] else {
+            panic!("decoded request retains user source");
+        };
+        let ContentBlock::ProviderContent { value, .. } = &content[1] else {
+            panic!("provider source remains an opaque source carrier");
+        };
+        let entries = value
+            .at_pointer("/unknown")
+            .and_then(|object| object.object_entries())
+            .expect("unknown nested object");
+        assert_eq!(entries[0].code_units, &[0xD800]);
+        assert_eq!(
+            entries[0]
+                .value
+                .get_index(0)
+                .and_then(|value| value.code_units()),
+            Some(&[0xD800][..])
+        );
     }
 }

@@ -1,8 +1,11 @@
 //! `LspDiagnosticRegistry` — accumulates `textDocument/publishDiagnostics`
 //! notifications keyed by document URI and tracks document freshness.
 
-use crate::diagnostics_format::{dedup_key, format_diagnostics_block, DiagnosticFile};
-use lsp_types::{Diagnostic, Url};
+use crate::diagnostics_format::{
+    dedup_key, format_diagnostics_block, DiagnosticFile, SourceDiagnostic,
+};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lsp_types::Url;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +20,7 @@ pub struct DiagnosticEntry {
     /// when the server does not track versions.
     pub version: Option<i32>,
     /// Diagnostics list, in server-provided order.
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<SourceDiagnostic>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +52,7 @@ pub struct HostDiagnosticSnapshot {
     pub synced_version: Option<i32>,
     pub diagnostics_version: Option<i32>,
     pub freshness: DiagnosticFreshness,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<SourceDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,7 +164,7 @@ impl LspDiagnosticRegistry {
     }
 
     /// Snapshot the diagnostics for `uri` (empty if none).
-    pub async fn get(&self, uri: &Url) -> Vec<Diagnostic> {
+    pub async fn get(&self, uri: &Url) -> Vec<SourceDiagnostic> {
         self.inner
             .read()
             .await
@@ -207,7 +210,7 @@ impl LspDiagnosticRegistry {
     }
 
     /// Snapshot every URI's diagnostics. Order is unspecified.
-    pub async fn all_diagnostics(&self) -> Vec<(Url, Vec<Diagnostic>)> {
+    pub async fn all_diagnostics(&self) -> Vec<(Url, Vec<SourceDiagnostic>)> {
         self.inner
             .read()
             .await
@@ -250,7 +253,7 @@ impl LspDiagnosticRegistry {
     pub async fn take_new_diagnostics_block_for_cursor(
         &self,
         cursor: &mut DiagnosticConsumerCursor,
-    ) -> Option<String> {
+    ) -> Option<Utf16JsonProjection> {
         self.take_new_diagnostics_block_for_cursor_under_host_root(cursor, None)
             .await
     }
@@ -261,7 +264,7 @@ impl LspDiagnosticRegistry {
         &self,
         cursor: &mut DiagnosticConsumerCursor,
         host_root: Option<&Path>,
-    ) -> Option<String> {
+    ) -> Option<Utf16JsonProjection> {
         let snapshots = self.inner.read().await;
         let documents = self.documents.read().await;
 
@@ -282,7 +285,7 @@ impl LspDiagnosticRegistry {
                 continue;
             };
             let seen = cursor.seen.entry(uri.clone()).or_default();
-            let mut fresh: Vec<Diagnostic> = Vec::new();
+            let mut fresh: Vec<SourceDiagnostic> = Vec::new();
             for diagnostic in &snapshot.entry.diagnostics {
                 let key = dedup_key(diagnostic);
                 if seen.insert(key) {
@@ -412,7 +415,7 @@ impl LspDiagnosticRegistry {
 
     /// Compute the passive `<new-diagnostics>` reminder for any diagnostics not
     /// yet surfaced to the model, marking them surfaced.
-    pub async fn take_new_diagnostics_block(&self) -> Option<String> {
+    pub async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
         let mut sent = self.sent.write().await;
         let mut cursor = DiagnosticConsumerCursor {
             seen: std::mem::take(&mut *sent),
@@ -427,14 +430,14 @@ impl LspDiagnosticRegistry {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for LspDiagnosticRegistry {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
         LspDiagnosticRegistry::take_new_diagnostics_block(self).await
     }
 }
 
 #[async_trait::async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for LspDiagnosticsSource {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
         if let (Some(root), Some(timeout)) = (&self.host_root, self.settle_timeout) {
             let _ = self.registry.settle_under_host_root(root, timeout).await;
         }
@@ -454,13 +457,16 @@ mod tests {
     use lsp_types::{DiagnosticSeverity, Position, Range};
     use std::path::PathBuf;
 
-    fn err(line: u32, msg: &str) -> Diagnostic {
-        Diagnostic {
-            range: Range::new(Position::new(line, 0), Position::new(line, 1)),
-            severity: Some(DiagnosticSeverity::ERROR),
-            message: msg.to_string(),
-            ..Default::default()
-        }
+    fn err(line: u32, msg: &str) -> SourceDiagnostic {
+        SourceDiagnostic::new(
+            Range::new(Position::new(line, 0), Position::new(line, 1)),
+            Some(DiagnosticSeverity::ERROR),
+            msg.into(),
+        )
+    }
+
+    fn block_text(block: &Utf16JsonProjection) -> String {
+        String::from_utf16_lossy(&block.string_units("").expect("root string"))
     }
 
     #[tokio::test]
@@ -479,9 +485,10 @@ mod tests {
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("a block");
-        assert!(block.contains("<new-diagnostics>"));
-        assert!(block.contains("a.ts:"));
-        assert!(block.contains("[Line 1:1] e1"));
+        let block_text = block_text(&block);
+        assert!(block_text.contains("<new-diagnostics>"));
+        assert!(block_text.contains("a.ts:"));
+        assert!(block_text.contains("[Line 1:1] e1"));
 
         assert!(reg.take_new_diagnostics_block().await.is_none());
 
@@ -494,8 +501,12 @@ mod tests {
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("e2 block");
-        assert!(block.contains("e2"), "got: {block}");
-        assert!(!block.contains("e1"), "e1 already surfaced: {block}");
+        let block_text = block_text(&block);
+        assert!(block_text.contains("e2"), "got: {block_text}");
+        assert!(
+            !block_text.contains("e1"),
+            "e1 already surfaced: {block_text}"
+        );
         assert!(reg.take_new_diagnostics_block().await.is_none());
     }
 
@@ -543,7 +554,7 @@ mod tests {
         assert!(reg.diagnostics_under_host_root(&root_a).await.is_empty());
         let remaining = reg.diagnostics_under_host_root(&root_b).await;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].diagnostics[0].message, "b");
+        assert_eq!(remaining[0].diagnostics[0].message.string_at(""), Some("b"));
     }
 
     #[tokio::test]
@@ -561,16 +572,16 @@ mod tests {
 
         let mut first = reg.consumer_cursor();
         let mut second = reg.consumer_cursor();
-        assert!(reg
+        let first_block = reg
             .take_new_diagnostics_block_for_cursor(&mut first)
             .await
-            .expect("first cursor")
-            .contains("e1"));
-        assert!(reg
+            .expect("first cursor");
+        assert!(block_text(&first_block).contains("e1"));
+        let second_block = reg
             .take_new_diagnostics_block_for_cursor(&mut second)
             .await
-            .expect("second cursor")
-            .contains("e1"));
+            .expect("second cursor");
+        assert!(block_text(&second_block).contains("e1"));
         assert!(reg
             .take_new_diagnostics_block_for_cursor(&mut first)
             .await

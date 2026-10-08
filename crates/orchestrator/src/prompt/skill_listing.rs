@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection as Source};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,11 +25,11 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillListingEntry {
     /// Skill name (TS `cmd.name`).
-    pub name: String,
+    pub name: Source,
     /// Short description (TS `cmd.description`).
-    pub description: String,
+    pub description: Source,
     /// Optional "when to use" guidance (TS `cmd.whenToUse`).
-    pub when_to_use: Option<String>,
+    pub when_to_use: Option<Source>,
     /// TS `cmd.source === 'bundled'` — bundled skills are never truncated.
     pub is_bundled: bool,
 }
@@ -42,6 +43,11 @@ pub trait SkillListingProvider: Send + Sync {
     /// Return the eligible skill entries (already filtered to model-invocable
     /// prompt skills). May be empty.
     async fn skill_entries(&self) -> Vec<SkillListingEntry>;
+
+    /// Snapshot precommit suggestions using the same eligible skill catalog.
+    async fn bash_precommit_skills(&self) -> tool_api::tool_trait::BashPrecommitSkills {
+        tool_api::tool_trait::BashPrecommitSkills::default()
+    }
 }
 
 /// A provider whose entries are loaded on demand from a host-owned source.
@@ -53,7 +59,17 @@ pub trait SkillListingProvider: Send + Sync {
 pub struct LazySkillListingProvider {
     loader:
         Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<SkillListingEntry>> + Send>> + Send + Sync>,
+    precommit_loader: Option<PrecommitSkillsLoader>,
 }
+
+type PrecommitSkillsLoader = Arc<
+    dyn Fn(
+            Vec<SkillListingEntry>,
+        )
+            -> Pin<Box<dyn Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send>>
+        + Send
+        + Sync,
+>;
 
 impl LazySkillListingProvider {
     /// Wrap an async loader as a [`SkillListingProvider`].
@@ -67,7 +83,20 @@ impl LazySkillListingProvider {
                 Box::pin(loader())
             },
         );
-        Self { loader }
+        Self {
+            loader,
+            precommit_loader: None,
+        }
+    }
+
+    /// Attach host provenance/settings resolution without changing listing rows.
+    pub fn with_bash_precommit_skills<F, Fut>(mut self, loader: F) -> Self
+    where
+        F: Fn(Vec<SkillListingEntry>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send + 'static,
+    {
+        self.precommit_loader = Some(Arc::new(move |entries| Box::pin(loader(entries))));
+        self
     }
 }
 
@@ -75,6 +104,13 @@ impl LazySkillListingProvider {
 impl SkillListingProvider for LazySkillListingProvider {
     async fn skill_entries(&self) -> Vec<SkillListingEntry> {
         (self.loader)().await
+    }
+
+    async fn bash_precommit_skills(&self) -> tool_api::tool_trait::BashPrecommitSkills {
+        let Some(loader) = self.precommit_loader.as_ref() else {
+            return tool_api::tool_trait::BashPrecommitSkills::default();
+        };
+        loader(self.skill_entries().await).await
     }
 }
 
@@ -106,56 +142,103 @@ fn char_budget(context_window_tokens: Option<usize>) -> usize {
 }
 
 /// prompt.ts:43-50. `whenToUse ? "{desc} - {when}" : desc`, capped at 250 with `…`.
-fn skill_description(e: &SkillListingEntry) -> String {
+fn skill_description(e: &SkillListingEntry) -> Source {
     let desc = match &e.when_to_use {
-        Some(w) if !w.is_empty() => format!("{} - {}", e.description, w),
+        Some(w) if !units(w).is_empty() => concatenate(&[&e.description, &" - ".into(), w]),
         _ => e.description.clone(),
     };
-    if string_width(&desc) > MAX_LISTING_DESC_CHARS {
-        truncate_to_width_ellipsis(&desc, MAX_LISTING_DESC_CHARS)
-    } else {
-        desc
+    truncate_to_width_ellipsis(&desc, MAX_LISTING_DESC_CHARS)
+}
+
+fn full_line(e: &SkillListingEntry) -> Source {
+    concatenate(&[&"- ".into(), &e.name, &": ".into(), &skill_description(e)])
+}
+
+fn units(source: &Source) -> Vec<u16> {
+    source.string_units("").expect("skill listing text")
+}
+
+fn from_units(units: Vec<u16>) -> Source {
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_string_units(units);
+    builder.finish(root).expect("skill listing source text")
+}
+
+fn concatenate(parts: &[&Source]) -> Source {
+    from_units(parts.iter().flat_map(|part| units(part)).collect())
+}
+
+fn join_lines(lines: &[Source]) -> Source {
+    let mut output = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index != 0 {
+            output.push(u16::from(b'\n'));
+        }
+        output.extend(units(line));
     }
+    from_units(output)
 }
 
-fn full_line(e: &SkillListingEntry) -> String {
-    format!("- {}: {}", e.name, skill_description(e))
+// Rust's Unicode routines need scalar text. The measurement projection keeps
+// every UTF-16 offset (one replacement scalar per isolated unit); output is
+// always sliced from the original units. Bun assigns isolated surrogates zero
+// display columns, unlike the replacement character used only for segmentation.
+fn measurement_text(units: &[u16]) -> (String, usize) {
+    let mut isolated = 0;
+    let text = char::decode_utf16(units.iter().copied())
+        .map(|value| {
+            value.unwrap_or_else(|_| {
+                isolated += 1;
+                '\u{fffd}'
+            })
+        })
+        .collect();
+    (text, isolated)
 }
 
-fn string_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
+fn units_width(units: &[u16]) -> usize {
+    let (text, isolated) = measurement_text(units);
+    UnicodeWidthStr::width(text.as_str()).saturating_sub(isolated)
 }
 
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if string_width(s) <= max_width {
-        return s.to_string();
+fn string_width(source: &Source) -> usize {
+    units_width(&units(source))
+}
+
+fn truncate_to_width(source: &Source, max_width: usize) -> Source {
+    let original = units(source);
+    if units_width(&original) <= max_width {
+        return source.clone();
     }
+    let (measurement, _) = measurement_text(&original);
     let mut used = 0;
-    let mut result = String::new();
-    for grapheme in s.graphemes(true) {
-        let width = string_width(grapheme);
+    let mut end = 0;
+    for grapheme in measurement.graphemes(true) {
+        let next = end + grapheme.encode_utf16().count();
+        let width = units_width(&original[end..next]);
         if used + width > max_width {
             break;
         }
-        result.push_str(grapheme);
         used += width;
+        end = next;
     }
-    result
+    from_units(original[..end].to_vec())
 }
 
-fn truncate_to_width_ellipsis(s: &str, max_width: usize) -> String {
-    if string_width(s) <= max_width {
-        return s.to_string();
+fn truncate_to_width_ellipsis(source: &Source, max_width: usize) -> Source {
+    if string_width(source) <= max_width {
+        return source.clone();
     }
     if max_width == 0 {
-        return String::new();
+        return "".into();
     }
     if max_width == 1 {
-        return "\u{2026}".to_string();
+        return "\u{2026}".into();
     }
-    let mut result = truncate_to_width(s, max_width - 1);
-    result.push('\u{2026}');
-    result
+    concatenate(&[
+        &truncate_to_width(source, max_width - 1),
+        &"\u{2026}".into(),
+    ])
 }
 
 /// prompt.ts:70-171. Returns the listing body (no `<system-reminder>` wrapper);
@@ -165,17 +248,17 @@ fn truncate_to_width_ellipsis(s: &str, max_width: usize) -> String {
 pub fn format_within_budget(
     entries: &[SkillListingEntry],
     context_window_tokens: Option<usize>,
-) -> String {
+) -> Source {
     if entries.is_empty() {
-        return String::new();
+        return "".into();
     }
     let budget = char_budget(context_window_tokens);
 
-    let full: Vec<String> = entries.iter().map(full_line).collect();
+    let full: Vec<Source> = entries.iter().map(full_line).collect();
     let join_overhead = full.len().saturating_sub(1); // newlines between lines
     let full_total: usize = full.iter().map(|l| string_width(l)).sum::<usize>() + join_overhead;
     if full_total <= budget {
-        return full.join("\n");
+        return join_lines(&full);
     }
 
     // Over budget: bundled skills stay full; the rest share the remaining budget
@@ -190,7 +273,7 @@ pub fn format_within_budget(
         .filter(|&i| !entries[i].is_bundled)
         .collect();
     if rest.is_empty() {
-        return full.join("\n");
+        return join_lines(&full);
     }
     let remaining = budget.saturating_sub(bundled_chars);
     let rest_name_overhead: usize = rest
@@ -200,22 +283,23 @@ pub fn format_within_budget(
         + rest.len().saturating_sub(1); // newlines among rest
     let max_desc_len = remaining.saturating_sub(rest_name_overhead) / rest.len();
 
-    entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            if e.is_bundled {
-                full[i].clone()
-            } else if max_desc_len < MIN_DESC_LENGTH {
-                format!("- {}", e.name) // names-only fallback (prompt.ts:137-141)
-            } else {
-                let d = skill_description(e);
-                let d = truncate_to_width(&d, max_desc_len);
-                format!("- {}: {d}", e.name)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    join_lines(
+        &entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                if e.is_bundled {
+                    full[i].clone()
+                } else if max_desc_len < MIN_DESC_LENGTH {
+                    concatenate(&[&"- ".into(), &e.name]) // names-only fallback (prompt.ts:137-141)
+                } else {
+                    let d = skill_description(e);
+                    let d = truncate_to_width(&d, max_desc_len);
+                    concatenate(&[&"- ".into(), &e.name, &": ".into(), &d])
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// messages.ts:3728-3738 renderer + `wrapInSystemReminder` (`messages.ts:3097`).
@@ -225,14 +309,17 @@ pub fn format_within_budget(
 pub fn render_reminder(
     entries: &[SkillListingEntry],
     context_window_tokens: Option<usize>,
-) -> Option<String> {
+) -> Option<Source> {
     let body = format_within_budget(entries, context_window_tokens);
-    if body.is_empty() {
+    if units(&body).is_empty() {
         return None;
     }
-    Some(format!(
-        "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{body}\n</system-reminder>"
-    ))
+    Some(concatenate(&[
+        &"<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
+            .into(),
+        &body,
+        &"\n</system-reminder>".into(),
+    ]))
 }
 
 #[cfg(test)]
@@ -245,9 +332,9 @@ mod tests {
 
     fn entry(name: &str, desc: &str, when: Option<&str>, bundled: bool) -> SkillListingEntry {
         SkillListingEntry {
-            name: name.to_string(),
-            description: desc.to_string(),
-            when_to_use: when.map(str::to_string),
+            name: name.into(),
+            description: desc.into(),
+            when_to_use: when.map(Into::into),
             is_bundled: bundled,
         }
     }
@@ -261,15 +348,30 @@ mod tests {
             async { vec![entry("live", "loaded from the current source", None, false)] }
         });
 
-        assert_eq!(provider.skill_entries().await[0].name, "live");
-        assert_eq!(provider.skill_entries().await[0].name, "live");
+        assert_eq!(
+            provider.skill_entries().await[0]
+                .name
+                .string_at("")
+                .as_deref(),
+            Some("live")
+        );
+        assert_eq!(
+            provider.skill_entries().await[0]
+                .name
+                .string_at("")
+                .as_deref(),
+            Some("live")
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
     fn empty_entries_render_none() {
         assert_eq!(render_reminder(&[], Some(200_000)), None);
-        assert_eq!(format_within_budget(&[], None), "");
+        assert_eq!(
+            format_within_budget(&[], None).string_at("").as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -291,13 +393,47 @@ mod tests {
             - debug: Debug a failing test\n\
             - loop: Run a prompt on a loop - for repeated tasks\n\
             </system-reminder>";
-        assert_eq!(got, want);
+        assert_eq!(got.string_at("").as_deref(), Some(want));
     }
 
     #[test]
     fn when_to_use_is_appended_to_description() {
         let e = entry("x", "Base desc", Some("when X happens"), false);
-        assert_eq!(skill_description(&e), "Base desc - when X happens");
+        assert_eq!(
+            skill_description(&e).string_at("").as_deref(),
+            Some("Base desc - when X happens")
+        );
+    }
+
+    #[test]
+    fn listing_preserves_source_name_description_and_guidance() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
+        let entry = SkillListingEntry {
+            name: from_units(vec![0xd800]),
+            description: from_units(vec![0xdc00]),
+            when_to_use: Some(from_units(vec![0xd801])),
+            is_bundled: false,
+        };
+        let actual = format_within_budget(&[entry], None);
+        assert_eq!(
+            units(&actual),
+            vec![45, 32, 0xd800, 58, 32, 0xdc00, 32, 45, 32, 0xd801]
+        );
+    }
+
+    #[test]
+    fn width_truncation_preserves_zero_width_isolated_units_and_whole_graphemes() {
+        let mut original = vec![0xd800, 0x301];
+        original.extend("中😀".encode_utf16());
+        let source = from_units(original);
+        assert_eq!(string_width(&source), 4);
+        assert_eq!(
+            units(&truncate_to_width(&source, 2)),
+            vec![0xd800, 0x301, 0x4e2d]
+        );
+        // A real replacement character retains its own display column.
+        assert_eq!(string_width(&"\u{fffd}\u{301}中😀".into()), 5);
     }
 
     #[test]
@@ -305,9 +441,12 @@ mod tests {
         let long = "d".repeat(400);
         let e = entry("x", &long, None, false);
         let d = skill_description(&e);
-        assert_eq!(d.chars().count(), MAX_LISTING_DESC_CHARS);
+        assert_eq!(
+            d.string_at("").unwrap().chars().count(),
+            MAX_LISTING_DESC_CHARS
+        );
         assert_eq!(string_width(&d), MAX_LISTING_DESC_CHARS);
-        assert!(d.ends_with('\u{2026}'));
+        assert!(d.string_at("").unwrap().ends_with('\u{2026}'));
     }
 
     #[test]
@@ -316,8 +455,12 @@ mod tests {
         let e = entry("han", &long, None, false);
         let d = skill_description(&e);
         assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
-        assert!(d.ends_with('\u{2026}'));
-        assert!(d.chars().all(|c| c == '中' || c == '\u{2026}'));
+        assert!(d.string_at("").unwrap().ends_with('\u{2026}'));
+        assert!(d
+            .string_at("")
+            .unwrap()
+            .chars()
+            .all(|c| c == '中' || c == '\u{2026}'));
     }
 
     #[test]
@@ -326,7 +469,8 @@ mod tests {
         let long = family.repeat(200);
         let e = entry("emoji", &long, None, false);
         let d = skill_description(&e);
-        let without_ellipsis = d.strip_suffix('\u{2026}').expect("ellipsis");
+        let scalar = d.string_at("").unwrap();
+        let without_ellipsis = scalar.strip_suffix('\u{2026}').expect("ellipsis");
         assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
         assert!(without_ellipsis
             .graphemes(true)
@@ -335,8 +479,18 @@ mod tests {
 
     #[test]
     fn ellipsis_truncation_respects_zero_and_one_column_budgets() {
-        assert_eq!(truncate_to_width_ellipsis("wide", 0), "");
-        assert_eq!(truncate_to_width_ellipsis("wide", 1), "\u{2026}");
+        assert_eq!(
+            truncate_to_width_ellipsis(&"wide".into(), 0)
+                .string_at("")
+                .unwrap(),
+            ""
+        );
+        assert_eq!(
+            truncate_to_width_ellipsis(&"wide".into(), 1)
+                .string_at("")
+                .unwrap(),
+            "\u{2026}"
+        );
     }
 
     #[test]
@@ -361,11 +515,17 @@ mod tests {
             ),
         ];
         let body = format_within_budget(&entries, Some(1_000)); // budget = 40 chars
-        assert!(body.contains("- bundled_one: Bundled stays full"));
-        assert!(body.contains("- user_a"));
-        assert!(body.contains("- user_b"));
+        assert!(body
+            .string_at("")
+            .unwrap()
+            .contains("- bundled_one: Bundled stays full"));
+        assert!(body.string_at("").unwrap().contains("- user_a"));
+        assert!(body.string_at("").unwrap().contains("- user_b"));
         // Non-bundled descriptions are dropped under a tiny budget.
-        assert!(!body.contains("Some user skill description"));
+        assert!(!body
+            .string_at("")
+            .unwrap()
+            .contains("Some user skill description"));
     }
 
     #[test]
@@ -377,7 +537,7 @@ mod tests {
         std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
 
         assert_ne!(body, full_line(&entries[0]));
-        assert_eq!(body, "- han: 中中中中中中中中中中中");
+        assert_eq!(body.string_at("").unwrap(), "- han: 中中中中中中中中中中中");
         assert!(string_width(&body) <= 30);
     }
 

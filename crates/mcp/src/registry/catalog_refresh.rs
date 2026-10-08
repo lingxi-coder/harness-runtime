@@ -16,6 +16,7 @@ use super::{
 };
 use crate::connection::McpConnectionState;
 use lingxi_core::host::{McpError, ServerCapabilitiesDto};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use rand::Rng as _;
 use std::sync::Arc;
@@ -24,10 +25,11 @@ use tokio::sync::broadcast;
 
 pub(super) fn modern_listen_request_params(
     version: &str,
+    elicitation: lingxi_core::host::McpElicitationMode,
     notifications: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "_meta": crate::client::modern_meta(version),
+        "_meta": crate::client::modern_meta(version, elicitation),
         "notifications": notifications,
     })
 }
@@ -64,15 +66,19 @@ pub(super) fn notification_matches_subscription(
     let Some(params) = notification.params.as_ref() else {
         return false;
     };
-    let Some(meta) = params.get("_meta").and_then(serde_json::Value::as_object) else {
+    let Ok(params) = Utf16JsonProjection::parse(params.as_json()) else {
         return false;
     };
-    let Some(observed) = meta.get("io.modelcontextprotocol/subscriptionId") else {
+    let Some(meta) = params.get_property("_meta") else {
+        return false;
+    };
+    let Some(observed) = meta.get_property("io.modelcontextprotocol/subscriptionId") else {
         return false;
     };
     match subscription_id {
-        jsonrpc::Id::Number(expected) => observed.as_i64() == Some(*expected),
+        jsonrpc::Id::Number(expected) => observed.as_number() == Some(*expected as f64),
         jsonrpc::Id::String(expected) => observed.as_str() == Some(expected),
+        jsonrpc::Id::StringUnits(expected) => observed.code_units() == Some(expected.as_slice()),
     }
 }
 
@@ -219,10 +225,13 @@ impl McpRegistry {
             return Ok(Some(current_id));
         }
         let Some(client) = self.get_client(&change.server_name).await else {
-            return Err(McpError::Internal(format!(
-                "MCP server \"{}\" has no live client for catalog refresh",
-                change.server_name
-            )));
+            return Err(McpError::Internal(
+                format!(
+                    "MCP server \"{}\" has no live client for catalog refresh",
+                    change.server_name
+                )
+                .into(),
+            ));
         };
 
         enum Refreshed {
@@ -235,17 +244,17 @@ impl McpRegistry {
                 .list_tools()
                 .await
                 .map(Refreshed::Tools)
-                .map_err(|e| McpError::Internal(e.to_string()))?,
+                .map_err(|e| McpError::Internal(e.to_string().into()))?,
             McpCatalogKind::Prompts => client
                 .list_prompts()
                 .await
                 .map(Refreshed::Prompts)
-                .map_err(|e| McpError::Internal(e.to_string()))?,
+                .map_err(|e| McpError::Internal(e.to_string().into()))?,
             McpCatalogKind::Resources => client
                 .list_resources()
                 .await
                 .map(Refreshed::Resources)
-                .map_err(|e| McpError::Internal(e.to_string()))?,
+                .map_err(|e| McpError::Internal(e.to_string().into()))?,
         };
 
         let mut conns = self.connections.write().await;
@@ -363,9 +372,23 @@ impl McpRegistry {
         let Some(filter) = modern_listen_notifications_filter(&capabilities) else {
             return;
         };
+        let Some(elicitation) = self
+            .clients
+            .read()
+            .await
+            .get(&server_name)
+            .filter(|registered| {
+                registered
+                    .connection_id
+                    .is_none_or(|id| id == connection_id)
+            })
+            .map(|registered| registered.client.elicitation_capabilities().modern)
+        else {
+            return;
+        };
         let listen = match connection.start_call_unbounded(
             "subscriptions/listen",
-            modern_listen_request_params(&negotiated.version, filter),
+            modern_listen_request_params(&negotiated.version, elicitation, filter),
         ) {
             Ok(listen) => listen,
             Err(_) => {

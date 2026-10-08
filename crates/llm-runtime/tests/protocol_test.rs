@@ -10,13 +10,14 @@ fn tool_declarations_require_tools_capability() {
     let mut request = LlmRequest::new("text-only").with_user_text("hi");
     request.input.tools = vec![ToolSpec {
         name: "Read".to_string(),
-        description: "d".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: lingxi_llm_client::protocol::JsonPayload::string("d"),
+        input_schema: lingxi_llm_client::protocol::JsonPayload::parse(r#"{"type":"object"}"#)
+            .unwrap(),
         strict: false,
         defer_loading: false,
         native_options: vec![],
         tool_type: None,
-        extra: serde_json::Value::Null,
+        extra: lingxi_llm_client::protocol::JsonPayload::parse("null").unwrap(),
     }];
     let capabilities = Capabilities {
         streaming: true,
@@ -41,6 +42,7 @@ fn with_image_attaches_to_last_user_message_or_starts_one() {
         content: vec![ContentBlock::Text {
             text: "ok".to_string(),
             thought_signature: None,
+            citations: None,
         }],
     });
 

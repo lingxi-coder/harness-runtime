@@ -35,7 +35,7 @@ async fn prepare_projection(
     orch: &ConversationOrchestrator,
     model: &str,
     profile: Option<&str>,
-    tools: &[Value],
+    tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
     recover_before_request(orch).await?;
     super::prepare_projection(orch, model, profile, tools).await
@@ -148,16 +148,28 @@ impl ToolExecutionJournal for Journal {
 #[derive(Default)]
 struct Gate {
     denied: AtomicBool,
-    checks: SyncMutex<Vec<(String, Value)>>,
-    resolutions: SyncMutex<Vec<(Option<String>, String, Value)>>,
-    prompts: SyncMutex<Vec<(Option<String>, String, Value)>>,
+    checks: SyncMutex<Vec<(String, lingxi_core::types::utf16_json::Utf16JsonProjection)>>,
+    resolutions: SyncMutex<
+        Vec<(
+            Option<String>,
+            String,
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        )>,
+    >,
+    prompts: SyncMutex<
+        Vec<(
+            Option<String>,
+            String,
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        )>,
+    >,
 }
 #[async_trait]
 impl PermissionGate for Gate {
     async fn resolve_detailed_or_abort(
         &self,
         name: &str,
-        input: &Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionResolution, PermissionAbort> {
         self.resolutions.lock().unwrap().push((
@@ -170,7 +182,7 @@ impl PermissionGate for Gate {
     async fn check_with_context(
         &self,
         name: &str,
-        input: &Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         self.prompts
@@ -186,7 +198,11 @@ impl PermissionGate for Gate {
             PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
         }
     }
-    async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        name: &str,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         self.checks
             .lock()
             .unwrap()
@@ -204,7 +220,7 @@ impl PermissionGate for Gate {
 
 struct Computer {
     calls: SyncMutex<Vec<Value>>,
-    outputs: SyncMutex<Vec<Vec<Value>>>,
+    outputs: SyncMutex<Vec<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     ready: AtomicBool,
     fail_type: bool,
     partial: AtomicBool,
@@ -374,12 +390,14 @@ impl Tool for Computer {
     async fn computer_model_output(
         &self,
         _: &ToolUseContext,
-        _: &str,
-        blocks: Option<&[Value]>,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        blocks: Option<&[lingxi_core::types::utf16_json::Utf16JsonProjection]>,
     ) -> Result<(), ToolError> {
         let blocks = blocks.unwrap_or_default().to_vec();
         self.ready.store(
-            blocks.iter().any(|b| b["type"] == "image"),
+            blocks
+                .iter()
+                .any(|block| block.string_at("/type") == Some("image")),
             Ordering::SeqCst,
         );
         self.outputs.lock().unwrap().push(blocks);
@@ -776,6 +794,7 @@ impl Fixture {
             id: MessageId::new(),
             content: blocks,
             stop_reason: response.stop_reason.clone(),
+            resumable: None,
         };
         let accepted =
             persist_native_assistant(&self.orch, &message, response, None, self.fence()).await?;
@@ -809,6 +828,7 @@ impl Fixture {
                     id: MessageId::new(),
                     content: blocks.clone(),
                     stop_reason: Some("tool_use".into()),
+                    resumable: None,
                 });
         let assistant_id = assistant_message.id();
         if existing.is_none() {
@@ -862,6 +882,7 @@ impl Fixture {
             &uses,
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
+                native_query_depth: 0,
                 query_history: vec![],
                 assistant_message,
                 same_turn_tool_uses: vec![],
@@ -1666,7 +1687,11 @@ async fn post_hook_removed_image_is_absent_from_model_frame_and_receipt() {
         .lock()
         .unwrap()
         .iter()
-        .all(|blocks| !blocks.iter().any(|b| b["type"] == "image")));
+        .all(|blocks| {
+            !blocks
+                .iter()
+                .any(|block| block.string_at("/type") == Some("image"))
+        }));
     // Claude's required observation must fail explicitly, and cannot obtain
     // the hidden original image or perform another screenshot behind the hook.
     let receipt = prepare_receipts(&fixture.orch, &result_ids(&dispatched.results)).await;
@@ -2024,8 +2049,11 @@ async fn completed_native_rows_stay_compacted_when_preparing_the_next_request() 
         .unwrap()
         .unwrap();
     assert!(next.submission.is_none());
-    assert_eq!(serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap(), compacted_json,
-        "routine ledger refresh must not resurrect completed binding, output, receipt or acknowledgement rows");
+    assert_eq!(
+        serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap(),
+        compacted_json,
+        "routine ledger refresh must not resurrect completed binding, output, receipt or acknowledgement rows"
+    );
     assert_eq!(
         std::fs::read(&fixture.transcript_path).unwrap(),
         transcript_before
@@ -2078,8 +2106,11 @@ async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_b
         next.continuation.unwrap().response_id.as_str(),
         "retained-successor"
     );
-    assert_eq!(serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap(), retained,
-        "received ledger facts must not add old output, receipt or a derived ACK after the successor");
+    assert_eq!(
+        serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap(),
+        retained,
+        "received ledger facts must not add old output, receipt or a derived ACK after the successor"
+    );
     assert_eq!(
         std::fs::read(&fixture.transcript_path).unwrap(),
         transcript_before
@@ -2169,8 +2200,12 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
         wire::ProtocolFamily::OpenAiResponses,
     )
     .unwrap();
-    assert!(serde_json::to_string(&input).unwrap().contains("openai.responses.computer_call_output.v1"),
-        "an old abandonment marker must not suppress the new response's receipt with a reused call ID");
+    assert!(
+        serde_json::to_string(&input)
+            .unwrap()
+            .contains("openai.responses.computer_call_output.v1"),
+        "an old abandonment marker must not suppress the new response's receipt with a reused call ID"
+    );
 }
 
 #[tokio::test]

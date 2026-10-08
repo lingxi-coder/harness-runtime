@@ -1,0 +1,15 @@
+<tool_use_error>tool.call step resolved Glob with a result that does not match its output shape: [
+  {
+    "expected": "string",
+    "code": "invalid_type",
+    "path": [
+      "filenames",
+      1
+    ],
+    "message": "Invalid input: expected string, received number"
+  }
+]</tool_use_error>
+
+<system-reminder>
+<total_tokens>14999994 tokens left</total_tokens>
+</system-reminder>

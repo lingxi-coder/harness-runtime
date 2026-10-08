@@ -70,8 +70,11 @@ impl Tool for AlwaysOkTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "AlwaysOk".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -138,8 +141,11 @@ impl Tool for McpEndTurnTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "McpEndTurn".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -193,7 +199,7 @@ async fn two_streaming_turns_with_tool_in_between() {
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -203,7 +209,7 @@ async fn two_streaming_turns_with_tool_in_between() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let outcome = orch.run_turn_streaming("call then echo").await.expect("ok");
     match outcome {
@@ -258,18 +264,20 @@ async fn streaming_mcp_end_turn_stops_without_a_second_model_call() {
     let bus = Arc::new(telemetry::AnalyticsBus::new());
     let sink = Arc::new(InMemorySink::new());
     bus.attach_sink(sink.clone()).await;
-    let orch = ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        batched,
-        api.clone(),
-        registry_with_mcp_end_turn(),
-        orchestrator::test_support::noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        output.clone(),
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
-    )
-    .with_analytics_bus(bus);
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            api.clone(),
+            registry_with_mcp_end_turn(),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_analytics_bus(bus),
+    );
 
     let outcome = orch.run_turn_streaming("call and stop").await.expect("ok");
     match outcome {

@@ -26,6 +26,31 @@ pub(crate) fn count_structured_patch_lines(structured_patch: &serde_json::Value)
     (added, removed)
 }
 
+/// Source-native counterpart for provider/tool result payloads.
+pub(crate) fn count_structured_patch_lines_source(
+    structured_patch: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> (u64, u64) {
+    let Some(hunks) = structured_patch.array_len("") else {
+        return (0, 0);
+    };
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    for hunk in 0..hunks {
+        let pointer = format!("/{hunk}/lines");
+        for index in 0..structured_patch.array_len(&pointer).unwrap_or_default() {
+            let Some(line) = structured_patch.string_units(&format!("{pointer}/{index}")) else {
+                continue;
+            };
+            match line.first() {
+                Some(unit) if *unit == b'+' as u16 => added += 1,
+                Some(unit) if *unit == b'-' as u16 => removed += 1,
+                _ => {}
+            }
+        }
+    }
+    (added, removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,6 +22,7 @@
 //! 6-element built-in vec (claude does not register `FORK_AGENT` in
 //! `builtInAgents`, `forkSubagent.ts:45`).
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::{ContentBlock, ConversationMessage, MessageId};
 
 /// XML tag wrapping the rules/format boilerplate in a fork child's first message
@@ -93,7 +94,9 @@ pub fn is_in_fork_child(messages: &[ConversationMessage]) -> bool {
     let open_tag = format!("<{FORK_BOILERPLATE_TAG}>");
     messages.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(|b| match b {
-            ContentBlock::Text { text } => text.contains(&open_tag),
+            ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                text.contains(&open_tag)
+            }
             _ => false,
         }),
         _ => false,
@@ -106,8 +109,8 @@ pub fn is_in_fork_child(messages: &[ConversationMessage]) -> bool {
 /// worker-fork hard rules / guidelines, two em-dashes (U+2014), and the
 /// trailing `{N5t}{directive}` (`Your directive: `).
 #[must_use]
-pub fn build_child_message(directive: &str) -> String {
-    format!(
+pub fn build_child_message(directive: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let prefix = format!(
         "<{FORK_BOILERPLATE_TAG}>
 You are a worker fork. The transcript above is the parent's history — inherited reference, not your situation. You are NOT a continuation of that agent. Execute ONE directive, then stop.
 Hard rules:
@@ -119,8 +122,28 @@ Guidelines (your directive may override any of these):
 - Be concise — as short as the answer allows, no shorter. Plain text, no preamble, no meta-commentary.
 - If you committed changes, list the paths and commit hashes in your report.
 </{FORK_BOILERPLATE_TAG}>
-{FORK_DIRECTIVE_PREFIX}{directive}"
-    )
+{FORK_DIRECTIVE_PREFIX}"
+    );
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        directive
+            .string_units("")
+            .expect("fork directive is a root-string projection"),
+    );
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("fork child prompt matches exact UTF-16 units")
+}
+
+fn child_message_block(directive: &Utf16JsonProjection) -> ContentBlock {
+    let message = build_child_message(directive);
+    let utf16_code_units = message
+        .string_units("")
+        .expect("fork child message is a root-string projection");
+    ContentBlock::TextJsUtf16 {
+        text: String::from_utf16_lossy(&utf16_code_units),
+        utf16_code_units,
+        citations: None,
+    }
 }
 
 /// Notice injected into fork children running in an isolated worktree (claude
@@ -150,13 +173,11 @@ pub fn build_worktree_notice(parent_cwd: &str, worktree_cwd: &str) -> String {
 /// Fallback (no `tool_use` blocks, `forkSubagent.ts:127-139`): a single user
 /// message `[Text(build_child_message(directive))]`.
 ///
-/// NOTE divergence: `crate::types::ContentBlock::ToolResult.content` is a flat
-/// `String` (not `[{type:'text', text}]`) — the placeholder is stored directly;
-/// this is the established Rust shape (`agent::runner` builds `ToolResult` the
-/// same way) and the egress codec serializes it to the same wire bytes.
+/// The generated placeholder is a Source JSON string; inherited tool inputs
+/// and assistant metadata retain their exact current carriers.
 #[must_use]
 pub fn build_forked_messages(
-    directive: &str,
+    directive: &Utf16JsonProjection,
     assistant: &ConversationMessage,
 ) -> Vec<ConversationMessage> {
     // (1) Clone the FULL assistant message, minting a fresh id (TS spreads the
@@ -165,11 +186,13 @@ pub fn build_forked_messages(
         ConversationMessage::Assistant {
             content,
             stop_reason,
+            resumable,
             ..
         } => ConversationMessage::Assistant {
             id: MessageId::new(),
             content: content.clone(),
             stop_reason: stop_reason.clone(),
+            resumable: resumable.clone(),
         },
         // The caller only ever passes an Assistant message; defensively treat a
         // non-assistant input as "no tool_use" (the fallback below handles it).
@@ -194,12 +217,14 @@ pub fn build_forked_messages(
     if tool_uses.is_empty() {
         return vec![ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
-                text: build_child_message(directive),
-            }],
+            content: vec![child_message_block(directive)],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
     }
 
@@ -209,15 +234,17 @@ pub fn build_forked_messages(
     for (id, provider_id) in &tool_uses {
         content.push(ContentBlock::ToolResult {
             tool_use_id: (*id).clone(),
-            content: FORK_PLACEHOLDER_RESULT.to_string(),
-            is_error: false,
+            content: crate::types::utf16_json::Utf16JsonProjection::root_string(
+                FORK_PLACEHOLDER_RESULT.to_owned(),
+                FORK_PLACEHOLDER_RESULT.encode_utf16().collect(),
+            )
+            .expect("generated fork placeholder is Unicode text"),
+            is_error: Some(false),
             provider_tool_use_id: (*provider_id).clone(),
             content_blocks: None,
         });
     }
-    content.push(ContentBlock::Text {
-        text: build_child_message(directive),
-    });
+    content.push(child_message_block(directive));
 
     vec![
         cloned_assistant,
@@ -227,8 +254,50 @@ pub fn build_forked_messages(
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         },
     ]
+}
+
+/// Preserve the parent's full history before the dispatching assistant, then
+/// append the cloned assistant and placeholder-results/directive tail.
+/// Claude Code 2.1.286 passes these as `forkContextMessages: e.messages` and
+/// `promptMessages: ICr(prompt, assistant)` to Lv; our runner has already
+/// appended that assistant, so it must be replaced by its cloned fork tail.
+#[must_use]
+pub fn build_forked_context(
+    directive: &Utf16JsonProjection,
+    messages: &[ConversationMessage],
+) -> Vec<ConversationMessage> {
+    let index = messages
+        .iter()
+        .rposition(|message| matches!(message, ConversationMessage::Assistant { .. }))
+        .filter(|index| {
+            *index + 1 == messages.len()
+                && matches!(&messages[*index], ConversationMessage::Assistant { content, .. }
+                    if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. })))
+        });
+    let Some(index) = index else {
+        let mut prefix = messages.to_vec();
+        prefix.push(ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![child_message_block(directive)],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        });
+        return prefix;
+    };
+    let mut prefix = messages[..index].to_vec();
+    prefix.extend(build_forked_messages(directive, &messages[index]));
+    prefix
 }
 
 #[cfg(test)]
@@ -240,6 +309,52 @@ mod tests {
 
     /// `LINGXI_FORK_SUBAGENT` is process-global; serialize the gate tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn source_text(text: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
+            .expect("test text is a valid root-string projection")
+    }
+
+    #[test]
+    fn fork_context_keeps_completed_assistant_and_later_lazy_policy() {
+        let messages = vec![
+            ConversationMessage::user(MessageId::new(), "parent task".into()),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::Text {
+                    text: "completed parent answer".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+            },
+            ConversationMessage::user_meta(MessageId::new(), "lazy instruction policy".into()),
+        ];
+        let fork = build_forked_context(&source_text("child task"), &messages);
+        assert_eq!(&fork[..messages.len()], messages.as_slice());
+        assert_eq!(fork.len(), messages.len() + 1);
+    }
+
+    #[test]
+    fn fork_clone_retains_exact_resumable_metadata() {
+        use crate::types::utf16_json::Utf16JsonProjection;
+        let payload = Utf16JsonProjection::parse(r#"{"x":"\ud800","n":-0}"#).unwrap();
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "Task".into(),
+                input: payload.clone(),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            resumable: Some(payload.clone()),
+        };
+        let fork = build_forked_messages(&source_text("continue"), &assistant);
+        assert!(
+            matches!(&fork[0], ConversationMessage::Assistant { resumable: Some(resumable), .. } if resumable == &payload)
+        );
+    }
 
     #[test]
     fn consts_are_byte_exact_vs_claude() {
@@ -301,7 +416,7 @@ mod tests {
 
     #[test]
     fn build_child_message_is_byte_exact() {
-        let got = build_child_message("Fix the bug in foo.rs");
+        let got = build_child_message(&source_text("Fix the bug in foo.rs"));
         // Whole-string byte-exact port of claude-code 2.1.232 `zCn`.
         let expected = "<fork-boilerplate>
 You are a worker fork. The transcript above is the parent's history — inherited reference, not your situation. You are NOT a continuation of that agent. Execute ONE directive, then stop.
@@ -315,9 +430,19 @@ Guidelines (your directive may override any of these):
 - If you committed changes, list the paths and commit hashes in your report.
 </fork-boilerplate>
 Your directive: Fix the bug in foo.rs";
-        assert_eq!(got, expected);
+        assert_eq!(got.string_at(""), Some(expected));
+        assert_eq!(got.string_units(""), Some(expected.encode_utf16().collect()));
         // Two em-dashes: "history — inherited" and "Be concise — as short".
-        assert_eq!(got.matches('\u{2014}').count(), 2);
+        assert_eq!(got.string_at("").unwrap().matches('\u{2014}').count(), 2);
+    }
+
+    #[test]
+    fn fork_child_prompt_keeps_unpaired_directive_units() {
+        let directive = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+        let child = build_child_message(&directive);
+        let units = child.string_units("").unwrap();
+        assert_eq!(units.last(), Some(&0xd800));
+        assert!(child.string_at("").unwrap().ends_with('\u{fffd}'));
     }
 
     #[test]
@@ -332,12 +457,14 @@ Your directive: Fix the bug in foo.rs";
     fn is_in_fork_child_detects_boilerplate_tag() {
         let child = ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text {
-                text: build_child_message("do it"),
-            }],
+            content: vec![child_message_block(&source_text("do it"))],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         assert!(is_in_fork_child(&[child]));
 
@@ -350,8 +477,10 @@ Your directive: Fix the bug in foo.rs";
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "<fork-boilerplate>".into(),
+                citations: None,
             }],
             stop_reason: None,
+            resumable: None,
         };
         assert!(!is_in_fork_child(&[asst]));
     }
@@ -360,7 +489,10 @@ Your directive: Fix the bug in foo.rs";
         ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "Bash".into(),
-            input: json!({"command": id_str}),
+            input: crate::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"command": id_str}),
+            )
+            .expect("bounded tool-use fixture"),
             provider_id: provider.map(str::to_string),
         }
     }
@@ -376,13 +508,15 @@ Your directive: Fix the bug in foo.rs";
                 },
                 ContentBlock::Text {
                     text: "I'll run two commands".into(),
+                    citations: None,
                 },
                 tu("ls", Some("toolu_a")),
                 tu("pwd", Some("toolu_b")),
             ],
             stop_reason: Some("tool_use".into()),
+            resumable: None,
         };
-        let msgs = build_forked_messages("Do the thing", &assistant);
+        let msgs = build_forked_messages(&source_text("Do the thing"), &assistant);
         assert_eq!(msgs.len(), 2);
 
         // (1) cloned assistant retains thinking + text + both tool_use blocks.
@@ -414,15 +548,18 @@ Your directive: Fix the bug in foo.rs";
                             provider_tool_use_id,
                             ..
                         } => {
-                            assert_eq!(c, "Fork started — processing in background");
-                            assert!(!is_error);
+                            assert_eq!(
+                                c.string_at(""),
+                                Some("Fork started — processing in background")
+                            );
+                            assert!(!is_error.unwrap_or(false));
                             assert_eq!(provider_tool_use_id.as_deref(), Some(prov));
                         }
                         other => panic!("expected ToolResult, got {other:?}"),
                     }
                 }
                 match &content[2] {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::TextJsUtf16 { text, .. } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
                         assert!(text.ends_with("Your directive: Do the thing"));
                     }
@@ -439,16 +576,18 @@ Your directive: Fix the bug in foo.rs";
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no tools here".into(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         };
-        let msgs = build_forked_messages("Just answer", &assistant);
+        let msgs = build_forked_messages(&source_text("Just answer"), &assistant);
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
             ConversationMessage::User { content, .. } => {
                 assert_eq!(content.len(), 1);
                 match &content[0] {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::TextJsUtf16 { text, .. } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
                         assert!(text.ends_with("Your directive: Just answer"));
                     }

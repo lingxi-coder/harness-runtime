@@ -1,0 +1,23 @@
+{
+  "type": "tombstone",
+  "message": {
+    "uuid": "assistant-row-1",
+    "type": "assistant",
+    "timestamp": "2026-10-03T12:00:00.000Z",
+    "request_id": "request-1",
+    "request_ref_json": "{\"route\":\"native\"}",
+    "message": {
+      "id": "provider-message-1",
+      "model": "claude-opus-4",
+      "stop_reason": "tool_use",
+      "stop_details_json": "{\"category\":\"cyber\"}",
+      "usage_json": "{\"input_tokens\":5,\"output_tokens\":2}",
+      "content_json": "[{\"type\":\"text\",\"text\":\"superseded\"}]"
+    },
+    "is_api_error_message": false,
+    "supersedes_uuids": [
+      "assistant-row-0"
+    ]
+  },
+  "display_only": true
+}

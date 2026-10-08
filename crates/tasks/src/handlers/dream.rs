@@ -297,9 +297,18 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
+            parent_native_query_depth: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
-            prompt: build_consolidation_prompt(&prompt),
+            prompt: build_consolidation_prompt(&prompt).into(),
             observer: None,
             context_paths: Vec::new(),
             // AgentTool spawn-surface parity params — the dream consolidation
@@ -321,6 +330,7 @@ impl Task for DreamHandler {
             worktree: None,
             // Non-fork synchronous spawn.
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -391,8 +401,10 @@ impl Task for DreamHandler {
             // is surfaced by spooling a `<usage><total_tokens>…` footer.
             let (payload, status) = match &result {
                 Ok(SubagentResult::Completed { content, usage, .. }) => {
-                    let body = serde_json::to_string_pretty(content)
-                        .unwrap_or_else(|_| content.to_string());
+                    let body = content
+                        .to_pretty_json_string()
+                        .or_else(|_| content.to_json_string())
+                        .expect("validated subagent projection serializes");
                     let body = format!(
                         "{body}\n<usage><total_tokens>{}</total_tokens></usage>\n",
                         usage.total_tokens
@@ -652,8 +664,10 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        handback: None,
                         agent_id: lingxi_core::types::AgentId::new(),
-                        content,
+                        content: Utf16JsonProjection::from_serde_value(&content)
+                            .expect("generated dream fixture is valid JSON"),
                         usage: SubagentUsage {
                             total_tokens,
                             ..Default::default()
@@ -694,10 +708,10 @@ mod tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
-            Ok(json!(null))
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").unwrap())
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -926,7 +940,9 @@ mod tests {
         let req = spawner.request().expect("spawner must have been called");
         assert_eq!(req.subagent_type, "general-purpose");
         assert!(
-            req.prompt.contains("# Dream: Memory Consolidation"),
+            req.prompt
+                .string_at("")
+                .is_some_and(|prompt| prompt.contains("# Dream: Memory Consolidation")),
             "static consolidation prompt seeded"
         );
         assert!(req.context_paths.is_empty());
@@ -1018,8 +1034,8 @@ mod tests {
 
         await_terminal(&sink).await;
         assert_eq!(
-            spawner.request().unwrap().prompt,
-            "custom dream directive",
+            spawner.request().unwrap().prompt.string_at(""),
+            Some("custom dream directive"),
             "a non-empty caller prompt is forwarded verbatim"
         );
     }

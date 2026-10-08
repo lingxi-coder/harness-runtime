@@ -14,12 +14,18 @@
 //! their `Display`) but are no longer produced from this path.
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
-use serde_json::json;
+use serde_json::{json, Value};
 use session::jsonl::{load_session, project_dir_name, LoaderError};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+fn source_json_view(source: &Utf16JsonProjection) -> Value {
+    let json = source.to_json_string().expect("fixture source is JSON");
+    serde_json::from_str(&json).expect("fixture source parses as JSON")
+}
 
 async fn setup_cwd() -> (
     TempDir,
@@ -488,12 +494,13 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
         "orphaned tool_result tr2 recovered: {uuids:?}"
     );
 
-    // Main chain is NOT reordered: u0, a1, tr1, a3 keep their relative order,
-    // and the recovered group [a2, tr2] is spliced right after the anchor a1.
+    // Claude 2.1.286 merges recovered records in transcript insertion order:
+    // a2 precedes tr1, but tr2 follows tr1. Executed upstream fixture:
+    // recovery-2.1.286/cases.json::legacy_parallel_recovery_order.
     assert_eq!(
         uuids,
-        vec![u0, a1, a2, tr2, tr1, a3],
-        "recovered group inserted after anchor a1; main chain order preserved",
+        vec![u0, a1, a2, tr1, tr2, a3],
+        "recovered records merged in transcript insertion order",
     );
 }
 
@@ -896,10 +903,11 @@ async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
             "per-block assistant tail lines must resolve via inner message.id"
         );
         for uuid in [&a4a, &a4b] {
-            let usage = &messages.iter().find(|m| &m.uuid == uuid).unwrap().message["usage"];
+            let usage =
+                source_json_view(&messages.iter().find(|m| &m.uuid == uuid).unwrap().message);
             assert_eq!(
-                usage,
-                &json!({
+                usage["usage"],
+                json!({
                     "input_tokens": 0, "output_tokens": 0,
                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
                     "server_tool_use": {"web_search_requests": 1}
@@ -907,7 +915,10 @@ async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
                 "preserved assistant usage must not revive the precompact context"
             );
         }
-        assert_eq!(messages.last().unwrap().message["usage"], fresh_usage);
+        assert_eq!(
+            source_json_view(&messages.last().unwrap().message)["usage"],
+            fresh_usage
+        );
     }
 }
 
@@ -977,8 +988,8 @@ async fn preserved_segment_resume_usage_and_boundary_validation() {
                 ("cache_read_input_tokens", 50000),
             ] {
                 assert_eq!(
-                    tail.message["usage"][field],
-                    if variant == "broken" { old } else { 0 },
+                    tail.message.number_at(&format!("/usage/{field}")),
+                    Some(if variant == "broken" { old as f64 } else { 0.0 }),
                     "{variant} {field}"
                 );
             }
@@ -989,8 +1000,12 @@ async fn preserved_segment_resume_usage_and_boundary_validation() {
                 Some("tail")
             );
             assert_eq!(
-                messages.last().unwrap().message["usage"]["input_tokens"],
-                2000
+                messages
+                    .last()
+                    .unwrap()
+                    .message
+                    .number_at("/usage/input_tokens"),
+                Some(2000.0)
             );
         }
     }
@@ -1068,7 +1083,10 @@ async fn preserved_segment_keeps_parallel_results_and_split_blocks_only_from_lat
                     "cache_creation_input_tokens",
                     "cache_read_input_tokens",
                 ] {
-                    assert_eq!(message.message["usage"][field], 0);
+                    assert_eq!(
+                        message.message.number_at(&format!("/usage/{field}")),
+                        Some(0.0)
+                    );
                 }
             }
         }

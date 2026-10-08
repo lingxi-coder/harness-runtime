@@ -39,11 +39,12 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
@@ -84,8 +85,8 @@ impl GitTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "operation":   { "type": "string", "enum": OPERATIONS, "description": "The git operation to run." },
@@ -103,7 +104,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "description": { "type": "string", "description": "Optional short description of what this operation does." }
         },
         "required": ["operation"]
-    })
+    }))
 });
 
 #[async_trait]
@@ -112,8 +113,16 @@ impl Tool for GitTool {
         TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -127,19 +136,23 @@ impl Tool for GitTool {
         MAX_TOOL_OUTPUT_LENGTH
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         // Conservative: a git operation can mutate the index / worktree / refs,
         // so never run it concurrently with other tools.
         false
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         // Git mutates (add/commit/checkout/merge/clone/fetch/pull); even the
         // read ops share a tool that is not read-only overall.
         false
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // Mirrors the desktop/shell-mobile stub: real allow/ask gating lives in
         // the engine's `AdapterPermissionGate` (wired on mobile via
         // `PermissionRequestSink` -> Kotlin UI), NOT in tool-level rule code.
@@ -153,14 +166,14 @@ impl Tool for GitTool {
         }
     }
 
-    async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
-        match input.get("description").and_then(Value::as_str) {
+    async fn description(&self, input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
+        match input.string_at("/description") {
             Some(d) if !d.is_empty() => d.to_string(),
             _ => "Run a structured git operation".into(),
         }
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
         let has_token = self.ctx.mobile_git().is_some_and(|g| g.has_token);
 
         let mut prompt = String::new();
@@ -200,17 +213,16 @@ impl Tool for GitTool {
                  branch_list/checkout/add/commit/branch_create/merge) still work.\n",
             );
         }
-        prompt
+        prompt.into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let op = input
-            .get("operation")
-            .and_then(Value::as_str)
+            .string_at("/operation")
             .ok_or_else(|| ValidationError("missing `operation`".into()))?;
         if op.is_empty() {
             return Err(ValidationError("`operation` must not be empty".into()));
@@ -220,14 +232,13 @@ impl Tool for GitTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // Extract + validate the operation.
         let operation = input
-            .get("operation")
-            .and_then(Value::as_str)
+            .string_at("/operation")
             .ok_or_else(|| ToolError::InvalidInput("missing operation".into()))?;
         if operation.is_empty() {
             return Err(ToolError::InvalidInput(
@@ -243,7 +254,7 @@ impl Tool for GitTool {
             .as_ref()
             .map(|g| g.workspace_root.clone())
             .ok_or_else(|| ToolError::InvalidInput("mobile_git context is absent".into()))?;
-        let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
+        let repo_rel = input.string_at("/repo").unwrap_or(".");
         let workspace_path = std::path::Path::new(&workspace_root);
 
         // Network ops (clone/fetch/pull/push) read the in-memory secret (token +
@@ -265,6 +276,7 @@ impl Tool for GitTool {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             }),
             Err(e) => Err(map_git_op_error(e)),
         }
@@ -311,9 +323,9 @@ fn dispatch_network(
     workspace_root: &std::path::Path,
     repo_rel: &str,
     operation: &str,
-    input: &Value,
-) -> Result<Value, ops::GitOpError> {
-    let str_param = |key: &str| input.get(key).and_then(Value::as_str);
+    input: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, ops::GitOpError> {
+    let str_param = |key: &str| input.string_at(&format!("/{key}"));
     match operation {
         "clone" => {
             let repo_url = str_param("repo_url")
@@ -321,27 +333,35 @@ fn dispatch_network(
             // Destination is the workspace-relative `repo` path; default to a
             // `cloned` sub-dir so a bare `clone` never targets the ws root.
             let dest = if repo_rel == "." { "cloned" } else { repo_rel };
-            Ok(
-                serde_json::to_value(ops::clone(net, workspace_root, repo_url, dest)?)
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::clone(net, workspace_root, repo_url, dest)?)
                     .unwrap_or(Value::Null),
-            )
+            ))
         }
         "fetch" => {
             let repo = ops::open_repo(workspace_root, repo_rel)?;
             let remote = str_param("remote").unwrap_or("origin");
-            Ok(serde_json::to_value(ops::fetch(net, &repo, remote)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::fetch(net, &repo, remote)?).unwrap_or(Value::Null),
+            ))
         }
         "pull" => {
             let repo = ops::open_repo(workspace_root, repo_rel)?;
             let remote = str_param("remote").unwrap_or("origin");
             let branch = str_param("branch").unwrap_or("");
-            Ok(serde_json::to_value(ops::pull(net, &repo, remote, branch)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::pull(net, &repo, remote, branch)?)
+                    .unwrap_or(Value::Null),
+            ))
         }
         "push" => {
             let repo = ops::open_repo(workspace_root, repo_rel)?;
             let remote = str_param("remote").unwrap_or("origin");
             let branch = str_param("branch").unwrap_or("");
-            Ok(serde_json::to_value(ops::push(net, &repo, remote, branch)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::push(net, &repo, remote, branch)?)
+                    .unwrap_or(Value::Null),
+            ))
         }
         other => Err(ops::GitOpError::InvalidInput(format!(
             "unknown network git operation '{other}'"
@@ -356,43 +376,59 @@ fn dispatch_local(
     workspace_root: &std::path::Path,
     repo_rel: &str,
     operation: &str,
-    input: &Value,
-) -> Result<Value, ops::GitOpError> {
-    let str_param = |key: &str| input.get(key).and_then(Value::as_str);
+    input: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, ops::GitOpError> {
+    let str_param = |key: &str| input.string_at(&format!("/{key}"));
     let repo = ops::open_repo(workspace_root, repo_rel)?;
     match operation {
-        "status" => Ok(json!({ "entries": ops::status(&repo)? })),
+        "status" => Ok(tool_api::tool_trait::generated_builtin_result(
+            &json!({ "entries": ops::status(&repo)? }),
+        )),
         "log" => {
             let max = input
-                .get("max")
-                .and_then(Value::as_u64)
+                .at_pointer("/max")
+                .and_then(|value| value.as_number())
+                .filter(|number| number.is_finite() && *number >= 0.0 && number.fract() == 0.0)
+                .map(|number| number as u64)
                 .and_then(|n| usize::try_from(n).ok());
-            Ok(json!({ "commits": ops::log(&repo, max)? }))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &json!({ "commits": ops::log(&repo, max)? }),
+            ))
         }
-        "diff" => Ok(serde_json::to_value(ops::diff(&repo)?).unwrap_or(Value::Null)),
+        "diff" => Ok(tool_api::tool_trait::generated_builtin_result(
+            &serde_json::to_value(ops::diff(&repo)?).unwrap_or(Value::Null),
+        )),
         "show" => {
             let rev = str_param("rev")
                 .ok_or_else(|| ops::GitOpError::InvalidInput("show requires `rev`".into()))?;
             let (info, diff) = ops::show(&repo, rev)?;
-            Ok(json!({ "commit": info, "diff": diff }))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &json!({ "commit": info, "diff": diff }),
+            ))
         }
-        "branch_list" => Ok(json!({ "branches": ops::branch_list(&repo)? })),
+        "branch_list" => Ok(tool_api::tool_trait::generated_builtin_result(
+            &json!({ "branches": ops::branch_list(&repo)? }),
+        )),
         "add" => {
-            let paths: Vec<String> = input
-                .get("paths")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect()
+            let paths = input
+                .at_pointer("/paths")
+                .and_then(|value| value.array_len().map(|len| (value, len)))
+                .map(|(array, len)| {
+                    (0..len)
+                        .filter_map(|index| array.get_index(index)?.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            Ok(serde_json::to_value(ops::add(&repo, &paths)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::add(&repo, &paths)?).unwrap_or(Value::Null),
+            ))
         }
         "commit" => {
             let message = str_param("message")
                 .ok_or_else(|| ops::GitOpError::InvalidInput("commit requires `message`".into()))?;
-            Ok(serde_json::to_value(ops::commit(&repo, message)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::commit(&repo, message)?).unwrap_or(Value::Null),
+            ))
         }
         "branch_create" => {
             let name = str_param("new_branch")
@@ -400,7 +436,9 @@ fn dispatch_local(
                 .ok_or_else(|| {
                     ops::GitOpError::InvalidInput("branch_create requires `new_branch`".into())
                 })?;
-            Ok(serde_json::to_value(ops::branch_create(&repo, name)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::branch_create(&repo, name)?).unwrap_or(Value::Null),
+            ))
         }
         "checkout" => {
             let target = str_param("branch")
@@ -408,7 +446,9 @@ fn dispatch_local(
                 .ok_or_else(|| {
                     ops::GitOpError::InvalidInput("checkout requires `branch` or `rev`".into())
                 })?;
-            Ok(serde_json::to_value(ops::checkout(&repo, target)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::checkout(&repo, target)?).unwrap_or(Value::Null),
+            ))
         }
         "merge" => {
             let source = str_param("branch")
@@ -418,7 +458,9 @@ fn dispatch_local(
                         "merge requires `branch` or `rev` (source)".into(),
                     )
                 })?;
-            Ok(serde_json::to_value(ops::merge(&repo, source)?).unwrap_or(Value::Null))
+            Ok(tool_api::tool_trait::generated_builtin_result(
+                &serde_json::to_value(ops::merge(&repo, source)?).unwrap_or(Value::Null),
+            ))
         }
         other => Err(ops::GitOpError::InvalidInput(format!(
             "unknown git operation '{other}'"
@@ -433,9 +475,9 @@ fn map_git_op_error(e: ops::GitOpError) -> ToolError {
     use ops::GitOpError as G;
     match e {
         G::Dirty(_) | G::NonFastForward(_) | G::InvalidInput(_) | G::NotFound(_) => {
-            ToolError::InvalidInput(e.to_string())
+            ToolError::InvalidInput(e.to_string().into())
         }
-        G::Escape(_) => ToolError::InvalidInput(e.to_string()),
+        G::Escape(_) => ToolError::InvalidInput(e.to_string().into()),
         G::Libgit2(msg) => ToolError::Internal(format!("libgit2: {msg}")),
     }
 }
@@ -498,18 +540,23 @@ mod tests {
         ctx
     }
 
+    fn source_input(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+    }
+
     #[test]
     fn name_is_git_and_schema_has_operation() {
         let t = GitTool::new(test_ctx_git_enabled());
         assert_eq!(t.name(), "Git");
         let schema = t.input_schema();
-        let props = &schema["properties"];
-        assert!(props.get("operation").is_some(), "operation param required");
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "operation"));
+        assert!(
+            schema
+                .get_property("properties")
+                .and_then(|props| props.get_property("operation"))
+                .is_some(),
+            "operation param required"
+        );
+        assert_eq!(schema.string_at("/required/0"), Some("operation"));
     }
 
     #[test]
@@ -542,10 +589,12 @@ mod tests {
             include_examples: false,
             model: None,
             model_profile: None,
+            ..Default::default()
         };
 
         let with_token = GitTool::new(test_ctx_git_enabled());
         let prompt = with_token.prompt(&opts).await;
+        let prompt = prompt.string_at("").unwrap();
         assert!(
             prompt.contains("git"),
             "prompt should mention git: {prompt}"
@@ -569,6 +618,7 @@ mod tests {
         // has_token == false -> prompt mentions credentials.
         let no_token = GitTool::new(test_ctx_git_no_token());
         let prompt = no_token.prompt(&opts).await;
+        let prompt = prompt.string_at("").unwrap();
         assert!(
             prompt.contains("credentials"),
             "no-token prompt should mention credentials: {prompt}"
@@ -613,15 +663,18 @@ mod tests {
 
         let result = tool
             .call(
-                json!({ "operation": "commit", "repo": "r", "message": "dispatched" }),
+                source_input(
+                    &json!({ "operation": "commit", "repo": "r", "message": "dispatched" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("commit dispatch should succeed");
 
-        let oid = result.data["oid"]
-            .as_str()
+        let oid = result
+            .data
+            .string_at("/oid")
             .expect("commit result carries an oid");
         // The reported oid is the new HEAD with the right message.
         let head = repo.head().unwrap().peel_to_commit().unwrap();
@@ -666,14 +719,14 @@ mod tests {
 
         let result = tool
             .call(
-                json!({ "operation": "clone", "repo_url": url, "repo": "cloned" }),
+                source_input(&json!({ "operation": "clone", "repo_url": url, "repo": "cloned" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("clone dispatch should succeed");
         assert!(
-            result.data["head"].as_str().is_some(),
+            result.data.string_at("/head").is_some(),
             "clone result carries a head oid"
         );
         assert!(
@@ -717,14 +770,17 @@ mod tests {
         });
         let tool = GitTool::new(ctx);
 
-        let input = json!({ "operation": "push", "repo": ".", "remote": "origin" });
+        let input = source_input(&json!({ "operation": "push", "repo": ".", "remote": "origin" }));
         let res = tool
             .call(input, fresh_ctx(), fresh_tx())
             .await
             .expect("push call ok");
         let data = res.data;
-        assert_eq!(data["branch"], branch);
-        assert_eq!(data["pushed_oid"], oid.to_string());
+        assert_eq!(data.string_at("/branch"), Some(branch.as_str()));
+        assert_eq!(
+            data.string_at("/pushed_oid"),
+            Some(oid.to_string().as_str())
+        );
         assert_eq!(
             remote_repo
                 .find_reference(&format!("refs/heads/{branch}"))
@@ -742,13 +798,20 @@ mod tests {
         let tool = GitTool::new(test_ctx_git_enabled());
         let err = tool
             .call(
-                json!({ "operation": "clone", "repo_url": "git@github.com:x/y.git" }),
+                source_input(
+                    &json!({ "operation": "clone", "repo_url": "git@github.com:x/y.git" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect_err("ssh clone should be rejected");
-        let msg = err.to_string();
+        let msg = match err {
+            ToolError::InvalidInput(message) => message
+                .string_at("")
+                .expect("invalid input is a JSON string"),
+            other => panic!("unexpected error: {other:?}"),
+        };
         assert!(
             msg.contains("ssh") && msg.contains("HTTPS"),
             "ssh rejection should name ssh + HTTPS, got: {msg}"

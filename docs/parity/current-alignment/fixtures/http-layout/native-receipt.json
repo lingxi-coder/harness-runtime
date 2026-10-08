@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "gate": "M2-HTTP-1",
+  "scope": "Native-only public headless CLI print-text fixture; exact first Anthropic Messages HTTP/1 request line, header block, body and response capture. No Harness process was invoked.",
+  "capturedAt": "2026-10-08",
+  "frozenNative": {
+    "version": "2.1.293 (Claude Code)",
+    "sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e"
+  },
+  "officialLatestCheck": {
+    "version": "2.1.294",
+    "source": "https://github.com/anthropics/claude-code/releases/tag/v2.1.294",
+    "publishedDate": "2026-10-08",
+    "releaseNotesDelta": [
+      "Instruction-written prompt/agent hooks are judged more reliably.",
+      "Stop and SubagentStop prompt-hook instructions are judged more reliably."
+    ],
+    "affectedDomains": [
+      "HOOK-2",
+      "AGENT-1"
+    ],
+    "latestNativeCapture": "not run; frozen 2.1.293 baseline retained"
+  },
+  "sourceProvenance": {
+    "llmClientCommit": "62dacf5",
+    "harnessCommit": "3f27b67",
+    "harnessMainHeadAtCapture": "1d7e55259a16c476eba652a7252f152009862d30",
+    "runnerFilesUnchangedFromHarnessCommit": true,
+    "runnerSha256": "78b867ea36327a20b6988a28c2a0d30c5dbc91c27ad7a6aeafeb080931e3c946",
+    "fixtureMatrixSha256": "bab9e2ce77a5a96f2dc3b640765fad3a394ae73f40c7e513bc30beb25f1038d0",
+    "loopbackProviderSha256": "b445507ddcdfa705d3e183e84ea2812ab6c78c3e2b7f3456bedff99651d182d1",
+    "llmClientRefs": [
+      "src/transport.rs: Http1HeaderLayout::NativeFetch sorts explicitly supplied field-name spellings and appends missing native defaults",
+      "src/client/prepared.rs: RequestDraft::set_http1_header_layout defers final layout to transport dispatch",
+      "src/providers/anthropic/request_policy.rs: native_main_and_side_templates_match_full_layout_bytes is an SDK body-layout test using the 2.1.287 fixture",
+      "src/exact_json.rs: request serializer retains exact raw subtrees"
+    ],
+    "harnessRefs": [
+      "crates/llm-runtime/src/service.rs: Anthropic request metadata path selects NativeFetch",
+      "crates/llm-runtime/src/execution.rs: HostAuthenticator canonicalizes names after authentication",
+      "crates/http-client/src/tls_config.rs: custom CA/mTLS requests exercise both layouts but do not assert raw header order",
+      "docs/parity/headless-native-baseline.md and scripts/tests/headless_native_differential.mjs: exact loopback HTTP wire capture and byte comparator"
+    ]
+  },
+  "invocation": {
+    "runner": "scripts/tests/headless_native_differential.mjs",
+    "fixture": "print-text",
+    "commandTemplate": "node scripts/tests/headless_native_differential.mjs --execute <sha-verified-native-2.1.293> --only print-text --output <new-output-directory>",
+    "nativeCaptures": 2,
+    "nativeOnly": true,
+    "dummyKeyOnly": true,
+    "provider": "127.0.0.1 loopback; no upstream relay",
+    "captureDirectory": "run-output/native-2.1.293-print-text-20261008-rerun1"
+  },
+  "nativeRunResults": {
+    "bothProcessesExitCode": 0,
+    "oneMessagesRequestPerProcess": true,
+    "unexpectedRequests": 0,
+    "stdoutBytesEach": 24,
+    "stdoutSha256Each": "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6",
+    "stderrBytesEach": 0,
+    "providerResponseBytesEach": 862,
+    "providerResponseSha256Each": "8e9582eda0a4500172c5ca9d692add80c01a11efbaf4b075d2247d8ef2a79389"
+  },
+  "http1Observation": {
+    "requestLine": "POST /v1/messages?beta=true HTTP/1.1",
+    "headerNamesInObservedOrder": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "headerBlockBytesEach": 935,
+    "headerBlockSha256Each": "8cbda942fc7f3af7681116430a7bffc868b01b4cb682489c9850da34f4c8c448",
+    "headerBlocksRawEqualAcrossTheseTwoRuns": true,
+    "requestBodyBytesEach": 978,
+    "requestBodySha256": {
+      "nativeA": "8751c228e6c5d3e2d7e1b9a0199a53b396156c792b1309170c667dc55a1f5510",
+      "nativeB": "dea19d0109b80496dade6c10be39950c00b6324e179019cfede64b9c366440db"
+    },
+    "requestBodiesRawEqual": false,
+    "requestBodyFirstDifferenceOffset": 628,
+    "firstDifferenceScope": "metadata.user_id contains a nested device_id scalar; actual values are deliberately not copied into this tracked receipt",
+    "fullRequestBytesEach": 1913,
+    "fullRequestSha256": {
+      "nativeA": "7fa73f6c6f5f5c070bee0b56883f31e7652b4df6bc6143cfb87ce7ab34cabf53",
+      "nativeB": "a9d23fc82bb017198a2ee34caf946e9446dd3e428c1575c69c21011601e456c3"
+    },
+    "fullRequestsRawEqual": false,
+    "candidateHarnessInvoked": false
+  },
+  "comparisonBoundary": {
+    "nativeNativeWholeFixtureStable": false,
+    "rawArtifactsWereRewritten": false,
+    "existingNarrowIdentityRule": "scripts/tests/headless-fixtures/normalization.json: print-text provider/000.request-body.bin metadata-json-string at outerPath /metadata/user_id, innerPath /device_id",
+    "identityRuleAppliedToThisCapture": false,
+    "claim": "This receipt establishes one reproducible public capture and a two-run raw-header match only. It does not establish full request byte stability or candidate parity. A later candidate comparison may use only the existing explicit nested device-id identity rule; all remaining header/body bytes stay significant."
+  }
+}

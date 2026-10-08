@@ -71,10 +71,13 @@
 
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::Utf16JsonProjectionError;
 use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Managed-policy gate over which settings-tier hooks are allowed to load.
 ///
@@ -208,7 +211,22 @@ impl HookPolicyGate {
     }
 }
 
-/// Top-level settings shape consumed by [`parse_hooks_from_settings_json`].
+fn deserialize_optional_mcp_input<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let input = lingxi_core::types::utf16_json::raw_json_serde::deserialize_option(deserializer)?;
+    match input {
+        None => Ok(None),
+        Some(input) if input.at_pointer("").is_some_and(|root| root.is_null()) => Ok(None),
+        Some(input) if input.object_entries().is_some() => Ok(Some(input)),
+        Some(_) => Err(serde::de::Error::custom("expected an object")),
+    }
+}
+
+/// Top-level settings shape consumed by the hook loader.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SettingsTop {
     #[serde(default)]
@@ -217,8 +235,13 @@ pub(crate) struct SettingsTop {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatcherGroup {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::definition::hook_if_pattern_source::serialize_option",
+        deserialize_with = "crate::definition::hook_if_pattern_source::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub matcher: Option<Utf16JsonProjection>,
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
 }
@@ -277,15 +300,25 @@ pub struct HookEntry {
     /// `lo(H(),Fn()).optional()`): "Arguments passed to the MCP tool. String
     /// values support `${path}` interpolation from the hook input JSON (e.g.
     /// `"${tool_input.file_path}"`)." Carried onto
-    /// the `input` map of [`HookExecutor::McpTool`]; the interpolation happens at
+    /// the `input` object of [`HookExecutor::McpTool`]; the interpolation happens at
     /// invocation time (see that variant's residual note).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<HashMap<String, serde_json::Value>>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "deserialize_optional_mcp_input",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input: Option<Utf16JsonProjection>,
     /// `agent` / `prompt` hook prompt text (`schemas/hooks.ts:138-142` /
     /// `67-73`). For an `agent` hook it is the verifier prompt; for a `prompt`
     /// hook it is the inline-LLM evaluation prompt (with `$ARGUMENTS`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::definition::hook_if_pattern_source::serialize_option",
+        deserialize_with = "crate::definition::hook_if_pattern_source::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt: Option<Utf16JsonProjection>,
     /// `prompt` / `agent` hook model override (`schemas/hooks.ts:81-86`).
     /// Consumed only by the `prompt` arm; the `agent` arm has no model field on
     /// its [`HookExecutor::Agent`] variant, so it is dropped there.
@@ -361,8 +394,14 @@ pub struct HookEntry {
     /// the hook on the tool name + tool input matching. Parsed and carried onto
     /// [`HookCondition::if_pattern`], evaluated by
     /// [`crate::matcher::matches_if_condition`] in `match_event`.
-    #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
-    pub if_pattern: Option<String>,
+    #[serde(
+        default,
+        rename = "if",
+        serialize_with = "crate::definition::hook_if_pattern_source::serialize_option",
+        deserialize_with = "crate::definition::hook_if_pattern_source::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub if_pattern: Option<Utf16JsonProjection>,
 }
 
 /// Default agent type for an `agent` hook.
@@ -394,6 +433,44 @@ pub fn parse_hooks_from_settings_json(
     parse_into(raw, source)
 }
 
+/// Errors produced while projecting source JSON directly into hook
+/// definitions.
+#[derive(Debug, Error)]
+pub enum HookSettingsProjectionError {
+    /// The exact source JSON projection could not be stringified.
+    #[error(transparent)]
+    Projection(#[from] Utf16JsonProjectionError),
+    /// The settings shape was invalid for the hook loader.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+/// Parse the settings-shaped root of an exact source JSON projection.
+///
+/// This accepts the same shape as [`parse_hooks_from_settings_json`], but its
+/// arbitrary members have already crossed into [`Utf16JsonProjection`] before
+/// any ordinary serde JSON values were materialized. Stringifying this flat
+/// carrier uses JavaScript JSON semantics and preserves its UTF-16 strings;
+/// [`HookEntry::input`] then parses from raw JSON again into the same carrier.
+pub fn parse_hooks_from_settings_projection(
+    raw: &Utf16JsonProjection,
+    source: HookSource,
+) -> Result<Vec<HookDefinition>, HookSettingsProjectionError> {
+    parse_into(&raw.to_json_string()?, source).map_err(Into::into)
+}
+
+/// Parse a source projection whose root is the hook event tree itself, as in
+/// an inline plugin manifest `hooks` object. The projection is wrapped in the
+/// ordinary `{ "hooks": ... }` settings envelope without converting it to a
+/// recursive `serde_json::Value`.
+pub fn parse_hooks_from_tree_projection(
+    hooks: &Utf16JsonProjection,
+    source: HookSource,
+) -> Result<Vec<HookDefinition>, HookSettingsProjectionError> {
+    let settings = Utf16JsonProjection::object(vec![("hooks".to_owned(), hooks.clone())])?;
+    parse_hooks_from_settings_projection(&settings, source)
+}
+
 /// [`parse_hooks_from_settings_json`] gated by a [`HookPolicyGate`].
 ///
 /// When the gate suppresses `source` ([`HookPolicyGate::allows_source`] is
@@ -419,6 +496,31 @@ pub fn parse_hooks_from_settings_json_gated(
     parse_into(raw, source)
 }
 
+/// Gated counterpart to [`parse_hooks_from_settings_projection`]. A denied
+/// source is suppressed without stringifying or parsing its payload.
+pub fn parse_hooks_from_settings_projection_gated(
+    raw: &Utf16JsonProjection,
+    source: HookSource,
+    gate: HookPolicyGate,
+) -> Result<Vec<HookDefinition>, HookSettingsProjectionError> {
+    if !gate.allows_source(source) {
+        return Ok(Vec::new());
+    }
+    parse_hooks_from_settings_projection(raw, source)
+}
+
+/// Gated counterpart to [`parse_hooks_from_tree_projection`].
+pub fn parse_hooks_from_tree_projection_gated(
+    hooks: &Utf16JsonProjection,
+    source: HookSource,
+    gate: HookPolicyGate,
+) -> Result<Vec<HookDefinition>, HookSettingsProjectionError> {
+    if !gate.allows_source(source) {
+        return Ok(Vec::new());
+    }
+    parse_hooks_from_tree_projection(hooks, source)
+}
+
 /// Shared projection used by both the ungated and gated entry points.
 fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serde_json::Error> {
     let top: SettingsTop = serde_json::from_str(raw)?;
@@ -435,8 +537,7 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
                 // The tool-name `matcher` is per-GROUP; the `if`-condition is
                 // per-HOOK — combine them into one condition built per entry so a
                 // hook can carry both (claude-code applies both filters).
-                let condition =
-                    build_condition(group.matcher.as_deref(), entry.if_pattern.as_deref());
+                let condition = build_condition(group.matcher.as_ref(), entry.if_pattern.as_ref());
                 out.push(HookDefinition {
                     id: HookId::new(),
                     name,
@@ -475,17 +576,19 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
 /// (per-hook) populates the `if`-condition field. A hook may carry both — both
 /// gate firing in `match_event`, mirroring claude-code's two sequential filters.
 pub(crate) fn build_condition(
-    matcher: Option<&str>,
-    if_pattern: Option<&str>,
+    matcher: Option<&Utf16JsonProjection>,
+    if_pattern: Option<&Utf16JsonProjection>,
 ) -> Option<HookCondition> {
     if matcher.is_none() && if_pattern.is_none() {
         return None;
     }
     Some(HookCondition {
-        pattern: matcher.unwrap_or_default().to_string(),
+        pattern: matcher
+            .cloned()
+            .unwrap_or_else(|| Utf16JsonProjection::from("")),
         match_tool_name: matcher.is_some(),
         match_input: if_pattern.is_some(),
-        if_pattern: if_pattern.map(ToString::to_string),
+        if_pattern: if_pattern.cloned(),
     })
 }
 
@@ -594,7 +697,10 @@ pub(crate) fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)
             let executor = HookExecutor::McpTool {
                 server: server.clone(),
                 tool: tool.clone(),
-                input: entry.input.clone().unwrap_or_default(),
+                input: entry
+                    .input
+                    .clone()
+                    .unwrap_or_else(crate::definition::empty_mcp_tool_input),
             };
             // The oracle's own hook-display function names an `mcp_tool` hook
             // `${server}/${tool}` (2.1.238 @ 296901778:
@@ -748,7 +854,7 @@ mod tests {
             HookSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         let cond = hooks[0].if_condition.as_ref().expect("matcher present");
-        assert_eq!(cond.pattern, "Write|Edit");
+        assert_eq!(cond.pattern.string_at(""), Some("Write|Edit"));
         // No `if` → if_pattern stays None, match_input false.
         assert_eq!(hooks[0].if_pattern(), None);
         assert!(!cond.match_input);
@@ -772,8 +878,16 @@ mod tests {
         .unwrap();
         assert_eq!(hooks.len(), 1);
         // Tool-name matcher AND the `if`-condition are both carried on one condition.
-        assert_eq!(hooks[0].matcher(), Some("Bash"));
-        assert_eq!(hooks[0].if_pattern(), Some("Bash(git push:*)"));
+        assert_eq!(
+            hooks[0].matcher().and_then(|matcher| matcher.string_at("")),
+            Some("Bash")
+        );
+        assert_eq!(
+            hooks[0]
+                .if_pattern()
+                .and_then(|pattern| pattern.string_at("")),
+            Some("Bash(git push:*)")
+        );
         let cond = hooks[0].if_condition.as_ref().expect("condition present");
         assert!(cond.match_tool_name);
         assert!(cond.match_input);
@@ -798,7 +912,60 @@ mod tests {
         assert_eq!(hooks.len(), 1);
         // No group matcher → no tool-name matcher, but the `if` is carried.
         assert_eq!(hooks[0].matcher(), None);
-        assert_eq!(hooks[0].if_pattern(), Some("Bash(rm:*)"));
+        assert_eq!(
+            hooks[0]
+                .if_pattern()
+                .and_then(|pattern| pattern.string_at("")),
+            Some("Bash(rm:*)")
+        );
+    }
+
+    #[test]
+    fn if_condition_projection_keeps_unpaired_source_units() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{
+              "hooks": [{
+                "type": "command",
+                "command": "./guard.sh",
+                "if": "Edit(*\ud800.rs)"
+              }]
+            }]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let actual = hooks[0].if_pattern().expect("if pattern is present");
+        let expected =
+            Utf16JsonProjection::parse(r#""Edit(*\ud800.rs)""#).expect("expected source string");
+        assert_eq!(actual, &expected);
+
+        let condition = hooks[0]
+            .if_condition
+            .as_ref()
+            .expect("condition is present");
+        let serialized = serde_json::to_string(condition).unwrap();
+        let round_trip: HookCondition = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.if_pattern, Some(expected));
+    }
+
+    #[test]
+    fn group_matcher_projection_keeps_unpaired_regexp_units() {
+        let hooks = parse_hooks_from_settings_json(
+            r#"{"hooks":{"UserPromptExpansion":[{"matcher":"^\ud800$","hooks":[{"type":"command","command":"./guard.sh"}]}]}}"#,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let actual = hooks[0].matcher().expect("matcher is present");
+        let expected = Utf16JsonProjection::parse(r#""^\ud800$""#).unwrap();
+        assert_eq!(actual, &expected);
+
+        let serialized = serde_json::to_string(&hooks[0].if_condition).unwrap();
+        let round_trip: Option<HookCondition> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.unwrap().pattern, expected);
     }
 
     #[test]
@@ -981,7 +1148,10 @@ mod tests {
         assert!(hooks[0].once);
         assert_eq!(hooks[0].status_message.as_deref(), Some("Guarding"));
         assert_eq!(
-            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            hooks[0]
+                .if_condition
+                .as_ref()
+                .and_then(|c| c.pattern.string_at("")),
             Some("Write|Edit"),
         );
     }
@@ -1063,7 +1233,10 @@ mod tests {
         assert_eq!(hooks[0].name, "https://hooks.example.com/pre");
         // No matcher-independent matcher pattern is lost.
         assert_eq!(
-            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            hooks[0]
+                .if_condition
+                .as_ref()
+                .and_then(|c| c.pattern.string_at("")),
             Some("Write|Edit"),
         );
     }
@@ -1196,7 +1369,10 @@ mod tests {
         else {
             panic!("expected Agent executor, got {:?}", hooks[0].executor);
         };
-        assert_eq!(prompt, "Verify that unit tests ran and passed.");
+        assert_eq!(
+            prompt.string_at(""),
+            Some("Verify that unit tests ran and passed.")
+        );
         // The schema carries no agent type; the crate default is used.
         assert_eq!(agent_type, "general-purpose");
     }
@@ -1247,11 +1423,14 @@ mod tests {
         let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor, got {:?}", hooks[0].executor);
         };
-        assert_eq!(prompt, "Is $ARGUMENTS a safe command?");
+        assert_eq!(prompt.string_at(""), Some("Is $ARGUMENTS a safe command?"));
         assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(hooks[0].name, "prompt");
         assert_eq!(
-            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            hooks[0]
+                .if_condition
+                .as_ref()
+                .and_then(|c| c.pattern.string_at("")),
             Some("Bash"),
         );
     }
@@ -1270,8 +1449,25 @@ mod tests {
         let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor");
         };
-        assert_eq!(prompt, "evaluate this");
+        assert_eq!(prompt.string_at(""), Some("evaluate this"));
         assert_eq!(*model, None);
+    }
+
+    #[test]
+    fn prompt_hook_retains_exact_utf16_source() {
+        let raw = r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"prompt","prompt":"check \ud800 $ARGUMENTS"}]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let HookExecutor::Prompt { prompt, .. } = &hooks[0].executor else {
+            panic!("expected Prompt executor");
+        };
+        let expected = Utf16JsonProjection::parse(r#""check \ud800 $ARGUMENTS""#).unwrap();
+        assert_eq!(prompt.string_units(""), expected.string_units(""));
+        let serialized = serde_json::to_string(&hooks[0]).unwrap();
+        assert!(serialized.contains(r#""prompt":"check \ud800 $ARGUMENTS""#));
     }
 
     #[test]
@@ -1326,7 +1522,10 @@ mod tests {
         assert!(hooks[0].once);
         assert_eq!(hooks[0].status_message.as_deref(), Some("Formatting…"));
         assert_eq!(
-            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            hooks[0]
+                .if_condition
+                .as_ref()
+                .and_then(|c| c.pattern.string_at("")),
             Some("Write|Edit"),
         );
         // Oracle hook display/name for `mcp_tool` is `${server}/${tool}`.
@@ -1344,19 +1543,36 @@ mod tests {
         // `input` is carried verbatim; the `${path}` interpolation is applied at
         // invocation time, so the raw template must survive the load.
         assert_eq!(
-            input.get("path").and_then(serde_json::Value::as_str),
+            input.get_property("path").and_then(|value| value.as_str()),
             Some("${tool_input.file_path}"),
         );
         assert_eq!(
-            input.get("fix").and_then(serde_json::Value::as_bool),
+            input.get_property("fix").and_then(|value| value.as_bool()),
             Some(true),
         );
     }
 
-    /// `input` is `.optional()` in the oracle schema — an entry without it loads
-    /// with an empty argument map rather than being skipped.
     #[test]
-    fn mcp_tool_hook_without_input_defaults_to_empty_map() {
+    fn mcp_tool_input_retains_exact_lone_utf16_units_from_raw_settings() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "mcp_tool", "server": "audit", "tool": "check",
+              "input": { "path": "\ud800" } }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let HookExecutor::McpTool { input, .. } = &hooks[0].executor else {
+            panic!("expected McpTool executor");
+        };
+        assert_eq!(input.string_units("/path").unwrap(), vec![0xd800]);
+        assert_eq!(input.to_json_string().unwrap(), r#"{"path":"\ud800"}"#);
+    }
+
+    /// An omitted optional input loads as an empty object.
+    #[test]
+    fn mcp_tool_hook_without_input_defaults_to_empty_object() {
         let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "mcp_tool", "server": "audit", "tool": "check" }
         ]}]}}"#;
@@ -1369,7 +1585,27 @@ mod tests {
         let HookExecutor::McpTool { input, .. } = &hooks[0].executor else {
             panic!("expected McpTool executor");
         };
-        assert!(input.is_empty());
+        assert!(input
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty()));
+    }
+
+    #[test]
+    fn mcp_tool_null_input_keeps_the_optional_empty_object_behavior() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "mcp_tool", "server": "audit", "tool": "check", "input": null }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let HookExecutor::McpTool { input, .. } = &hooks[0].executor else {
+            panic!("expected McpTool executor");
+        };
+        assert!(input
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty()));
     }
 
     /// `server` and `tool` are REQUIRED (`H()`, not `.optional()`), so an entry
@@ -1420,7 +1656,9 @@ mod tests {
         // Every parsed hook keeps the group's matcher.
         for h in &hooks {
             assert_eq!(
-                h.if_condition.as_ref().map(|c| c.pattern.as_str()),
+                h.if_condition
+                    .as_ref()
+                    .and_then(|c| c.pattern.string_at("")),
                 Some("Bash"),
             );
         }

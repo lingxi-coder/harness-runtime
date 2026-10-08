@@ -16,6 +16,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use serde::Deserialize;
 use serde_json::Value;
 use session::jsonl::{JsonlReader, JsonlWriter};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -52,6 +53,8 @@ struct Locks {
 struct SequenceEntry {
     #[serde(rename = "type")]
     msg_type: String,
+    attachment_type: Option<String>,
+    expected_attachment: Option<Value>,
 }
 
 fn load() -> Fixture {
@@ -84,8 +87,193 @@ fn build_orchestrator_with_writer(
     .with_jsonl_writer(writer)
 }
 
+async fn assert_native_single_turn_rows(
+    lines: &[session::JsonlMessage],
+    raw: &str,
+    api: &MockApiClient,
+) {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let fixture = load();
+    assert_eq!(lines.len(), fixture.meta.single_turn_sequence.len());
+    let raw_rows: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid JSONL row"))
+        .collect();
+    assert_eq!(raw_rows.len(), lines.len());
+
+    // These native cases execute .286 Br/renderers and fmn/xd unchanged.
+    // Only the local date and the host's branded static prompt vary here.
+    let oracle: Value = serde_json::from_str(include_str!(
+        "../../core/tests/fixtures/instruction_announcements_2_1_286.json"
+    ))
+    .unwrap();
+    assert_eq!(oracle["version"], "2.1.286");
+    assert_eq!(
+        oracle["binary_sha256"],
+        "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433"
+    );
+    let native = oracle["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "successful-empty-initial")
+        .unwrap();
+    assert_eq!(native["expected"].as_array().unwrap().len(), 2);
+    assert_eq!(native["expected"][0]["rendered"], serde_json::json!([]));
+    assert_eq!(
+        fixture.meta.single_turn_sequence[1].expected_attachment,
+        Some(native["expected"][0]["attachment"].clone())
+    );
+    let mut native_date = native["expected"][1]["attachment"].clone();
+    native_date["date"] = serde_json::json!("$currentDate");
+    assert_eq!(
+        fixture.meta.single_turn_sequence[2].expected_attachment,
+        Some(native_date)
+    );
+    let native_snapshot = oracle["snapshotCases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "valid-announced-system-prompt")
+        .unwrap();
+    assert_eq!(native_snapshot["expected"]["schemaValid"], true);
+    let mut snapshot_payload = native_snapshot["prior"][0]["attachment"].clone();
+    snapshot_payload["systemPrompt"] = serde_json::json!(["$capturedSystem"]);
+    assert_eq!(
+        fixture.meta.single_turn_sequence[4].expected_attachment,
+        Some(snapshot_payload)
+    );
+
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1, "single turn makes exactly one API call");
+    let systems = api.captured_systems().await;
+    assert_eq!(systems.len(), 1);
+    let system = systems[0].as_deref().expect("static system prompt");
+    assert!(!system.is_empty());
+    // Native persists the source string vector before dynamic context. The
+    // default mock route has no provider profile, so its source vector carries
+    // no global-cache marker.
+    let snapshot_system = lines[4].extra["attachment"]["systemPrompt"].clone();
+    let snapshot_blocks = snapshot_system
+        .as_array()
+        .expect("Native source block array");
+    assert!(!snapshot_blocks.is_empty());
+    assert!(snapshot_blocks.iter().all(Value::is_string));
+    assert!(lines[4].extra["attachment"].get("sharedBoundary").is_none());
+    let snapshot_text = snapshot_blocks
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .expect("source blocks are strings")
+        .join("\n\n");
+    assert!(system.starts_with(&snapshot_text));
+    assert_eq!(api.captured_tools().await, vec![Vec::<Value>::new()]);
+
+    let date = orchestrator::prompt::env_meta::current_date_string();
+    let mut seen = HashSet::new();
+    for (index, (line, expected)) in lines
+        .iter()
+        .zip(&fixture.meta.single_turn_sequence)
+        .enumerate()
+    {
+        let uuid = uuid::Uuid::parse_str(&line.uuid).expect("valid row UUID");
+        assert_eq!(line.uuid, uuid.to_string(), "canonical UUID at row {index}");
+        assert!(seen.insert(uuid), "distinct UUID at row {index}");
+        let parent = index.checked_sub(1).map(|prior| lines[prior].uuid.as_str());
+        assert_eq!(line.parent_uuid.as_deref(), parent, "parent at row {index}");
+        assert_eq!(raw_rows[index]["parentUuid"], serde_json::json!(parent));
+        assert_eq!(line.session_id, lines[0].session_id);
+        assert_eq!(line.message_type, expected.msg_type, "type at row {index}");
+        if let Some(kind) = expected.attachment_type.as_deref() {
+            let mut payload = expected
+                .expected_attachment
+                .clone()
+                .expect("exact attachment payload in fixture");
+            match kind {
+                "date" => payload["date"] = serde_json::json!(date),
+                "prompt_snapshot" => {
+                    payload["systemPrompt"] = snapshot_system.clone();
+                }
+                _ => {}
+            }
+            assert_eq!(payload["type"], kind);
+            assert_eq!(line.extra.get("attachment"), Some(&payload), "row {index}");
+            assert_eq!(raw_rows[index]["attachment"], payload, "disk row {index}");
+            assert_eq!(
+                line.message,
+                Value::Null,
+                "no decoded projection at row {index}"
+            );
+            assert!(
+                raw_rows[index].get("message").is_none(),
+                "native attachment has no inner message at row {index}"
+            );
+            assert!(
+                raw_rows[index].get("isMeta").is_none(),
+                "attachment is persisted as raw metadata at row {index}"
+            );
+        }
+    }
+    lingxi_core::types::SessionId::parse_prefixed(&lines[0].session_id)
+        .expect("valid core session ID");
+    assert_eq!(
+        lines[0].message,
+        serde_json::json!({"role":"user","content":[{"type":"text","text":"say hi"}]})
+    );
+    assert_eq!(lines[5].message["role"], "assistant");
+    assert_eq!(
+        lines[5].message["content"],
+        serde_json::json!([{"type":"text","text":"hello"}])
+    );
+    assert_eq!(lines[5].message["stop_reason"], "end_turn");
+
+    // Announcements and total_tokens preserve their prepared-request IDs.
+    // The empty native session_context has no model-visible user projection.
+    let sent = &calls[0];
+    assert_eq!(
+        sent.len(),
+        4,
+        "human, empty context anchor, date, total_tokens"
+    );
+    for (line, message) in lines[..4].iter().zip(sent) {
+        assert_eq!(line.uuid, message.id().as_uuid().to_string());
+    }
+    assert!(
+        matches!(&sent[0], ConversationMessage::User { content, is_meta: false, .. }
+        if content == &[ContentBlock::Text { text: "say hi".into(), citations: None }])
+    );
+    assert!(
+        matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
+        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+    );
+    let date_body = native["expected"][1]["rendered"][0]
+        .as_str()
+        .unwrap()
+        .replace(
+            native["expected"][1]["attachment"]["date"]
+                .as_str()
+                .unwrap(),
+            &date,
+        );
+    assert!(
+        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: date_body, citations: None }])
+    );
+    let token_body = fixture.meta.single_turn_sequence[3]
+        .expected_attachment
+        .as_ref()
+        .unwrap()["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        matches!(&sent[3], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: format!("<system-reminder>\n{token_body}\n</system-reminder>"), citations: None }])
+    );
+}
+
 // ============================================================================
-// T4 — single turn: line count = 2 (user + assistant)
+// T4 — single turn: human + four native attachments + assistant
 // ============================================================================
 
 #[tokio::test]
@@ -102,12 +290,17 @@ async fn single_turn_produces_the_fixture_line_count() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
 
-    let orch = build_orchestrator_with_writer(api, Arc::clone(&writer));
-    orch.run_turn("say hi").await.expect("turn must succeed");
+    let orch = build_orchestrator_with_writer(api.clone(), Arc::clone(&writer));
+    let outcome = orch.run_turn("say hi").await.expect("turn must succeed");
+    assert!(matches!(
+        outcome,
+        orchestrator::ConversationOutcome::EndTurn { turn_count: 1, .. }
+    ));
 
     // Read back via JsonlReader.
     let reader = JsonlReader::new(path.clone(), Arc::clone(&fs));
@@ -123,19 +316,8 @@ async fn single_turn_produces_the_fixture_line_count() {
             .map(|l| l.message_type.as_str())
             .collect::<Vec<_>>()
     );
-    // The extra line over the original user+assistant pair is the static
-    // system-prompt snapshot, which upstream records unless CLAUDE_CODE_SIMPLE
-    // is set — see the fixture's `why`. Assert WHICH attachment it is, so a
-    // different attachment leaking into the transcript cannot pass by count.
-    assert_eq!(
-        lines[1]
-            .extra
-            .get("attachment")
-            .and_then(|a| a.get("type"))
-            .and_then(|t| t.as_str()),
-        Some("prompt_snapshot"),
-        "the middle line must be the prompt snapshot"
-    );
+    let raw = std::fs::read_to_string(&path).expect("read actual JSONL bytes");
+    assert_native_single_turn_rows(&lines, &raw, &api).await;
 }
 
 // ============================================================================
@@ -157,12 +339,17 @@ async fn single_turn_line_types_follow_the_fixture_order() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
 
-    let orch = build_orchestrator_with_writer(api, Arc::clone(&writer));
-    orch.run_turn("say hi").await.expect("turn must succeed");
+    let orch = build_orchestrator_with_writer(api.clone(), Arc::clone(&writer));
+    let outcome = orch.run_turn("say hi").await.expect("turn must succeed");
+    assert!(matches!(
+        outcome,
+        orchestrator::ConversationOutcome::EndTurn { turn_count: 1, .. }
+    ));
 
     let reader = JsonlReader::new(path.clone(), Arc::clone(&fs));
     let lines = reader.read_all().await.expect("read_all must succeed");
@@ -179,18 +366,8 @@ async fn single_turn_line_types_follow_the_fixture_order() {
         actual_types, expected_types,
         "line types must follow the fixture order"
     );
-    // The snapshot sits INSIDE the chain rather than beside it: the assistant's
-    // parent is the attachment, not the user line it answers.
-    assert_eq!(
-        lines[1].parent_uuid.as_deref(),
-        Some(lines[0].uuid.as_str()),
-        "the snapshot must chain from the user line"
-    );
-    assert_eq!(
-        lines[2].parent_uuid.as_deref(),
-        Some(lines[1].uuid.as_str()),
-        "the assistant must chain from the snapshot, not around it"
-    );
+    let raw = std::fs::read_to_string(&path).expect("read actual JSONL bytes");
+    assert_native_single_turn_rows(&lines, &raw, &api).await;
 }
 
 // ============================================================================
@@ -211,6 +388,7 @@ async fn single_turn_parent_uuid_chain_is_correct() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -253,6 +431,7 @@ async fn single_turn_all_lines_share_session_id() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -289,6 +468,7 @@ async fn single_turn_file_has_lf_only_terminator_and_compact_json() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -346,6 +526,7 @@ async fn single_turn_user_line_has_usertype_external() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -384,6 +565,7 @@ async fn single_turn_is_sidechain_is_false() {
         vec![LlmContentBlock::Text {
             text: "hello".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));

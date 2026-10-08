@@ -1,0 +1,111 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "30447d93e7217af1499d3a7c50754e48b0c60060bc7cc17f272418e02a2c6c97",
+  "fixture_sha256": {
+    "cases.json": "5739d9a463e4cb52cd4d18ae4ac32857230e0c3aa91df024095aa38c5324470d",
+    "plugin/hooks/register.js": "5f15dbc5ce6165684c235d55fc5b1ff1868a411ac01e5b05f5a0dc2195735574"
+  },
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002934",
+    "Use the probe tool once, then report the fixed completion."
+  ],
+  "run_output_dir": "run-output/tool-result-native-63hw3g4x",
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 125255,
+      "request_sha256": "504d9fd1cad867675cd90cd96870676750b1a65957844eaae43f7dd92084ad27",
+      "raw_request_path": "run-output/tool-result-native-63hw3g4x/requests/request-1.full.raw.json"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 128217,
+      "request_sha256": "54475c1dfe2d5d5b3d0eac472fa3c9ade79fd5892a87682b8702a13add3cb684",
+      "raw_request_path": "run-output/tool-result-native-63hw3g4x/requests/request-2.full.raw.json"
+    }
+  ],
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 17,
+    "sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "tool_result_source": {
+    "utf16_units": 50007,
+    "lone_unit_index": 5,
+    "lone_unit": "U+D800"
+  },
+  "native_tool_call_meta": {
+    "path": "tool-call-meta.raw.txt",
+    "bytes": 253,
+    "sha256": "5a8be911df50ff7aec0dc5dfaacb9da24429f18bdb79fd5064ed0a9f2bc54754",
+    "observed": {
+      "tool": "mcp__native-tool-result-persist-fixture__probe",
+      "tool_use_id": "toolu_native_tool_result_fixture",
+      "result_units": 50007,
+      "unit_at_5": 55296
+    }
+  },
+  "session_preview": {
+    "raw_row_path": "tool-result-session-row.raw.jsonl",
+    "bytes": 53403,
+    "sha256": "353b66ea421c0203dfe6fac0aa8362bd59619b88f209bd9fa100cec8fa368d40",
+    "units": 2000,
+    "unit_at_index_5": "U+D800"
+  },
+  "request_preview": {
+    "raw_content_path": "tool-result-content.raw.json",
+    "bytes": 2691,
+    "sha256": "ef03d5b3f025fd680859de4186f352c9576886d776da2e8a49a581c3fde8d33f",
+    "units": 2000,
+    "unit_at_index_5": "U+FFFD"
+  },
+  "persisted_file": {
+    "path": "persisted-tool-result.raw",
+    "bytes": 50009,
+    "sha256": "2e8a6a250786b45f474bf077c036deb49d7f5ed4dc8148c6f5328008098ba937",
+    "utf8_replacement_count": 1
+  },
+  "checks": {
+    "registered_tool_in_first_request": true,
+    "two_fixed_requests": true,
+    "tool_result_envelope_in_request": true,
+    "native_tool_call_hook_executed": true,
+    "session_preview_keeps_lone_unit": true,
+    "request_preview_uses_replacement_unit": true,
+    "file_uses_utf8_replacement_bytes": true
+  },
+  "scope": "Public Native CLI + $.tool.register + tool.call; source preview, Anthropic request serialization, session JSONL, and persisted file are separate surfaces. No Harness comparison."
+}

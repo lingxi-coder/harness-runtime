@@ -2,8 +2,8 @@
 //!
 //! Unlike its `parity_claude_2_1_252.rs` sibling this file does NOT pin
 //! version-facing identifiers: `lingxi_core::host::CLAUDE_CODE_VERSION` is
-//! deliberately still `2.1.252`, because this port is not wholly at 2.1.267 and
-//! advertising that it is would be a false claim. What is pinned here is the
+//! managed separately from these contract assertions. Passing this file does
+//! not establish whole-runtime release parity. What is pinned here is the
 //! set of ORACLE FACTS the sweep read out of the 2.1.267 binary and then built
 //! behaviour on.
 //!

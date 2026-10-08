@@ -40,9 +40,12 @@ mod tests {
         let mut reg = crate::CommandRegistry::new();
         crate::builtins::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
-            assert!(reg.resolve(name).is_some(), "core /{name} disappeared");
             assert!(
-                reg.get_handler(name).is_some(),
+                reg.resolve(&name.into()).is_some(),
+                "core /{name} disappeared"
+            );
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
                 "core /{name} has no handler"
             );
         }
@@ -54,10 +57,12 @@ mod tests {
         // through the shared UnimplementedCommandHandler.
         let mut reg = crate::CommandRegistry::new();
         crate::builtins::register_all_builtin_commands(&mut reg);
-        let h = reg.get_handler("clear").expect("clear handler missing");
+        let h = reg
+            .get_handler(&"clear".into())
+            .expect("clear handler missing");
         let args = ParsedSlashCommand {
-            name: "clear".to_string(),
-            raw_args: String::new(),
+            name: "clear".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
@@ -72,7 +77,9 @@ mod tests {
     async fn core_name_carries_real_description_after_register_all() {
         let mut reg = crate::CommandRegistry::new();
         crate::builtins::register_all_builtin_commands(&mut reg);
-        let h = reg.get_handler("help").expect("help handler missing");
+        let h = reg
+            .get_handler(&"help".into())
+            .expect("help handler missing");
         assert_eq!(h.description(), "Show help and available commands");
     }
 
@@ -97,11 +104,11 @@ mod tests {
                 continue;
             }
             let h = reg
-                .get_handler(name)
+                .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("no handler /{name}"));
             let args = ParsedSlashCommand {
                 name: (*name).to_string(),
-                raw_args: String::new(),
+                raw_args: String::new().into(),
                 positional_args: vec![],
             };
             match h.handle(&args).await {

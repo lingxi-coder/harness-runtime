@@ -117,11 +117,18 @@ impl ConnectHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ConnectHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let provider = args.raw_args.trim();
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some("Provider name must be valid Unicode text.".into()),
+            };
+        };
+        let provider = raw_args.trim();
         if provider.is_empty() {
             return CommandResult::Done {
                 display: Some(
-                    "Usage: /connect <provider>  (e.g. openrouter, deepseek, glm-coding, zai, chatgpt, github-copilot)".to_string(),
+                    "Usage: /connect <provider>  (e.g. openrouter, deepseek, glm-coding, zai, chatgpt, github-copilot)"
+                        .to_string()
+                        .into(),
                 ),
             };
         }
@@ -132,8 +139,8 @@ impl BuiltinCommandHandler for ConnectHandler {
                 Ok(s) => s,
                 Err(e) => {
                     return CommandResult::Done {
-                        display: Some(format!("Could not start Copilot sign-in: {e}")),
-                    }
+                        display: Some((format!("Could not start Copilot sign-in: {e}")).into()),
+                    };
                 }
             };
             let intro = format!(
@@ -142,26 +149,30 @@ impl BuiltinCommandHandler for ConnectHandler {
             );
             match self.copilot.poll_to_completion(&step).await {
                 Ok(()) => CommandResult::Done {
-                    display: Some(format!("{intro}\nConnected github-copilot.")),
+                    display: Some((format!("{intro}\nConnected github-copilot.")).into()),
                 },
                 Err(e) => CommandResult::Done {
-                    display: Some(format!("{intro}\nCould not connect github-copilot: {e}")),
+                    display: Some(
+                        (format!("{intro}\nCould not connect github-copilot: {e}")).into(),
+                    ),
                 },
             }
         } else if provider == "chatgpt" || provider == "openai-chatgpt" {
             match self.chatgpt.connect().await {
-                Ok(msg) => CommandResult::Done { display: Some(msg) },
+                Ok(msg) => CommandResult::Done {
+                    display: Some((msg).into()),
+                },
                 Err(e) => CommandResult::Done {
-                    display: Some(format!("Could not connect chatgpt: {e}")),
+                    display: Some((format!("Could not connect chatgpt: {e}")).into()),
                 },
             }
         } else {
             match self.writer.prompt_and_store_key(provider).await {
                 Ok(()) => CommandResult::Done {
-                    display: Some(format!("Connected {provider}.")),
+                    display: Some((format!("Connected {provider}.")).into()),
                 },
                 Err(e) => CommandResult::Done {
-                    display: Some(format!("Could not connect {provider}: {e}")),
+                    display: Some((format!("Could not connect {provider}: {e}")).into()),
                 },
             }
         }
@@ -181,9 +192,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "connect".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "connect".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

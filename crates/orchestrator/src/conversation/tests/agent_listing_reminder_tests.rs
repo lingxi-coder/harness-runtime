@@ -1,8 +1,8 @@
 use super::*;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use agent::{AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy};
 use std::sync::Arc;
 use tool_api::context::ToolUseContext;
@@ -65,8 +65,11 @@ impl Tool for NamedTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -113,6 +116,7 @@ fn wait_for_mcp_servers_is_visible_only_without_tool_search() {
 
 fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> AgentDefinition {
     AgentDefinition {
+        omit_claude_md: false,
         cache_ttl: None,
         agent_type: agent_type.into(),
         when_to_use: when_to_use.into(),
@@ -138,6 +142,7 @@ fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> Age
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -489,5 +494,64 @@ async fn gate_on_removed_type_emits_the_removal_branch_and_the_ambient_trailer()
         t2.contains("New agent types are now available for the Agent tool:")
             && t2.contains("- beta-agent:"),
         "a returning type must be re-announced; got: {t2}"
+    );
+}
+
+#[tokio::test]
+async fn agent_offer_withheld_agent_is_absent_from_model_reminder() {
+    let _g = AGENT_LIST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("agent-offer.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+          on('agent.offer', { agent: 'hidden-agent' }, () => ({ isOffered: false }));
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("agent-offer", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut hook_registry = hooks::HookRegistry::new();
+    hook_registry.set_mod_host(host);
+
+    let mut hidden = agent_def(
+        "hidden-agent",
+        "not offered to the model",
+        AgentToolPolicy::All {
+            use_exact_tools: false,
+        },
+    );
+    hidden.source = AgentSource::Settings(lingxi_core::types::SettingsScope::User);
+    let catalog = Arc::new(tokio::sync::RwLock::new(vec![
+        hidden,
+        agent_def(
+            "visible-agent",
+            "available to the model",
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+        ),
+    ]));
+    let orch = orch_with(reg_with_agent_tool(), Some(catalog))
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)));
+
+    let reminder = orch
+        .agent_listing_reminder_message()
+        .await
+        .expect("the offered listing should be sent on the initial turn")
+        .text_content();
+    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+
+    assert!(reminder.contains("- visible-agent: available to the model"));
+    assert!(reminder.contains("- general-purpose:"));
+    assert!(
+        !reminder.contains("hidden-agent"),
+        "a Mod-withheld candidate must be absent from the model reminder: {reminder}"
     );
 }

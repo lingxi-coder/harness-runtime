@@ -82,23 +82,22 @@ impl BuiltinCommandHandler for LoginHandler {
                         // Surface the byte-exact admin/validation message VERBATIM
                         // (no "Could not log in:" wrapper), matching `/connect`.
                         return CommandResult::Done {
-                            display: Some(denial),
+                            display: Some((denial).into()),
                         };
                     }
                 }
                 telemetry::emit_command_completed(cmd_evt::LOGIN_COMPLETED, &info.org_id);
                 CommandResult::Done {
-                    display: Some(format!(
-                        "Logged in as {} (org: {}).",
-                        info.email, info.org_id
-                    )),
+                    display: Some(
+                        (format!("Logged in as {} (org: {}).", info.email, info.org_id)).into(),
+                    ),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::LOGIN_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not log in: {msg}")),
+                    display: Some((format!("Could not log in: {msg}")).into()),
                 }
             }
         }
@@ -136,6 +135,12 @@ pub(crate) mod tests {
     }
     #[async_trait]
     impl AuthHandle for MockAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             self.result.lock().unwrap().clone()
         }
@@ -150,7 +155,7 @@ pub(crate) mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "login".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -214,6 +219,12 @@ pub(crate) mod tests {
     }
     #[async_trait]
     impl AuthHandle for RollbackAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(self.info.clone())
         }

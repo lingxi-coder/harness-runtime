@@ -7,14 +7,14 @@
 //! invariant is covered end-to-end via the duplex-driven `prompt_user`
 //! tests in `prompting_gate_e2e_test.rs` (Tasks 7-10).
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::{PermissionRequest, PromptDefault};
-use serde_json::json;
 
 #[test]
 fn allow_by_default_round_trips() {
     let r = PermissionRequest::ToolUseConfirm {
         tool_name: "Read".to_string(),
-        tool_input: json!({}),
+        tool_input: Utf16JsonProjection::parse("{}").expect("empty test input is valid JSON"),
         default_decision: PromptDefault::AllowByDefault,
         suppress_always_allow_rule: false,
     };
@@ -30,7 +30,7 @@ fn allow_by_default_round_trips() {
 fn deny_by_default_round_trips() {
     let r = PermissionRequest::ToolUseConfirm {
         tool_name: "Bash".to_string(),
-        tool_input: json!({}),
+        tool_input: Utf16JsonProjection::parse("{}").expect("empty test input is valid JSON"),
         default_decision: PromptDefault::DenyByDefault,
         suppress_always_allow_rule: false,
     };

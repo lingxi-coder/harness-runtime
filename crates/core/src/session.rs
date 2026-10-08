@@ -1,10 +1,28 @@
 //! Session state model. Persistence lives in `lingxi-session` (Plan 10).
 
 use crate::token::Usage;
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::{ConversationMessage, MessageId, SessionId, ToolUseId};
+use serde::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn deserialize_todo_source_text<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if value.string_units("").is_some() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("expected a JSON string"))
+    }
+}
 
 /// Running total of `Usage` across all turns in a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -31,15 +49,22 @@ pub struct TodoItem {
     /// `String` so existing readers keep compiling.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
-    /// Human-readable description of the todo.
-    pub content: String,
+    /// Human-readable description of the todo, retaining exact source UTF-16.
+    #[serde(
+        deserialize_with = "deserialize_todo_source_text",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize"
+    )]
+    pub content: Utf16JsonProjection,
     /// Lifecycle state of this todo. Wire-locked.
     pub status: TodoState,
     /// Present-tense form shown while the todo is in progress (claude-code
-    /// `TodoItemSchema.activeForm`). Wire key is camelCase `activeForm`;
-    /// `default` keeps pre-`activeForm` persisted sessions deserializable.
-    #[serde(rename = "activeForm", default)]
-    pub active_form: String,
+    /// `TodoItemSchema.activeForm`). Wire key is camelCase `activeForm`.
+    #[serde(
+        rename = "activeForm",
+        deserialize_with = "deserialize_todo_source_text",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize"
+    )]
+    pub active_form: Utf16JsonProjection,
 }
 
 /// Wire-locked todo lifecycle states.
@@ -92,12 +117,17 @@ impl GoalOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveGoalState {
     /// User-supplied goal condition.
-    pub condition: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub condition: Utf16JsonProjection,
     /// When the goal became active.
     pub set_at: SystemTime,
     /// Most recent stop-time evaluation reason, when available.
-    #[serde(default)]
-    pub last_reason: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub last_reason: Option<Utf16JsonProjection>,
     /// Number of completed Stop evaluations for this goal.
     #[serde(default)]
     pub iterations: u64,
@@ -135,6 +165,15 @@ pub struct SessionState {
     pub session_id: SessionId,
     /// Ordered conversation history.
     pub history: Vec<ConversationMessage>,
+    /// Genuine user prompts removed from the active history by compaction.
+    /// `$.session.turns()` adds this to the prompts still present in `history`.
+    /// A full JSONL resume rebuilds the original rows and starts at zero.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub compacted_user_turns: u64,
+    /// User rows whose JSONL envelope carried `isVirtual: true`. This flag is
+    /// independent of `isMeta`, but the model-facing message type omits it.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub virtual_user_messages: HashSet<MessageId>,
     /// Original assistant grouping flags `(isVirtual, resumedFromIncompleteThinking)`
     /// retained when JSONL rows are projected into protocol messages.
     #[serde(default)]
@@ -261,6 +300,8 @@ impl SessionState {
         Self {
             session_id,
             history: Vec::new(),
+            compacted_user_turns: 0,
+            virtual_user_messages: HashSet::new(),
             hook_message_grouping: HashMap::new(),
             usage: CumulativeUsage::default(),
             model,
@@ -300,6 +341,7 @@ impl SessionState {
     /// excluded transcript messages. Recovery/compaction paths use this when
     /// they rewrite the request history in place.
     pub fn replace_model_context_history(&mut self, history: Vec<ConversationMessage>) {
+        let before = self.real_user_turns_in_history();
         let excluded = self
             .history
             .iter()
@@ -308,6 +350,104 @@ impl SessionState {
             .collect::<Vec<_>>();
         self.history = history;
         self.history.extend(excluded);
+        let after = self.real_user_turns_in_history();
+        self.compacted_user_turns = self
+            .compacted_user_turns
+            .saturating_add(before.saturating_sub(after));
+    }
+
+    /// Number of actual user prompts in this session, including those removed
+    /// from model context by earlier compactions.
+    #[must_use]
+    pub fn real_user_turns(&self) -> u64 {
+        self.compacted_user_turns
+            .saturating_add(self.real_user_turns_in_history())
+    }
+
+    fn real_user_turns_in_history(&self) -> u64 {
+        self.history
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::User {
+                        id,
+                        content,
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                        ..
+                    } if !self.virtual_user_messages.contains(id)
+                        && !self.compact_summary_messages.contains(id)
+                        && !self.transcript_only_messages.contains(id)
+                        && !content.iter().any(|block| matches!(block, crate::types::ContentBlock::ToolResult { .. }))
+                )
+            })
+            .count() as u64
+    }
+}
+
+#[cfg(test)]
+mod mod_session_turn_tests {
+    use super::*;
+    use crate::types::{ContentBlock, ToolUseId};
+
+    #[test]
+    fn real_user_turns_survive_repeated_compaction_and_roundtrip() {
+        let mut session = SessionState::empty(SessionId::nil(), "model".into());
+        let first = ConversationMessage::user(MessageId::new(), "first".into());
+        let second = ConversationMessage::user(MessageId::new(), "second".into());
+        let virtual_user = ConversationMessage::user(MessageId::new(), "virtual".into());
+        session.virtual_user_messages.insert(virtual_user.id());
+        session.history.extend([
+            first,
+            ConversationMessage::user_meta(MessageId::new(), "meta".into()),
+            virtual_user,
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: ToolUseId::new(),
+                    content: crate::types::utf16_json::Utf16JsonProjection::root_string(
+                        "result".into(),
+                        "result".encode_utf16().collect(),
+                    )
+                    .unwrap(),
+                    is_error: Some(false),
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
+            },
+            second.clone(),
+        ]);
+        assert_eq!(session.real_user_turns(), 2);
+
+        session.replace_model_context_history(vec![
+            ConversationMessage::compact_summary(MessageId::new(), "summary".into()),
+            second,
+        ]);
+        assert_eq!(session.compacted_user_turns, 1);
+        assert_eq!(session.real_user_turns(), 2);
+
+        let third = ConversationMessage::user(MessageId::new(), "third".into());
+        session.history.push(third.clone());
+        assert_eq!(session.real_user_turns(), 3);
+        session.replace_model_context_history(vec![
+            ConversationMessage::compact_summary(MessageId::new(), "summary 2".into()),
+            third,
+        ]);
+        assert_eq!(session.compacted_user_turns, 2);
+        assert_eq!(session.real_user_turns(), 3);
+
+        let restored: SessionState =
+            serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert_eq!(restored.real_user_turns(), 3);
     }
 }
 
@@ -315,6 +455,12 @@ impl SessionState {
 mod m4_04_session_extension_tests {
     use super::*;
     use crate::types::SessionId;
+
+    fn todo_text(text: &str) -> Utf16JsonProjection {
+        let units = text.encode_utf16().collect::<Vec<_>>();
+        Utf16JsonProjection::root_string(text.to_owned(), units)
+            .expect("todo test text is valid JSON")
+    }
 
     #[test]
     fn fresh_session_has_empty_todos_and_plan_mode_false() {
@@ -324,19 +470,49 @@ mod m4_04_session_extension_tests {
     }
 
     #[test]
+    fn active_goal_condition_and_reason_keep_exact_utf16_in_session_json() {
+        let source_text = |units: Vec<u16>| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("source text is valid JSON")
+        };
+        let condition_units = vec![b'c' as u16, 0xd800, b'd' as u16];
+        let reason_units = vec![b'r' as u16, 0xdfff];
+        let mut session = SessionState::empty(SessionId::nil(), "x".into());
+        session.active_goal = Some(ActiveGoalState {
+            condition: source_text(condition_units.clone()),
+            set_at: SystemTime::UNIX_EPOCH,
+            last_reason: Some(source_text(reason_units.clone())),
+            iterations: 7,
+            tokens_at_start: 23,
+            origin: GoalOrigin::User,
+        });
+
+        let serialized = serde_json::to_string(&session).expect("serialize session");
+        let restored: SessionState = serde_json::from_str(&serialized).expect("restore session");
+        let goal = restored.active_goal.expect("restore active goal");
+        assert_eq!(goal.condition.string_units(""), Some(condition_units));
+        assert_eq!(
+            goal.last_reason.unwrap().string_units(""),
+            Some(reason_units)
+        );
+        assert_eq!(goal.iterations, 7);
+        assert_eq!(goal.tokens_at_start, 23);
+    }
+
+    #[test]
     fn session_with_todos_round_trips_via_json() {
         let mut s = SessionState::empty(SessionId::nil(), "x".into());
         s.todos.push(TodoItem {
             id: "t1".into(),
-            content: "buy milk".into(),
+            content: todo_text("buy milk"),
             status: TodoState::Pending,
-            active_form: "Buying milk".into(),
+            active_form: todo_text("Buying milk"),
         });
         s.todos.push(TodoItem {
             id: "t2".into(),
-            content: "write plan".into(),
+            content: todo_text("write plan"),
             status: TodoState::InProgress,
-            active_form: "Writing plan".into(),
+            active_form: todo_text("Writing plan"),
         });
         s.plan_mode = true;
         let json = serde_json::to_string(&s).expect("serialize");
@@ -358,6 +534,40 @@ mod m4_04_session_extension_tests {
         assert_eq!(back.todos[0].status, TodoState::Pending);
         assert_eq!(back.todos[1].status, TodoState::InProgress);
         assert!(back.plan_mode);
+    }
+
+    #[test]
+    fn todo_text_round_trips_unpaired_utf16_through_session_json() {
+        let content_units = vec![b'a' as u16, 0xD800, b'b' as u16];
+        let active_units = vec![0xDC00, b'x' as u16];
+        let source_text = |units: &[u16]| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+                .expect("source todo text is valid JSON")
+        };
+        let mut session = SessionState::empty(SessionId::nil(), "x".into());
+        session.todos.push(TodoItem {
+            id: "exact".into(),
+            content: source_text(&content_units),
+            status: TodoState::InProgress,
+            active_form: source_text(&active_units),
+        });
+
+        let persisted = serde_json::to_string(&session).expect("serialize session");
+        let restored: SessionState = serde_json::from_str(&persisted).expect("restore session");
+        assert_eq!(
+            restored.todos[0].content.string_units(""),
+            Some(content_units.clone())
+        );
+        assert_eq!(
+            restored.todos[0].active_form.string_units(""),
+            Some(active_units.clone())
+        );
+    }
+
+    #[test]
+    fn todo_requires_current_active_form_wire_field() {
+        let item = r#"{"id":"t1","content":"buy milk","status":"pending"}"#;
+        assert!(serde_json::from_str::<TodoItem>(item).is_err());
     }
 
     #[test]

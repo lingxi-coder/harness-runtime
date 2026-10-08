@@ -16,7 +16,7 @@ fn anthropic_rows_carry_structured_output_true() {
     let row = desktop_fusion_catalog_row(
         "anthropic",
         opus,
-        lingxi_core::host::ModelBillingMode::PerToken,
+        Some(lingxi_core::host::ModelBillingMode::PerToken),
         &llm_runtime::ProtocolFamily::AnthropicMessages,
     );
     assert_eq!(row.profile, "anthropic");
@@ -48,7 +48,7 @@ fn unhinted_model_on_a_subscription_profile_is_classified_subscription() {
     let row = desktop_fusion_catalog_row(
         "github-copilot",
         &unhinted,
-        lingxi_core::host::ModelBillingMode::Subscription,
+        Some(lingxi_core::host::ModelBillingMode::Subscription),
         &llm_runtime::ProtocolFamily::OpenAiChat,
     );
     assert_eq!(
@@ -77,12 +77,36 @@ fn unhinted_model_on_a_per_token_profile_keeps_the_default_cost_class() {
     let row = desktop_fusion_catalog_row(
         "openai",
         &unhinted,
-        lingxi_core::host::ModelBillingMode::PerToken,
+        Some(lingxi_core::host::ModelBillingMode::PerToken),
         &llm_runtime::ProtocolFamily::OpenAiResponses,
     );
     assert_eq!(
         row.hints.cost_class,
         lingxi_core::host::FusionCostClass::Medium
+    );
+
+    let unsourced = desktop_fusion_catalog_row(
+        "openai",
+        &unhinted,
+        None,
+        &llm_runtime::ProtocolFamily::OpenAiResponses,
+    );
+    assert_eq!(
+        unsourced.hints.cost_class,
+        lingxi_core::host::FusionCostClass::Medium,
+        "an absent billing source must not manufacture subscription pricing"
+    );
+
+    let explicitly_unknown = desktop_fusion_catalog_row(
+        "openai",
+        &unhinted,
+        Some(lingxi_core::host::ModelBillingMode::Unknown),
+        &llm_runtime::ProtocolFamily::OpenAiResponses,
+    );
+    assert_eq!(
+        explicitly_unknown.hints.cost_class,
+        lingxi_core::host::FusionCostClass::Medium,
+        "an explicit Unknown mode also must not claim subscription pricing"
     );
 }
 
@@ -197,7 +221,7 @@ fn supported_protocols_preserve_the_model_capability_bit() {
             desktop_fusion_catalog_row(
                 "p",
                 &capable,
-                lingxi_core::host::ModelBillingMode::PerToken,
+                Some(lingxi_core::host::ModelBillingMode::PerToken),
                 &family,
             )
             .structured_output,
@@ -207,7 +231,7 @@ fn supported_protocols_preserve_the_model_capability_bit() {
             !desktop_fusion_catalog_row(
                 "p",
                 &incapable,
-                lingxi_core::host::ModelBillingMode::PerToken,
+                Some(lingxi_core::host::ModelBillingMode::PerToken),
                 &family,
             )
             .structured_output,

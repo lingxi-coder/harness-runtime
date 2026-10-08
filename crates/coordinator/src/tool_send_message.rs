@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::AgentId;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -51,8 +52,9 @@ use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
+    generated_builtin_result, source_text_projection, source_text_projection_units, CoercedInput,
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 
 use crate::mailbox::{MailboxError, MessageSender, TeammateMessage};
@@ -104,18 +106,18 @@ pub enum Address {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StructuredMessage {
     /// `shutdown_request { reason? }`.
-    ShutdownRequest { reason: Option<String> },
+    ShutdownRequest { reason: Option<Utf16JsonProjection> },
     /// `shutdown_response { request_id, approve, reason? }`.
     ShutdownResponse {
         request_id: String,
         approve: bool,
-        reason: Option<String>,
+        reason: Option<Utf16JsonProjection>,
     },
     /// `plan_approval_response { request_id, approve, feedback? }`.
     PlanApprovalResponse {
         request_id: String,
         approve: bool,
-        feedback: Option<String>,
+        feedback: Option<Utf16JsonProjection>,
     },
 }
 
@@ -157,13 +159,106 @@ pub fn parse_address(to: &str) -> Address {
 /// Coerce a JSON value to `bool` the way TS `semanticBoolean()`
 /// (`utils/semanticBoolean.ts`) does: a real bool, or the exact strings
 /// `"true"`/`"false"`. Anything else is `None` (a validation error).
-fn semantic_boolean(v: Option<&Value>) -> Option<bool> {
-    match v {
-        Some(Value::Bool(b)) => Some(*b),
-        Some(Value::String(s)) if s == "true" => Some(true),
-        Some(Value::String(s)) if s == "false" => Some(false),
-        _ => None,
+fn semantic_boolean(value: Option<JsonValueView<'_>>) -> Option<bool> {
+    value.and_then(|value| {
+        value.as_bool().or_else(|| match value.as_str() {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        })
+    })
+}
+
+fn strict_string(input: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    String::from_utf16(&input.string_units(pointer)?).ok()
+}
+
+fn source_string(input: &Utf16JsonProjection, pointer: &str) -> Option<Utf16JsonProjection> {
+    let value = input.subprojection(pointer).ok()?;
+    value.string_units("")?;
+    Some(value)
+}
+
+fn source_object(fields: Vec<(&str, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("locally generated SendMessage object has unique fields")
+}
+
+fn source_preview(
+    text: &Utf16JsonProjection,
+    preview: fn(&str, usize) -> String,
+) -> Utf16JsonProjection {
+    let units = text
+        .string_units("")
+        .expect("SendMessage content is a root string");
+    if let Ok(valid_text) = String::from_utf16(&units) {
+        return source_text_projection(&preview(&valid_text, 50));
     }
+    // The normal preview callback uses terminal grapheme/cell widths and is
+    // defined for Rust strings. For a source string containing lone UTF-16
+    // units, retain those units through the bounded fallback preview instead
+    // of replacing them with U+FFFD before constructing model-facing JSON.
+    let clipped = if units.len() <= 50 {
+        units
+    } else {
+        let mut clipped = units[..49].to_vec();
+        clipped.push(0x2026);
+        clipped
+    };
+    source_text_projection_units(&clipped)
+}
+
+fn is_ecmascript_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009
+            | 0x000a
+            | 0x000b
+            | 0x000c
+            | 0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+            | 0x2000..=0x200a
+    )
+}
+
+fn source_object_without_fields(
+    source: &Utf16JsonProjection,
+    omitted: &[&str],
+) -> Result<Utf16JsonProjection, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    let entries = source
+        .object_entries()
+        .ok_or(lingxi_core::types::utf16_json::Utf16JsonProjectionError::ExpectedObject)?;
+    let mut fields = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if omitted
+            .iter()
+            .any(|key| key.encode_utf16().eq(entry.code_units.iter().copied()))
+        {
+            continue;
+        }
+        fields.push((
+            entry.code_units.to_vec(),
+            source.subprojection_property_units(entry.code_units)?,
+        ));
+    }
+    Utf16JsonProjection::object_units(fields)
+}
+
+fn invalid_input(message: impl Into<String>) -> ToolError {
+    ToolError::InvalidInput(source_text_projection(&message.into()))
 }
 
 /// Coordinator-only `SendMessage` tool.
@@ -227,8 +322,8 @@ impl SendMessageTool {
     async fn route_live_session(
         &self,
         session_id: &str,
-        content: &str,
-        summary: Option<&str>,
+        content: &Utf16JsonProjection,
+        summary: Option<&Utf16JsonProjection>,
         ctx: &ToolUseContext,
     ) -> Result<(), ToolError> {
         if lingxi_core::host::live_sessions::process_session_id().as_deref() == Some(session_id) {
@@ -294,9 +389,10 @@ impl SendMessageTool {
             Address::Name(name) if name.eq_ignore_ascii_case(TEAM_LEAD_NAME) => {
                 Ok(self.team.coordinator_id)
             }
-            Address::Name(name) => self.registered_recipient(name).await.ok_or_else(|| {
-                ToolError::InvalidInput(format!("SendMessage: no such teammate: {name}"))
-            }),
+            Address::Name(name) => self
+                .registered_recipient(name)
+                .await
+                .ok_or_else(|| invalid_input(format!("SendMessage: no such teammate: {name}"))),
             Address::Broadcast
             | Address::SessionId(_)
             | Address::InvalidSession(_)
@@ -315,10 +411,9 @@ impl SendMessageTool {
             .route(to, msg)
             .await
             .map_err(|e| match e {
-                MailboxError::NotFound(id) => ToolError::InvalidInput(format!(
-                    "SendMessage: no such worker: {}",
-                    id.as_uuid()
-                )),
+                MailboxError::NotFound(id) => {
+                    invalid_input(format!("SendMessage: no such worker: {}", id.as_uuid()))
+                }
                 other => ToolError::Internal(format!("SendMessage: {other}")),
             })
     }
@@ -327,8 +422,8 @@ impl SendMessageTool {
     /// route to every member except the sender (case-insensitive self-skip).
     async fn handle_broadcast(
         &self,
-        content: String,
-        summary: String,
+        content: Utf16JsonProjection,
+        summary: Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let sender_id = ctx.agent_id;
@@ -385,7 +480,7 @@ impl SendMessageTool {
         &self,
         addr: &Address,
         to_label: &str,
-        reason: Option<String>,
+        reason: Option<Utf16JsonProjection>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let to_id = self.resolve_recipient(addr).await?;
@@ -398,10 +493,9 @@ impl SendMessageTool {
         let content = tool_api::send_message_contract::shutdown_request(
             &request_id,
             &from,
-            reason.as_deref(),
+            reason.as_ref(),
             &timestamp,
-        )
-        .to_string();
+        );
 
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
@@ -430,7 +524,7 @@ impl SendMessageTool {
         &self,
         request_id: String,
         approve: bool,
-        reason: Option<String>,
+        reason: Option<Utf16JsonProjection>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         if !approve {
@@ -458,7 +552,7 @@ impl SendMessageTool {
         &self,
         request_id: String,
         approve: bool,
-        reason: Option<String>,
+        reason: Option<Utf16JsonProjection>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let leader = self.team.coordinator_id;
@@ -492,14 +586,14 @@ impl SendMessageTool {
             tool_api::send_message_contract::shutdown_rejected(
                 &request_id,
                 &from,
-                reason.as_deref().unwrap_or_default(),
+                reason.as_ref().unwrap_or(&Utf16JsonProjection::from("")),
                 &timestamp,
             )
         };
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
             from_name: from,
-            content: payload.to_string(),
+            content: payload,
             summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
             timestamp: now,
@@ -576,18 +670,21 @@ impl SendMessageTool {
         }
 
         let message = if approve {
-            "Shutdown approved. Sent confirmation to team-lead.".to_string()
+            source_text_projection("Shutdown approved. Sent confirmation to team-lead.")
         } else {
-            format!(
-                "Shutdown rejected. Reason: \"{}\". Continuing to work.",
-                reason.unwrap_or_default()
-            )
+            let reason = reason.unwrap_or_else(|| source_text_projection(""));
+            let mut units = "Shutdown rejected. Reason: \""
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            units.extend(reason.string_units("").expect("reason is a root string"));
+            units.extend("\". Continuing to work.".encode_utf16());
+            source_text_projection_units(&units)
         };
-        Ok(Self::ok(json!({
-            "success": true,
-            "message": message,
-            "request_id": request_id,
-        })))
+        Ok(Self::ok_source(source_object(vec![
+            ("success", generated_builtin_result(&json!(true))),
+            ("message", message),
+            ("request_id", source_text_projection(&request_id)),
+        ])))
     }
 
     /// `handlePlanApproval` / `handlePlanRejection`
@@ -599,14 +696,16 @@ impl SendMessageTool {
         to_label: &str,
         request_id: String,
         approve: bool,
-        feedback: Option<String>,
+        feedback: Option<Utf16JsonProjection>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let is_lead = ctx.agent_id == Some(self.team.coordinator_id)
             || (ctx.agent_id.is_none() && ctx.agent_name.is_none());
         if !is_lead {
             let action = if approve { "approve" } else { "reject" };
-            return Err(ToolError::InvalidInput(format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans.")));
+            return Err(invalid_input(format!(
+                "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
+            )));
         }
         let to_id = self.resolve_recipient(addr).await?;
         let mode = self
@@ -623,12 +722,13 @@ impl SendMessageTool {
         };
         let now = SystemTime::now();
         let timestamp = tool_api::send_message_contract::protocol_timestamp(now);
-        let rejection_feedback = feedback.as_deref().unwrap_or("Plan needs revision");
+        let fallback_feedback = Utf16JsonProjection::from("Plan needs revision");
+        let rejection_feedback = feedback.as_ref().unwrap_or(&fallback_feedback);
         let payload = tool_api::send_message_contract::plan_response(
             &request_id,
             approve,
             if approve {
-                feedback.as_deref()
+                feedback.as_ref()
             } else {
                 Some(rejection_feedback)
             },
@@ -638,7 +738,7 @@ impl SendMessageTool {
         let msg = TeammateMessage {
             from: MessageSender::Coordinator,
             from_name: TEAM_LEAD_NAME.into(),
-            content: payload.to_string(),
+            content: payload,
             summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
             timestamp: now,
@@ -647,37 +747,55 @@ impl SendMessageTool {
         self.route(&to_id, msg).await?;
 
         let message = if approve {
-            format!(
+            source_text_projection(&format!(
                 "Plan approved for {to_label}. They will receive the approval and can proceed with implementation."
-            )
+            ))
         } else {
-            format!(
-                "Plan rejected for {to_label} with feedback: \"{}\"",
-                (self.preview)(feedback.as_deref().unwrap_or("Plan needs revision"), 50)
-            )
+            let preview = feedback
+                .as_ref()
+                .map(|value| source_preview(value, self.preview))
+                .unwrap_or_else(|| source_text_projection("Plan needs revision"));
+            let mut units = format!("Plan rejected for {to_label} with feedback: \"")
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            units.extend(
+                preview
+                    .string_units("")
+                    .expect("feedback preview is a string"),
+            );
+            units.push('"' as u16);
+            source_text_projection_units(&units)
         };
-        Ok(Self::ok(json!({
-            "success": true,
-            "message": message,
-            "request_id": request_id,
-        })))
+        Ok(Self::ok_source(source_object(vec![
+            ("success", generated_builtin_result(&json!(true))),
+            ("message", message),
+            ("request_id", source_text_projection(&request_id)),
+        ])))
     }
 
     /// Wrap a JSON `data` blob in a successful [`ToolCallResult`].
     fn ok(data: Value) -> ToolCallResult {
-        let mut model_data = data.clone();
-        if let Some(object) = model_data.as_object_mut() {
-            object.remove("display");
-            object.remove("inlineHandback");
-        }
-        let model_content = Some(model_data.to_string());
+        Self::ok_source(generated_builtin_result(&data))
+    }
+
+    fn ok_source(data: Utf16JsonProjection) -> ToolCallResult {
+        let model_data = if data.object_entries().is_some() {
+            source_object_without_fields(&data, &["display", "inlineHandback"])
+                .expect("validated SendMessage result object")
+        } else {
+            data.clone()
+        };
+        let model_content = model_data
+            .to_json_string()
+            .expect("SendMessage result is valid JSON");
         ToolCallResult {
             data,
-            model_content,
+            model_content: Some(source_text_projection(&model_content)),
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         }
     }
 }
@@ -698,11 +816,19 @@ impl Tool for SendMessageTool {
         SEND_MESSAGE_TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         tool_api::send_message_contract::schema(
             lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             lingxi_core::host::env::agent_swarms_enabled(),
         )
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -715,31 +841,33 @@ impl Tool for SendMessageTool {
         MAX_RESULT_SIZE_CHARS
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         // The registry/mailbox are `RwLock`/`Mutex`-guarded, so concurrent
         // sends are safe.
         true
     }
 
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         // TS `isReadOnly(input)` = `typeof input.message === 'string'`.
-        input.get("message").is_some_and(Value::is_string)
+        input
+            .get_property("message")
+            .is_some_and(|value| value.code_units().is_some())
     }
 
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("send messages to agent teammates")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some(source_text_projection("send messages to agent teammates"))
     }
 
     fn should_defer(&self) -> bool {
@@ -747,7 +875,11 @@ impl Tool for SendMessageTool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // The TS tool only escalates to `ask` for the cross-machine `bridge:`
         // scheme; direct bridge addresses are rejected up front in `call`.
         // Canonical local session sends and teammate sends are
@@ -763,11 +895,11 @@ impl Tool for SendMessageTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         tool_api::send_message_contract::prompt(
             lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             lingxi_core::host::env::agent_swarms_enabled(),
@@ -775,13 +907,13 @@ impl Tool for SendMessageTool {
         .into()
     }
 
-    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+    fn coerce_input(&self, input: &Utf16JsonProjection) -> Option<CoercedInput> {
         tool_api::send_message_contract::coerce(input)
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
         tool_api::send_message_contract::validate(
@@ -789,7 +921,7 @@ impl Tool for SendMessageTool {
             lingxi_core::host::env::agent_swarms_enabled(),
             ctx.agent_id.is_some() || ctx.agent_name.is_some(),
         )
-        .map_err(tool_api::tool_trait::ValidationError)
+        .map_err(|message| tool_api::tool_trait::ValidationError(source_text_projection(&message)))
     }
 
     // A faithful 1:1 port of the long TS `SendMessageTool.call`
@@ -798,31 +930,28 @@ impl Tool for SendMessageTool {
     #[allow(clippy::too_many_lines)]
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let input = tool_api::send_message_contract::coerce(&input)
             .map_or(input.clone(), |coerced| coerced.input);
-        if input.get("to").and_then(Value::as_str) == Some("*") {
-            return Err(ToolError::InvalidInput(
-                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
-                    .into(),
+        if input.string_at("/to") == Some("*") {
+            return Err(invalid_input(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient",
             ));
         }
         // --- Parse + validate `to` (validateInput, SendMessageTool.ts:604-718) ---
-        let to = input
-            .get("to")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidInput("SendMessage: missing 'to'".into()))?;
+        let to = strict_string(&input, "/to")
+            .ok_or_else(|| invalid_input("SendMessage: missing 'to'"))?;
 
         if to.trim().is_empty() {
-            return Err(ToolError::InvalidInput("to must not be empty".into()));
+            return Err(invalid_input("to must not be empty"));
         }
         // Reserved transport syntax must retain its validation even when a
         // mailbox happens to have the same name. Bare local names/task IDs,
         // including UUID-shaped aliases, resolve through the shared mailbox.
-        let parsed_address = parse_address(to);
+        let parsed_address = parse_address(&to);
         let addr = if matches!(&parsed_address, Address::Name(_) | Address::AgentId(_))
             && self.registered_recipient(to.trim()).await.is_some()
         {
@@ -831,30 +960,28 @@ impl Tool for SendMessageTool {
             parsed_address
         };
         if let Address::InvalidSession(raw) = &addr {
-            return Err(ToolError::InvalidInput(format!(
+            return Err(invalid_input(format!(
                 "SendMessage: invalid session address '{raw}'; expected session:<uuid>"
             )));
         }
         // address target must not be empty (uds/bridge with empty target).
         match &addr {
             Address::Uds(t) | Address::Bridge(t) if t.trim().is_empty() => {
-                return Err(ToolError::InvalidInput(
-                    "address target must not be empty".into(),
-                ));
+                return Err(invalid_input("address target must not be empty"));
             }
             _ => {}
         }
         // `@` is reserved (one team per session) — bare name / "*" only.
         if to.contains('@') {
-            return Err(ToolError::InvalidInput(
-                "to must be a bare teammate name — there is only one team per session".into(),
+            return Err(invalid_input(
+                "to must be a bare teammate name — there is only one team per session",
             ));
         }
         if let Address::SessionId(session_id) = &addr {
             if lingxi_core::host::live_sessions::process_session_id().as_deref() == Some(session_id)
             {
-                return Err(ToolError::InvalidInput(
-                    "SendMessage: cannot send a message to the current session".into(),
+                return Err(invalid_input(
+                    "SendMessage: cannot send a message to the current session",
                 ));
             }
         }
@@ -862,13 +989,13 @@ impl Tool for SendMessageTool {
         // address a local peer through canonical `session:<uuid>` instead.
         match &addr {
             Address::Uds(_) => {
-                return Err(ToolError::InvalidInput(
-                    "SendMessage: 'uds:' addresses are not supported on this build".into(),
+                return Err(invalid_input(
+                    "SendMessage: 'uds:' addresses are not supported on this build",
                 ));
             }
             Address::Bridge(_) => {
-                return Err(ToolError::InvalidInput(
-                    "SendMessage: 'bridge:' addresses are not supported on this build".into(),
+                return Err(invalid_input(
+                    "SendMessage: 'bridge:' addresses are not supported on this build",
                 ));
             }
             _ => {}
@@ -881,35 +1008,38 @@ impl Tool for SendMessageTool {
             true,
             ctx.agent_id.is_some() || ctx.agent_name.is_some(),
         )
-        .map_err(ToolError::InvalidInput)?;
+        .map_err(|message| ToolError::InvalidInput(message.into()))?;
         if let Some(forwarder) = self.team.message_forwarder().await {
             let forwarded = forwarder
                 .send_message(input.clone())
                 .await
                 .map_err(ToolError::Internal)?;
-            let mut result = Self::ok(forwarded.result);
+            let mut result = Self::ok_source(forwarded.result);
             result.is_error = forwarded.is_error;
             return Ok(result);
         }
 
         // --- Parse `message`: plain string or structured object -------------
         let message = input
-            .get("message")
-            .ok_or_else(|| ToolError::InvalidInput("SendMessage: missing 'message'".into()))?;
+            .subprojection("/message")
+            .map_err(|_| invalid_input("SendMessage: missing 'message'"))?;
 
         // Plain messages derive their optional summary before routing.
-        if let Value::String(s) = message {
-            if s.trim().is_empty() {
-                return Err(ToolError::InvalidInput("message must not be empty".into()));
+        if let Some(message_units) = message.string_units("") {
+            if message_units
+                .iter()
+                .all(|unit| is_ecmascript_whitespace(*unit))
+            {
+                return Err(invalid_input("message must not be empty"));
             }
-            if let Some(error) = tool_api::send_message_contract::plain_message_error(s) {
-                return Err(ToolError::InvalidInput(error.into()));
+            if let Some(error) =
+                tool_api::send_message_contract::plain_message_error(&message_units)
+            {
+                return Err(invalid_input(error));
             }
-            let summary = input
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
+            let summary =
+                source_string(&input, "/summary").unwrap_or_else(|| source_text_projection(""));
+            let content = message;
             if matches!(&addr, Address::Name(name) if name.eq_ignore_ascii_case("main")) {
                 if ctx.agent_id.is_none() {
                     return Ok(Self::ok(
@@ -921,7 +1051,7 @@ impl Tool for SendMessageTool {
                     TeammateMessage {
                         from: Self::sender_from(&ctx),
                         from_name: self.sender_name(&ctx).await,
-                        content: s.clone(),
+                        content: content.clone(),
                         summary: Some(summary),
                         message_id: tool_api::util::ids::ulid_or_uuid(),
                         timestamp: SystemTime::now(),
@@ -934,9 +1064,9 @@ impl Tool for SendMessageTool {
                 ));
             }
             return match addr {
-                Address::Broadcast => self.handle_broadcast(s.clone(), summary, &ctx).await,
+                Address::Broadcast => self.handle_broadcast(content.clone(), summary, &ctx).await,
                 Address::SessionId(session_id) => {
-                    self.route_live_session(&session_id, s, Some(&summary), &ctx)
+                    self.route_live_session(&session_id, &content, Some(&summary), &ctx)
                         .await?;
                     Ok(Self::ok(json!({
                         "success": true,
@@ -957,7 +1087,7 @@ impl Tool for SendMessageTool {
                     let msg = TeammateMessage {
                         from: Self::sender_from(&ctx),
                         from_name: sender.clone(),
-                        content: s.clone(),
+                        content: content.clone(),
                         summary: Some(summary.clone()),
                         message_id: message_id.clone(),
                         timestamp: SystemTime::now(),
@@ -972,47 +1102,54 @@ impl Tool for SendMessageTool {
                     } else {
                         None
                     };
-                    let target_color = self.team.mailbox_router.teammate_color(to).await;
-                    Ok(Self::ok(json!({
-                        "success": true,
-                        "message": format!("Message sent to {}'s inbox", display_target(to, a)),
-                        "msg_id": message_id,
-                        "routing": tool_api::send_message_contract::routing(
-                            &sender, sender_color.as_deref(),
-                            &format!("@{}", display_target(to, a)), target_color.as_deref(),
-                            Some(&summary), Some(&(self.preview)(s, 50)),
+                    let target_color = self.team.mailbox_router.teammate_color(&to).await;
+                    let target = display_target(&to, a);
+                    let routing = tool_api::send_message_contract::routing(
+                        &sender,
+                        sender_color.as_deref(),
+                        &format!("@{target}"),
+                        target_color.as_deref(),
+                        Some(&summary),
+                        Some(&source_preview(&content, self.preview)),
+                    );
+                    Ok(Self::ok_source(source_object(vec![
+                        ("success", generated_builtin_result(&json!(true))),
+                        (
+                            "message",
+                            source_text_projection(&format!("Message sent to {target}'s inbox")),
                         ),
-                    })))
+                        ("msg_id", source_text_projection(&message_id)),
+                        ("routing", routing),
+                    ])))
                 }
             };
         }
 
         // Structured message.
-        let Value::Object(obj) = message else {
-            return Err(ToolError::InvalidInput(
-                "SendMessage: 'message' must be a string or a structured object".into(),
+        if message.object_entries().is_none() {
+            return Err(invalid_input(
+                "SendMessage: 'message' must be a string or a structured object",
             ));
-        };
+        }
 
         // structured messages cannot be broadcast (to: "*").
         if addr == Address::Broadcast {
-            return Err(ToolError::InvalidInput(
-                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
-                    .into(),
+            return Err(invalid_input(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient",
             ));
         }
 
         if matches!(addr, Address::SessionId(_)) {
-            return Err(ToolError::InvalidInput(
-                "structured messages cannot be sent cross-session — only plain text".into(),
+            return Err(invalid_input(
+                "structured messages cannot be sent cross-session — only plain text",
             ));
         }
 
-        let structured = parse_structured(obj)?;
+        let structured = parse_structured(&message)?;
 
         match structured {
             StructuredMessage::ShutdownRequest { reason } => {
-                self.handle_shutdown_request(&addr, to, reason, &ctx).await
+                self.handle_shutdown_request(&addr, &to, reason, &ctx).await
             }
             StructuredMessage::ShutdownResponse {
                 request_id,
@@ -1021,14 +1158,19 @@ impl Tool for SendMessageTool {
             } => {
                 // shutdown_response must be sent to "team-lead".
                 if !to.eq_ignore_ascii_case(TEAM_LEAD_NAME) {
-                    return Err(ToolError::InvalidInput(format!(
+                    return Err(invalid_input(format!(
                         "shutdown_response must be sent to \"{TEAM_LEAD_NAME}\""
                     )));
                 }
                 // reason required when rejecting.
-                if !approve && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-                    return Err(ToolError::InvalidInput(
-                        "reason is required when rejecting a shutdown request".into(),
+                if !approve
+                    && reason
+                        .as_ref()
+                        .and_then(|r| r.string_at(""))
+                        .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(invalid_input(
+                        "reason is required when rejecting a shutdown request",
                     ));
                 }
                 self.handle_shutdown_response(request_id, approve, reason, &ctx)
@@ -1039,7 +1181,7 @@ impl Tool for SendMessageTool {
                 approve,
                 feedback,
             } => {
-                self.handle_plan_approval(&addr, to, request_id, approve, feedback, &ctx)
+                self.handle_plan_approval(&addr, &to, request_id, approve, feedback, &ctx)
                     .await
             }
         }
@@ -1058,43 +1200,39 @@ fn display_target(raw: &str, addr: &Address) -> String {
 /// Parse a structured message object into [`StructuredMessage`], mirroring the
 /// TS discriminated union + `semanticBoolean` coercion (`SendMessageTool.ts:
 /// 46-65`). `request_id` / `approve` are required on the response variants.
-fn parse_structured(obj: &serde_json::Map<String, Value>) -> Result<StructuredMessage, ToolError> {
-    let ty = obj.get("type").and_then(Value::as_str).ok_or_else(|| {
-        ToolError::InvalidInput("SendMessage: structured message missing 'type'".into())
-    })?;
+fn parse_structured(obj: &Utf16JsonProjection) -> Result<StructuredMessage, ToolError> {
+    let ty = strict_string(obj, "/type")
+        .ok_or_else(|| invalid_input("SendMessage: structured message missing 'type'"))?;
 
     let request_id = || -> Result<String, ToolError> {
-        obj.get("request_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "SendMessage: structured message missing 'request_id'".into(),
-                )
-            })
+        strict_string(obj, "/request_id")
+            .ok_or_else(|| invalid_input("SendMessage: structured message missing 'request_id'"))
     };
     let approve = || -> Result<bool, ToolError> {
-        semantic_boolean(obj.get("approve")).ok_or_else(|| {
-            ToolError::InvalidInput("SendMessage: 'approve' must be a boolean".into())
-        })
+        semantic_boolean(obj.get_property("approve"))
+            .ok_or_else(|| invalid_input("SendMessage: 'approve' must be a boolean"))
     };
-    let opt_str = |k: &str| obj.get(k).and_then(Value::as_str).map(str::to_string);
+    let opt_string = |key: &str| -> Option<Utf16JsonProjection> {
+        let value = obj.subprojection(&format!("/{key}")).ok()?;
+        value.string_units("")?;
+        Some(value)
+    };
 
-    match ty {
+    match ty.as_str() {
         "shutdown_request" => Ok(StructuredMessage::ShutdownRequest {
-            reason: opt_str("reason"),
+            reason: opt_string("reason"),
         }),
         "shutdown_response" => Ok(StructuredMessage::ShutdownResponse {
             request_id: request_id()?,
             approve: approve()?,
-            reason: opt_str("reason"),
+            reason: opt_string("reason"),
         }),
         "plan_approval_response" => Ok(StructuredMessage::PlanApprovalResponse {
             request_id: request_id()?,
             approve: approve()?,
-            feedback: opt_str("feedback"),
+            feedback: opt_string("feedback"),
         }),
-        other => Err(ToolError::InvalidInput(format!(
+        other => Err(invalid_input(format!(
             "SendMessage: unknown structured message type '{other}'"
         ))),
     }
@@ -1106,6 +1244,39 @@ mod tests {
     use tool_api::context::{ToolUseContext, ToolUseOptions};
     use tool_api::progress::progress_channel;
 
+    #[async_trait::async_trait]
+    trait GeneratedInputCallFixture {
+        async fn call_fixture(
+            &self,
+            input: Value,
+            ctx: ToolUseContext,
+            progress: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError>;
+    }
+
+    #[async_trait::async_trait]
+    impl GeneratedInputCallFixture for SendMessageTool {
+        async fn call_fixture(
+            &self,
+            input: Value,
+            ctx: ToolUseContext,
+            progress: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Tool::call(self, generated_builtin_result(&input), ctx, progress).await
+        }
+    }
+
+    fn result_value(result: &ToolCallResult) -> Value {
+        serde_json::from_str(&result.data.to_json_string().unwrap()).unwrap()
+    }
+
+    fn model_text(result: &ToolCallResult) -> Option<&str> {
+        result
+            .model_content
+            .as_ref()
+            .and_then(|content| content.string_at(""))
+    }
+
     static LIVE_SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fresh_tx() -> ToolProgressSender {
@@ -1115,6 +1286,7 @@ mod tests {
 
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -1129,13 +1301,19 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: std::sync::Arc::default(),
             agent_name: None,
             observer: None,
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
+            instruction_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -1198,17 +1376,17 @@ mod tests {
         let tool = SendMessageTool::new(team, preview_ascii);
         for address in ["ordinary-agent", "task-ordinary", uuid_alias.as_str()] {
             let result = tool
-                .call(
+                .call_fixture(
                     json!({"to":address,"message":"hello"}),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(result.data["success"], true);
+            assert_eq!(result_value(&result)["success"], true);
             let delivered = inbox.drain();
             assert_eq!(delivered.len(), 1, "{address} must reach its local mailbox");
-            assert_eq!(delivered[0].content, "hello");
+            assert_eq!(delivered[0].content.string_at(""), Some("hello"));
         }
     }
 
@@ -1265,21 +1443,28 @@ mod tests {
 
     #[test]
     fn semantic_boolean_matches_ts() {
-        assert_eq!(semantic_boolean(Some(&json!(true))), Some(true));
-        assert_eq!(semantic_boolean(Some(&json!(false))), Some(false));
-        assert_eq!(semantic_boolean(Some(&json!("true"))), Some(true));
-        assert_eq!(semantic_boolean(Some(&json!("false"))), Some(false));
-        assert_eq!(semantic_boolean(Some(&json!("yes"))), None);
+        let true_value = generated_builtin_result(&json!(true));
+        let false_value = generated_builtin_result(&json!(false));
+        let true_text = generated_builtin_result(&json!("true"));
+        let false_text = generated_builtin_result(&json!("false"));
+        let other_text = generated_builtin_result(&json!("yes"));
+        assert_eq!(semantic_boolean(true_value.at_pointer("")), Some(true));
+        assert_eq!(semantic_boolean(false_value.at_pointer("")), Some(false));
+        assert_eq!(semantic_boolean(true_text.at_pointer("")), Some(true));
+        assert_eq!(semantic_boolean(false_text.at_pointer("")), Some(false));
+        assert_eq!(semantic_boolean(other_text.at_pointer("")), None);
         assert_eq!(semantic_boolean(None), None);
     }
 
     #[test]
     fn is_read_only_true_only_for_string_message() {
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
-        assert!(tool.is_read_only(&json!({ "to": "x", "message": "hi" })));
-        assert!(
-            !tool.is_read_only(&json!({ "to": "x", "message": { "type": "shutdown_request" } }))
+        let plain = generated_builtin_result(&json!({ "to": "x", "message": "hi" }));
+        let structured = generated_builtin_result(
+            &json!({ "to": "x", "message": { "type": "shutdown_request" } }),
         );
+        assert!(tool.is_read_only(&plain));
+        assert!(!tool.is_read_only(&structured));
     }
 
     #[tokio::test]
@@ -1293,7 +1478,7 @@ mod tests {
         let tool = SendMessageTool::new(registry, preview_ascii);
         let body = "x".repeat(100);
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"scout","summary":"inspect results","message":body}),
                 fresh_ctx(),
                 fresh_tx(),
@@ -1302,13 +1487,17 @@ mod tests {
             .unwrap();
         let delivered = mailbox.drain();
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].content, "x".repeat(100));
+        assert_eq!(
+            delivered[0].content.string_at(""),
+            Some("x".repeat(100).as_str())
+        );
         let expected = format!(
             "{{\"success\":true,\"message\":\"Message sent to scout's inbox\",\"msg_id\":{},\"routing\":{{\"sender\":\"team-lead\",\"target\":\"@scout\",\"summary\":\"inspect results\",\"content\":\"{}…\"}}}}",
-            json!(delivered[0].message_id), "x".repeat(49)
+            json!(delivered[0].message_id),
+            "x".repeat(49)
         );
-        assert_eq!(result.model_content.as_deref(), Some(expected.as_str()));
-        assert_eq!(result.data.to_string(), expected);
+        assert_eq!(model_text(&result), Some(expected.as_str()));
+        assert_eq!(result.data.to_json_string().unwrap(), expected);
     }
 
     #[tokio::test]
@@ -1321,7 +1510,7 @@ mod tests {
             .unwrap();
         let tool = SendMessageTool::new(registry, preview_ascii);
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"main","message":"update"}),
                 fresh_ctx(),
                 fresh_tx(),
@@ -1329,14 +1518,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            result.model_content.as_deref(),
+            model_text(&result),
             Some(
                 r#"{"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}"#
             )
         );
         assert!(mailbox.drain().is_empty());
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"main","message":"update"}),
                 ctx_as(agent),
                 fresh_tx(),
@@ -1344,22 +1533,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            result.model_content.as_deref(),
+            model_text(&result),
             Some(
                 r#"{"success":true,"message":"Message queued for the main conversation's next turn."}"#
             )
         );
-        assert_eq!(mailbox.drain()[0].content, "update");
+        assert_eq!(mailbox.drain()[0].content.string_at(""), Some("update"));
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"team-lead","message":"another update"}),
                 ctx_as(agent),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["success"], true);
-        assert_eq!(mailbox.drain()[0].content, "another update");
+        assert_eq!(result_value(&result)["success"], true);
+        assert_eq!(
+            mailbox.drain()[0].content.string_at(""),
+            Some("another update")
+        );
     }
 
     #[tokio::test]
@@ -1372,19 +1564,24 @@ mod tests {
         let mailbox = observable_mailbox(&registry, agent).await;
         let tool = SendMessageTool::new(registry, preview_ascii);
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"scout","message":"update"}),
                 ctx_as(agent),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["success"], false);
+        assert_eq!(result_value(&result)["success"], false);
         assert_eq!(
-            result.data["display"],
+            result_value(&result)["display"],
             "Not sent — 'scout' is this session's own name."
         );
-        assert!(!result.model_content.unwrap().contains("display"));
+        assert!(!result
+            .model_content
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .contains("display"));
         assert!(mailbox.drain().is_empty());
     }
 
@@ -1393,10 +1590,10 @@ mod tests {
         let result =
             SendMessageTool::ok(json!({"success":true,"message":"sent","display":"UI label"}));
         assert_eq!(
-            result.model_content.as_deref(),
+            model_text(&result),
             Some(r#"{"success":true,"message":"sent"}"#)
         );
-        assert_eq!(result.data["display"], "UI label");
+        assert_eq!(result_value(&result)["display"], "UI label");
     }
 
     #[tokio::test]
@@ -1415,7 +1612,7 @@ mod tests {
         registry.mailbox_router.set_color("reviewer", "green").await;
         let tool = SendMessageTool::new(registry, preview_ascii);
         let result = tool
-            .call(
+            .call_fixture(
                 json!({"to":"reviewer","message":"Finished"}),
                 ctx_as(sender),
                 fresh_tx(),
@@ -1423,19 +1620,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            result.data["routing"].to_string(),
+            result_value(&result)["routing"].to_string(),
             r#"{"sender":"scout","senderColor":"blue","target":"@reviewer","targetColor":"green","summary":"Finished","content":"Finished"}"#
         );
         assert_eq!(mailbox.drain().len(), 1);
         let error = tool
-            .call(
+            .call_fixture(
                 json!({"to":format!("agent:{}",target.as_uuid()),"message":"Finished"}),
                 ctx_as(sender),
                 fresh_tx(),
             )
             .await
             .unwrap_err();
-        assert!(error.model_facing_message().contains("no such teammate"));
+        assert!(error
+            .model_facing_message()
+            .string_at("")
+            .is_some_and(|message| message.contains("no such teammate")));
         assert!(mailbox.drain().is_empty());
     }
 
@@ -1456,15 +1656,51 @@ mod tests {
         });
 
         let res = tool
-            .call(input, fresh_ctx(), fresh_tx())
+            .call_fixture(input, fresh_ctx(), fresh_tx())
             .await
             .expect("send must succeed");
-        assert_eq!(res.data["success"], true);
+        assert_eq!(result_value(&res)["success"], true);
 
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].content, "start on task #1");
+        assert_eq!(drained[0].content.string_at(""), Some("start on task #1"));
         assert!(matches!(drained[0].from, MessageSender::Coordinator));
+    }
+
+    #[tokio::test]
+    async fn send_message_retains_lone_utf16_units_in_mailbox_and_model_result() {
+        let registry = make_registry();
+        let recipient = registry
+            .spawn_worker("explorer".into(), "scout".into(), "task-1".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, recipient).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let input = Utf16JsonProjection::parse(
+            r#"{"to":"scout","summary":"label \ud800","message":"hello \ud800"}"#,
+        )
+        .unwrap();
+
+        let result = Tool::call(&tool, input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let delivered = mailbox.drain();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            delivered[0].content.string_units(""),
+            Some("hello ".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            delivered[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_units("")),
+            Some("label ".encode_utf16().chain([0xd800]).collect())
+        );
+        let model_result = result.data.to_json_string().unwrap();
+        assert!(model_result.contains(r#""summary":"label \ud800""#));
+        assert!(model_result.contains(r#""content":"hello \ud800""#));
+        assert_eq!(model_text(&result), Some(model_result.as_str()));
     }
 
     #[tokio::test]
@@ -1479,12 +1715,15 @@ mod tests {
         let tool = SendMessageTool::new(registry, preview_ascii);
         // Case-insensitive name resolution.
         let input = json!({ "to": "scout", "summary": "go", "message": "begin" });
-        let res = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
+        let res = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(result_value(&res)["success"], true);
 
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].content, "begin");
+        assert_eq!(drained[0].content.string_at(""), Some("begin"));
     }
 
     #[tokio::test]
@@ -1492,7 +1731,10 @@ mod tests {
         let registry = make_registry();
         let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({ "to": "nobody", "summary": "x", "message": "y" });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "got {err:?}");
     }
 
@@ -1510,16 +1752,20 @@ mod tests {
             "to": "victim",
             "message": { "type": "shutdown_request", "reason": "done" }
         });
-        let res = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
-        let rid = res.data["request_id"].as_str().unwrap();
+        let res = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let result_json = result_value(&res);
+        assert_eq!(result_json["success"], true);
+        let rid = result_json["request_id"].as_str().unwrap();
         assert!(rid.starts_with("shutdown-"), "minted id: {rid}");
         assert!(rid.contains("@victim"), "id embeds target: {rid}");
 
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].request_id.as_deref(), Some(rid));
-        let body: Value = serde_json::from_str(&drained[0].content).unwrap();
+        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
         assert_eq!(body["type"], "shutdown_request");
         assert_eq!(body["requestId"], rid);
     }
@@ -1535,7 +1781,7 @@ mod tests {
         let tool = SendMessageTool::new(registry, preview_ascii);
         for address in ["session:not-a-uuid", "uds:/tmp/private.sock", "bridge:peer"] {
             assert!(
-                tool.call(
+                tool.call_fixture(
                     json!({"to":address,"message":"hello"}),
                     fresh_ctx(),
                     fresh_tx()
@@ -1557,7 +1803,7 @@ mod tests {
             .unwrap();
         let tool = SendMessageTool::new(registry, preview_ascii);
         let err = tool
-            .call(
+            .call_fixture(
                 json!({"to": "session:not-a-uuid", "message": "hello", "summary": "hi"}),
                 fresh_ctx(),
                 fresh_tx(),
@@ -1566,6 +1812,7 @@ mod tests {
             .expect_err("malformed session address must be invalid input");
         match err {
             ToolError::InvalidInput(message) => {
+                let message = message.string_at("").unwrap();
                 assert!(message.contains("invalid session address"), "{message}");
                 assert!(message.contains("expected session:<uuid>"), "{message}");
             }
@@ -1578,7 +1825,7 @@ mod tests {
         let session_id = "11111111-2222-4333-8444-555555555555";
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let err = tool
-            .call(
+            .call_fixture(
                 json!({
                     "to": format!("session:{session_id}"),
                     "message": {"type": "shutdown_request", "reason": "done"}
@@ -1590,7 +1837,7 @@ mod tests {
             .expect_err("team protocol messages must not target a session");
         match err {
             ToolError::InvalidInput(message) => assert_eq!(
-                message,
+                message.string_at(""),
                 "structured messages cannot be sent cross-session — only plain text"
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -1622,7 +1869,7 @@ mod tests {
         .unwrap();
 
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
-        tool.call(
+        tool.call_fixture(
             json!({
                 "to": format!("session:{target_session}"),
                 "summary": "fallback route",
@@ -1684,7 +1931,7 @@ mod tests {
         .unwrap();
 
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
-        tool.call(
+        tool.call_fixture(
             json!({
                 "to": format!("session:{target_session}"),
                 "summary": "wake up",
@@ -1738,13 +1985,17 @@ mod tests {
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "shutdown-1@worker", "approve": true }
         });
-        let res = tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
-        assert_eq!(res.data["request_id"], "shutdown-1@worker");
+        let res = tool
+            .call_fixture(input, ctx_as(worker), fresh_tx())
+            .await
+            .unwrap();
+        let result_json = result_value(&res);
+        assert_eq!(result_json["success"], true);
+        assert_eq!(result_json["request_id"], "shutdown-1@worker");
 
         let drained = leader_mb.drain();
         assert_eq!(drained.len(), 1, "leader received the response");
-        let body: Value = serde_json::from_str(&drained[0].content).unwrap();
+        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
         assert_eq!(body["type"], "shutdown_approved");
         assert_eq!(body["requestId"], "shutdown-1@worker");
         assert_eq!(body["from"], "worker");
@@ -1768,10 +2019,16 @@ mod tests {
             "to": "worker",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": true }
         });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
-                assert_eq!(m, "shutdown_response must be sent to \"team-lead\"")
+                assert_eq!(
+                    m.string_at(""),
+                    Some("shutdown_response must be sent to \"team-lead\"")
+                )
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1787,10 +2044,16 @@ mod tests {
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": false }
         });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
-                assert_eq!(m, "reason is required when rejecting a shutdown request");
+                assert_eq!(
+                    m.string_at(""),
+                    Some("reason is required when rejecting a shutdown request")
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1853,9 +2116,12 @@ mod tests {
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": true }
         });
-        tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+        tool.call_fixture(input, ctx_as(worker), fresh_tx())
+            .await
+            .unwrap();
         let messages = mailbox.drain();
-        let approval: Value = serde_json::from_str(&messages[0].content).unwrap();
+        let approval: Value =
+            serde_json::from_str(messages[0].content.string_at("").unwrap()).unwrap();
         assert_eq!(approval["paneId"], "%42");
         assert_eq!(approval["backendType"], "tmux");
         assert_eq!(approval["from"], "worker");
@@ -2037,7 +2303,7 @@ mod tests {
             let config_before =
                 std::fs::read(crate::team_file::team_file_path(&home, team_name)).unwrap();
             let error = tool
-                .call(input.clone(), ctx_as(worker), fresh_tx())
+                .call_fixture(input.clone(), ctx_as(worker), fresh_tx())
                 .await
                 .unwrap_err();
             assert!(error
@@ -2056,7 +2322,8 @@ mod tests {
                 1,
                 "approval delivery must not announce termination"
             );
-            let approval: Value = serde_json::from_str(&frames[0].content).unwrap();
+            let approval: Value =
+                serde_json::from_str(frames[0].content.string_at("").unwrap()).unwrap();
             assert_eq!(approval["type"], "shutdown_approved");
             tool
         } else {
@@ -2090,7 +2357,7 @@ mod tests {
             let (start, ready) = tokio::sync::oneshot::channel();
             let caller = tokio::spawn(async move {
                 ready.await.unwrap();
-                tool.call(input, ctx_as(worker), fresh_tx()).await
+                tool.call_fixture(input, ctx_as(worker), fresh_tx()).await
             });
             *seam.0.lock().unwrap() = Some(caller.abort_handle());
             start.send(()).unwrap();
@@ -2111,7 +2378,9 @@ mod tests {
             .await
             .expect("detached departure must finish after self-cancellation")
         } else {
-            tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+            tool.call_fixture(input, ctx_as(worker), fresh_tx())
+                .await
+                .unwrap();
             lead_mailbox.drain()
         };
 
@@ -2141,7 +2410,7 @@ mod tests {
         let terminated = frames
             .iter()
             .find_map(|m| {
-                let v: serde_json::Value = serde_json::from_str(&m.content).ok()?;
+                let v: serde_json::Value = serde_json::from_str(m.content.string_at("")?).ok()?;
                 (v["type"] == "teammate_terminated").then_some(v)
             })
             .expect("lead received the teammate_terminated frame");
@@ -2190,9 +2459,10 @@ mod tests {
             ("bypassPermissions", "bypassPermissions"),
         ] {
             *gate.0.lock().unwrap() = mode.into();
-            tool.call(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":true,"feedback":"Proceed carefully"}}), fresh_ctx(), fresh_tx()).await.unwrap();
+            tool.call_fixture(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":true,"feedback":"Proceed carefully"}}), fresh_ctx(), fresh_tx()).await.unwrap();
             let delivered = mailbox.drain();
-            let body: Value = serde_json::from_str(&delivered[0].content).unwrap();
+            let body: Value =
+                serde_json::from_str(delivered[0].content.string_at("").unwrap()).unwrap();
             assert_eq!(body["permissionMode"], expected);
             assert_eq!(body["feedback"], "Proceed carefully");
             assert_eq!(
@@ -2213,8 +2483,14 @@ mod tests {
         let mailbox = observable_mailbox(&registry, worker).await;
         let tool = SendMessageTool::new(registry, preview_ascii);
         for (approve, action) in [(true, "approve"), (false, "reject")] {
-            let error = tool.call(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":approve}}), ctx_as(worker), fresh_tx()).await.unwrap_err();
-            assert_eq!(error.model_facing_message(), format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."));
+            let error = tool.call_fixture(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":approve}}), ctx_as(worker), fresh_tx()).await.unwrap_err();
+            let expected = format!(
+                "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
+            );
+            assert_eq!(
+                error.model_facing_message().string_at(""),
+                Some(expected.as_str())
+            );
         }
         assert!(mailbox.drain().is_empty());
     }
@@ -2242,13 +2518,17 @@ mod tests {
             "to": "planner",
             "message": { "type": "plan_approval_response", "request_id": "plan-1@planner", "approve": true }
         });
-        let res = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
-        assert_eq!(res.data["request_id"], "plan-1@planner");
+        let res = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let result_json = result_value(&res);
+        assert_eq!(result_json["success"], true);
+        assert_eq!(result_json["request_id"], "plan-1@planner");
 
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 1);
-        let body: Value = serde_json::from_str(&drained[0].content).unwrap();
+        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
         assert_eq!(body["type"], "plan_approval_response");
         assert_eq!(body["approved"], true);
     }
@@ -2272,10 +2552,13 @@ mod tests {
                 "feedback": "tighten the scope"
             }
         });
-        let res = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
+        let res = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(result_value(&res)["success"], true);
         let drained = mailbox.drain();
-        let body: Value = serde_json::from_str(&drained[0].content).unwrap();
+        let body: Value = serde_json::from_str(drained[0].content.string_at("").unwrap()).unwrap();
         assert_eq!(body["approved"], false);
         assert_eq!(body["feedback"], "tighten the scope");
     }
@@ -2284,11 +2567,14 @@ mod tests {
     async fn structured_broadcast_is_rejected() {
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "*", "message": { "type": "shutdown_request" } });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
                 assert_eq!(
-                    m,
+                    m.string_at(""),
                     "broadcast (to: \"*\") is no longer supported — send a message per recipient"
                 );
             }
@@ -2300,11 +2586,16 @@ mod tests {
     async fn uds_address_is_not_supported() {
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "uds:/tmp/x.sock", "summary": "s", "message": "hi" });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => assert!(
-                m.contains("'uds:' addresses are not supported on this build"),
-                "got {m}"
+                m.string_at("")
+                    .unwrap()
+                    .contains("'uds:' addresses are not supported on this build"),
+                "got {m:?}"
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -2314,11 +2605,16 @@ mod tests {
     async fn bridge_address_is_not_supported() {
         let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "bridge:sess-1", "summary": "s", "message": "hi" });
-        let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+        let err = tool
+            .call_fixture(input, fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => assert!(
-                m.contains("'bridge:' addresses are not supported on this build"),
-                "got {m}"
+                m.string_at("")
+                    .unwrap()
+                    .contains("'bridge:' addresses are not supported on this build"),
+                "got {m:?}"
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -2333,7 +2629,7 @@ mod tests {
             .unwrap();
         let mailbox = observable_mailbox(&registry, agent).await;
         let tool = SendMessageTool::new(registry, preview_ascii);
-        tool.call(
+        tool.call_fixture(
             json!({"to":"scout","message":"First line\nSecond"}),
             fresh_ctx(),
             fresh_tx(),
@@ -2341,7 +2637,13 @@ mod tests {
         .await
         .unwrap();
         let messages = mailbox.drain();
-        assert_eq!(messages[0].summary.as_deref(), Some("First line"));
+        assert_eq!(
+            messages[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
+            Some("First line")
+        );
     }
 
     #[tokio::test]
@@ -2353,12 +2655,17 @@ mod tests {
             "message": "yo"
         });
         let err = tool
-            .call(input, fresh_ctx(), fresh_tx())
+            .call_fixture(input, fresh_ctx(), fresh_tx())
             .await
             .expect_err("an '@'-bearing recipient must be rejected");
         match err {
             ToolError::InvalidInput(m) => {
-                assert!(m.contains("there is only one team per session"), "got {m}")
+                assert!(
+                    m.string_at("")
+                        .unwrap()
+                        .contains("there is only one team per session"),
+                    "got {m:?}"
+                )
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -2375,7 +2682,7 @@ mod tests {
             "message": "anyone home?"
         });
         let err = tool
-            .call(input, fresh_ctx(), fresh_tx())
+            .call_fixture(input, fresh_ctx(), fresh_tx())
             .await
             .expect_err("routing to an unknown agent must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)), "got {err:?}");

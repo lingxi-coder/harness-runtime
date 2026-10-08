@@ -46,7 +46,7 @@ impl BuiltinCommandHandler for ExitHandler {
         self.handle.request_exit().await;
         telemetry::emit_command_completed(cmd_evt::EXIT_COMPLETED, "");
         CommandResult::Done {
-            display: Some(EXIT_DISPLAY.to_string()),
+            display: Some((EXIT_DISPLAY.to_string()).into()),
         }
     }
 
@@ -75,8 +75,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "exit".to_string(),
-            raw_args: String::new(),
+            name: "exit".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

@@ -2,7 +2,36 @@
 
 use super::*;
 
+fn normalize_absolute_lexical_read_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
 impl ConversationOrchestrator {
+    pub(crate) fn refresh_main_loop_model_for_route(&self, model: &str, profile: Option<&str>) {
+        let context = self
+            .model_resolution_context_provider
+            .as_ref()
+            .and_then(|provider| provider.context_for_route(model, profile).ok());
+        self.tools
+            .set_main_loop_model(canonical_main_loop_model(model, context.as_ref()));
+    }
+
     /// Seed the live read-state cache from an SDK host's `seed_read_state`
     /// control request.
     ///
@@ -20,7 +49,7 @@ impl ConversationOrchestrator {
         } else {
             self.session_cwd.cwd().join(requested)
         };
-        let absolute = crate::turn_loop::normalize_lexically(&absolute);
+        let absolute = normalize_absolute_lexical_read_path(&absolute);
 
         let Ok(metadata) = tokio::fs::metadata(&absolute).await else {
             return false;
@@ -47,9 +76,9 @@ impl ConversationOrchestrator {
             .replace("\r\n", "\n")
             .replace('\r', "\n");
 
-        tool_api::read_file_state::set_with_model_context(
+        tool_api::read_file_state::set_with_requested_path(
             &self.prompt_runtime.read_state_map,
-            absolute,
+            absolute.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -63,6 +92,7 @@ impl ConversationOrchestrator {
                 is_partial_view: false,
             },
             false,
+            Some(absolute),
         );
         true
     }
@@ -135,20 +165,11 @@ impl ConversationOrchestrator {
     /// `AutoMem` tier. No latch is invented here.
     pub(super) async fn seed_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
         for f in files {
-            // The registry is keyed by CANONICAL paths: `FileReadTool` looks up
-            // `canonicalize_and_validate(..)`'s output. The memory hierarchy's
-            // `f.path` is built from the orchestrator's cwd verbatim, symlinks
-            // and all — on macOS a `/var/...` cwd resolves to `/private/var/...`
-            // — so seeding under the raw path silently never matches and the
-            // dedup simply never fires. Canonicalize once here and use it for
-            // BOTH the `has` guard and the key, or the two halves disagree.
-            //
-            // Falls back to the raw path if canonicalization fails; the file was
-            // just read by the loader, so that is close to unreachable, and the
-            // fallback is no worse than not seeding at all.
-            let key = tokio::fs::canonicalize(&f.path)
-                .await
-                .unwrap_or_else(|_| f.path.clone());
+            // Native `seedMemoryFile` keys this entry by the memory producer's
+            // absolute lexical path; Read uses `VE(file_path)` for that same
+            // read-state key. Normalize without touching the filesystem, so a
+            // symlink route remains the observed source instead of its target.
+            let key = normalize_absolute_lexical_read_path(&f.path);
             // `!readFileState.has(path)` — never clobber a real Read, never
             // MRU-promote (see `contains`' doc).
             if self
@@ -186,11 +207,11 @@ impl ConversationOrchestrator {
                 f.raw_content
                     .strip_prefix('\u{feff}')
                     .unwrap_or(&f.raw_content)
-                    .to_string()
+                    .replace("\r\n", "\n")
             };
-            tool_api::read_file_state::set_with_model_context(
+            tool_api::read_file_state::set_with_requested_path(
                 &self.prompt_runtime.read_state_map,
-                key,
+                key.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content,
                     mtime_ms,
@@ -210,13 +231,17 @@ impl ConversationOrchestrator {
                 //   * this flag is LingXi's post-compact RESTORE set
                 //     (`drain_model_context` -> `restore_post_compact_attachments`)
                 //     and the "files touched this turn" input to
-                //     `conditional_rules_reminder_message`.
+                //     `nested_memory_reminder_messages`.
                 //
                 // A memory file is re-injected by the SYSTEM PROMPT on every
                 // turn, so enrolling it here would re-attach LINGXI.md after
                 // every compaction and report it as touched. It belongs with the
                 // host-seeded snapshots the drain doc already excludes.
                 false,
+                // Native `NTr` iterates every read-state key, including
+                // `contentNotInModelContext` seeds. Keep the normalized path
+                // the producer actually keyed for both rendered and hidden files.
+                Some(key.clone()),
             );
         }
     }
@@ -333,8 +358,11 @@ impl ConversationOrchestrator {
             self.output.emit_message_start(&msg_id, &model).await;
             if let ConversationMessage::Assistant { content, .. } = &assistant_msg {
                 for b in content {
+                    if let Some(text) = crate::streaming_loop::visible_text_projection(b) {
+                        self.output.emit_text(&text).await;
+                        continue;
+                    }
                     match b {
-                        ContentBlock::Text { text } => self.output.emit_text(text).await,
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => self.output.emit_tool_call(id, name, input).await,
@@ -432,26 +460,21 @@ impl ConversationOrchestrator {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         {
             let mut s = self.session.lock().await;
             s.history.push(tool_results_msg.clone());
-            for (m, source_id) in &injected_messages {
-                s.history.push(m.clone());
-                s.injected_message_sources.insert(m.id(), source_id.clone());
-            }
         }
         self.persist_message_to_jsonl(&tool_results_msg).await;
         // O3: this recovery path dispatches exactly one tool — flush its hook
         // attachment lines after its tool_result, and skip the ephemeral
         // renderings (see the batched driver in `turn_loop.rs`).
         self.flush_hook_attachments(tool_use_id).await;
-        for (m, _source_id) in &injected_messages {
-            if m.is_meta() {
-                continue;
-            }
-            self.persist_message_to_jsonl(m).await;
-        }
+        crate::turn_loop::append_tool_injected_messages(self, injected_messages, None).await;
         crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
 
         Ok(true)
@@ -472,59 +495,65 @@ impl ConversationOrchestrator {
     /// A conditional rule is NOT in the eager block, so the eager site would
     /// seed it `seeded_from_context:false` — and the dedup stub would never
     /// fire for exactly the files this reminder just put in the context.
-    pub(super) async fn seed_nested_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
-        for f in files {
-            // Canonical key, lexical render — the fork that already shipped one
-            // silent bug: `FileReadTool` looks up `canonicalize_and_validate`'s
-            // output, so seeding under the raw path never matches on a macOS
-            // `/var` -> `/private/var` cwd.
-            let key = tokio::fs::canonicalize(&f.path)
-                .await
-                .unwrap_or_else(|_| f.path.clone());
-            let now_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis()),
-            )
-            .unwrap_or(i64::MAX);
-            // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
-            let mtime_ms = match tokio::fs::metadata(&f.path)
-                .await
-                .and_then(|m| m.modified())
-            {
-                Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
-                Err(_) => now_ms,
-            };
-            let content = if f.content_differs_from_disk {
-                f.raw_content.clone()
-            } else {
-                f.raw_content
-                    .strip_prefix('\u{feff}')
-                    .unwrap_or(&f.raw_content)
-                    .to_string()
-            };
-            tool_api::read_file_state::set_with_model_context(
-                &self.prompt_runtime.read_state_map,
-                key,
-                tool_api::read_file_state::ReadFileEntry {
-                    content,
-                    mtime_ms,
-                    offset: None,
-                    limit: None,
-                    from_read: false,
-                    seeded_from_context: true,
-                    is_partial_view: f.content_differs_from_disk,
-                },
-                // ALWAYS false, for the reason spelled out on
-                // `seed_memory_read_state`, plus one specific to this site: the
-                // touched-file set is this reminder's own INPUT, so enrolling a
-                // surfaced memory file would make it a trigger for the next
-                // turn's discovery — a feedback loop walking its own ancestors.
-                false,
-            );
+    pub(super) async fn seed_nested_memory_read_state(
+        &self,
+        f: &crate::prompt::MemoryFile,
+    ) -> bool {
+        // Native nested-memory seeding preserves the current lexical path as
+        // its read-state key, aligned with `seedMemoryFile` and `VE(file_path)`.
+        let key = normalize_absolute_lexical_read_path(&f.path);
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+        // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
+        let mtime_ms = match tokio::fs::metadata(&f.path)
+            .await
+            .and_then(|m| m.modified())
+        {
+            Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+            Err(_) => now_ms,
+        };
+        let content = if f.content_differs_from_disk {
+            f.raw_content.clone()
+        } else {
+            f.raw_content
+                .strip_prefix('\u{feff}')
+                .unwrap_or(&f.raw_content)
+                .replace("\r\n", "\n")
+        };
+        let mut state = self
+            .prompt_runtime
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Native m7t rechecks after the asynchronous stat before claiming.
+        if state.contains(&key) {
+            return false;
         }
+        state.set_with_requested_path(
+            key.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms,
+                offset: None,
+                limit: None,
+                from_read: false,
+                seeded_from_context: true,
+                is_partial_view: f.content_differs_from_disk,
+            },
+            // ALWAYS false, for the reason spelled out on
+            // `seed_memory_read_state`, plus one specific to this site: the
+            // touched-file set is this reminder's own INPUT, so enrolling a
+            // surfaced memory file would make it a trigger for the next
+            // turn's discovery — a feedback loop walking its own ancestors.
+            false,
+            Some(key.clone()),
+        );
+        true
     }
-
     /// Build the wire `tools` array for a turn from the registry's enabled tool
     /// set, serialized via [`tool_api::wire::tools_to_wire`] to the
     /// `{name, description, input_schema}` shape claude-code sends
@@ -545,7 +574,9 @@ impl ConversationOrchestrator {
     /// order. A session-level cache is a recommended follow-up.
     ///
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
-    pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
+    pub(crate) async fn build_wire_tools(
+        &self,
+    ) -> (Vec<lingxi_core::host::SourceToolWireDefinition>, bool) {
         use tool_api::tool_trait::PromptOptions;
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
@@ -561,17 +592,35 @@ impl ConversationOrchestrator {
         // inside `filtered_available_tools` — keeps the advertise path free of a
         // second `session` lock, which would deadlock the callers that already
         // hold one.
-        self.tools
-            .set_main_loop_model(canonical_main_loop_model(&model));
+        self.refresh_main_loop_model_for_route(&model, model_profile.as_deref());
         let tools = self.filtered_available_tools().await;
+        let mod_host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let mod_registration_identity = mod_host.as_ref().map(|host| host.registration_identity());
+        let mod_tool_description_generation = self
+            .prompt_runtime
+            .mod_tool_descriptions
+            .lock()
+            .await
+            .generation;
         // Upstream `nre`'s per-call conjunct: the Workflow description may only
         // point at the `workflow-authoring` skill when this request actually
         // offers the tool that loads it, and tool filtering can drop `Skill`.
         // Name-or-alias, matching `Wt(e, o)`.
-        lingxi_core::host::session_flags::set_skill_tool_advertised(tools.iter().any(|tool| {
+        let skill_tool_advertised = tools.iter().any(|tool| {
             tool.name() == tool_skill::skill::SKILL_TOOL_NAME
                 || tool.aliases().contains(&tool_skill::skill::SKILL_TOOL_NAME)
-        }));
+        });
+        lingxi_core::host::session_flags::set_skill_tool_advertised(skill_tool_advertised);
+        let bash_precommit_skills =
+            match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
+                (true, Some(provider)) => provider.bash_precommit_skills().await,
+                _ => tool_api::tool_trait::BashPrecommitSkills::default(),
+            };
+        let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
         let cache_key = WireToolSchemaCacheKey {
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
             dynamic_schema_revisions: tools
@@ -585,6 +634,10 @@ impl ConversationOrchestrator {
             model_profile: model_profile.clone(),
             workflow_authoring_skill_reachable:
                 lingxi_core::host::session_flags::workflow_authoring_skill_reachable(),
+            bash_precommit_skills,
+            bash_precommit_session_generation,
+            mod_registration_identity,
+            mod_tool_description_generation,
         };
         let mut wire = {
             let cached = self
@@ -602,6 +655,8 @@ impl ConversationOrchestrator {
                         include_examples: true,
                         model: Some(model.clone()),
                         model_profile: model_profile.clone(),
+                        bash_precommit_skills,
+                        bash_precommit_session_generation,
                     },
                 )
                 .await;
@@ -621,15 +676,13 @@ impl ConversationOrchestrator {
         // `strict`).
         if telemetry::flag_bool("tengu_structured_output_strict", false) {
             for t in &mut wire {
-                if t.get("name").and_then(serde_json::Value::as_str)
-                    == Some(crate::structured_output::STRUCTURED_OUTPUT_TOOL_NAME)
-                {
-                    if let Some(obj) = t.as_object_mut() {
-                        obj.insert("strict".to_string(), serde_json::Value::Bool(true));
-                    }
+                if t.name == crate::structured_output::STRUCTURED_OUTPUT_TOOL_NAME {
+                    t.strict = true;
                 }
             }
         }
+        self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire)
+            .await;
         let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
         let has_deferred_candidates = tools.iter().any(|tool| {
             self.tools
@@ -695,13 +748,9 @@ impl ConversationOrchestrator {
                     })
                     .map(|tool| tool.name())
                     .collect();
-                let deferred_wire: Vec<serde_json::Value> = complete_wire
+                let deferred_wire: Vec<lingxi_core::host::SourceToolWireDefinition> = complete_wire
                     .iter()
-                    .filter(|tool| {
-                        tool.get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|name| deferred_names.contains(name))
-                    })
+                    .filter(|tool| deferred_names.contains(tool.name.as_str()))
                     .cloned()
                     .collect();
                 // Claude subtracts the fixed request/tool envelope from the
@@ -747,9 +796,7 @@ impl ConversationOrchestrator {
         self.tools
             .refresh_tool_search_view_from_wire(&complete_wire);
         if !self.tools.deferral().is_enabled() {
-            wire.retain(|tool| {
-                tool.get("name").and_then(serde_json::Value::as_str) != Some("ToolSearch")
-            });
+            wire.retain(|tool| tool.name != "ToolSearch");
         }
         // Carved-slate keeps descriptions for already-inline tools stable
         // while allowing deferred tools to remain provider-discovered. Apply
@@ -757,10 +804,228 @@ impl ConversationOrchestrator {
         // request; the schema and defer markers stay live.
         self.apply_prompt_snapshot_tool_descriptions(&mut wire)
             .await;
-        wire
+        // Native jqt's `Rr` derives `skipGlobalCacheForSystemPrompt` from the
+        // active registered tools and the same `hr(tool)` decision serialized
+        // as `defer_loading`. Do this before `Tool` identity is flattened into
+        // provider JSON; pending servers and non-MCP tools do not participate.
+        let skip_global_cache_for_system_prompt = tools.iter().any(|tool| {
+            tool.is_mcp()
+                && wire
+                    .iter()
+                    .find(|definition| definition.name == tool.name())
+                    .is_some_and(|definition| !definition.defer_loading)
+        });
+        (wire, skip_global_cache_for_system_prompt)
     }
 
-    async fn apply_prompt_snapshot_tool_descriptions(&self, wire: &mut [serde_json::Value]) {
+    async fn mod_tool_provider(&self, tool: &dyn tool_api::tool_trait::Tool) -> serde_json::Value {
+        if let Some(owner) = self.tools.mod_tool_owner(tool.name()) {
+            return serde_json::json!({"plugin":owner,"tier":"user"});
+        }
+        if tool.is_mcp() {
+            if let Some(server) = tool
+                .name()
+                .strip_prefix("mcp__")
+                .and_then(|rest| rest.split_once("__"))
+                .map(|(server, _)| server)
+            {
+                let config = if let Some(registry) = &self.mcp_registry {
+                    registry.get_config(server).await
+                } else {
+                    None
+                };
+                // Native `rNn` conservatively seats an unread server record
+                // at the organization tier. A known non-policy source is user.
+                let tier = match config.map(|config| config.scope) {
+                    None
+                    | Some(
+                        mcp::connection::ConfigScope::Settings(
+                            lingxi_core::types::SettingsScope::Managed,
+                        )
+                        | mcp::connection::ConfigScope::Enterprise,
+                    ) => "prepend",
+                    Some(_) => "user",
+                };
+                return serde_json::json!({"plugin":format!("mcp:{server}"),"tier":tier});
+            }
+            return serde_json::json!({"plugin":"mcp","tier":"user"});
+        }
+        serde_json::json!({"plugin":"engine","tier":"core"})
+    }
+
+    async fn apply_mod_tool_descriptions(
+        &self,
+        host: Option<&std::sync::Arc<hooks::mods::ModHost>>,
+        tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
+        wire: &mut [lingxi_core::host::SourceToolWireDefinition],
+    ) {
+        let Some(host) = host.filter(|host| host.has_event("tool.describe")) else {
+            self.tools
+                .deferral()
+                .set_mod_overrides(std::collections::HashMap::new());
+            return;
+        };
+        let identity = host.registration_identity();
+        let generation = self
+            .prompt_runtime
+            .mod_tool_descriptions
+            .lock()
+            .await
+            .generation;
+        let mut overrides = std::collections::HashMap::new();
+        for (tool, entry) in tools.iter().zip(wire.iter_mut()) {
+            let name = tool.name();
+            if entry.description.string_units("").is_none() {
+                continue;
+            }
+            let raw_deferred = tool.should_defer();
+            let provider_value = self.mod_tool_provider(tool.as_ref()).await;
+            let provider = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &provider_value,
+            )
+            .expect("tool provider metadata is valid JSON");
+            let mut input_fields = vec![
+                (
+                    "tool".to_owned(),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(name),
+                ),
+                ("description".to_owned(), entry.description.clone()),
+                ("provider".to_owned(), provider.clone()),
+            ];
+            if raw_deferred {
+                input_fields.push((
+                    "isDeferred".to_owned(),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true")
+                        .expect("static boolean"),
+                ));
+            }
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::object(input_fields)
+                .expect("tool description Mod input is a valid object");
+            let cached = {
+                let cache = self.prompt_runtime.mod_tool_descriptions.lock().await;
+                cache
+                    .answers
+                    .get(name)
+                    .and_then(|(source, catalog, answer)| {
+                        (source == &input && catalog == &identity).then_some(answer.clone())
+                    })
+            };
+            let answer = if let Some(cached) = cached {
+                cached
+            } else {
+                let pinned_name = name.to_owned();
+                let pinned_provider = provider.clone();
+                let log_output = self.output.clone();
+                let toast_output = self.output.clone();
+                let status_output = self.output.clone();
+                let result = host
+                    .dispatch_with_ui_at_session(
+                        "tool.describe",
+                        input.clone(),
+                        self,
+                        move |forwarded| {
+                            let pinned_name = pinned_name.clone();
+                            let pinned_provider = pinned_provider.clone();
+                            async move {
+                                let forwarded = forwarded.ok_or_else(|| {
+                                    hooks::mods::ModError::Hook(
+                                        "tool.describe removed its input".into(),
+                                    )
+                                })?;
+                                if forwarded.string_at("/tool") != Some(pinned_name.as_str())
+                                    || forwarded.subprojection("/provider").ok().as_ref()
+                                        != Some(&pinned_provider)
+                                {
+                                    return Err(hooks::mods::ModError::Hook(
+                                        "tool.describe tool and provider are pinned".into(),
+                                    ));
+                                }
+                                let description = forwarded
+                                    .subprojection("/description")
+                                    .ok()
+                                    .filter(|value| value.string_units("").is_some())
+                                    .ok_or_else(|| {
+                                        hooks::mods::ModError::Hook(
+                                            "tool.describe needs description".into(),
+                                        )
+                                    })?;
+                                let mut result_fields =
+                                    vec![("description".to_owned(), description)];
+                                if let Some(deferred) = forwarded
+                                    .at_pointer("/isDeferred")
+                                    .and_then(|value| value.as_bool())
+                                {
+                                    result_fields.push((
+                                        "isDeferred".to_owned(),
+                                        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                                            if deferred { "true" } else { "false" },
+                                        )
+                                        .expect("static boolean"),
+                                    ));
+                                }
+                                lingxi_core::types::utf16_json::Utf16JsonProjection::object(
+                                    result_fields,
+                                )
+                                .map(Some)
+                                .map_err(|error| hooks::mods::ModError::Hook(error.to_string()))
+                            }
+                        },
+                        move |plugin, text| {
+                            let output = log_output.clone();
+                            async move { output.emit_mod_log(&plugin, &text).await }
+                        },
+                        move |plugin, text, timeout_ms| {
+                            let output = toast_output.clone();
+                            async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                        },
+                        move |plugin, text| {
+                            let output = status_output.clone();
+                            async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                        },
+                    )
+                    .await;
+                let result = match result {
+                    Ok(result)
+                        if result
+                            .subprojection("/description")
+                            .is_ok_and(|value| value.string_units("").is_some()) =>
+                    {
+                        result
+                    }
+                    Ok(_) => input.clone(),
+                    Err(error) => {
+                        tracing::warn!(tool = name, %error, "tool.describe Mod failed");
+                        input.clone()
+                    }
+                };
+                let mut cache = self.prompt_runtime.mod_tool_descriptions.lock().await;
+                if cache.generation == generation {
+                    cache
+                        .answers
+                        .insert(name.to_owned(), (input, identity, result.clone()));
+                }
+                result
+            };
+            if let Some(description) = answer
+                .subprojection("/description")
+                .ok()
+                .filter(|value| value.string_units("").is_some())
+            {
+                entry.description = description;
+            }
+            let deferred = answer
+                .at_pointer("/isDeferred")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(raw_deferred);
+            overrides.insert(name.to_owned(), deferred);
+        }
+        self.tools.deferral().set_mod_overrides(overrides);
+    }
+
+    async fn apply_prompt_snapshot_tool_descriptions(
+        &self,
+        wire: &mut [lingxi_core::host::SourceToolWireDefinition],
+    ) {
         if !self.prompt_snapshot_eligible() {
             return;
         }
@@ -787,25 +1052,13 @@ impl ConversationOrchestrator {
             return;
         }
         for tool in wire {
-            if tool
-                .get("defer_loading")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
+            if tool.defer_loading {
                 continue;
             }
-            let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
+            let Some(description) = recorded.get(tool.name.as_str()) else {
                 continue;
             };
-            let Some(description) = recorded.get(name) else {
-                continue;
-            };
-            if let Some(object) = tool.as_object_mut() {
-                object.insert(
-                    "description".to_string(),
-                    serde_json::Value::String(description.clone()),
-                );
-            }
+            tool.description = description.clone();
         }
     }
 
@@ -853,7 +1106,7 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn filtered_available_tools(
+    pub(crate) async fn filtered_available_tools(
         &self,
     ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         use tool_api::tool_trait::ToolStaticContext;
@@ -919,7 +1172,7 @@ impl ConversationOrchestrator {
     pub(super) fn text_content(message: &ConversationMessage) -> Option<String> {
         match message {
             ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
-                if let lingxi_core::types::ContentBlock::Text { text } = block {
+                if let lingxi_core::types::ContentBlock::Text { text, .. } = block {
                     Some(text.clone())
                 } else {
                     None
@@ -942,22 +1195,24 @@ impl ConversationOrchestrator {
     pub async fn mcp_tool_definitions(&self) -> Vec<serde_json::Value> {
         self.build_wire_tools()
             .await
+            .0
             .into_iter()
             .filter_map(|wire| {
-                let object = wire.as_object()?;
-                let mut tool = serde_json::Map::new();
-                tool.insert("name".into(), object.get("name")?.clone());
-                if let Some(description) = object.get("description") {
-                    tool.insert("description".into(), description.clone());
+                let mut fields = vec![
+                    (
+                        "name".to_owned(),
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(wire.name),
+                    ),
+                    ("inputSchema".to_owned(), wire.input_schema),
+                ];
+                if wire.description.string_units("").is_some() {
+                    fields.insert(1, ("description".to_owned(), wire.description));
                 }
-                tool.insert(
-                    "inputSchema".into(),
-                    object
-                        .get("input_schema")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
-                );
-                Some(serde_json::Value::Object(tool))
+                let source = lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields)
+                    .ok()?
+                    .to_json_string()
+                    .ok()?;
+                serde_json::from_str(&source).ok()
             })
             .collect()
     }
@@ -980,7 +1235,7 @@ impl ConversationOrchestrator {
         &self,
         tool_use_id: lingxi_core::types::ToolUseId,
         name: String,
-        input: serde_json::Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
         if self.find_dispatchable_tool(&name).is_none() {
@@ -1012,12 +1267,35 @@ impl ConversationOrchestrator {
 /// `HR` does not. Feeding it to the gate would gate `claude-opus-5-eap`, an id
 /// the oracle's `^claude-([a-z]+)-(\d+(?:-\d+)*)$` rejects and therefore
 /// leaves enabled.
-pub(crate) fn canonical_main_loop_model(raw: &str) -> Option<String> {
-    let resolved = agent::model_resolution::resolve_user_specified_model(raw);
-    let trimmed = resolved.trim();
+pub(crate) fn canonical_main_loop_model(
+    raw: &str,
+    context: Option<&agent::model_resolution::ModelResolutionContext>,
+) -> Option<String> {
+    use lingxi_core::host::effort::{javascript_whitespace, trim_js_whitespace};
+    let resolved = match context {
+        Some(context) => {
+            agent::model_resolution::resolve_user_specified_model(raw, context).ok()?
+        }
+        None => {
+            // A concrete wire id can be normalized without provider facts.
+            // Family aliases require actual route defaults; unwired callers
+            // have no authority to choose a first-party model for them.
+            let raw = trim_js_whitespace(raw);
+            let normalized = raw.to_lowercase();
+            let family = trim_js_whitespace(normalized.trim_end_matches("[1m]"));
+            if matches!(
+                family,
+                "opus" | "opusplan" | "sonnet" | "haiku" | "fable" | "best"
+            ) {
+                return None;
+            }
+            raw.to_owned()
+        }
+    };
+    let trimmed = trim_js_whitespace(&resolved);
     // `replace(/\[1m\]$/i, "")`.
     let base = if trimmed.to_lowercase().ends_with("[1m]") {
-        trimmed[..trimmed.len() - "[1m]".len()].trim_end()
+        trimmed[..trimmed.len() - "[1m]".len()].trim_end_matches(javascript_whitespace)
     } else {
         trimmed
     };

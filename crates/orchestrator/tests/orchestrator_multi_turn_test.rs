@@ -70,8 +70,11 @@ impl Tool for AlwaysOkTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "AlwaysOk".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -97,7 +100,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
         vec![
             LlmContentBlock::Text {
                 text: "let me check".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             },
             LlmContentBlock::ToolCall {
                 id: tool_use_id.to_string(),
@@ -110,7 +113,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "all good".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );

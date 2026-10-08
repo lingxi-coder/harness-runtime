@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lsp::registry::LspRegistry;
 use lsp::tool_operations as ops;
 use lsp::Url;
@@ -49,8 +50,9 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_schema, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 // -- Wire identifier locks (spec §7 line 695) --------------------------------
@@ -205,15 +207,66 @@ fn validate_file_path_in(file_path: &str, cwd: &Path) -> Result<(), ValidationEr
             if stats.is_file() {
                 Ok(())
             } else {
-                Err(ValidationError(format!("Path is not a file: {file_path}")))
+                Err(ValidationError(
+                    format!("Path is not a file: {file_path}").into(),
+                ))
             }
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(ValidationError(format!("File does not exist: {file_path}")))
-        }
-        Err(err) => Err(ValidationError(format!(
-            "Cannot access file: {file_path}. {err}"
-        ))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
+            format!("File does not exist: {file_path}").into(),
+        )),
+        Err(err) => Err(ValidationError(
+            format!("Cannot access file: {file_path}. {err}").into(),
+        )),
+    }
+}
+
+fn validation_error_with_source_path(
+    prefix: &str,
+    file_path: &Utf16JsonProjection,
+    suffix: &str,
+) -> ValidationError {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(file_path.string_units("").unwrap_or_default());
+    units.extend(suffix.encode_utf16());
+    ValidationError(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("message display is derived from exact input units"),
+    )
+}
+
+fn validate_file_path_source(
+    file_path: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Result<(), ValidationError> {
+    let path_units = file_path.string_units("").unwrap_or_default();
+    let path_text = String::from_utf16(&path_units).map_err(|_| {
+        validation_error_with_source_path(
+            "Path cannot be represented by this host: ",
+            file_path,
+            "",
+        )
+    })?;
+    let absolute_path = expand_path_in(&path_text, cwd);
+    let display = absolute_path.to_string_lossy();
+    if display.starts_with("\\\\") || display.starts_with("//") {
+        return Ok(());
+    }
+    match std::fs::metadata(&absolute_path) {
+        Ok(stats) if stats.is_file() => Ok(()),
+        Ok(_) => Err(validation_error_with_source_path(
+            "Path is not a file: ",
+            file_path,
+            "",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            validation_error_with_source_path("File does not exist: ", file_path, ""),
+        ),
+        Err(error) => Err(validation_error_with_source_path(
+            "Cannot access file: ",
+            file_path,
+            &format!(". {error}"),
+        )),
     }
 }
 
@@ -285,6 +338,7 @@ fn uri_to_file_path(uri: &str) -> String {
     percent_decode(&file_path).unwrap_or(file_path)
 }
 
+#[cfg(test)]
 fn rewrite_server_uris_to_host(
     value: &mut Value,
     registry: &LspRegistry,
@@ -315,9 +369,63 @@ fn rewrite_server_uris_to_host(
     Ok(())
 }
 
+fn pointer_child(parent: &str, child: &str) -> String {
+    let escaped = child.replace('~', "~0").replace('/', "~1");
+    format!("{parent}/{escaped}")
+}
+
+fn rewrite_server_uris_to_host_source(
+    value: &mut Utf16JsonProjection,
+    registry: &LspRegistry,
+) -> Result<(), lingxi_core::host::LspError> {
+    let mut pending = vec![String::new()];
+    let mut rewrites = Vec::<(String, Vec<u16>)>::new();
+    while let Some(pointer) = pending.pop() {
+        let Some(view) = value.at_pointer(&pointer) else {
+            continue;
+        };
+        if let Some(entries) = view.object_entries() {
+            for entry in entries {
+                let Ok(key) = String::from_utf16(entry.code_units) else {
+                    continue;
+                };
+                let child_pointer = pointer_child(&pointer, &key);
+                if matches!(key.as_str(), "uri" | "targetUri") {
+                    let Some(uri_text) = view_string(Some(entry.value)) else {
+                        continue;
+                    };
+                    if let Ok(uri) = Url::parse(&uri_text) {
+                        if let Some(host_uri) = registry.host_uri_for_server_uri(&uri)? {
+                            rewrites.push((
+                                child_pointer,
+                                host_uri.to_string().encode_utf16().collect(),
+                            ));
+                        }
+                    }
+                } else if entry.value.object_entries().is_some()
+                    || entry.value.array_len().is_some()
+                {
+                    pending.push(child_pointer);
+                }
+            }
+        } else if let Some(length) = view.array_len() {
+            for index in (0..length).rev() {
+                pending.push(format!("{pointer}/{index}"));
+            }
+        }
+    }
+    for (pointer, units) in rewrites {
+        value
+            .set_string_units(&pointer, &units)
+            .map_err(|error| lingxi_core::host::LspError::Transport(error.to_string()))?;
+    }
+    Ok(())
+}
+
 /// `toLocation(item).uri` for a `Location` (`uri`) or `LocationLink`
 /// (`targetUri`). Returns `None` when the URI is absent/non-string (the TS
 /// `!loc.uri` keep-case).
+#[cfg(test)]
 fn location_uri(item: &Value) -> Option<&str> {
     if item.get("targetUri").is_some() {
         return item.get("targetUri").and_then(Value::as_str);
@@ -326,6 +434,7 @@ fn location_uri(item: &Value) -> Option<&str> {
 }
 
 /// `SymbolInformation.location.uri`.
+#[cfg(test)]
 fn symbol_location_uri(item: &Value) -> Option<&str> {
     item.get("location")
         .and_then(|l| l.get("uri"))
@@ -400,6 +509,7 @@ fn ignored_uri_set(uris: &[&str], cwd: &Path) -> HashSet<String> {
 /// `LSPTool.ts:336-374`. Only array results of `findReferences`,
 /// `goToDefinition`, `goToImplementation`, and `workspaceSymbol` are touched;
 /// everything else is returned unchanged. Items whose URI is absent are kept.
+#[cfg(test)]
 fn filter_gitignored_results(operation: &str, raw: Value, cwd: &Path) -> Value {
     let is_location_op = matches!(
         operation,
@@ -434,6 +544,55 @@ fn filter_gitignored_results(operation: &str, raw: Value, cwd: &Path) -> Value {
     Value::Array(filtered)
 }
 
+fn filter_gitignored_results_source(
+    operation: &str,
+    raw: Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let is_location_op = matches!(
+        operation,
+        "findReferences" | "goToDefinition" | "goToImplementation" | "workspaceSymbol"
+    );
+    if !is_location_op {
+        return raw;
+    }
+    let Some(items) = result_items(&raw) else {
+        return raw;
+    };
+    let is_workspace_symbol = operation == "workspaceSymbol";
+    let uris = items
+        .iter()
+        .filter_map(|item| {
+            if is_workspace_symbol {
+                symbol_location_uri_source(*item)
+            } else {
+                location_uri_source(*item)
+            }
+        })
+        .collect::<Vec<_>>();
+    let ignored = ignored_uri_set(&uris.iter().map(String::as_str).collect::<Vec<_>>(), cwd);
+    if ignored.is_empty() {
+        return raw;
+    }
+    let filtered = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let uri = if is_workspace_symbol {
+                symbol_location_uri_source(*item)
+            } else {
+                location_uri_source(*item)
+            };
+            if uri.is_none_or(|uri| !ignored.contains(&uri)) {
+                raw.subprojection(&format!("/{index}")).ok()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    Utf16JsonProjection::array(filtered).expect("filtered source array has valid child projections")
+}
+
 // -- Result formatting (`LSPTool.ts:636 formatResult` + `formatters.ts`) ------
 
 // Empty-result messages, byte-exact from `formatters.ts`.
@@ -463,6 +622,7 @@ fn utf16_len(s: &str) -> usize {
 
 /// `formatters.ts:symbolKindToString` — LSP `SymbolKind` (1-26) to label;
 /// anything out of range (or missing) maps to `Unknown`.
+#[cfg(test)]
 fn symbol_kind_to_string(item: &Value) -> &'static str {
     match item.get("kind").and_then(Value::as_u64) {
         Some(1) => "File",
@@ -551,9 +711,647 @@ fn format_uri(uri: Option<&str>, cwd: &Path) -> String {
     file_path.replace('\\', "/")
 }
 
+fn format_go_to_definition_result_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let Some(root) = result.at_pointer("") else {
+        return NO_DEFINITION.into();
+    };
+    if root.is_null() {
+        return NO_DEFINITION.into();
+    }
+    let candidates = if let Some(items) = result_items(result) {
+        items
+    } else {
+        vec![root]
+    };
+    let valid = candidates
+        .into_iter()
+        .filter(|item| location_uri_source(*item).is_some_and(|uri| !uri.is_empty()))
+        .collect::<Vec<_>>();
+    if valid.is_empty() {
+        return NO_DEFINITION.into();
+    }
+    let mut text = ModelText::default();
+    if valid.len() == 1 {
+        text.text("Defined in ");
+        text.text(&format_location_source(valid[0], cwd));
+    } else {
+        text.text(&format!("Found {} definitions:\n", valid.len()));
+        for (index, item) in valid.iter().enumerate() {
+            if index > 0 {
+                text.text("\n");
+            }
+            text.text("  ");
+            text.text(&format_location_source(*item, cwd));
+        }
+    }
+    text.finish()
+}
+
+fn format_find_references_result_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let Some(items) = result_items(result) else {
+        return NO_REFERENCES.into();
+    };
+    let valid = items
+        .into_iter()
+        .filter(|item| property_string(*item, "uri").is_some_and(|uri| !uri.is_empty()))
+        .collect::<Vec<_>>();
+    if valid.is_empty() {
+        return NO_REFERENCES.into();
+    }
+    let mut text = ModelText::default();
+    if valid.len() == 1 {
+        text.text("Found 1 reference:\n  ");
+        text.text(&format_location_source(valid[0], cwd));
+        return text.finish();
+    }
+    let by_file = group_by_file_source(&valid, |item| {
+        Some(format_uri(property_string(item, "uri").as_deref(), cwd))
+    });
+    text.text(&format!(
+        "Found {} references across {} files:",
+        valid.len(),
+        by_file.len()
+    ));
+    for (file_index, (file_path, locations)) in by_file.iter().enumerate() {
+        if file_index > 0 {
+            text.text("\n");
+        }
+        text.text(&format!("\n{file_path}:"));
+        for location in locations {
+            let (line, character) = range_start_source(location.get_property("range"));
+            text.text(&format!("\n  Line {}:{}", line + 1, character + 1));
+        }
+    }
+    text.finish()
+}
+
+fn markup_text_units(contents: Option<JsonValueView<'_>>) -> Vec<u16> {
+    let Some(contents) = contents else {
+        return Vec::new();
+    };
+    if let Some(items) = view_items(Some(contents)) {
+        let mut output = Vec::new();
+        for (index, item) in items.iter().copied().enumerate() {
+            if index > 0 {
+                output.extend("\n\n".encode_utf16());
+            }
+            if let Some(units) = item.code_units() {
+                output.extend_from_slice(units);
+            } else if let Some(units) = property_string_units(item, "value") {
+                output.extend(units);
+            }
+        }
+        return output;
+    }
+    view_string_units(Some(contents))
+        .or_else(|| property_string_units(contents, "value"))
+        .unwrap_or_default()
+}
+
+fn format_hover_result_source(result: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(root) = result.at_pointer("") else {
+        return NO_HOVER.into();
+    };
+    if root.is_null() {
+        return NO_HOVER.into();
+    }
+    let contents = markup_text_units(root.get_property("contents"));
+    if let Some(range) = root.get_property("range").filter(|range| !range.is_null()) {
+        let (line, character) = range_start_source(Some(range));
+        let mut text = ModelText::default();
+        text.text(&format!(
+            "Hover info at {}:{}:\n\n",
+            line + 1,
+            character + 1
+        ));
+        text.units(&contents);
+        return text.finish();
+    }
+    source_from_units(contents)
+}
+
+fn count_symbols_source(items: &[JsonValueView<'_>]) -> u64 {
+    let mut count = items.len() as u64;
+    let mut pending = items.to_vec();
+    while let Some(symbol) = pending.pop() {
+        if let Some(children) = view_items(symbol.get_property("children")) {
+            count = count.saturating_add(children.len() as u64);
+            pending.extend(children);
+        }
+    }
+    count
+}
+
+fn format_document_symbol_result_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let Some(symbols) = result_items(result) else {
+        return NO_DOCUMENT_SYMBOLS.into();
+    };
+    let Some(first) = symbols.first().copied() else {
+        return NO_DOCUMENT_SYMBOLS.into();
+    };
+    if first.get_property("location").is_some() {
+        return format_workspace_symbol_result_source(result, cwd);
+    }
+    let mut text = ModelText::default();
+    text.text("Document symbols:");
+    let mut pending = symbols
+        .into_iter()
+        .rev()
+        .map(|symbol| (symbol, 0_usize))
+        .collect::<Vec<_>>();
+    while let Some((symbol, indent)) = pending.pop() {
+        text.text("\n");
+        text.text(&"  ".repeat(indent));
+        text.units(&name_units(symbol));
+        text.text(&format!(" ({})", symbol_kind_to_string_source(symbol)));
+        if let Some(detail) = truthy_property_units(symbol, "detail") {
+            text.text(" ");
+            text.units(&detail);
+        }
+        let (line, _) = range_start_source(symbol.get_property("range"));
+        text.text(&format!(" - Line {}", line + 1));
+        if let Some(children) = view_items(symbol.get_property("children")) {
+            pending.extend(children.into_iter().rev().map(|child| (child, indent + 1)));
+        }
+    }
+    text.finish()
+}
+
+fn format_workspace_symbol_result_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let Some(items) = result_items(result) else {
+        return NO_WORKSPACE_SYMBOLS.into();
+    };
+    let valid = items
+        .into_iter()
+        .filter(|symbol| symbol_location_uri_source(*symbol).is_some_and(|uri| !uri.is_empty()))
+        .collect::<Vec<_>>();
+    if valid.is_empty() {
+        return NO_WORKSPACE_SYMBOLS.into();
+    }
+    let by_file = group_by_file_source(&valid, |symbol| {
+        Some(format_uri(
+            symbol_location_uri_source(symbol).as_deref(),
+            cwd,
+        ))
+    });
+    let mut text = ModelText::default();
+    text.text(&format!(
+        "Found {} {} in workspace:",
+        valid.len(),
+        plural(valid.len(), "symbol")
+    ));
+    for (file_path, symbols) in &by_file {
+        text.text(&format!("\n\n{file_path}:"));
+        for symbol in symbols {
+            let location = symbol.get_property("location").expect("filtered location");
+            let (line, _) = range_start_source(location.get_property("range"));
+            text.text("\n  ");
+            text.units(&name_units(*symbol));
+            text.text(&format!(
+                " ({}) - Line {}",
+                symbol_kind_to_string_source(*symbol),
+                line + 1
+            ));
+            if let Some(container) = truthy_property_units(*symbol, "containerName") {
+                text.text(" in ");
+                text.units(&container);
+            }
+        }
+    }
+    text.finish()
+}
+
+fn format_call_hierarchy_item_source(item: JsonValueView<'_>, cwd: &Path) -> Utf16JsonProjection {
+    let kind = symbol_kind_to_string_source(item);
+    let Some(uri) = property_string(item, "uri").filter(|uri| !uri.is_empty()) else {
+        let mut text = ModelText::default();
+        text.units(&name_units(item));
+        text.text(&format!(" ({kind}) - <unknown location>"));
+        return text.finish();
+    };
+    let file_path = format_uri(Some(&uri), cwd);
+    let (line, _) = range_start_source(item.get_property("range"));
+    let mut text = ModelText::default();
+    text.units(&name_units(item));
+    text.text(&format!(" ({kind}) - {file_path}:{}", line + 1));
+    if let Some(detail) = truthy_property_units(item, "detail") {
+        text.text(" [");
+        text.units(&detail);
+        text.text("]");
+    }
+    text.finish()
+}
+
+fn format_prepare_call_hierarchy_result_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
+    let Some(items) = result_items(result) else {
+        return NO_CALL_HIERARCHY_ITEM.into();
+    };
+    if items.is_empty() {
+        return NO_CALL_HIERARCHY_ITEM.into();
+    }
+    let mut text = ModelText::default();
+    if items.len() == 1 {
+        text.text("Call hierarchy item: ");
+        text.source(&format_call_hierarchy_item_source(items[0], cwd));
+    } else {
+        text.text(&format!("Found {} call hierarchy items:", items.len()));
+        for item in items {
+            text.text("\n  ");
+            text.source(&format_call_hierarchy_item_source(item, cwd));
+        }
+    }
+    text.finish()
+}
+
+fn call_sites_source(call: JsonValueView<'_>) -> Option<String> {
+    let ranges = view_items(call.get_property("fromRanges"))?;
+    if ranges.is_empty() {
+        return None;
+    }
+    Some(
+        ranges
+            .iter()
+            .map(|range| {
+                let (line, character) = range_start_source(Some(*range));
+                format!("{}:{}", line + 1, character + 1)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn format_calls_source(
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+    incoming: bool,
+) -> Utf16JsonProjection {
+    let empty_message = if incoming {
+        NO_INCOMING_CALLS
+    } else {
+        NO_OUTGOING_CALLS
+    };
+    let Some(calls) = result_items(result) else {
+        return empty_message.into();
+    };
+    if calls.is_empty() {
+        return empty_message.into();
+    }
+    let direction = if incoming { "incoming" } else { "outgoing" };
+    let field = if incoming { "from" } else { "to" };
+    let suffix = if incoming { "calls at" } else { "called from" };
+    let by_file = group_by_file_source(&calls, |call| {
+        let item = call.get_property(field)?;
+        Some(format_uri(property_string(item, "uri").as_deref(), cwd))
+    });
+    let mut text = ModelText::default();
+    text.text(&format!(
+        "Found {} {direction} {}:",
+        calls.len(),
+        plural(calls.len(), "call")
+    ));
+    for (file_path, group) in &by_file {
+        text.text(&format!("\n\n{file_path}:"));
+        for call in group {
+            let Some(item) = call.get_property(field) else {
+                continue;
+            };
+            let (line, _) = range_start_source(item.get_property("range"));
+            text.text("\n  ");
+            text.units(&name_units(item));
+            text.text(&format!(
+                " ({}) - Line {}",
+                symbol_kind_to_string_source(item),
+                line + 1
+            ));
+            if let Some(sites) = call_sites_source(*call) {
+                text.text(&format!(" [{suffix}: {sites}]"));
+            }
+        }
+    }
+    text.finish()
+}
+
+fn format_result_source(
+    operation: &str,
+    result: &Utf16JsonProjection,
+    cwd: &Path,
+) -> (Utf16JsonProjection, u64, u64) {
+    match operation {
+        "goToDefinition" | "goToImplementation" => {
+            let items = if let Some(items) = result_items(result) {
+                items
+            } else {
+                result.at_pointer("").into_iter().collect()
+            };
+            let uris = items
+                .iter()
+                .filter_map(|item| location_uri_source(*item))
+                .filter(|uri| !uri.is_empty())
+                .collect::<Vec<_>>();
+            let count = uris.len() as u64;
+            let files = unique_uri_count_source(uris.iter().map(String::as_str));
+            (
+                format_go_to_definition_result_source(result, cwd),
+                count,
+                files,
+            )
+        }
+        "findReferences" => {
+            let uris = result_items(result)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| property_string(item, "uri"))
+                .filter(|uri| !uri.is_empty())
+                .collect::<Vec<_>>();
+            let count = uris.len() as u64;
+            let files = unique_uri_count_source(uris.iter().map(String::as_str));
+            (
+                format_find_references_result_source(result, cwd),
+                count,
+                files,
+            )
+        }
+        "hover" => {
+            let present = result.at_pointer("").is_some_and(|root| !root.is_null());
+            let count = u64::from(present);
+            (format_hover_result_source(result), count, count)
+        }
+        "documentSymbol" => {
+            let symbols = result_items(result).unwrap_or_default();
+            let symbol_information = symbols
+                .first()
+                .is_some_and(|symbol| symbol.get_property("location").is_some());
+            let count = if symbol_information {
+                symbols.len() as u64
+            } else {
+                count_symbols_source(&symbols)
+            };
+            let files = u64::from(!symbols.is_empty());
+            (
+                format_document_symbol_result_source(result, cwd),
+                count,
+                files,
+            )
+        }
+        "workspaceSymbol" => {
+            let uris = result_items(result)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(symbol_location_uri_source)
+                .filter(|uri| !uri.is_empty())
+                .collect::<Vec<_>>();
+            let count = uris.len() as u64;
+            let files = unique_uri_count_source(uris.iter().map(String::as_str));
+            (
+                format_workspace_symbol_result_source(result, cwd),
+                count,
+                files,
+            )
+        }
+        "prepareCallHierarchy" => {
+            let items = result_items(result).unwrap_or_default();
+            let uris = items
+                .iter()
+                .filter_map(|item| property_string(*item, "uri"))
+                .filter(|uri| !uri.is_empty())
+                .collect::<Vec<_>>();
+            let files = unique_uri_count_source(uris.iter().map(String::as_str));
+            (
+                format_prepare_call_hierarchy_result_source(result, cwd),
+                items.len() as u64,
+                files,
+            )
+        }
+        "incomingCalls" | "outgoingCalls" => {
+            let calls = result_items(result).unwrap_or_default();
+            let field = if operation == "incomingCalls" {
+                "from"
+            } else {
+                "to"
+            };
+            let uris = calls
+                .iter()
+                .filter_map(|call| call.get_property(field))
+                .filter_map(|item| property_string(item, "uri"))
+                .filter(|uri| !uri.is_empty())
+                .collect::<Vec<_>>();
+            let files = unique_uri_count_source(uris.iter().map(String::as_str));
+            (
+                format_calls_source(result, cwd, operation == "incomingCalls"),
+                calls.len() as u64,
+                files,
+            )
+        }
+        _ => (result.to_json_string().unwrap_or_default().into(), 0, 0),
+    }
+}
+
+#[derive(Default)]
+struct ModelText(Vec<u16>);
+
+impl ModelText {
+    fn text(&mut self, value: &str) {
+        self.0.extend(value.encode_utf16());
+    }
+
+    fn units(&mut self, value: &[u16]) {
+        self.0.extend_from_slice(value);
+    }
+
+    fn source(&mut self, value: &Utf16JsonProjection) {
+        if let Some(value) = value.string_units("") {
+            self.units(&value);
+        }
+    }
+
+    fn finish(self) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&self.0), self.0)
+            .expect("display form is derived from the retained UTF-16 units")
+    }
+}
+
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display form is derived from the retained UTF-16 units")
+}
+
+fn view_string_units(value: Option<JsonValueView<'_>>) -> Option<Vec<u16>> {
+    value?.code_units().map(<[u16]>::to_vec)
+}
+
+fn view_string(value: Option<JsonValueView<'_>>) -> Option<String> {
+    String::from_utf16(&view_string_units(value)?).ok()
+}
+
+fn property_string_units(value: JsonValueView<'_>, key: &str) -> Option<Vec<u16>> {
+    view_string_units(value.get_property(key))
+}
+
+fn property_string(value: JsonValueView<'_>, key: &str) -> Option<String> {
+    view_string(value.get_property(key))
+}
+
+fn property_i64(value: JsonValueView<'_>, key: &str) -> Option<i64> {
+    view_i64(value.get_property(key))
+}
+
+fn view_i64(value: Option<JsonValueView<'_>>) -> Option<i64> {
+    let number = value?.as_number()?;
+    (number.is_finite()
+        && number.fract() == 0.0
+        && number >= i64::MIN as f64
+        && number <= i64::MAX as f64)
+        .then_some(number as i64)
+}
+
+fn view_items<'a>(value: Option<JsonValueView<'a>>) -> Option<Vec<JsonValueView<'a>>> {
+    let value = value?;
+    let length = value.array_len()?;
+    Some(
+        (0..length)
+            .filter_map(|index| value.get_index(index))
+            .collect(),
+    )
+}
+
+fn result_items<'a>(result: &'a Utf16JsonProjection) -> Option<Vec<JsonValueView<'a>>> {
+    view_items(result.at_pointer(""))
+}
+
+fn location_uri_source(item: JsonValueView<'_>) -> Option<String> {
+    let uri = if item.get_property("targetUri").is_some() {
+        item.get_property("targetUri")
+    } else {
+        item.get_property("uri")
+    };
+    view_string(uri)
+}
+
+fn symbol_location_uri_source(item: JsonValueView<'_>) -> Option<String> {
+    property_string(item.get_property("location")?, "uri")
+}
+
+fn to_location_source(item: JsonValueView<'_>) -> (Option<String>, Option<JsonValueView<'_>>) {
+    if item.get_property("targetUri").is_some() {
+        let range = item
+            .get_property("targetSelectionRange")
+            .or_else(|| item.get_property("targetRange"));
+        (view_string(item.get_property("targetUri")), range)
+    } else {
+        (property_string(item, "uri"), item.get_property("range"))
+    }
+}
+
+fn range_start_source(range: Option<JsonValueView<'_>>) -> (i64, i64) {
+    let start = range.and_then(|value| value.get_property("start"));
+    (
+        start
+            .and_then(|value| property_i64(value, "line"))
+            .unwrap_or(0),
+        start
+            .and_then(|value| property_i64(value, "character"))
+            .unwrap_or(0),
+    )
+}
+
+fn format_location_source(item: JsonValueView<'_>, cwd: &Path) -> String {
+    let (uri, range) = to_location_source(item);
+    let (line, character) = range_start_source(range);
+    format!(
+        "{}:{}:{}",
+        format_uri(uri.as_deref(), cwd),
+        line + 1,
+        character + 1
+    )
+}
+
+fn truthy_property_units(value: JsonValueView<'_>, key: &str) -> Option<Vec<u16>> {
+    property_string_units(value, key).filter(|units| !units.is_empty())
+}
+
+fn name_units(value: JsonValueView<'_>) -> Vec<u16> {
+    property_string_units(value, "name").unwrap_or_default()
+}
+
+fn unique_uri_count_source<'a>(uris: impl Iterator<Item = &'a str>) -> u64 {
+    uris.collect::<HashSet<&str>>().len() as u64
+}
+
+fn group_by_file_source<'a>(
+    items: &[JsonValueView<'a>],
+    key: impl Fn(JsonValueView<'a>) -> Option<String>,
+) -> Vec<(String, Vec<JsonValueView<'a>>)> {
+    let mut order = Vec::new();
+    let mut positions = HashMap::<String, usize>::new();
+    let mut groups = Vec::<Vec<JsonValueView<'a>>>::new();
+    for item in items.iter().copied() {
+        let Some(file) = key(item) else { continue };
+        let index = match positions.get(&file).copied() {
+            Some(index) => index,
+            None => {
+                let index = groups.len();
+                positions.insert(file.clone(), index);
+                order.push(file);
+                groups.push(Vec::new());
+                index
+            }
+        };
+        groups[index].push(item);
+    }
+    order.into_iter().zip(groups).collect()
+}
+
+fn symbol_kind_to_string_source(item: JsonValueView<'_>) -> &'static str {
+    match property_i64(item, "kind") {
+        Some(1) => "File",
+        Some(2) => "Module",
+        Some(3) => "Namespace",
+        Some(4) => "Package",
+        Some(5) => "Class",
+        Some(6) => "Method",
+        Some(7) => "Property",
+        Some(8) => "Field",
+        Some(9) => "Constructor",
+        Some(10) => "Enum",
+        Some(11) => "Interface",
+        Some(12) => "Function",
+        Some(13) => "Variable",
+        Some(14) => "Constant",
+        Some(15) => "String",
+        Some(16) => "Number",
+        Some(17) => "Boolean",
+        Some(18) => "Array",
+        Some(19) => "Object",
+        Some(20) => "Key",
+        Some(21) => "Null",
+        Some(22) => "EnumMember",
+        Some(23) => "Struct",
+        Some(24) => "Event",
+        Some(25) => "Operator",
+        Some(26) => "TypeParameter",
+        _ => "Unknown",
+    }
+}
+
 /// `formatters.ts:toLocation` — yield `(uri, range)` for a `Location`
 /// (`uri`/`range`) or a `LocationLink` (`targetUri`,
 /// `targetSelectionRange || targetRange`).
+#[cfg(test)]
 fn to_location(item: &Value) -> (Option<&str>, Option<&Value>) {
     if item.get("targetUri").is_some() {
         let uri = item.get("targetUri").and_then(Value::as_str);
@@ -567,6 +1365,7 @@ fn to_location(item: &Value) -> (Option<&str>, Option<&Value>) {
 }
 
 /// 1-based-ready `(line, character)` of a `range.start` (0-based on the wire).
+#[cfg(test)]
 fn range_start(range: Option<&Value>) -> (i64, i64) {
     let start = range.and_then(|r| r.get("start"));
     let line = start
@@ -581,6 +1380,7 @@ fn range_start(range: Option<&Value>) -> (i64, i64) {
 }
 
 /// `formatters.ts:formatLocation` — `path:line:character` (1-based).
+#[cfg(test)]
 fn format_location(item: &Value, cwd: &Path) -> String {
     let (uri, range) = to_location(item);
     let (line, character) = range_start(range);
@@ -589,6 +1389,7 @@ fn format_location(item: &Value, cwd: &Path) -> String {
 
 /// String field that is present and non-empty (TS truthiness for `detail`,
 /// `containerName`, `name`).
+#[cfg(test)]
 fn truthy_str(item: &Value, key: &str) -> Option<String> {
     item.get(key)
         .and_then(Value::as_str)
@@ -596,11 +1397,13 @@ fn truthy_str(item: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 fn name_of(item: &Value) -> &str {
     item.get("name").and_then(Value::as_str).unwrap_or("")
 }
 
 /// Number of unique URIs in the iterator (`countUniqueFiles*`).
+#[cfg(test)]
 fn unique_uri_count<'a>(uris: impl Iterator<Item = &'a str>) -> u64 {
     uris.collect::<HashSet<&str>>().len() as u64
 }
@@ -608,6 +1411,7 @@ fn unique_uri_count<'a>(uris: impl Iterator<Item = &'a str>) -> u64 {
 /// Group items into `(filePath, items)` buckets preserving first-seen order
 /// (a faithful stand-in for the insertion-ordered JS `Map`). `key` returns
 /// `None` to skip an item entirely.
+#[cfg(test)]
 fn group_by_file<'a>(
     items: &[&'a Value],
     key: impl Fn(&Value) -> Option<String>,
@@ -632,6 +1436,7 @@ fn group_by_file<'a>(
 }
 
 /// `formatGoToDefinitionResult` (also reused for `goToImplementation`).
+#[cfg(test)]
 fn format_go_to_definition_result(result: &Value, cwd: &Path) -> String {
     if result.is_null() {
         return NO_DEFINITION.to_string();
@@ -659,6 +1464,7 @@ fn format_go_to_definition_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// `formatFindReferencesResult`.
+#[cfg(test)]
 fn format_find_references_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_REFERENCES.to_string();
@@ -699,6 +1505,7 @@ fn format_find_references_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// `formatters.ts:extractMarkupText` — flatten `Hover.contents` to text.
+#[cfg(test)]
 fn extract_markup_text(contents: &Value) -> String {
     if let Some(arr) = contents.as_array() {
         return arr
@@ -729,6 +1536,7 @@ fn extract_markup_text(contents: &Value) -> String {
 }
 
 /// `formatHoverResult`.
+#[cfg(test)]
 fn format_hover_result(result: &Value) -> String {
     if result.is_null() {
         return NO_HOVER.to_string();
@@ -747,6 +1555,7 @@ fn format_hover_result(result: &Value) -> String {
 }
 
 /// `formatters.ts:formatDocumentSymbolNode` — one DocumentSymbol (+children).
+#[cfg(test)]
 fn format_document_symbol_node(symbol: &Value, indent: usize, lines: &mut Vec<String>) {
     let prefix = "  ".repeat(indent);
     let kind = symbol_kind_to_string(symbol);
@@ -766,6 +1575,7 @@ fn format_document_symbol_node(symbol: &Value, indent: usize, lines: &mut Vec<St
 
 /// `formatDocumentSymbolResult` — hierarchical outline; `SymbolInformation[]`
 /// results delegate to the workspace-symbol formatter (per LSP spec).
+#[cfg(test)]
 fn format_document_symbol_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_DOCUMENT_SYMBOLS.to_string();
@@ -785,6 +1595,7 @@ fn format_document_symbol_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// `formatWorkspaceSymbolResult` — flat symbol list grouped by file.
+#[cfg(test)]
 fn format_workspace_symbol_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_WORKSPACE_SYMBOLS.to_string();
@@ -833,6 +1644,7 @@ fn format_workspace_symbol_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// `formatters.ts:formatCallHierarchyItem`.
+#[cfg(test)]
 fn format_call_hierarchy_item(item: &Value, cwd: &Path) -> String {
     let kind = symbol_kind_to_string(item);
     let uri = item
@@ -852,6 +1664,7 @@ fn format_call_hierarchy_item(item: &Value, cwd: &Path) -> String {
 }
 
 /// `formatPrepareCallHierarchyResult`.
+#[cfg(test)]
 fn format_prepare_call_hierarchy_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_CALL_HIERARCHY_ITEM.to_string();
@@ -873,6 +1686,7 @@ fn format_prepare_call_hierarchy_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// Render the `fromRanges` call-site suffix (`6:9, 10:3`).
+#[cfg(test)]
 fn call_sites(call: &Value) -> Option<String> {
     let ranges = call.get("fromRanges").and_then(Value::as_array)?;
     if ranges.is_empty() {
@@ -891,6 +1705,7 @@ fn call_sites(call: &Value) -> Option<String> {
 }
 
 /// `formatIncomingCallsResult`.
+#[cfg(test)]
 fn format_incoming_calls_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_INCOMING_CALLS.to_string();
@@ -927,6 +1742,7 @@ fn format_incoming_calls_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// `formatOutgoingCallsResult`.
+#[cfg(test)]
 fn format_outgoing_calls_result(result: &Value, cwd: &Path) -> String {
     let Some(arr) = result.as_array() else {
         return NO_OUTGOING_CALLS.to_string();
@@ -963,6 +1779,7 @@ fn format_outgoing_calls_result(result: &Value, cwd: &Path) -> String {
 }
 
 /// Count DocumentSymbols including nested children (`countSymbols`).
+#[cfg(test)]
 fn count_symbols(symbols: &[Value]) -> u64 {
     let mut count = symbols.len() as u64;
     for symbol in symbols {
@@ -978,6 +1795,7 @@ fn count_symbols(symbols: &[Value]) -> u64 {
 /// Port of `LSPTool.ts:636 formatResult` — returns the model-facing formatted
 /// string plus the `resultCount` / `fileCount` summary fields. `result` is the
 /// already-gitignore-filtered LSP payload.
+#[cfg(test)]
 fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u64) {
     match operation {
         "goToDefinition" | "goToImplementation" => {
@@ -1143,15 +1961,20 @@ impl LSPTool {
         self.ctx.lsp_registry.as_ref()
     }
 
-    fn input_file_path(input: &Value) -> Option<&str> {
-        input
-            .get("filePath")
-            .and_then(Value::as_str)
-            .or_else(|| input.get("file_path").and_then(Value::as_str))
+    fn input_file_path(input: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        ["/filePath", "/file_path"].into_iter().find_map(|pointer| {
+            input
+                .string_units(pointer)
+                .and_then(|_| input.subprojection(pointer).ok())
+        })
+    }
+
+    fn input_file_path_text(input: &Utf16JsonProjection) -> Option<String> {
+        String::from_utf16(&Self::input_file_path(input)?.string_units("")?).ok()
     }
 }
 
-static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
+static LSP_TOOL_SCHEMA_VALUE: Lazy<Value> = Lazy::new(|| {
     // Byte-faithful to claude-code's LSP zod schema (@183057616): `operation`,
     // `filePath`, 1-based `line`/`character`, optional `query`. There is NO
     // `server_name` — the server is resolved from `filePath`.
@@ -1168,17 +1991,27 @@ static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static LSP_TOOL_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&LSP_TOOL_SCHEMA_VALUE));
+
 #[async_trait]
 impl Tool for LSPTool {
     fn name(&self) -> &str {
         LSP_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("code intelligence (definitions, references, symbols, hover)")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("code intelligence (definitions, references, symbols, hover)".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &LSP_TOOL_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.lsp_registry()
@@ -1191,88 +2024,108 @@ impl Tool for LSPTool {
         // claude-code `maxOutputChars: 1e5` for the LSP tool.
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
         // `LSPTool.ts:152-154` `getPath({ filePath }) => expandPath(filePath)`,
         // where `expandPath` resolves relatives against the live `getCwd()`.
-        let file_path = Self::input_file_path(input)?;
-        Some(expand_path_in(file_path, &self.cwd_now()))
+        let file_path = Self::input_file_path_text(input)?;
+        Some(expand_path_in(&file_path, &self.cwd_now()))
     }
 
     /// Port of `LSPTool.ts:155-209` `validateInput`: confirm the (expanded)
     /// path exists and is a regular file. Byte-exact TS messages.
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let file_path = Self::input_file_path(input).unwrap_or_default();
-        validate_file_path_in(file_path, &self.cwd_now())
+        let Some(file_path) = Self::input_file_path(input) else {
+            return Err(ValidationError(
+                "LSPTool: missing or non-string filePath".into(),
+            ));
+        };
+        validate_file_path_source(&file_path, &self.cwd_now())
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         allow_lsp()
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         LSP_TOOL_DESCRIPTION.into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         LSP_TOOL_DESCRIPTION.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let operation = input
-            .get("operation")
-            .and_then(|v| v.as_str())
+            .get_property("operation")
+            .and_then(|value| value.code_units())
+            .and_then(|units| String::from_utf16(units).ok())
             .ok_or_else(|| {
                 ToolError::InvalidInput("LSPTool: missing or non-string operation".into())
             })?
             .to_string();
         // claude-code dispatches by `filePath` and resolves the server itself —
         // there is NO model-supplied `server_name`.
-        let file_path = Self::input_file_path(&input)
-            .ok_or_else(|| {
-                ToolError::InvalidInput("LSPTool: missing or non-string filePath".into())
-            })?
-            .to_string();
+        let file_path_source = Self::input_file_path(&input).ok_or_else(|| {
+            ToolError::InvalidInput("LSPTool: missing or non-string filePath".into())
+        })?;
+        let file_path_units = file_path_source
+            .string_units("")
+            .expect("filePath source is a string");
+        let file_path = String::from_utf16(&file_path_units).map_err(|_| {
+            ToolError::InvalidInput(
+                validation_error_with_source_path(
+                    "Path cannot be represented by this host: ",
+                    &file_path_source,
+                    "",
+                )
+                .0,
+            )
+        })?;
         // `workspaceSymbol` query (optional; ignored by the other operations).
         let query = input
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+            .get_property("query")
+            .filter(|value| value.code_units().is_some())
+            .and_then(|_| input.subprojection("/query").ok());
         let line = input
-            .get("line")
-            .and_then(serde_json::Value::as_u64)
+            .number_at("/line")
+            .filter(|number| number.is_finite() && *number >= 0.0 && number.fract() == 0.0)
             .ok_or_else(|| ToolError::InvalidInput("LSPTool: missing or non-integer line".into()))?
-            as u32;
+            as u64 as u32;
         let character = input
-            .get("character")
-            .and_then(serde_json::Value::as_u64)
+            .number_at("/character")
+            .filter(|number| number.is_finite() && *number >= 0.0 && number.fract() == 0.0)
             .ok_or_else(|| {
                 ToolError::InvalidInput("LSPTool: missing or non-integer character".into())
-            })? as u32;
+            })? as u64 as u32;
 
         // 1-based position guard — emits no STARTED to keep paired events.
         if line < 1 || character < 1 {
@@ -1283,7 +2136,8 @@ impl Tool for LSPTool {
         if !LSP_OPERATIONS_LOCKED.contains(&operation.as_str()) {
             return Err(ToolError::InvalidInput(format!(
                 "LSPTool: unknown operation {operation:?}; allowed: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls"
-            )));
+            )
+            .into()));
         }
 
         let bus = &self.ctx.bus;
@@ -1313,9 +2167,8 @@ impl Tool for LSPTool {
                 .await;
                 return Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
-                    "LSP server manager not initialized. This may indicate a startup issue."
-                        .to_string(),
+                    &file_path_source,
+                    "LSP server manager not initialized. This may indicate a startup issue.".into(),
                     None,
                 ));
             }
@@ -1334,8 +2187,8 @@ impl Tool for LSPTool {
             Err(error) => {
                 return Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
-                    format!("Error performing {operation}: {error}"),
+                    &file_path_source,
+                    lsp_error_result_text(&operation, &error),
                     None,
                 ));
             }
@@ -1358,8 +2211,8 @@ impl Tool for LSPTool {
                     .unwrap_or_default();
                 return Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
-                    format!("No LSP server available for file type: {extension}"),
+                    &file_path_source,
+                    format!("No LSP server available for file type: {extension}").into(),
                     None,
                 ));
             }
@@ -1375,8 +2228,8 @@ impl Tool for LSPTool {
                 .await;
                 return Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
-                    format!("Error performing {operation}: {e}"),
+                    &file_path_source,
+                    lsp_error_result_text(&operation, &e),
                     None,
                 ));
             }
@@ -1437,8 +2290,8 @@ impl Tool for LSPTool {
                 let mut normalized = r.raw;
                 // URI projection is best-effort: an unmappable guest URI is
                 // still a valid LSP result and must not fail the tool call.
-                let _ = rewrite_server_uris_to_host(&mut normalized, registry.as_ref());
-                let filtered = filter_gitignored_results(&operation, normalized, &cwd);
+                let _ = rewrite_server_uris_to_host_source(&mut normalized, registry.as_ref());
+                let filtered = filter_gitignored_results_source(&operation, normalized, &cwd);
                 // `LSPTool.ts:376-389` — format the FILTERED result into the
                 // brief human-readable string TS gives the model, plus the
                 // `resultCount`/`fileCount` summary. `model_content` is what the
@@ -1446,10 +2299,10 @@ impl Tool for LSPTool {
                 // `content: output.result` split); `result` mirrors the TS
                 // `Output.result` field for the UI.
                 let (formatted, result_count, file_count) =
-                    format_result(&operation, &filtered, &cwd);
+                    format_result_source(&operation, &filtered, &cwd);
                 Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
+                    &file_path_source,
                     formatted,
                     Some((result_count, file_count)),
                 ))
@@ -1474,8 +2327,8 @@ impl Tool for LSPTool {
                 // `LSPTool.ts:265-272` — `Output` carries the message as
                 // `result`; the model sees it via `model_content` (no
                 // `resultCount`/`fileCount`, matching the TS `Output`).
-                let result = file_too_large_message(size);
-                Ok(lsp_tool_result(&operation, &file_path, result, None))
+                let result = file_too_large_message(size).into();
+                Ok(lsp_tool_result(&operation, &file_path_source, result, None))
             }
             Err(e) => {
                 emit(
@@ -1490,8 +2343,8 @@ impl Tool for LSPTool {
                 .await;
                 Ok(lsp_tool_result(
                     &operation,
-                    &file_path,
-                    format!("Error performing {operation}: {e}"),
+                    &file_path_source,
+                    lsp_operation_error_result_text(&operation, &e),
                     None,
                 ))
             }
@@ -1501,29 +2354,65 @@ impl Tool for LSPTool {
 
 fn lsp_tool_result(
     operation: &str,
-    file_path: &str,
-    result: String,
+    file_path: &Utf16JsonProjection,
+    result: Utf16JsonProjection,
     counts: Option<(u64, u64)>,
 ) -> ToolCallResult {
-    let mut data = serde_json::Map::new();
-    data.insert(
-        "operation".to_string(),
-        Value::String(operation.to_string()),
-    );
-    data.insert("result".to_string(), Value::String(result.clone()));
-    data.insert("filePath".to_string(), Value::String(file_path.to_string()));
+    let mut data = vec![
+        (
+            "operation".to_string(),
+            Utf16JsonProjection::from(operation),
+        ),
+        ("result".to_string(), result.clone()),
+        ("filePath".to_string(), file_path.clone()),
+    ];
     if let Some((result_count, file_count)) = counts {
-        data.insert("resultCount".to_string(), json!(result_count));
-        data.insert("fileCount".to_string(), json!(file_count));
+        data.push((
+            "resultCount".to_string(),
+            Utf16JsonProjection::parse(&result_count.to_string())
+                .expect("generated result count is valid JSON"),
+        ));
+        data.push((
+            "fileCount".to_string(),
+            Utf16JsonProjection::parse(&file_count.to_string())
+                .expect("generated file count is valid JSON"),
+        ));
     }
+    let data = Utf16JsonProjection::object(data).expect("LSP tool output object is valid");
     ToolCallResult {
-        data: Value::Object(data),
+        data,
         model_content: Some(result),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
+}
+
+fn lsp_error_result_text(
+    operation: &str,
+    error: &lingxi_core::host::LspError,
+) -> Utf16JsonProjection {
+    let mut text = ModelText::default();
+    text.text(&format!("Error performing {operation}: "));
+    match error {
+        lingxi_core::host::LspError::ServerError(message) => text.source(message),
+        other => text.text(&other.to_string()),
+    }
+    text.finish()
+}
+
+fn lsp_operation_error_result_text(
+    operation: &str,
+    error: &ops::LspOperationError,
+) -> Utf16JsonProjection {
+    if let ops::LspOperationError::Lsp(error) = error {
+        return lsp_error_result_text(operation, error);
+    }
+    let mut text = ModelText::default();
+    text.text(&format!("Error performing {operation}: {}", error));
+    text.finish()
 }
 
 #[cfg(test)]
@@ -1534,6 +2423,10 @@ mod tests {
     use lingxi_core::types::McpConnectionId;
     use serde_json::Value;
 
+    fn generated_input(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("generated LSP test input")
+    }
+
     #[test]
     fn lsp_name_locked() {
         assert_eq!(LSP_TOOL_NAME, "LSP");
@@ -1541,19 +2434,127 @@ mod tests {
 
     #[test]
     fn output_shape_and_key_order_match_claude_code_2_1_251() {
-        let result = lsp_tool_result("hover", "src/lib.rs", "details".to_string(), Some((1, 1)));
+        let result = lsp_tool_result(
+            "hover",
+            &"src/lib.rs".into(),
+            "details".into(),
+            Some((1, 1)),
+        );
         assert_eq!(
-            serde_json::to_string(&result.data).unwrap(),
+            result.data.to_json_string().unwrap(),
             r#"{"operation":"hover","result":"details","filePath":"src/lib.rs","resultCount":1,"fileCount":1}"#
         );
-        assert_eq!(result.model_content.as_deref(), Some("details"));
+        assert_eq!(
+            result
+                .model_content
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("details")
+        );
     }
 
     #[test]
     fn public_schema_does_not_add_a_port_only_file_path_constraint() {
-        assert!(LSP_TOOL_SCHEMA["properties"]["filePath"]
-            .get("minLength")
-            .is_none());
+        let properties = LSP_TOOL_SCHEMA.get_property("properties").unwrap();
+        let file_path = properties.get_property("filePath").unwrap();
+        assert!(file_path.get_property("minLength").is_none());
+    }
+
+    #[test]
+    fn source_hover_formatter_retains_unpaired_model_text() {
+        let result = Utf16JsonProjection::parse(r#"{"contents":"hover\ud800"}"#).unwrap();
+        let (formatted, count, files) = format_result_source("hover", &result, &cwd());
+        let units = formatted.string_units("").unwrap();
+        assert!(units
+            .windows(2)
+            .any(|window| window == [b'r' as u16, 0xd800]));
+        assert_eq!((count, files), (1, 1));
+    }
+
+    #[test]
+    fn source_tool_result_preserves_exact_model_text_and_path() {
+        let result = lsp_tool_result(
+            "hover",
+            &Utf16JsonProjection::root_string(
+                "src/�.rs".to_string(),
+                vec![
+                    b's' as u16,
+                    b'r' as u16,
+                    b'c' as u16,
+                    b'/' as u16,
+                    0xd800,
+                    b'.' as u16,
+                    b'r' as u16,
+                    b's' as u16,
+                ],
+            )
+            .unwrap(),
+            Utf16JsonProjection::root_string("x�".to_string(), vec![b'x' as u16, 0xd800]).unwrap(),
+            None,
+        );
+        assert_eq!(result.data.string_units("/filePath").unwrap()[4], 0xd800);
+        assert_eq!(
+            result.model_content.unwrap().string_units("").unwrap(),
+            vec![b'x' as u16, 0xd800]
+        );
+    }
+
+    #[test]
+    fn source_file_path_with_unpaired_unit_is_rejected_at_host_boundary() {
+        let file_path = Utf16JsonProjection::root_string(
+            "src/�.rs".to_string(),
+            vec![
+                b's' as u16,
+                b'r' as u16,
+                b'c' as u16,
+                b'/' as u16,
+                0xd800,
+                b'.' as u16,
+                b'r' as u16,
+                b's' as u16,
+            ],
+        )
+        .unwrap();
+
+        let error = validate_file_path_source(&file_path, &cwd()).unwrap_err();
+        assert!(error
+            .0
+            .string_at("")
+            .unwrap()
+            .starts_with("Path cannot be represented by this host: src/"));
+        assert!(error
+            .0
+            .string_units("")
+            .unwrap()
+            .windows(1)
+            .any(|unit| unit == [0xd800]));
+    }
+
+    #[test]
+    fn source_lsp_server_error_reaches_model_result_without_replacement() {
+        let message_units = "server said "
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let message = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&message_units),
+            message_units.clone(),
+        )
+        .unwrap();
+        let error = ops::LspOperationError::Lsp(lingxi_core::host::LspError::ServerError(message));
+        let model_text = lsp_operation_error_result_text("hover", &error);
+        let mut expected = "Error performing hover: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend_from_slice(&message_units);
+        assert_eq!(model_text.string_units(""), Some(expected.clone()));
+
+        let result = lsp_tool_result("hover", &"src/a.rs".into(), model_text, None);
+        assert_eq!(
+            result.model_content.unwrap().string_units(""),
+            Some(expected.clone())
+        );
+        assert_eq!(result.data.string_units("/result"), Some(expected));
     }
 
     #[test]
@@ -1627,7 +2628,8 @@ mod tests {
         let missing = dir.path().join("nope.rs");
         let p = missing.to_string_lossy().into_owned();
         let err = validate_file_path(&p).unwrap_err();
-        assert_eq!(err.0, format!("File does not exist: {p}"));
+        let expected = format!("File does not exist: {p}");
+        assert_eq!(err.0.string_at(""), Some(expected.as_str()));
     }
 
     #[test]
@@ -1635,7 +2637,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().to_string_lossy().into_owned();
         let err = validate_file_path(&p).unwrap_err();
-        assert_eq!(err.0, format!("Path is not a file: {p}"));
+        let expected = format!("Path is not a file: {p}");
+        assert_eq!(err.0.string_at(""), Some(expected.as_str()));
     }
 
     #[test]
@@ -1716,8 +2719,8 @@ mod tests {
             &self,
             _connection: &lingxi_core::host::LspRawConnection,
             _method: &str,
-            _params: Value,
-        ) -> Result<Value, lingxi_core::host::LspError> {
+            _params: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::LspError> {
             Err(lingxi_core::host::LspError::Unavailable)
         }
 
@@ -1725,7 +2728,7 @@ mod tests {
             &self,
             _connection: &lingxi_core::host::LspRawConnection,
             _method: &str,
-            _params: Value,
+            _params: Utf16JsonProjection,
         ) -> Result<(), lingxi_core::host::LspError> {
             Err(lingxi_core::host::LspError::Unavailable)
         }
@@ -2247,11 +3250,15 @@ mod tests {
         let cell = std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from("/live/cwd")));
         let tool = LSPTool::new(ctx).with_live_cwd(cell);
         assert_eq!(
-            tool.get_path(&serde_json::json!({ "filePath": "rel/x.rs" })),
+            tool.get_path(&generated_input(
+                &serde_json::json!({ "filePath": "rel/x.rs" })
+            )),
             Some(PathBuf::from("/live/cwd/rel/x.rs"))
         );
         assert_eq!(
-            tool.get_path(&serde_json::json!({ "file_path": "legacy/x.rs" })),
+            tool.get_path(&generated_input(
+                &serde_json::json!({ "file_path": "legacy/x.rs" })
+            )),
             Some(PathBuf::from("/live/cwd/legacy/x.rs"))
         );
     }
@@ -2271,14 +3278,14 @@ mod tests {
         let use_ctx = tool_api::test_support::fresh_ctx();
         assert!(tool
             .validate_input(
-                &serde_json::json!({ "filePath": file.to_string_lossy() }),
+                &generated_input(&serde_json::json!({ "filePath": file.to_string_lossy() })),
                 &use_ctx
             )
             .await
             .is_ok());
         assert!(tool
             .validate_input(
-                &serde_json::json!({ "file_path": file.to_string_lossy() }),
+                &generated_input(&serde_json::json!({ "file_path": file.to_string_lossy() })),
                 &use_ctx
             )
             .await

@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/private/tmp/mods-current-native-293-reference-v1614/claude",
+    "plugin",
+    "test",
+    "/private/tmp/mods-current-native-293-session-append-v1628"
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 0.29,
+  "binary_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "source_files": {
+    "append.test.ts": "b8fca1a21c0c4abaccd5cad41b3f7b20080f4684dc94c988db1e67ab4edb7d82",
+    "hooks/hooks.json": "448e29b17c4ce3ee767d3caf0ff9e35b5501b1cfb3b59952e7b7625744bbf070",
+    "hooks/register.js": "96e7dd7dae94ed0adff877f238d91cc3fd8776e57c5d943f3c49edb9dd00c2d7",
+    ".claude-plugin/plugin.json": "fa21195f23fab0268bfa509ffb0d80b2bf2d55a4046fa8603ba68608222e6a7e"
+  },
+  "source_unchanged": true,
+  "stdout_sha256": "dcffaa096a3a3ee5eea271ca819494e0ff6b223736183c2e4ba1c6345981b8b2",
+  "stderr_sha256": "e9ccc24438de44e9b35fc86c8135128d5c9a8f28503ac7f563e9e6f0964bf5ea",
+  "runner_sha256": "be970b12eda8a581f0b8676b9627b4cc660b9a2b36c611abf97b42cda9c18781",
+  "pass_count": 3,
+  "fail_count": 0,
+  "scope": "Actual pinned Native 2.1.293 named plugin-test cases only; no implied whole Harness/Mods byte acceptance"
+}

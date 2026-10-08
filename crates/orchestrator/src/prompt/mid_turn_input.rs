@@ -14,9 +14,9 @@
 //! orchestrator defines the trait but the msgqueue-backed implementation lives
 //! at the composition root (`engine-desktop` / `bridge-server`), so the
 //! orchestrator keeps NO dependency on `msgqueue` (it is a lower layer). The
-//! source returns ONLY the already-joined prompt text — all queue filtering
-//! (main-thread, non-slash, priority threshold), batching, and the
-//! consume/remove bookkeeping happen inside the adapter where the queue lives.
+//! source drains its queue and may preserve each input's host-stamped origin
+//! until `session.receive` has screened it. Queue filtering and consume/remove
+//! bookkeeping stay inside the adapter where the queue lives.
 //!
 //! ## Abort-reason disambiguation
 //!
@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Why the active turn's [`tokio_util::sync::CancellationToken`] was fired.
 ///
@@ -133,9 +134,9 @@ impl Default for CancelReasonFlag {
 /// `consume`s the folded commands from the queue, and returns the joined text.
 /// Returns `None` when nothing batchable is queued → no injection this step.
 ///
-/// The returned text is injected as a META user message (hidden in the
-/// transcript UI, visible to the model) so the next sampling sees it — the same
-/// surface the task-notification reminder uses.
+/// The returned text is injected as a user message so the next sampling sees it.
+/// Hosts with external arrivals override [`Self::take_mid_turn_batch`] to retain
+/// each origin through the Mod receive screen before the text is joined.
 #[async_trait]
 pub trait MidTurnInputSource: Send + Sync {
     /// Whether this host can admit cancellable goal wake-ups.
@@ -150,7 +151,7 @@ pub trait MidTurnInputSource: Send + Sync {
     async fn enqueue_goal_retry(
         &self,
         _id: String,
-        _body: String,
+        _body: Utf16JsonProjection,
         _cancel: tokio_util::sync::CancellationToken,
     ) {
     }
@@ -159,7 +160,24 @@ pub trait MidTurnInputSource: Send + Sync {
     /// prompts at or above `Next` priority, or `None` when there is nothing to
     /// inject. CONSUME-ONCE: drained commands are `consume`d from the queue so
     /// they are not re-run by the between-turn drain.
-    async fn take_mid_turn_input(&self) -> Option<String>;
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection>;
+
+    /// Preserve individual arrivals and their host-stamped origin before they
+    /// are joined for the model. Existing text-only sources use the default.
+    async fn take_mid_turn_batch(&self) -> Option<Vec<MidTurnInput>> {
+        self.take_mid_turn_input().await.map(|text| {
+            vec![MidTurnInput {
+                text,
+                origin_kind: None,
+            }]
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidTurnInput {
+    pub text: Utf16JsonProjection,
+    pub origin_kind: Option<&'static str>,
 }
 
 #[cfg(test)]
@@ -204,8 +222,11 @@ mod tests {
 
     #[async_trait]
     impl MidTurnInputSource for OnceSource {
-        async fn take_mid_turn_input(&self) -> Option<String> {
-            self.0.lock().unwrap().take()
+        async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+            self.0.lock().unwrap().take().map(|text| {
+                Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect())
+                    .unwrap()
+            })
         }
     }
 
@@ -213,8 +234,10 @@ mod tests {
     async fn source_drains_once_then_empty() {
         let src = OnceSource(std::sync::Mutex::new(Some("queued\ninput".to_string())));
         assert_eq!(
-            src.take_mid_turn_input().await.as_deref(),
-            Some("queued\ninput")
+            src.take_mid_turn_input()
+                .await
+                .and_then(|text| text.string_at("").map(str::to_owned)),
+            Some("queued\ninput".to_string())
         );
         assert_eq!(src.take_mid_turn_input().await, None);
     }

@@ -4,6 +4,7 @@
 //!
 //! Concrete impl lives in `lingxi-coordinator`. Tests inject a recording mock.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -14,8 +15,17 @@ use thiserror::Error;
 pub struct MailboxMessage {
     /// Caller-assigned message id for idempotency.
     pub message_id: String,
-    /// Plain-text message body.
-    pub content: String,
+    /// Plain-text message body, preserving the original UTF-16 source units.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub content: Utf16JsonProjection,
+    /// Optional model-visible summary, preserving source units and the current
+    /// JSON contract (`null` when absent; missing input defaults to `None`).
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub summary: Option<Utf16JsonProjection>,
     /// Wall-clock send time.
     pub timestamp: SystemTime,
     /// Sender's assigned teammate color, if any (claude-code `getTeammateColor()`,
@@ -113,6 +123,7 @@ mod tests {
         let msg = MailboxMessage {
             message_id: "m1".into(),
             content: "hi".into(),
+            summary: None,
             timestamp: SystemTime::UNIX_EPOCH,
             color: None,
         };
@@ -128,6 +139,7 @@ mod tests {
         let msg = MailboxMessage {
             message_id: "m1".into(),
             content: "hi".into(),
+            summary: None,
             timestamp: SystemTime::UNIX_EPOCH,
             color: Some("cyan".into()),
         };
@@ -135,5 +147,46 @@ mod tests {
         assert_eq!(v["color"], "cyan");
         let back: MailboxMessage = serde_json::from_value(v).unwrap();
         assert_eq!(back.color.as_deref(), Some("cyan"));
+    }
+
+    #[test]
+    fn content_preserves_unpaired_utf16_on_the_json_boundary() {
+        let content = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let summary = Utf16JsonProjection::root_string("S�".into(), vec![0x53, 0xd801]).unwrap();
+        let msg = MailboxMessage {
+            message_id: "m1".into(),
+            content,
+            summary: Some(summary),
+            timestamp: SystemTime::UNIX_EPOCH,
+            color: None,
+        };
+        let encoded = serde_json::to_string(&msg).unwrap();
+        assert!(encoded.contains(r#""content":"\ud800""#), "{encoded}");
+        assert!(encoded.contains(r#""summary":"S\ud801""#), "{encoded}");
+        let decoded: MailboxMessage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.content.string_units(""), Some(vec![0xd800]));
+        assert_eq!(
+            decoded
+                .summary
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(vec![0x53, 0xd801])
+        );
+    }
+
+    #[test]
+    fn missing_summary_defaults_and_none_serializes_as_null() {
+        let msg = MailboxMessage {
+            message_id: "m1".into(),
+            content: "hi".into(),
+            summary: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+            color: None,
+        };
+        let mut value = serde_json::to_value(&msg).unwrap();
+        assert!(value["summary"].is_null());
+        value.as_object_mut().unwrap().remove("summary");
+        let decoded: MailboxMessage = serde_json::from_value(value).unwrap();
+        assert!(decoded.summary.is_none());
     }
 }

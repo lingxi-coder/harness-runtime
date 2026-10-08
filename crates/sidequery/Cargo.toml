@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
+lingxi-llm-client.workspace = true
 platform-common = { path = "../platforms/common" }
 hooks = { path = "../hooks" }
 cost = { path = "../cost" }

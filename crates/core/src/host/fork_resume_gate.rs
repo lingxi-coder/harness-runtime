@@ -16,6 +16,7 @@
 //! An unwired host has no gate, which is correct for a host that also has no
 //! way to launch a forked skill.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 
 /// Consulted before a parked background agent is resumed.
@@ -34,6 +35,6 @@ pub trait ForkResumeGate: Send + Sync {
     async fn check_resume(
         &self,
         agent_id: crate::types::AgentId,
-        task_forked_skill_name: Option<&str>,
+        task_forked_skill_name: Option<&Utf16JsonProjection>,
     ) -> Result<(), String>;
 }

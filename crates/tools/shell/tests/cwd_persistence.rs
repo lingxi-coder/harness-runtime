@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use hooks::{CwdChangedFire, CwdChangedFirer};
 use lingxi_core::host::process::{ProcessHandle, ProcessRunner};
 use lingxi_core::host::sandbox::SandboxedCommand;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mobile_linux_api::{ProcessError, ProcessOutput};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -23,6 +24,16 @@ use tempfile::TempDir;
 use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 use tool_api::Tool;
 use tool_shell::BashTool;
+
+fn source_json_value(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
+}
+
+macro_rules! source_json {
+    ($($tokens:tt)*) => {
+        source_json_value(serde_json::json!($($tokens)*))
+    };
+}
 
 /// Serializes EVERY test whose correctness depends on
 /// `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` (TFo) having a fixed value. The
@@ -188,14 +199,14 @@ async fn foreground_cd_persists_to_next_call() {
     let tool = tool_with(&workspace_canon, runner.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", target_canon.display()) }),
+        source_json!({ "command": format!("cd {}", target_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
     .await
     .expect("first call ok");
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("second call ok");
 
@@ -238,7 +249,7 @@ async fn background_spawns_in_the_persisted_shell_cwd() {
     let tool = tool_with(&workspace_canon, runner.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", target_canon.display()) }),
+        source_json!({ "command": format!("cd {}", target_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -246,7 +257,7 @@ async fn background_spawns_in_the_persisted_shell_cwd() {
     .expect("foreground cd ok");
 
     tool.call(
-        json!({ "command": "ls", "run_in_background": true }),
+        source_json!({ "command": "ls", "run_in_background": true }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -283,7 +294,7 @@ async fn background_does_not_mutate_shell_cwd_and_omits_readback() {
 
     // Background `cd` — must not change the shared cwd.
     tool.call(
-        json!({
+        source_json!({
             "command": format!("cd {}", target.path().display()),
             "run_in_background": true,
         }),
@@ -294,7 +305,7 @@ async fn background_does_not_mutate_shell_cwd_and_omits_readback() {
     .expect("background call ok");
 
     // A later foreground call must still spawn under the original workspace.
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("foreground call ok");
 
@@ -336,7 +347,7 @@ async fn subagent_does_not_mutate_shared_cwd() {
     sub_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
 
     tool.call(
-        json!({ "command": format!("cd {}", target.path().display()) }),
+        source_json!({ "command": format!("cd {}", target.path().display()) }),
         sub_ctx,
         fresh_tx(),
     )
@@ -345,7 +356,7 @@ async fn subagent_does_not_mutate_shared_cwd() {
 
     // A subsequent main-thread call must still see the original workspace,
     // proving the subagent's `cd` did not leak into the shared cwd.
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("main call ok");
 
@@ -370,7 +381,7 @@ async fn deleted_cwd_recovers_to_workspace() {
     let tool = tool_with(workspace.path(), runner.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", gone_path.display()) }),
+        source_json!({ "command": format!("cd {}", gone_path.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -380,7 +391,7 @@ async fn deleted_cwd_recovers_to_workspace() {
     // Delete the directory the shell cwd now points at.
     drop(gone);
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("second call recovers");
 
@@ -404,7 +415,7 @@ async fn deleted_cwd_and_workspace_yields_locked_error() {
     let tool = tool_with(&ghost, runner.clone());
 
     let err = tool
-        .call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+        .call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect_err("missing workspace must error");
 
@@ -483,7 +494,7 @@ async fn cwd_change_fires_cwd_changed_hook_with_old_and_new() {
     let tool = tool_with_firer(&workspace_canon, runner, firer.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        source_json!({ "command": format!("cd {}", sub_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -511,9 +522,13 @@ async fn no_cwd_change_does_not_fire() {
     let firer = RecordingFirer::new();
     let tool = tool_with_firer(workspace.path(), runner, firer.clone());
 
-    tool.call(json!({ "command": "echo hi" }), fresh_ctx(), fresh_tx())
-        .await
-        .expect("call ok");
+    tool.call(
+        source_json!({ "command": "echo hi" }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("call ok");
 
     assert!(
         firer.fires.lock().unwrap().is_empty(),
@@ -540,14 +555,14 @@ async fn no_firer_registered_is_a_silent_noop() {
     let tool = tool_with(&workspace_canon, runner.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        source_json!({ "command": format!("cd {}", sub_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
     .await
     .expect("first call ok (no firer registered)");
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("second call ok");
 
@@ -609,7 +624,7 @@ async fn foreground_cd_advances_the_shared_live_cwd_cell() {
     assert_eq!(*cell.lock().unwrap(), workspace_canon);
 
     tool.call(
-        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        source_json!({ "command": format!("cd {}", sub_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -642,7 +657,7 @@ async fn subagent_cd_does_not_advance_the_shared_live_cwd_cell() {
     let mut sub_ctx = fresh_ctx();
     sub_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
     tool.call(
-        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        source_json!({ "command": format!("cd {}", sub_canon.display()) }),
         sub_ctx,
         fresh_tx(),
     )
@@ -665,11 +680,8 @@ async fn subagent_cd_does_not_advance_the_shared_live_cwd_cell() {
 // and append `Y2n`'s `\nShell cwd was reset to {original}` to stderr.
 
 /// Read the model-facing `stderr` field out of a Bash `ToolCallResult`.
-fn result_stderr(data: &serde_json::Value) -> String {
-    data.get("stderr")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string()
+fn result_stderr(data: &Utf16JsonProjection) -> String {
+    data.string_at("/stderr").unwrap_or_default().to_owned()
 }
 
 /// Build a `(workspace, outside)` pair under ONE shared `TempDir` root: `ws/` is
@@ -701,7 +713,7 @@ async fn cd_outside_workspace_resets_and_warns() {
 
     let res = tool
         .call(
-            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            source_json!({ "command": format!("cd {}", outside_canon.display()) }),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -716,7 +728,7 @@ async fn cd_outside_workspace_resets_and_warns() {
         "out-of-workspace cd must append the Y2n reset warning to stderr",
     );
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("second call ok");
 
@@ -761,7 +773,7 @@ async fn cd_outside_workspace_preserves_existing_stderr() {
 
     let res = tool
         .call(
-            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            source_json!({ "command": format!("cd {}", outside_canon.display()) }),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -804,7 +816,7 @@ async fn maintain_env_resets_even_in_workspace() {
     let _env_guard = MaintainEnvGuard;
     let res = tool
         .call(
-            json!({ "command": format!("cd {}", sub_canon.display()) }),
+            source_json!({ "command": format!("cd {}", sub_canon.display()) }),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -820,7 +832,7 @@ async fn maintain_env_resets_even_in_workspace() {
         "TFo forces a reset warning even for an in-workspace cd",
     );
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("second call ok");
 
@@ -849,7 +861,7 @@ async fn subagent_is_unaffected_by_reset() {
 
     let res = tool
         .call(
-            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            source_json!({ "command": format!("cd {}", outside_canon.display()) }),
             sub_ctx,
             fresh_tx(),
         )
@@ -863,7 +875,7 @@ async fn subagent_is_unaffected_by_reset() {
         "a subagent must not get the reset warning (readback block is skipped)",
     );
 
-    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+    tool.call(source_json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
         .await
         .expect("main call ok");
 

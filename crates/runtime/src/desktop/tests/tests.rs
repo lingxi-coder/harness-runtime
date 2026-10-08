@@ -160,10 +160,10 @@ fn build_wires_one_plugin_workflow_registry_into_every_participant() {
     // a zero-match assertion would be green by default here.
     let uses = format!("Some(self.plugin_workflow{}.as_ref())", "s");
     assert_eq!(
-            build_src.matches(&uses).count(),
-            2,
-            "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
-        );
+        build_src.matches(&uses).count(),
+        2,
+        "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+    );
 }
 
 /// Finding [23] (and round-4 review finding [15], which caught the same
@@ -567,6 +567,12 @@ async fn desktop_registry_exposes_connect() {
     struct MockAuth;
     #[async_trait]
     impl AuthHandle for MockAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -646,6 +652,12 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
     struct MockAuth;
     #[async_trait]
     impl AuthHandle for MockAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -763,6 +775,12 @@ async fn an_add_dir_root_contributes_its_skills() {
     struct MockAuth;
     #[async_trait]
     impl AuthHandle for MockAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -1703,6 +1721,12 @@ async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
     struct OkLogout;
     #[async_trait]
     impl lingxi_core::host::AuthHandle for OkLogout {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -2460,11 +2484,11 @@ fn depr_bedrock_and_vertex_env_matrix() {
     // Bedrock: Opus has a different (later) date; Haiku 3.5 has none → None.
     std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
     assert_eq!(
-            model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
-            Some(
-                "⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
+        Some(
+            "⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model."
+        )
+    );
     assert_eq!(
         model_deprecation_warning(Some("claude-3-5-haiku-20241022")),
         None
@@ -2474,11 +2498,11 @@ fn depr_bedrock_and_vertex_env_matrix() {
     // Vertex: 3.7 Sonnet has a different date.
     std::env::set_var("CLAUDE_CODE_USE_VERTEX", "1");
     assert_eq!(
-            model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
-            Some(
-                "⚠ Claude 3.7 Sonnet will be retired on May 11, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
+        Some(
+            "⚠ Claude 3.7 Sonnet will be retired on May 11, 2026. Consider switching to a newer model."
+        )
+    );
     clear_provider_env();
 }
 
@@ -2501,11 +2525,11 @@ fn depr_case_insensitive_substring() {
     clear_provider_env();
     // The key match is lowercased, so uppercase input still matches.
     assert_eq!(
-            model_deprecation_warning(Some("CLAUDE-3-OPUS-20240229")).as_deref(),
-            Some(
-                "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("CLAUDE-3-OPUS-20240229")).as_deref(),
+        Some(
+            "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
+        )
+    );
     // Bedrock-prefixed id still matches the substring.
     assert!(model_deprecation_warning(Some("anthropic.claude-3-opus-20240229-v1:0")).is_some());
 }
@@ -2515,23 +2539,23 @@ fn depr_first_party_deprecated_models_warn() {
     let _guard = DEPR_ENV_LOCK.lock().unwrap();
     clear_provider_env();
     assert_eq!(
-            model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
-            Some(
-                "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
+        Some(
+            "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
+        )
+    );
     assert_eq!(
-            model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
-            Some(
-                "⚠ Claude 3.7 Sonnet will be retired on February 19, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
+        Some(
+            "⚠ Claude 3.7 Sonnet will be retired on February 19, 2026. Consider switching to a newer model."
+        )
+    );
     assert_eq!(
-            model_deprecation_warning(Some("claude-3-5-haiku-20241022")).as_deref(),
-            Some(
-                "⚠ Claude 3.5 Haiku will be retired on February 19, 2026. Consider switching to a newer model."
-            )
-        );
+        model_deprecation_warning(Some("claude-3-5-haiku-20241022")).as_deref(),
+        Some(
+            "⚠ Claude 3.5 Haiku will be retired on February 19, 2026. Consider switching to a newer model."
+        )
+    );
 }
 
 #[test]
@@ -3405,6 +3429,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         build_info: command_api::builtins::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: None,
         isolated_credential_storage: false,
         credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativeOrMemory,
         injected_plugin_secrets: std::collections::BTreeMap::new(),
@@ -3459,6 +3484,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         strict_mcp_config: false,
         restricted: false,
         restricted_tools: None,
+        session_skill_allowlist: None,
         exclude_dynamic_system_prompt_sections: false,
         setting_source_scope: (true, true),
         customization_gates: super::CustomizationGates::default(),
@@ -4026,6 +4052,7 @@ async fn init_git_repo_for_worktree_launch_test(dir: &std::path::Path) {
 /// regression test used (cost tracker + the three registries + compaction).
 #[tokio::test]
 async fn build_constructs_runtime_deterministically() {
+    use lingxi_core::host::OrchestratorHandle as _;
     let (_tmp, cfg) = test_config(true);
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
@@ -4035,6 +4062,15 @@ async fn build_constructs_runtime_deterministically() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
     assert!(rt.orchestrator.has_cost_tracker(), "no CostTracker");
+    let report_scope = rt
+        .task_registry
+        .handback_scope()
+        .await
+        .expect("desktop task registry must use its actual orchestrator report admission");
+    assert_eq!(
+        report_scope.session_id,
+        rt.orchestrator.current_session_id().await
+    );
     assert!(rt.orchestrator.has_mcp_registry(), "no McpRegistry");
     assert!(rt.orchestrator.has_hook_registry(), "no HookRegistry");
     assert!(rt.orchestrator.has_agent_catalog(), "no agent catalog");
@@ -4535,6 +4571,233 @@ async fn build_discovers_and_materialises_an_installed_plugin() {
     }
 }
 
+struct CountedModCoreCommand {
+    name: &'static str,
+    hits: Arc<AtomicUsize>,
+    prompt: bool,
+}
+
+#[async_trait::async_trait]
+impl command_api::BuiltinCommandHandler for CountedModCoreCommand {
+    async fn handle(&self, args: &command_api::ParsedSlashCommand) -> command_api::CommandResult {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        if self.prompt {
+            command_api::CommandResult::InjectMessage {
+                content: "model prompt".into(),
+            }
+        } else {
+            command_api::CommandResult::Done {
+                display: Some(format!("core {}", args.raw_args)),
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Mod command.run core fixture"
+    }
+}
+
+#[tokio::test]
+async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
+    use lingxi_core::host::{SlashCommandDispatcher as _, SlashDispatchResult};
+
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.host_workspace_trusted = Some(true);
+    cfg.mod_render_surface = Some(crate::desktop::ModRenderSurface::Desktop);
+    let plugin_dir = cfg.cwd.join("moddemo");
+    std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".lingxi-plugin/plugin.json"),
+        r#"{"name":"moddemo","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("hooks/hooks.json"),
+        r#"{"modules":["./register.js"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("hooks/register.js"),
+        r#"
+        export function register(on) {
+          on('session.start', async ($, e, next) => {
+            await $.command.register({ name: 'hello', description: 'Say hello' });
+            await $.command.register({ name: 'unanswered', description: 'No handler' });
+            await $.command.register({ name: 'origin', description: 'Inspect run origin' });
+            return next(e);
+          });
+          on('command.run', { command: 'hello' }, ($, e) => ({ text: `hello ${e.args}` }));
+          on('command.run', { command: 'origin' }, ($, e) => ({
+            text: `${e.origin.kind}:${e.origin.name ?? '-'}:${e.presentation.isFullscreen}:${e.presentation.columns}`
+          }));
+          on('command.run', { command: 'echo' }, async ($, e, next) => {
+            const result = await next({ ...e, args: e.args + '!' });
+            return { ...result, text: result.text + ' served' };
+          });
+          on('command.run', { command: 'cut' }, () => ({ text: 'blocked' }));
+          on('command.run', { command: 'plain' }, ($, e, next) => next(e));
+          on('command.run', { command: 'prompted' }, ($, e, next) => next(e));
+          on('prompt.compose', async ($, e, next) => {
+            const answer = await next(e);
+            return { sections: [...answer.sections,
+              { id: 'moddemo:surface', text: `MOD SURFACE ${e.surfaces.join(',')}`, scope: 'session' }] };
+          });
+        }
+    "#,
+    )
+    .unwrap();
+    cfg.cli_plugin_dirs = vec![plugin_dir];
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
+        Arc::new(RecordingPermissionSink::default());
+    let rt = build(cfg, output, perm_sink).await.expect("desktop boot");
+    assert!(rt
+        .orchestrator
+        .assemble_default_system_prompt_preview()
+        .await
+        .contains("MOD SURFACE desktop"));
+    assert!(rt
+        .shared_command_registry
+        .read()
+        .await
+        .resolve("hello")
+        .is_some());
+    let (hello, hello_settlement) = command_api::with_mod_command_capture(
+        command_api::ModCommandRunContext {
+            origin: serde_json::json!({"kind":"plugin","name":"caller"}),
+            is_fullscreen: false,
+            columns: 80,
+        },
+        rt.dispatcher.dispatch("/hello Ada"),
+    )
+    .await;
+    assert_eq!(
+        hello_settlement,
+        Some(serde_json::json!({"text":"hello Ada"}))
+    );
+    assert_eq!(
+        hello,
+        SlashDispatchResult::Handled {
+            display: "moddemo: hello Ada".into()
+        }
+    );
+    assert_eq!(
+        rt.dispatcher.dispatch("/unanswered").await,
+        SlashDispatchResult::Handled {
+            display: "moddemo registered /unanswered but no command.run hook answered it: add on(\"command.run\", { command: \"unanswered\" }, ($, e) => ({ text: ... })) to the plugin.".into()
+        }
+    );
+    assert_eq!(
+        command_api::with_mod_command_context(
+            command_api::ModCommandRunContext {
+                origin: serde_json::json!({"kind":"plugin","name":"caller"}),
+                is_fullscreen: true,
+                columns: 123,
+            },
+            rt.dispatcher.dispatch("/origin"),
+        )
+        .await,
+        SlashDispatchResult::Handled {
+            display: "moddemo: plugin:caller:true:123".into()
+        }
+    );
+    assert_eq!(
+        rt.dispatcher.dispatch("/origin").await,
+        SlashDispatchResult::Handled {
+            display: "moddemo: unclassified:-:false:80".into()
+        }
+    );
+    let echo_hits = Arc::new(AtomicUsize::new(0));
+    let cut_hits = Arc::new(AtomicUsize::new(0));
+    let plain_hits = Arc::new(AtomicUsize::new(0));
+    let prompt_hits = Arc::new(AtomicUsize::new(0));
+    {
+        let mut registry = rt.shared_command_registry.write().await;
+        for (name, hits, prompt) in [
+            ("echo", echo_hits.clone(), false),
+            ("cut", cut_hits.clone(), false),
+            ("plain", plain_hits.clone(), false),
+            ("prompted", prompt_hits.clone(), true),
+        ] {
+            registry.register_builtin_handler(Arc::new(CountedModCoreCommand {
+                name,
+                hits,
+                prompt,
+            }));
+        }
+    }
+    let (echo, echo_settlement) = command_api::with_mod_command_capture(
+        command_api::ModCommandRunContext {
+            origin: serde_json::json!({"kind":"plugin","name":"caller"}),
+            is_fullscreen: false,
+            columns: 80,
+        },
+        rt.dispatcher.dispatch("/echo Ada"),
+    )
+    .await;
+    assert_eq!(
+        echo_settlement,
+        Some(serde_json::json!({"text":"core Ada! served"}))
+    );
+    assert_eq!(
+        echo,
+        SlashDispatchResult::Handled {
+            display: "moddemo: core Ada! served".into()
+        }
+    );
+    assert_eq!(echo_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rt.dispatcher.dispatch("/cut Ada").await,
+        SlashDispatchResult::Handled {
+            display: "moddemo: blocked".into()
+        }
+    );
+    assert_eq!(cut_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        rt.dispatcher.dispatch("/plain Ada").await,
+        SlashDispatchResult::Handled {
+            display: "core Ada".into()
+        }
+    );
+    assert_eq!(plain_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rt.dispatcher
+            .clone_shared()
+            .with_injected_messages_as_turns()
+            .dispatch("/prompted")
+            .await,
+        SlashDispatchResult::RunAsTurn {
+            prompt: "model prompt".into()
+        }
+    );
+    assert_eq!(prompt_hits.load(Ordering::SeqCst), 1);
+    let host = rt.hook_registry.read().await.mod_host().expect("Mod host");
+    host.unload("moddemo").await.unwrap();
+    assert_eq!(
+        rt.dispatcher.dispatch("/echo Ada").await,
+        SlashDispatchResult::Handled {
+            display: "core Ada".into()
+        }
+    );
+    assert_eq!(echo_hits.load(Ordering::SeqCst), 2);
+    assert!(rt
+        .shared_command_registry
+        .read()
+        .await
+        .resolve("hello")
+        .is_none());
+    assert!(matches!(
+        rt.dispatcher.dispatch("/hello Ada").await,
+        SlashDispatchResult::Unknown { .. }
+    ));
+}
+
 /// The desktop runtime must surface the SAME shared command registry the
 /// slash dispatcher reads so bridge hosts can emit `SlashCommandCatalog`
 /// pulls and `CommandsChanged` diffs from live state without reconstructing
@@ -4631,7 +4894,10 @@ async fn build_with_json_schema_surfaces_structured_output_slot() {
     // `--json-schema` ⇒ build() registers the forced `StructuredOutput` tool
     // and surfaces its capture slot for the print path.
     let (_tmp, mut cfg) = test_config(true);
-    cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
+    cfg.json_schema = Some(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"const":"\ud800"}"#)
+            .expect("valid source schema with a lone UTF-16 unit"),
+    );
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
@@ -4641,6 +4907,35 @@ async fn build_with_json_schema_surfaces_structured_output_slot() {
         rt.structured_output_slot.is_some(),
         "--json-schema must surface a structured-output capture slot"
     );
+}
+
+#[tokio::test]
+async fn build_rejects_invalid_source_schema_with_exact_diagnostic() {
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.json_schema = Some(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"\ud800":true}"#)
+            .expect("valid JSON text with a lone UTF-16 schema keyword"),
+    );
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
+        Arc::new(RecordingPermissionSink::default());
+    let error = match build(cfg, output, perm_sink).await {
+        Ok(_) => panic!("unknown lone-surrogate schema keyword must fail compilation"),
+        Err(error) => error,
+    };
+    let super::BuildError::StructuredOutputSchema(
+        lingxi_core::host::json_schema_validator::SchemaCompileError::InvalidSchema(detail),
+    ) = error
+    else {
+        panic!("expected the source-preserving schema compile error, got {error:?}");
+    };
+    assert!(detail
+        .at_pointer("")
+        .unwrap()
+        .code_units()
+        .unwrap()
+        .contains(&0xd800));
 }
 
 #[tokio::test]
@@ -5006,6 +5301,17 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
     let rt = build(cfg.clone(), output, perm_sink)
         .await
         .expect("build() failed with providers + routing");
+    let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: super::anthropic_models_for(
+            &cfg.default_model,
+            cfg.fallback_model.as_deref(),
+        ),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    });
 
     // (1) The merged config exposes BOTH a user-provider model and a built-in
     //     catalog model via `model_providers` (built from
@@ -5021,12 +5327,51 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         Some(&("anthropic".to_string(), "Anthropic".to_string())),
         "built-in anthropic model must group under anthropic"
     );
-    // A built-in CATALOG preset model is also present (e.g. a deepseek model).
-    assert!(
-        rt.model_providers
-            .values()
-            .any(|(profile, _)| profile == "deepseek"),
-        "a built-in catalog preset model must appear in model_providers"
+    // A built-in preset with a unique request id is also grouped. Some current
+    // presets deliberately share request ids (for example DeepSeek's chat and
+    // search routes), and the bare-id map must omit those rather than guess.
+    let (preset_profile, preset_model) = llm_runtime::builtin_presets()
+        .providers
+        .iter()
+        .filter(|preset| {
+            preset.profile_name != "anthropic"
+                && !cfg
+                    .provider_profiles
+                    .as_ref()
+                    .is_some_and(|profiles| profiles.contains_key(&preset.profile_name))
+        })
+        .flat_map(|preset| {
+            preset
+                .models
+                .iter()
+                .map(move |model| (preset.profile_name.clone(), model.request_model.clone()))
+        })
+        .find(|(profile, model)| {
+            let matches = assembled
+                .client_config
+                .providers
+                .iter()
+                .flat_map(|provider| provider.models.iter())
+                .filter(|candidate| candidate.request_model == *model)
+                .count();
+            matches == 1
+                && assembled.client_config.providers.iter().any(|provider| {
+                    provider.profile_name == *profile
+                        && provider
+                            .models
+                            .iter()
+                            .any(|candidate| candidate.request_model == *model)
+                })
+        })
+        .expect("the assembled catalog has a unique, non-overridden preset model");
+    let expected_preset = (
+        preset_profile.clone(),
+        super::provider_profile_label(&preset_profile),
+    );
+    assert_eq!(
+        rt.model_providers.get(&preset_model),
+        Some(&expected_preset),
+        "unique built-in preset model {preset_profile}/{preset_model} must be grouped"
     );
 
     // (2) The availability map carries the user profile (no GROQ_API_KEY in
@@ -5042,17 +5387,6 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
     // (3) The routing chain translates into main's `fallback_overrides` shape.
     //     Re-derive the same translation `build()` performs from `assemble`
     //     (the adapter's private `fallback_overrides` field is not inspectable).
-    let assembled = provider_config::assemble(provider_config::AssembleInputs {
-        anthropic_api_base: cfg.api_base.clone(),
-        anthropic_models: super::anthropic_models_for(
-            &cfg.default_model,
-            cfg.fallback_model.as_deref(),
-        ),
-        anthropic_has_api_key: false,
-        anthropic_has_oauth: false,
-        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
-        routing: cfg.routing.clone(),
-    });
     let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
         .chains
         .chains
@@ -5060,12 +5394,12 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         .map(|(k, entries)| (k.clone(), entries.iter().map(|e| e.model.clone()).collect()))
         .collect();
     assert_eq!(
-            fallback_overrides
-                .get("claude-sonnet-4-6")
-                .map(Vec::as_slice),
-            Some(&["llama-3.3-70b-versatile".to_string()][..]),
-            "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
-        );
+        fallback_overrides
+            .get("claude-sonnet-4-6")
+            .map(Vec::as_slice),
+        Some(&["llama-3.3-70b-versatile".to_string()][..]),
+        "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
+    );
 }
 
 fn fusion_catalog_row(profile: &str, model: &str) -> fusion::CatalogModel {
@@ -7061,6 +7395,15 @@ async fn late_safe_mode_blocks_resolved_ambient_mcp_but_keeps_explicit_servers()
         names.iter().any(|name| name == "explicit-server"),
         "safe mode must preserve explicit server policy: {names:?}"
     );
+    assert!(
+        rt.mcp_registry
+            .get_config("explicit-server")
+            .await
+            .unwrap()
+            .metadata
+            .cli_owned,
+        "explicit CLI config lost its trusted ownership"
+    );
     assert!(rt.session_lifecycle.shutdown_and_drain().await.complete);
 }
 
@@ -7159,9 +7502,9 @@ async fn session_persistence_flag_gates_jsonl_writer() {
                 .filter(|state| state.base().task_type == tasks::TaskType::LocalFusion)
                 .count();
             assert_eq!(
-                    after, before,
-                    "the persistence preflight must reject before spawning a task that can reserve budget or call a provider"
-                );
+                after, before,
+                "the persistence preflight must reject before spawning a task that can reserve budget or call a provider"
+            );
         }
     }
 }
@@ -7222,9 +7565,9 @@ async fn build_fires_instructions_loaded_against_a_registered_hook() {
     // fires against once the memory provider yields instruction files.
     let hooks = rt.orchestrator.list_hooks().await;
     assert!(
-            hooks.iter().any(|h| h.event == "InstructionsLoaded"),
-            "boot must load the InstructionsLoaded hook the lifecycle fire dispatches against: {hooks:?}"
-        );
+        hooks.iter().any(|h| h.event == "InstructionsLoaded"),
+        "boot must load the InstructionsLoaded hook the lifecycle fire dispatches against: {hooks:?}"
+    );
 }
 
 /// End-to-end proof of the injectable memory-provider seam (the real-provider
@@ -7278,6 +7621,8 @@ async fn build_with_injected_memory_reaches_system_prompt() {
     let memory_path = cfg.cwd.join("LINGXI.md");
     let memory_body = "PROJECT MEMORY: always be terse.";
     let memory_file = orchestrator::prompt::MemoryFile {
+        parent: None,
+        source_content: None,
         path: memory_path.clone(),
         body: memory_body.to_string(),
         is_local_override: false,
@@ -7446,7 +7791,7 @@ impl lingxi_core::host::team_spawn::TeamSpawnSeam for NoopSeam {
         _agent_id: lingxi_core::types::AgentId,
         _name: String,
         _team_name: String,
-        _description: String,
+        _description: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
         Ok(String::new())
     }
@@ -8450,7 +8795,11 @@ fn model_setting_provenance_is_provider_neutral() {
                 contributors: vec![source],
             },
         );
-        lingxi_core::settings::EffectiveSettings { settings, trace }
+        lingxi_core::settings::EffectiveSettings {
+            settings,
+            trace,
+            effort_layers: Vec::new(),
+        }
     }
 
     let cfg = DesktopConfig::default();
@@ -8594,12 +8943,12 @@ async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
     let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
     assert_eq!(tiers.rules.len(), 2, "user allow + managed deny both load");
     assert!(
-            tiers
-                .rules
-                .iter()
-                .any(|r| r.source == permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)),
-            "managed tier rules must parse with PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)"
-        );
+        tiers.rules.iter().any(|r| r.source
+            == permission::PermissionRuleSource::Settings(
+                lingxi_core::types::SettingsScope::Managed
+            )),
+        "managed tier rules must parse with PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)"
+    );
     // The managed raw text also feeds the sandbox derivation (appended last).
     assert_eq!(
         tiers.raw_tiers.len(),
@@ -9248,7 +9597,7 @@ fn session_read_allowances_include_job_tmp_only_for_bg_jobs() {
     let with_job = super::session_read_allowances_for_boot(home, cwd, "sid", Some("bg"), Some(job));
     assert!(
         with_job.iter().any(|a| {
-            a.path == std::path::PathBuf::from("/home/u/.lingxi/jobs/j1/tmp")
+            a.path == std::path::Path::new("/home/u/.lingxi/jobs/j1/tmp")
                 && a.reason == permission::JOB_TMP_READ_ALLOW_REASON
         }),
         "bg job tmp must be published, got {with_job:?}"
@@ -9613,10 +9962,10 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         handle
     };
     assert_eq!(
-            transport.connect_calls.load(Ordering::SeqCst),
-            1,
-            "the second refresh must wait for the first transaction instead of racing into a second enable"
-        );
+        transport.connect_calls.load(Ordering::SeqCst),
+        1,
+        "the second refresh must wait for the first transaction instead of racing into a second enable"
+    );
 
     transport.block_first_connect.store(false, Ordering::SeqCst);
     transport.connect_release.notify_one();

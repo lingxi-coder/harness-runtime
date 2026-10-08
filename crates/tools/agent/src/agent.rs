@@ -29,9 +29,11 @@ use lingxi_core::host::fusion::{
     FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 use lingxi_core::host::subagent_spawn::{
-    StructuredOutputMode, SubagentInheritance, SubagentListingEntry, SubagentResult,
+    AgentSpawnAdmission, AgentSpawnStart, StructuredOutputMode, SubagentInheritance,
+    SubagentListingEntry, SubagentObservation, SubagentResult, SubagentSpawnObserver,
     SubagentSpawnRequest,
 };
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -48,10 +50,48 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
+
+struct ModStartReceiptObserver(
+    std::sync::Mutex<Option<tokio::sync::oneshot::Sender<foreground_task::StartReceipt>>>,
+);
+
+#[async_trait]
+impl SubagentSpawnObserver for ModStartReceiptObserver {
+    fn on_started(&self, event: &SubagentObservation) {
+        if let SubagentObservation::Allocated {
+            agent_id, model, ..
+        } = event
+        {
+            if let Some(sender) = self.0.lock().unwrap().take() {
+                let _ = sender.send((*agent_id, model.clone()));
+            }
+        }
+    }
+
+    async fn on_event(&self, _event: SubagentObservation) {}
+}
+
+#[cfg(test)]
+impl AgentTool {
+    /// Bounded legacy fixture ingress for the existing test suite. Production
+    /// dispatch calls the Tool trait with the original flat source projection.
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        let source = Utf16JsonProjection::from_serde_value(&input)
+            .expect("generated Agent test fixture is JSON representable");
+        <Self as Tool>::call(self, source, ctx, progress).await
+    }
+}
 
 /// `Agent` — canonical tool name (claude-code `AGENT_TOOL_NAME`).
 pub const AGENT_TOOL_NAME: &str = "Agent";
@@ -243,6 +283,100 @@ pub struct AgentToolInput {
     pub fusion_mode: Option<String>,
 }
 
+/// Read the fields needed by the Agent implementation without lowering the
+/// request's source tree to `serde_json::Value`. `prompt_source` remains a
+/// separate exact projection at the callback boundary; this DTO holds only the
+/// UTF-8 strings needed by typed routing, display and host APIs.
+fn parse_agent_tool_input(source: &Utf16JsonProjection) -> Result<AgentToolInput, ()> {
+    let root = source
+        .at_pointer("")
+        .filter(|value| value.object_entries().is_some())
+        .ok_or(())?;
+
+    let required_string = |field: &str| {
+        source
+            .string_at(&format!("/{field}"))
+            .map(str::to_owned)
+            .ok_or(())
+    };
+    let optional_string = |field: &str| -> Result<Option<String>, ()> {
+        match root.get_property(field) {
+            None => Ok(None),
+            Some(value) if value.is_null() => Ok(None),
+            Some(value) => value.as_str().map(str::to_owned).map(Some).ok_or(()),
+        }
+    };
+    let optional_bool = |field: &str| -> Result<Option<bool>, ()> {
+        match root.get_property(field) {
+            None => Ok(None),
+            Some(value) if value.is_null() => Ok(None),
+            Some(value) => value.as_bool().map(Some).ok_or(()),
+        }
+    };
+    let optional_strings = |field: &str| -> Result<Option<Vec<String>>, ()> {
+        let Some(value) = root.get_property(field) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let length = value.array_len().ok_or(())?;
+        let mut strings = Vec::with_capacity(length);
+        for index in 0..length {
+            strings.push(
+                value
+                    .get_index(index)
+                    .and_then(JsonValueView::as_str)
+                    .map(str::to_owned)
+                    .ok_or(())?,
+            );
+        }
+        Ok(Some(strings))
+    };
+    let context_paths = optional_strings("context_paths")?.unwrap_or_default();
+    // The execution/report APIs still use a Rust display string, but the
+    // caller separately retains the exact UJP prompt and passes that projection
+    // through every Native Agent spawn/result path. JavaScript strings may
+    // contain unpaired UTF-16 units, so this display copy must not reject the
+    // request or become the source of model-visible prompt text.
+    let prompt_units = source.string_units("/prompt").ok_or(())?;
+    let max_panel = match root.get_property("max_panel") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => {
+            let number = value.as_number().ok_or(())?;
+            if !number.is_finite()
+                || number.fract() != 0.0
+                || number < 0.0
+                || number > u8::MAX as f64
+            {
+                return Err(());
+            }
+            Some(number as u8)
+        }
+    };
+    Ok(AgentToolInput {
+        description: required_string("description")?,
+        prompt: String::from_utf16_lossy(&prompt_units),
+        subagent_type: optional_string("subagent_type")?,
+        model: optional_string("model")?,
+        run_in_background: optional_bool("run_in_background")?,
+        name: optional_string("name")?,
+        team_name: optional_string("team_name")?,
+        mode: optional_string("mode")?,
+        isolation: optional_string("isolation")?,
+        cwd: optional_string("cwd")?,
+        context_paths: context_paths.into_iter().map(PathBuf::from).collect(),
+        preset: optional_string("preset")?,
+        models: optional_strings("models")?,
+        dimensions: optional_strings("dimensions")?,
+        max_panel,
+        partial_ok: optional_bool("partial_ok")?,
+        cross_provider: optional_bool("cross_provider")?,
+        fusion_mode: optional_string("fusion_mode")?,
+    })
+}
+
 /// claude `Agt()` (`AgentTool.tsx`): normalize a subagent-type candidate for the
 /// fuzzy fallback match — lowercase, then strip all whitespace, dashes (Unicode
 /// `Pd`), and underscores, so `"Explore"` / `"explore"` / `"ex-plore"` /
@@ -319,6 +453,16 @@ fn decode_forward_subagent_message(line: &str) -> Option<Value> {
     parsed
         .get(lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
         .cloned()
+}
+
+fn decode_forward_subagent_tombstone(line: &str) -> Option<(Value, bool)> {
+    let parsed: Value = serde_json::from_str(line).ok()?;
+    let payload = parsed.get(
+        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL,
+    )?;
+    let message = payload.get("message")?.clone();
+    let display_only = payload.get("display_only")?.as_bool()?;
+    Some((message, display_only))
 }
 
 /// Unicode `Pd` (dash punctuation) membership test for [`normalize_agent_type`].
@@ -659,10 +803,113 @@ static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                     "canReadOutputFile": { "type": "boolean", "description": "Whether the calling agent has Read/Bash tools to check progress" }
                 },
                 "required": ["status", "agentId", "description", "prompt", "outputFile"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "status": { "const": "teammate_spawned" },
+                    "prompt": { "type": "string" },
+                    "teammate_id": { "type": "string" },
+                    "agent_id": { "type": "string" },
+                    "agent_type": { "type": "string" },
+                    "model": { "type": "string" },
+                    "model_profile": { "type": ["string", "null"] },
+                    "name": { "type": "string" },
+                    "color": { "type": "string" },
+                    "tmux_session_name": { "type": "string" },
+                    "tmux_window_name": { "type": "string" },
+                    "tmux_pane_id": { "type": "string" },
+                    "team_name": { "type": "string" },
+                    "is_splitpane": { "type": "boolean" },
+                    "plan_mode_required": { "type": "boolean" }
+                },
+                "required": [
+                    "status", "prompt", "teammate_id", "agent_id", "agent_type", "model",
+                    "name", "color", "tmux_session_name", "tmux_window_name",
+                    "tmux_pane_id", "team_name", "is_splitpane", "plan_mode_required"
+                ]
             }
         ]
     })
 });
+
+static AGENT_OUTPUT_SCHEMA_SOURCE: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&AGENT_OUTPUT_SCHEMA));
+
+/// The host Fusion branch is a typed LingXi result, distinct from Native
+/// Agent's completed/async-launched output arms. Advertise it only when this
+/// AgentTool instance has a Fusion executor.
+static AGENT_OUTPUT_SCHEMA_WITH_FUSION_SOURCE: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    let mut schema = AGENT_OUTPUT_SCHEMA.clone();
+    let fusion = json!({
+        "type": "object",
+        "properties": {
+            "runId": { "type": "string" },
+            "mode": { "enum": ["analysis", "implement"] },
+            "status": { "enum": ["analyzed", "unanalyzed", "failed"] },
+            "analysisFailure": { "type": ["string", "null"] },
+            "computationStatus": { "enum": ["analyzed", "unanalyzed"] },
+            "panels": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "panel_id": { "type": "string" },
+                        "status": { "enum": ["completed", "failed", "timed_out", "cancelled"] },
+                        "duration_ms": { "type": "number" },
+                        "error_category": { "type": ["string", "null"] }
+                    },
+                    "required": ["panel_id", "status", "duration_ms"]
+                }
+            },
+            "usage": {
+                "type": "object",
+                "properties": {
+                    "input_tokens": { "type": "number" },
+                    "output_tokens": { "type": "number" },
+                    "reasoning_tokens": { "type": "number" },
+                    "cache_read_tokens": { "type": "number" },
+                    "cache_write_tokens": { "type": "number" },
+                    "realized_nano_usd": { "type": "number" },
+                    "reserved_max_nano_usd": { "type": "number" },
+                    "estimated": { "type": "boolean" },
+                    "provider_requests": { "type": "number" }
+                },
+                "required": [
+                    "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens",
+                    "cache_write_tokens", "realized_nano_usd", "reserved_max_nano_usd",
+                    "estimated", "provider_requests"
+                ]
+            },
+            "timing": {
+                "type": "object",
+                "properties": {
+                    "total_ms": { "type": "number" },
+                    "panels_ms": { "type": "number" },
+                    "analyst_ms": { "type": "number" },
+                    "verification_ms": { "type": "number" }
+                },
+                "required": ["total_ms", "panels_ms", "analyst_ms", "verification_ms"]
+            },
+            "egress": { "type": "array", "items": { "type": "string" } },
+            "attemptSettlement": {
+                "anyOf": [
+                    { "type": "object", "properties": { "status": { "enum": ["pending", "settled"] } }, "required": ["status"] },
+                    { "type": "object", "properties": { "status": { "const": "failed" }, "reason": { "type": "string" } }, "required": ["status", "reason"] }
+                ]
+            }
+        },
+        "required": ["runId", "mode", "status", "analysisFailure", "panels", "usage", "timing", "egress"]
+    });
+    schema["anyOf"]
+        .as_array_mut()
+        .expect("generated Agent output schema has anyOf")
+        .push(fusion);
+    tool_api::tool_trait::generated_builtin_schema(&schema)
+});
+
+#[path = "agent_output.rs"]
+mod agent_output;
 
 /// The MODEL-FACING input schema = [`AGENT_INPUT_SCHEMA`] with `cwd` removed.
 ///
@@ -759,17 +1006,53 @@ fn budget_limit_reached_error(current_nano_usd: u64, limit_nano_usd: u64) -> Str
 }
 
 /// Render a handoff review into the block `EZe` prepends, in its own copy.
-fn render_handoff_review(review: &lingxi_core::host::permission_gate::HandoffReview) -> String {
+fn render_handoff_review(
+    review: &lingxi_core::host::permission_gate::HandoffReview,
+) -> Utf16JsonProjection {
     use lingxi_core::host::permission_gate::HandoffReview;
     match review {
         HandoffReview::Flagged { reason } => {
-            crate::classifier_handoff::format_security_warning(reason)
+            let mut units = crate::classifier_handoff::SECURITY_WARNING_PREFIX
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            units.extend(reason.string_units("").unwrap_or_default());
+            units.extend(crate::classifier_handoff::SECURITY_WARNING_SUFFIX.encode_utf16());
+            source_text_projection_units(&units)
         }
-        HandoffReview::Refused => crate::classifier_handoff::SAFEGUARD_REFUSED_WARNING.to_string(),
-        HandoffReview::Unavailable { model, detail } => {
-            crate::classifier_handoff::classifier_unavailable_warning(model, detail)
+        HandoffReview::Refused => {
+            source_text_projection(crate::classifier_handoff::SAFEGUARD_REFUSED_WARNING)
         }
+        HandoffReview::Unavailable { model, detail } => source_text_projection(
+            &crate::classifier_handoff::classifier_unavailable_warning(model, detail),
+        ),
     }
+}
+
+fn plugin_spawn_denied_message(answer: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let reason = answer.string_units("/deny").unwrap_or_else(|| {
+        "agent.spawn: a hook answered without passing the spawn on"
+            .encode_utf16()
+            .collect()
+    });
+    let mut units = "Subagent spawn denied by a plugin: "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(reason);
+    source_text_projection_units(&units)
+}
+
+fn agent_spawn_error_message(
+    prefix: &str,
+    error: &lingxi_core::host::subagent_spawn::SubagentSpawnError,
+) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        error
+            .source_diagnostic()
+            .string_units("")
+            .expect("subagent diagnostic is a source string"),
+    );
+    source_text_projection_units(&units)
 }
 
 /// Extract claude's `content: [{type:'text', text}]` array from a subagent's
@@ -779,22 +1062,43 @@ fn render_handoff_review(review: &lingxi_core::host::permission_gate::HandoffRev
 /// `finalizeAgentTool`, agentToolUtils.ts) on the clean-stop path. Other terminal
 /// results (max-turns / stub `{reason}`) carry no `content` key → empty array,
 /// which the caller renders as the no-output marker. Returns each block's `text`.
-fn extract_content_texts(result: &Value) -> Vec<String> {
-    result
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|b| {
-                    if b.get("type").and_then(Value::as_str) == Some("text") {
-                        b.get("text").and_then(Value::as_str).map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+fn extract_content_texts(
+    result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Vec<Vec<u16>> {
+    let Some(blocks) = result.get_property("content") else {
+        return Vec::new();
+    };
+    let Some(block_count) = blocks.array_len() else {
+        return Vec::new();
+    };
+
+    (0..block_count)
+        .filter_map(|index| {
+            let block = blocks.get_index(index)?;
+            if block.get_property("type")?.as_str() != Some("text") {
+                return None;
+            }
+            result.string_units(&format!("/content/{index}/text"))
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+/// Explicit import for the host-generated `agent.spawn` control object. The
+/// hook's returned projection stays flat and is read through UJP views below.
+fn generated_spawn_source(
+    value: &serde_json::Value,
+    prompt: &Utf16JsonProjection,
+    description: &Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut source = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+        .expect("host-generated agent.spawn input is a valid JSON object");
+    source
+        .set_field("prompt", prompt.clone())
+        .expect("host-generated agent.spawn input is an object");
+    source
+        .set_field("description", description.clone())
+        .expect("host-generated agent.spawn input is an object");
+    source
 }
 
 /// Inputs to [`should_run_in_background`] — `vBo`'s argument object minus the
@@ -852,30 +1156,49 @@ fn should_run_in_background(d: BackgroundDecision) -> bool {
 fn async_launch_result(
     launch: lingxi_core::host::subagent_spawn::AsyncLaunch,
     task_id: Option<String>,
-    prompt: &str,
-    description: &str,
+    prompt: &Utf16JsonProjection,
+    description: &Utf16JsonProjection,
     resolved_model: &str,
     can_read_output_file: bool,
 ) -> ToolCallResult {
     let agent_id_str = launch.agent_id.as_uuid().to_string();
-    let prefix = format!("Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime.");
+    let prefix = format!(
+        "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives — do not report, assume, or predict them; continue other work or respond to the user in the meantime."
+    );
     let tail = if can_read_output_file {
-        format!("Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.", launch.output_file)
+        format!(
+            "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification.",
+            launch.output_file
+        )
     } else {
         "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running.".to_string()
     };
-    let mut data = json!({"isAsync": true, "status": "async_launched", "agentId": agent_id_str, "prompt": prompt, "description": description, "resolvedModel": resolved_model,
-        "outputFile": launch.output_file, "canReadOutputFile": can_read_output_file, "model_content": format!("{prefix}\n{tail}")});
+    let mut data = generated_builtin_result(&json!({
+        "isAsync": true,
+        "status": "async_launched",
+        "agentId": agent_id_str,
+        "prompt": "",
+        "description": "",
+        "resolvedModel": resolved_model,
+        "outputFile": launch.output_file,
+        "canReadOutputFile": can_read_output_file,
+    }));
+    data.set_field("prompt", prompt.clone())
+        .expect("generated async Agent result is an object");
+    data.set_field("description", description.clone())
+        .expect("generated async Agent result is an object");
     if let Some(task_id) = task_id {
-        data["task_id"] = json!(task_id);
+        data.set_field("task_id", source_text_projection(&task_id))
+            .expect("generated async Agent result is an object");
     }
     ToolCallResult {
         data,
-        model_content: None,
+        model_content: Some(source_text_projection(&format!("{prefix}\n{tail}"))),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -888,11 +1211,17 @@ use lingxi_core::host::subagent_output::max_turns_harness_note;
 /// max-turns fall-through is the only completion that stamps
 /// `reason: "max_turns_exhausted"` onto its result, and it carries the budget
 /// under `max_turns`.
-fn max_turns_reached_from_result(result: &Value) -> Option<u64> {
-    if result.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
+fn max_turns_reached_from_result(
+    result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<u64> {
+    if result.get_property("reason")?.as_str() != Some("max_turns_exhausted") {
         return None;
     }
-    result.get("max_turns").and_then(Value::as_u64)
+    let value = result.get_property("max_turns")?.as_number()?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
+        return None;
+    }
+    Some(value as u64)
 }
 
 /// Render the model-facing `tool_result` text for a COMPLETED subagent, byte-for-byte
@@ -909,17 +1238,19 @@ fn max_turns_reached_from_result(result: &Value) -> Option<u64> {
 /// single string; LingXi's `model_content` IS that single string, so the text
 /// blocks (and the trailer block) are `\n`-joined here.
 fn render_completed_model_content(
-    content_texts: &[String],
+    content_texts: &[Vec<u16>],
     agent_id: &str,
     agent_type: &str,
     total_tokens: u64,
     total_tool_use_count: u64,
     total_duration_ms: u64,
     worktree_info: Option<(&str, &str)>,
-) -> String {
+) -> Utf16JsonProjection {
     // contentOrMarker (AgentTool.tsx:1347-1350).
-    let content_or_marker: Vec<String> = if content_texts.is_empty() {
-        vec!["(Subagent completed but returned no output.)".to_string()]
+    let content_or_marker: Vec<Vec<u16>> = if content_texts.is_empty() {
+        vec!["(Subagent completed but returned no output.)"
+            .encode_utf16()
+            .collect()]
     } else {
         content_texts.to_vec()
     };
@@ -937,7 +1268,7 @@ fn render_completed_model_content(
     };
     let is_one_shot = ONE_SHOT_BUILTIN_AGENT_TYPES.contains(&agent_type);
     if is_one_shot && worktree_info_text.is_empty() {
-        return content_or_marker.join("\n");
+        return source_text_projection_units(&join_utf16_lines(&content_or_marker));
     }
 
     // Trailer (AgentTool.tsx:1366-1372): agentId/SendMessage hint + worktree +
@@ -949,8 +1280,20 @@ fn render_completed_model_content(
         "agentId: {agent_id} (use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent){worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
     );
     let mut blocks = content_or_marker;
-    blocks.push(trailer);
-    blocks.join("\n")
+    blocks.push(trailer.encode_utf16().collect());
+    source_text_projection_units(&join_utf16_lines(&blocks))
+}
+
+fn join_utf16_lines(blocks: &[Vec<u16>]) -> Vec<u16> {
+    let separator: Vec<u16> = "\n".encode_utf16().collect();
+    let mut joined = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            joined.extend_from_slice(&separator);
+        }
+        joined.extend_from_slice(block);
+    }
+    joined
 }
 
 /// `AgentTool` — spawn a subagent (surface only; recursive dispatch lands
@@ -964,7 +1307,7 @@ pub struct AgentTool {
     /// `gSn()`'s memoized projection of the advertised schema — the coordinator
     /// `model` description suffix and the `SUBAGENT_MODEL_FORCE` omission,
     /// resolved on first use because both read live session state.
-    projected_input_schema: std::sync::OnceLock<Value>,
+    projected_input_schema: std::sync::OnceLock<Utf16JsonProjection>,
     /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
     fusion: Option<Arc<dyn FusionExecutor>>,
     /// Host-owned common terminal recorder for Agent-origin Fusion runs.
@@ -979,6 +1322,47 @@ pub struct AgentTool {
 /// JS `\s` for the typical ASCII description.)
 fn normalize_description_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_description_source(source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(units) = source.string_units("") else {
+        return source_text_projection("");
+    };
+    let mut output = Vec::with_capacity(units.len());
+    let mut index = 0;
+    let mut has_content = false;
+    let mut pending_space = false;
+    while index < units.len() {
+        let first = units[index];
+        let (character, width) = if (0xd800..=0xdbff).contains(&first)
+            && units
+                .get(index + 1)
+                .is_some_and(|second| (0xdc00..=0xdfff).contains(second))
+        {
+            let second = units[index + 1];
+            let scalar =
+                0x10000 + (((u32::from(first) - 0xd800) << 10) | (u32::from(second) - 0xdc00));
+            (char::from_u32(scalar), 2)
+        } else if (0xd800..=0xdfff).contains(&first) {
+            (None, 1)
+        } else {
+            (char::from_u32(u32::from(first)), 1)
+        };
+        let is_whitespace =
+            character.is_some_and(|character| character.is_whitespace() || character == '\u{feff}');
+        if is_whitespace {
+            pending_space |= has_content;
+        } else {
+            if pending_space {
+                output.push(b' ' as u16);
+                pending_space = false;
+            }
+            output.extend_from_slice(&units[index..index + width]);
+            has_content = true;
+        }
+        index += width;
+    }
+    source_text_projection_units(&output)
 }
 
 fn fusion_panel_count(parsed: &AgentToolInput, surface: FusionAgentSurface) -> u8 {
@@ -1007,7 +1391,7 @@ fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
         // reject an unknown preset identically.
         Some(other) => other
             .parse::<FusionPreset>()
-            .map_err(|error| ToolError::InvalidInput(error.to_string())),
+            .map_err(|error| ToolError::InvalidInput(error.to_string().into())),
     }
 }
 
@@ -1018,7 +1402,7 @@ fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
 /// model id.
 fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError> {
     lingxi_core::host::parse_fusion_models(raw)
-        .map_err(|error| ToolError::InvalidInput(error.to_string()))
+        .map_err(|error| ToolError::InvalidInput(error.to_string().into()))
 }
 
 fn fusion_request_from_agent(
@@ -1030,7 +1414,9 @@ fn fusion_request_from_agent(
 ) -> Result<FusionRequest, ToolError> {
     if parsed.cross_provider == Some(true) && !surface.allow_cross_provider {
         return Err(ToolError::InvalidInput(
-            lingxi_core::host::FusionError::CrossProviderDenied.to_string(),
+            lingxi_core::host::FusionError::CrossProviderDenied
+                .to_string()
+                .into(),
         ));
     }
     let preset = match parsed.preset.as_deref() {
@@ -1059,9 +1445,9 @@ fn fusion_request_from_agent(
     let parent_profile = executor
         .resolve_parent_profile(&parent_model, routed_profile.as_deref())
         .ok_or_else(|| {
-            ToolError::InvalidInput(format!(
-                "fusion parent model profile is unavailable for `{parent_model}`"
-            ))
+            ToolError::InvalidInput(
+                format!("fusion parent model profile is unavailable for `{parent_model}`").into(),
+            )
         })?;
     Ok(FusionRequest {
         verify_claims: false,
@@ -1118,9 +1504,9 @@ fn parse_fusion_mode(raw: Option<&str>) -> Result<FusionPanelMode, ToolError> {
     match raw {
         None | Some("analysis") => Ok(FusionPanelMode::Analysis),
         Some("implement") => Ok(FusionPanelMode::Implement),
-        Some(other) => Err(ToolError::InvalidInput(format!(
-            "unknown fusion_mode `{other}`; expected \"analysis\" or \"implement\""
-        ))),
+        Some(other) => Err(ToolError::InvalidInput(
+            format!("unknown fusion_mode `{other}`; expected \"analysis\" or \"implement\"").into(),
+        )),
     }
 }
 
@@ -1201,7 +1587,7 @@ fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult
         })
         .collect();
     ToolCallResult {
-        data: json!({
+        data: generated_builtin_result(&json!({
             "runId": result.run_id,
             "mode": result.mode,
             "status": status,
@@ -1210,23 +1596,13 @@ fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult
             "usage": result.usage,
             "timing": result.timing,
             "egress": result.egress_profiles,
-            // G008: tells the orchestrator's subagent-hook chokepoint
-            // (turn_loop.rs) this result carries NO single child `agentId` to
-            // attribute a hook pair to — a Fusion run is N panels, each
-            // hook-silent by runner-side design (`agent_type ==
-            // FUSION_PANEL_TYPE` skips the in-child SubagentStart; a panel
-            // definition has no frontmatter Stop). Reusing the chokepoint's
-            // existing `subagentHooksFired` field name (rather than a Fusion-
-            // specific one) keeps the ordinary Agent-tool `runner_fired_start`
-            // reader unchanged; the chokepoint tells the two cases apart by
-            // this data's absent `agentId`.
-            "subagentHooksFired": true,
-        }),
-        model_content: Some(material),
+        })),
+        model_content: Some(source_text_projection(&material)),
         new_messages: vec![],
         context_modifier: None,
         mcp_meta: None,
         is_error: false,
+        subagent_hooks_fired: true,
     }
 }
 
@@ -1237,19 +1613,42 @@ fn fusion_tool_result_with_settlement(
 ) -> ToolCallResult {
     let mut output = fusion_tool_result(result);
     if let Some(settlement) = settlement {
-        output.data["attemptSettlement"] = json!(settlement);
+        output
+            .data
+            .set_field(
+                "attemptSettlement",
+                generated_builtin_result(&json!(settlement)),
+            )
+            .expect("generated Fusion result is an object");
         if matches!(
             settlement,
             lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. }
         ) {
-            output.data["computationStatus"] = output.data["status"].clone();
-            output.data["status"] = json!("failed");
+            let computation_status = output.data.string_at("/status").unwrap_or("unanalyzed");
+            output
+                .data
+                .set_field(
+                    "computationStatus",
+                    source_text_projection(computation_status),
+                )
+                .expect("generated Fusion result is an object");
+            output
+                .data
+                .set_field("status", source_text_projection("failed"))
+                .expect("generated Fusion result is an object");
             output.is_error = true;
             // Keep the computed answer visible, but never present it as an
             // ordinary successful tool call. Detailed safe diagnostics remain
             // structured data, not instructions appended to the model prompt.
             if let Some(answer) = &mut output.model_content {
-                answer.push_str("\n\nFusion accounting failed; the computed answer is retained, but accounting remains unavailable.");
+                let mut units = answer
+                    .string_units("")
+                    .expect("Fusion model content is a root string");
+                units.extend(
+                    "\n\nFusion accounting failed; the computed answer is retained, but accounting remains unavailable."
+                        .encode_utf16(),
+                );
+                *answer = source_text_projection_units(&units);
             }
         }
     }
@@ -1293,8 +1692,8 @@ fn fusion_tool_error(err: lingxi_core::host::FusionError) -> ToolError {
         | FusionError::PanelAdmissionRejected(_)
         | FusionError::MinPanelsNotMet
         | FusionError::PanelSetIncomplete
-        | FusionError::TimedOutEmpty => ToolError::Internal(err.to_string()),
-        other => ToolError::InvalidInput(other.to_string()),
+        | FusionError::TimedOutEmpty => ToolError::Internal(err.to_string().into()),
+        other => ToolError::InvalidInput(other.to_string().into()),
     }
 }
 
@@ -1624,6 +2023,43 @@ fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
     }
 }
 
+fn parent_permission_mode(
+    ctx: &ToolUseContext,
+    gate: Option<&Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>,
+) -> Option<String> {
+    ctx.trusted_effective_permission_mode
+        .clone()
+        .or_else(|| gate.and_then(|gate| gate.permission_mode()))
+}
+
+fn handback_completion_texts(
+    handback: Option<&lingxi_core::host::handback::HandbackState>,
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    sender_name: &str,
+    waiting_on_owned_work: bool,
+    resumable: bool,
+) -> Vec<Vec<u16>> {
+    use lingxi_core::host::handback::{
+        handback_pointer, handback_withheld, HandbackDisposition, HANDBACK_INTERIM,
+    };
+    match handback.and_then(|state| state.disposition) {
+        Some(HandbackDisposition::Send) => {
+            vec![handback_pointer(false, sender_name)
+                .encode_utf16()
+                .collect()]
+        }
+        Some(HandbackDisposition::Flagged) => {
+            vec![handback_pointer(true, sender_name).encode_utf16().collect()]
+        }
+        Some(HandbackDisposition::Withheld) => vec![if waiting_on_owned_work {
+            HANDBACK_INTERIM.encode_utf16().collect()
+        } else {
+            handback_withheld(resumable).encode_utf16().collect()
+        }],
+        None => extract_content_texts(content),
+    }
+}
+
 /// The child's agent id, whatever way its run ended.
 fn subagent_result_agent_id(
     result: &lingxi_core::host::SubagentResult,
@@ -1769,10 +2205,10 @@ impl AgentTool {
     /// reject anyway is not asked about.
     fn fusion_implement_ask(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Option<PermissionResult> {
-        let parsed: AgentToolInput = serde_json::from_value(input.clone()).ok()?;
+        let parsed = parse_agent_tool_input(input).ok()?;
         let is_fusion = parsed
             .subagent_type
             .as_deref()
@@ -1806,7 +2242,7 @@ impl AgentTool {
             },
             prompt: permission::result::PermissionPrompt {
                 title: "Fusion implement mode".into(),
-                message,
+                message: message.into(),
                 options: vec!["Allow".into(), "Deny".into()],
             },
             pending_classifier_check: None,
@@ -1862,7 +2298,7 @@ impl AgentTool {
     // hard-rejected. Apply the SAME deny set here.
     async fn fusion_available_agents_display(&self, is_coordinator: bool) -> String {
         let mut listing = match &self.ctx.subagent_spawner {
-            Some(s) => s.agent_listing().await,
+            Some(s) => s.agent_listing_for_model().await,
             None => Vec::new(),
         };
         drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
@@ -1886,7 +2322,8 @@ impl AgentTool {
     #[allow(clippy::too_many_arguments)]
     async fn call_fusion(
         &self,
-        parsed: AgentToolInput,
+        mut parsed: AgentToolInput,
+        prompt_source: Utf16JsonProjection,
         ctx: ToolUseContext,
         progress: ToolProgressSender,
         bus: &Arc<AnalyticsBus>,
@@ -1894,6 +2331,24 @@ impl AgentTool {
         started: Instant,
         is_coordinator: bool,
     ) -> Result<ToolCallResult, ToolError> {
+        let prompt_units = prompt_source
+            .string_units("")
+            .expect("Agent prompt source is a root string");
+        parsed.prompt = match String::from_utf16(&prompt_units) {
+            Ok(prompt) => prompt,
+            Err(_) => {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "fusion_invalid_prompt_text",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(
+                    "Fusion requires prompt text containing valid Unicode scalar values.".into(),
+                ));
+            }
+        };
         // F008: `call`'s catalog-lookup dispatch (a few lines above the
         // `call_fusion` call site) intercepts `subagent_type: "fusion"`
         // BEFORE the `Agent(<type>)` deny-rule and tools-denied checks that
@@ -1915,7 +2370,7 @@ impl AgentTool {
                 .await;
                 return Err(ToolError::InvalidInput(format!(
                     "Agent type '{FUSION_AGENT_TYPE}' has been denied by permission rule 'Agent({FUSION_AGENT_TYPE})' from {source}."
-                )));
+                ).into()));
             }
         }
         if let Some(spawner) = &self.ctx.subagent_spawner {
@@ -1928,9 +2383,9 @@ impl AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(agent_type_tools_denied_error(
-                    FUSION_AGENT_TYPE,
-                )));
+                return Err(ToolError::InvalidInput(
+                    agent_type_tools_denied_error(FUSION_AGENT_TYPE).into(),
+                ));
             }
         }
         // F008: an explicit `run_in_background: true` is silently ignored by
@@ -1973,9 +2428,12 @@ impl AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
+                    )
+                    .into(),
+                ));
             }
         };
         // F008: a boot-pinned rejection (an invalid `fusion.*` setting at
@@ -2004,9 +2462,12 @@ impl AgentTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
-                "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!(
+                    "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
+                )
+                .into(),
+            ));
         }
 
         // [round-5 review, finding 20] This `?` used to propagate with NO
@@ -2039,11 +2500,10 @@ impl AgentTool {
             )
             .await;
             return Err(match budget.max_session_nano_usd() {
-                Some(limit_nano_usd) => ToolError::InvalidInput(budget_limit_reached_error(
-                    current_nano_usd,
-                    limit_nano_usd,
-                )),
-                None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+                Some(limit_nano_usd) => ToolError::InvalidInput(
+                    budget_limit_reached_error(current_nano_usd, limit_nano_usd).into(),
+                ),
+                None => ToolError::Internal(format_budget_denied(current_nano_usd).into()),
             });
         }
 
@@ -2171,11 +2631,14 @@ impl AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
 Complete the remaining work directly with your tools instead of spawning more agents. \
 If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
-                )));
+                    )
+                    .into(),
+                ));
             }
             reservation_guard = Some(FusionSpawnReservationGuard::new(
                 Arc::clone(registry),
@@ -2203,7 +2666,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             bus,
             invocation_id,
             FUSION_AGENT_TYPE,
-            parsed.prompt.chars().count(),
+            prompt_source
+                .string_units("")
+                .map_or(0, |units| units.len()),
         )
         .await;
 
@@ -2260,7 +2725,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: lingxi_core::types::ToolUseId::new(),
-                        data: serde_json::json!({
+                        data: generated_builtin_result(&serde_json::json!({
                             // F005: `subagent_activity` is the key
                             // `turn_loop.rs::forward_tool_progress` actually
                             // recognizes and renders — `fusion_stage` (kept
@@ -2272,7 +2737,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             "fusion_stage": fusion_stage_name(&event.stage),
                             "message": event.message,
                             "panel_id": event.panel_id,
-                        }),
+                        })),
                     })
                     .await;
             }
@@ -2444,9 +2909,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     let current_nano_usd = budget.snapshot_total_nano_usd().await;
                     return Err(match budget.max_session_nano_usd() {
                         Some(limit_nano_usd) => ToolError::InvalidInput(
-                            budget_limit_reached_error(current_nano_usd, limit_nano_usd),
+                            budget_limit_reached_error(current_nano_usd, limit_nano_usd).into(),
                         ),
-                        None => ToolError::InvalidInput(err.to_string()),
+                        None => ToolError::InvalidInput(err.to_string().into()),
                     });
                 }
                 Err(fusion_tool_error(err))
@@ -2882,7 +3347,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             } else {
                 ""
             },
-            if is_fork { "For fresh agents, terse" } else { "Terse" }
+            if is_fork {
+                "For fresh agents, terse"
+            } else {
+                "Terse"
+            }
         );
 
         // `${a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE?"":"; the `model` parameter here
@@ -3336,6 +3805,8 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         started: Instant,
         spawner: &dyn lingxi_core::host::subagent_spawn::SubagentSpawner,
         parsed: &AgentToolInput,
+        prompt_source: &Utf16JsonProjection,
+        description_source: &Utf16JsonProjection,
         effective_type: &str,
         selected: &lingxi_core::host::subagent_spawn::SelectedAgentMeta,
         is_fork: bool,
@@ -3346,6 +3817,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         effective_isolation: Option<String>,
         resolved_cwd: Option<String>,
         agent_worktree: Option<lingxi_core::host::worktree::WorktreeHandle>,
+        mod_start: Option<Box<dyn AgentSpawnStart>>,
     ) -> Result<ToolCallResult, ToolError> {
         // [round-4 review, finding 15] `dispatch_async` is reached ONLY when
         // `run_in_background` is true (its sole caller gates on that flag
@@ -3367,15 +3839,17 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> =
+            spawner.decorate_tool_invoker(Arc::new(invoker_impl));
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget,
         };
         let request = SubagentSpawnRequest {
+            agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             subagent_type: effective_type.to_string(),
-            prompt: parsed.prompt.clone(),
+            prompt: prompt_source.clone(),
             observer: selected.observer.clone().or_else(|| {
                 ctx.observer
                     .as_ref()
@@ -3383,7 +3857,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     .cloned()
             }),
             context_paths: parsed.context_paths.clone(),
-            description: Some(parsed.description.clone()),
+            description: Some(description_source.clone()),
             model: if is_fork { None } else { parsed.model.clone() },
             model_profile: if parsed.model.is_none() {
                 ctx.options.model_profile.clone()
@@ -3407,6 +3881,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             // handler runs the terminal keep/cleanup judgment.
             worktree: agent_worktree,
             fork_context_messages: None,
+            instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: None,
             // The Agent (Task) tool has no structured-output schema param.
             schema: None,
@@ -3447,10 +3922,21 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback_opt_in: !is_fork,
+            parent_permission_mode: parent_permission_mode(ctx, self.ctx.permission_gate.as_ref()),
+            handback_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            handback_ends_turn_enabled: None,
+            restore_handback_start: None,
+            parent_native_query_depth: ctx.native_query_depth,
         };
 
         match spawner.spawn_async(request, inherit).await {
             Ok(launch) => {
+                if let Some(start) = mod_start {
+                    start.started(launch.agent_id, selected.resolved_model.clone());
+                }
                 // (G14) Register name → agentId for SendMessage routing — ASYNC
                 // ONLY, post-launch so a failed spawn leaves no stale entry
                 // (claude AgentTool.tsx:700-712). Prefer the ctx-level registry
@@ -3471,8 +3957,8 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 Ok(async_launch_result(
                     launch,
                     None,
-                    &parsed.prompt,
-                    &parsed.description,
+                    prompt_source,
+                    &description_source,
                     &selected.resolved_model,
                     can_read_output_file,
                 ))
@@ -3486,9 +3972,12 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
-                )))
+                Err(ToolError::InvalidInput(
+                    concurrent_subagent_limit_error(
+                        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
+                    )
+                    .into(),
+                ))
             }
             Err(e) => {
                 Self::emit_failed(
@@ -3501,10 +3990,16 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 if let lingxi_core::host::subagent_spawn::SubagentSpawnError::DeniedByHook(reason) =
                     &e
                 {
-                    return Err(ToolError::InvalidInput(format!("Agent: {reason}")));
+                    return Err(ToolError::InvalidInput(agent_spawn_error_message(
+                        "Agent: ",
+                        &lingxi_core::host::subagent_spawn::SubagentSpawnError::DeniedByHook(
+                            reason.clone(),
+                        ),
+                    )));
                 }
-                Err(ToolError::Internal(format!(
-                    "Agent: async spawn failed: {e}"
+                Err(ToolError::SubagentFailed(agent_spawn_error_message(
+                    "Agent: async spawn failed: ",
+                    &e,
                 )))
             }
         }
@@ -3520,27 +4015,26 @@ impl Tool for AgentTool {
         const ALIASES: &[&str] = &[LEGACY_AGENT_TOOL_NAME];
         ALIASES
     }
-    fn search_hint(&self) -> Option<&str> {
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
         // claude `searchHint: 'delegate work to a subagent'` (AgentTool.tsx:227).
-        Some("delegate work to a subagent")
+        Some("delegate work to a subagent".into())
     }
-    fn get_activity_description(&self, input: &Value) -> Option<String> {
+    fn get_activity_description(&self, input: &Utf16JsonProjection) -> Option<String> {
         // Binary `getActivityDescription(e){return e?.description?.replace(/\s+/g,
         // " ").trim()||"Running task"}` — collapse internal whitespace runs to a
         // single space and trim; fall back to "Running task" when absent OR when
         // the normalized value is empty (JS `||`, empty string is falsy). (The
         // leaked TS `?? 'Running task'` was stale — the 2.1.195 binary normalizes.)
         let desc = input
-            .get("description")
-            .and_then(Value::as_str)
+            .string_at("/description")
             .map(normalize_description_ws)
             .filter(|s| !s.is_empty());
         Some(desc.unwrap_or_else(|| "Running task".to_string()))
     }
-    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
+    fn user_facing_name_for_input(&self, input: &Utf16JsonProjection) -> Option<String> {
         // claude `userFacingName(input)` (UI.tsx:760-775): show the subagent type
         // (except `general-purpose`/`worker`, which display as "Agent").
-        let subagent_type = input.get("subagent_type").and_then(Value::as_str);
+        let subagent_type = input.string_at("/subagent_type");
         Some(match subagent_type {
             Some(t) if t != GENERAL_PURPOSE_AGENT_TYPE => {
                 if t == "worker" {
@@ -3553,17 +4047,17 @@ impl Tool for AgentTool {
             _ => "Agent".to_string(),
         })
     }
-    fn user_facing_name_background_color(&self, input: &Value) -> Option<String> {
+    fn user_facing_name_background_color(&self, input: &Utf16JsonProjection) -> Option<String> {
         // claude `userFacingNameBackgroundColor(input)` (UI.tsx:776-787): no
         // subagent_type ⇒ None; else the agent's color via `getAgentColor`.
         // claude's `getAgentColor` is process-global; the Rust color manager
         // lives in the `agent` crate and is NOT threaded onto
         // `BuiltinToolContext`, so we return None here (a faithful degraded
         // behavior — no wrong color; documented residual).
-        input.get("subagent_type").and_then(Value::as_str)?;
+        input.string_at("/subagent_type")?;
         None
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
         // never exposes `cwd` (set internally by isolation / explicit override).
         // `gSn()`'s remaining two projections (coordinator `model` suffix,
@@ -3581,19 +4075,26 @@ impl Tool for AgentTool {
                 .coordinator_mode
                 .as_ref()
                 .is_some_and(|m| m.is_enabled());
-            project_agent_input_schema(base, is_coordinator)
+            generated_builtin_schema(&project_agent_input_schema(base, is_coordinator))
         })
     }
-    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
-        let Some(name) = input.get("name").and_then(Value::as_str) else {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn input_validation_issues(&self, input: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
+        let Some(name) = input.string_at("/name") else {
             return Vec::new();
         };
         let mut issues = Vec::new();
         if !matches_agent_name_pattern(name) {
-            issues.push(serde_json::json!({"origin":"string","code":"invalid_format","format":"regex","pattern":format!("/{AGENT_NAME_PATTERN}/"),"path":["name"],"message":AGENT_NAME_REGEX_MESSAGE}));
+            issues.push(generated_builtin_result(&serde_json::json!({"origin":"string","code":"invalid_format","format":"regex","pattern":format!("/{AGENT_NAME_PATTERN}/"),"path":["name"],"message":AGENT_NAME_REGEX_MESSAGE})));
         }
         if name == RESERVED_AGENT_NAME {
-            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":reserved_agent_name_message()}));
+            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":["name"],"message":reserved_agent_name_message()})));
         }
         // TGo has a second .refine(!l0); Zod reports both for "main".
         let normalized = self.ctx.subagent_spawner.as_ref().map_or_else(
@@ -3602,12 +4103,22 @@ impl Tool for AgentTool {
         );
         if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized)
         {
-            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"}));
+            issues.push(generated_builtin_result(&serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"})));
         }
         issues
     }
-    fn output_schema(&self) -> Option<&Value> {
-        Some(&AGENT_OUTPUT_SCHEMA)
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(if self.fusion.is_some() {
+            &AGENT_OUTPUT_SCHEMA_WITH_FUSION_SOURCE
+        } else {
+            &AGENT_OUTPUT_SCHEMA_SOURCE
+        })
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        agent_output::parse(output, self.fusion.is_some())
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -3617,25 +4128,25 @@ impl Tool for AgentTool {
         // NOT the shared `MAX_TOOL_OUTPUT_LENGTH`.
         AGENT_MAX_RESULT_SIZE_CHARS
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         // claude `isConcurrencySafe() { return true }` (AgentTool.tsx:1273-1275):
         // the Agent tool delegates to its underlying tools' own permission /
         // concurrency checks, so it is itself concurrency-safe — it is not an
         // exclusive drain barrier in the streaming executor.
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         // claude `isReadOnly() { return true }` (AgentTool.tsx:1264-1266):
         // "delegates permission checks to its underlying tools".
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, input: &Utf16JsonProjection) -> InterruptBehavior {
         // Fusion owns a multi-stage settlement state (including already
         // realized panel spend and spawn-quota refunds).  The outer turn-loop
         // dispatcher drops `Cancel` tool futures as soon as the shared token
@@ -3644,8 +4155,7 @@ impl Tool for AgentTool {
         // path observes the token and returns only after accounting is sealed;
         // ordinary Agent spawns retain the existing drop-on-cancel behavior.
         let is_fusion = input
-            .get("subagent_type")
-            .and_then(Value::as_str)
+            .string_at("/subagent_type")
             .is_some_and(|agent_type| normalize_agent_type(agent_type) == FUSION_AGENT_TYPE);
         if is_fusion {
             InterruptBehavior::Block
@@ -3654,7 +4164,11 @@ impl Tool for AgentTool {
         }
     }
 
-    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> PermissionResult {
         if let Some(ask) = self.fusion_implement_ask(input, ctx) {
             return ask;
         }
@@ -3668,26 +4182,27 @@ impl Tool for AgentTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // claude `async description() { return 'Launch a new agent' }`
         // (AgentTool.tsx:230-232). The dynamic catalog text lives in `prompt()`.
         "Launch a new agent".into()
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // claude-code builds the Agent tool prompt dynamically (getPrompt,
         // AgentTool/prompt.ts:66-287): it injects the live agent catalog (one
         // `formatAgentLine` per resolved AgentDefinition) and the available MCP
         // server names. Pull the catalog from the spawner (defaulted-empty when
         // unwired) and the MCP server names from the registry.
         let mut agents = match &self.ctx.subagent_spawner {
-            Some(s) => s.agent_listing().await,
+            Some(s) => s.agent_listing_for_model().await,
             None => Vec::new(),
         };
         // 2.1.238 `generalPurposeAvailable` (`p7f(agents, allowedAgentTypes)`,
-        // @292885292): computed from the RAW listing, before the `Agent(<x>)`
-        // deny filter below — the binary's `prompt({agents,…})` wrapper passes
-        // the unfiltered `agents` to `p7f` and handles deny separately.
+        // @292885292): computed from the offered catalog, before the
+        // `Agent(<x>)` permission-deny filter below — the binary's
+        // `prompt({agents,…})` wrapper passes the unfiltered-by-permission
+        // catalog to `p7f` and handles deny separately.
         let general_purpose_available = general_purpose_is_available(&agents);
         // F008 fix: append the synthetic `fusion` catalog entry BEFORE the
         // two deny-filter `retain` calls below, not after — otherwise
@@ -3740,18 +4255,23 @@ impl Tool for AgentTool {
         // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
         // web-fetch agent for a coordinator session.
         drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
-        Self::build_prompt(
+        let prompt = Self::build_prompt(
             &agents,
             &mcp_server_names,
             is_coordinator,
             opts.model.as_deref(),
             general_purpose_available,
-        )
+        );
+        // The catalog rows here are host-parsed UTF-8 definitions and the
+        // remaining prompt text is generated locally, so this is an explicit
+        // UTF-8 producer boundary. Tool prompt transport stays a root-string
+        // UJP from this point onward.
+        source_text_projection(&prompt)
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -3760,9 +4280,19 @@ impl Tool for AgentTool {
         let bus = self.ctx.bus.clone();
 
         // 1. Parse input.
-        let mut parsed: AgentToolInput = match serde_json::from_value(input) {
-            Ok(v) => v,
-            Err(e) => {
+        let mut prompt_source = input.subprojection("/prompt").ok().filter(|value| {
+            value
+                .at_pointer("")
+                .is_some_and(|root| root.code_units().is_some())
+        });
+        let mut description_source = input.subprojection("/description").ok().filter(|value| {
+            value
+                .at_pointer("")
+                .is_some_and(|root| root.code_units().is_some())
+        });
+        let mut parsed: AgentToolInput = match parse_agent_tool_input(&input) {
+            Ok(v) if prompt_source.is_some() && description_source.is_some() => v,
+            _ => {
                 Self::emit_failed(
                     &bus,
                     &invocation_id,
@@ -3770,11 +4300,20 @@ impl Tool for AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "Agent: invalid input shape: {e}"
-                )));
+                return Err(ToolError::InvalidInput("Agent: invalid input shape".into()));
             }
         };
+        let mut prompt_source = prompt_source.take().expect("validated prompt source");
+        let mut description_source = normalize_description_source(
+            &description_source
+                .take()
+                .expect("validated description source"),
+        );
+        parsed.description = String::from_utf16_lossy(
+            &description_source
+                .string_units("")
+                .expect("normalized description is a root string"),
+        );
 
         // `if(xi()&&a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)F=void 0`
         // (@3577560) — on a coordinator session pinned to worker inheritance the
@@ -3809,7 +4348,7 @@ impl Tool for AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(msg));
+                return Err(ToolError::InvalidInput(msg.into()));
             }
         }
 
@@ -3825,10 +4364,9 @@ impl Tool for AgentTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(subagent_depth_limit_error(
-                ctx.depth,
-                depth_limit,
-            )));
+            return Err(ToolError::InvalidInput(
+                subagent_depth_limit_error(ctx.depth, depth_limit).into(),
+            ));
         }
 
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing.
@@ -3846,7 +4384,8 @@ impl Tool for AgentTool {
                 )
                 .await;
                 return Err(ToolError::InvalidInput(
-                    lingxi_core::host::agent_processes::stop_pending_refusal("launch new agents."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("launch new agents.")
+                        .into(),
                 ));
             }
         }
@@ -3868,11 +4407,9 @@ impl Tool for AgentTool {
             ));
         }
 
-        // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
-        // `description` ONCE at entry so every downstream use (the spawn request,
-        // the async-launch payload, the completed `data.description`) carries the
-        // collapsed/trimmed value.
-        parsed.description = normalize_description_ws(&parsed.description);
+        // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — source
+        // normalization above collapses whitespace while retaining the exact
+        // UTF-16 units of non-whitespace description text.
 
         // (G7) NO empty-prompt validation: claude-code has no such guard — a
         // `prompt: ""` spawn must succeed (AgentTool.call accepts any prompt).
@@ -3929,6 +4466,7 @@ impl Tool for AgentTool {
             return self
                 .call_fusion(
                     parsed,
+                    prompt_source,
                     ctx,
                     progress,
                     &bus,
@@ -3983,7 +4521,7 @@ impl Tool for AgentTool {
                 if let Some(source) = gate.agent_type_deny(kind).await {
                     return Err(ToolError::InvalidInput(format!(
                         "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
-                    )));
+                    ).into()));
                 }
             }
             let resolved = requested.and_then(|kind| {
@@ -4002,7 +4540,7 @@ impl Tool for AgentTool {
                         }
                     })
             });
-            let kind = resolved
+            let mut kind = resolved
                 .map(|agent| agent.agent_type.as_str())
                 .or(requested)
                 .unwrap_or(GENERAL_PURPOSE_AGENT_TYPE);
@@ -4010,7 +4548,7 @@ impl Tool for AgentTool {
                 if let Some(source) = gate.agent_type_deny(kind).await {
                     return Err(ToolError::InvalidInput(format!(
                         "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
-                    )));
+                    ).into()));
                 }
             }
             let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
@@ -4024,10 +4562,10 @@ impl Tool for AgentTool {
                 budget.check_and_charge(0).await
             {
                 return Err(match budget.max_session_nano_usd() {
-                    Some(limit) => {
-                        ToolError::InvalidInput(budget_limit_reached_error(current_nano_usd, limit))
-                    }
-                    None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+                    Some(limit) => ToolError::InvalidInput(
+                        budget_limit_reached_error(current_nano_usd, limit).into(),
+                    ),
+                    None => ToolError::Internal(format_budget_denied(current_nano_usd).into()),
                 });
             }
             let registry = ctx.subagent_registry.clone().ok_or_else(|| {
@@ -4038,7 +4576,7 @@ impl Tool for AgentTool {
             if let Some(gate) = self.ctx.permission_gate.clone() {
                 invoker = invoker.with_gate(gate);
             }
-            let selected = spawner
+            let mut selected = spawner
                 .resolve_selection(kind, parsed.model.as_deref())
                 .await;
             let inherited_mode = self
@@ -4047,17 +4585,194 @@ impl Tool for AgentTool {
                 .as_ref()
                 .and_then(|gate| gate.permission_mode())
                 .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_owned());
+            // Native named teammates enter the same `agent.spawn` hook
+            // dispatcher as ordinary Agent calls, with `isTeammate:true`.
+            // Keep provenance in the host sidecar below; never reconstruct it
+            // from hook-rewritten JSON.
+            let original_kind = kind.to_owned();
+            let original_parent = ctx.agent_id.map(|id| id.as_uuid().to_string());
+            let mut named_spawn_input = json!({
+                "tool_use_id": ctx.tool_use_id.as_ref().map(ToString::to_string).unwrap_or_default(),
+                "prompt": parsed.prompt,
+                "description": parsed.description,
+                "subagentType": kind,
+                "provider": if selected.is_built_in {
+                    json!({"plugin":"engine","tier":"core"})
+                } else if selected.source == "plugin" {
+                    json!({"plugin":kind.split(':').next().unwrap_or("engine"),"tier":"user"})
+                } else {
+                    json!({"plugin":"engine","tier":"core"})
+                },
+                "parentModel": main_loop_model_parent(&ctx).unwrap_or_else(|| self.ctx.default_model.clone()),
+                "permissionMode": self.ctx.permission_gate.as_ref()
+                    .and_then(|gate| gate.permission_mode())
+                    .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_owned()),
+                "background": false,
+                "fork": false,
+                "isTeammate": true,
+            });
+            if let Some(parent_agent_id) = original_parent.as_ref() {
+                named_spawn_input["parentAgentId"] = json!(parent_agent_id);
+            }
+            if let Some(name) = parsed.name.as_deref() {
+                named_spawn_input["name"] = json!(name);
+            }
+            if let Some(model) = parsed.model.as_deref() {
+                named_spawn_input["model"] = json!(model);
+            }
+
+            let mut named_spawn_start: Option<Box<dyn AgentSpawnStart>> = None;
+            match spawner
+                .begin_agent_spawn(
+                    generated_spawn_source(&named_spawn_input, &prompt_source, &description_source),
+                    ctx.agent_spawn_provenance.clone(),
+                )
+                .await
+            {
+                Ok(AgentSpawnAdmission::Bypass) => {}
+                Ok(AgentSpawnAdmission::Answered(answer)) => {
+                    return Err(ToolError::InvalidInput(plugin_spawn_denied_message(
+                        &answer,
+                    )));
+                }
+                Ok(AgentSpawnAdmission::Forwarded { input, start }) => {
+                    let parent_agent_id = input.string_at("/parentAgentId");
+                    let parent_matches = match (original_parent.as_deref(), parent_agent_id) {
+                        (None, None) => true,
+                        (Some(expected), Some(actual)) => actual == expected,
+                        _ => false,
+                    };
+                    if input
+                        .get_property("isTeammate")
+                        .and_then(|value| value.as_bool())
+                        != Some(true)
+                        || !parent_matches
+                        || input
+                            .get_property("background")
+                            .and_then(|value| value.as_bool())
+                            != Some(false)
+                    {
+                        start.failed(
+                            "agent.spawn: named teammate identity or execution mode was changed"
+                                .into(),
+                        );
+                        return Err(ToolError::InvalidInput(
+                            "A plugin's agent.spawn hook changed the named teammate identity or execution mode.".into(),
+                        ));
+                    }
+                    let Some(next_type) = input
+                        .get_property("subagentType")
+                        .and_then(|value| value.as_str())
+                    else {
+                        start
+                            .failed("agent.spawn: named teammate input has no subagentType".into());
+                        return Err(ToolError::InvalidInput(
+                            "agent.spawn has no subagentType for the named teammate".into(),
+                        ));
+                    };
+                    if next_type != original_kind {
+                        let next_agent = listing
+                            .iter()
+                            .find(|agent| agent.agent_type == next_type)
+                            .or_else(|| {
+                                let mut matches = listing.iter().filter(|agent| {
+                                    normalize_agent_type(&agent.agent_type)
+                                        == normalize_agent_type(next_type)
+                                });
+                                let first = matches.next();
+                                if matches.next().is_none() {
+                                    first
+                                } else {
+                                    None
+                                }
+                            });
+                        let Some(next_agent) = next_agent else {
+                            start.failed(format!(
+                                "agent.spawn: named teammate type '{next_type}' is unavailable"
+                            ));
+                            return Err(ToolError::InvalidInput(format!(
+                                "A plugin's agent.spawn hook rewrote the named teammate to unavailable type '{next_type}'."
+                            ).into()));
+                        };
+                        kind = next_agent.agent_type.as_str();
+                        if let Some(gate) = &self.ctx.permission_gate {
+                            if let Some(source) = gate.agent_type_deny(kind).await {
+                                start.failed(format!(
+                                    "agent.spawn: rewritten agent type denied by {source}"
+                                ));
+                                return Err(ToolError::InvalidInput(format!(
+                                    "A plugin's agent.spawn hook rewrote the named teammate to agent type '{kind}', which a permission rule denies ({source})."
+                                ).into()));
+                            }
+                        }
+                    }
+                    let Some(rewritten_prompt) =
+                        input.subprojection("/prompt").ok().filter(|value| {
+                            value
+                                .at_pointer("")
+                                .is_some_and(|root| root.code_units().is_some())
+                        })
+                    else {
+                        start.failed(
+                            "agent.spawn: named teammate input has no string prompt".into(),
+                        );
+                        return Err(ToolError::InvalidInput(
+                            "agent.spawn has no string prompt for the named teammate".into(),
+                        ));
+                    };
+                    parsed.prompt = rewritten_prompt
+                        .string_at("")
+                        .unwrap_or_default()
+                        .to_owned();
+                    prompt_source = rewritten_prompt;
+                    if let Some(description) = input
+                        .subprojection("/description")
+                        .ok()
+                        .filter(|value| value.string_units("").is_some())
+                    {
+                        description_source = normalize_description_source(&description);
+                        parsed.description = String::from_utf16_lossy(
+                            &description_source
+                                .string_units("")
+                                .expect("normalized description is a root string"),
+                        );
+                    }
+                    parsed.name = input
+                        .get_property("name")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                        .or(parsed.name);
+                    parsed.model = input
+                        .get_property("model")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                        .or(parsed.model);
+                    selected = spawner
+                        .resolve_selection(kind, parsed.model.as_deref())
+                        .await;
+                    named_spawn_start = Some(start);
+                }
+                Err(error) => {
+                    return Err(ToolError::Internal(
+                        format!("agent.spawn Mod dispatch failed: {error}").into(),
+                    ));
+                }
+            }
+
             let resolved_model = if selected.resolved_model.is_empty() {
                 parsed.model.clone()
             } else {
-                Some(selected.resolved_model)
+                Some(selected.resolved_model.clone())
             };
+
             let request = SubagentSpawnRequest {
+                instruction_context: ctx.instruction_context.clone(),
                 subagent_type: kind.into(),
-                prompt: parsed.prompt.clone(),
-                description: Some(parsed.description),
-                name: parsed.name,
+                prompt: prompt_source.clone(),
+                description: Some(description_source.clone()),
+                name: parsed.name.clone(),
                 model: resolved_model,
+                agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
                 // The obsolete input mode never overrides the live parent mode.
                 mode: Some(inherited_mode),
                 // Snapshot the caller's current working directory only after
@@ -4072,7 +4787,12 @@ impl Tool for AgentTool {
                 creator_agent_id: ctx.agent_id,
                 origin_session_id,
                 parent_model_override: main_loop_model_parent(&ctx),
+                parent_permission_mode: parent_permission_mode(
+                    &ctx,
+                    self.ctx.permission_gate.as_ref(),
+                ),
                 depth: ctx.depth + 1,
+                parent_native_query_depth: ctx.native_query_depth,
                 ..Default::default()
             };
             let launch = spawner
@@ -4083,19 +4803,50 @@ impl Tool for AgentTool {
                         budget,
                     },
                 )
-                .await
-                .map_err(|error| ToolError::Internal(error.to_string()))?;
-            let mut data = serde_json::to_value(&launch)
-                .map_err(|error| ToolError::Internal(error.to_string()))?;
-            data["status"] = json!("teammate_spawned");
-            data["prompt"] = json!(parsed.prompt);
+                .await;
+            let launch = match launch {
+                Ok(launch) => {
+                    if let Some(start) = named_spawn_start.take() {
+                        if let Some(agent_id) =
+                            lingxi_core::types::AgentId::parse_prefixed(&launch.agent_id)
+                        {
+                            start.started(agent_id, launch.model.clone());
+                        } else {
+                            start.failed(
+                                "agent.spawn: teammate returned an invalid agent id".into(),
+                            );
+                            return Err(ToolError::Internal(
+                                "named teammate launch returned an invalid agent id".into(),
+                            ));
+                        }
+                    }
+                    launch
+                }
+                Err(error) => {
+                    if let Some(start) = named_spawn_start.take() {
+                        start.failed(format!("agent.spawn: teammate startup failed: {error}"));
+                    }
+                    return Err(ToolError::Internal(error.to_string().into()));
+                }
+            };
+            let launch_data = serde_json::to_value(&launch)
+                .map_err(|error| ToolError::Internal(error.to_string().into()))?;
+            let mut data = generated_builtin_result(&launch_data);
+            data.set_field("status", source_text_projection("teammate_spawned"))
+                .expect("generated teammate launch result is an object");
+            data.set_field("prompt", prompt_source.clone())
+                .expect("generated teammate launch result is an object");
             return Ok(ToolCallResult {
                 data,
-                model_content: Some(format!(
+                model_content: Some(source_text_projection(&format!(
                     "Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: {}\nname: {}\nThe agent is now running and will receive instructions via mailbox.",
                     launch.teammate_id, launch.name
-                )), new_messages: vec![], context_modifier: None,
-                is_error: false, mcp_meta: None,
+                ))),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
 
@@ -4122,7 +4873,7 @@ impl Tool for AgentTool {
         // (the trait's default seam, or no deny rules wired) ⇒ no behaviour
         // change.
         let tools_denied: Vec<String> = spawner.tools_denied_agent_types().await;
-        let effective_type: String = if is_fork {
+        let mut effective_type: String = if is_fork {
             lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
         } else {
             let candidate = parsed
@@ -4140,7 +4891,7 @@ impl Tool for AgentTool {
                     .await;
                     return Err(ToolError::InvalidInput(format!(
                         "Agent type '{candidate}' has been denied by permission rule 'Agent({candidate})' from {source}."
-                    )));
+                    ).into()));
                 }
             }
             // claude @292890415, in the `Gt.length===1 && !kt.has(...)` arm:
@@ -4159,9 +4910,9 @@ impl Tool for AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(agent_type_tools_denied_error(
-                    candidate,
-                )));
+                return Err(ToolError::InvalidInput(
+                    agent_type_tools_denied_error(candidate).into(),
+                ));
             }
             match parsed.subagent_type.as_deref() {
                 None => {
@@ -4179,7 +4930,7 @@ impl Tool for AgentTool {
                     // is unreachable here: the port only reaches this arm when
                     // `is_fork` is false, and `is_fork` is exactly
                     // "fork enabled AND subagent_type omitted".
-                    let mut listing = spawner.agent_listing().await;
+                    let mut listing = spawner.agent_listing_for_model().await;
                     drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
                     if !general_purpose_is_available(&listing) {
                         let mut denied = match &self.ctx.permission_gate {
@@ -4200,19 +4951,28 @@ impl Tool for AgentTool {
                             started.elapsed().as_millis() as u64,
                         )
                         .await;
-                        return Err(ToolError::InvalidInput(format!(
-                            "{SUBAGENT_TYPE_REQUIRED_MESSAGE}. Available agents: {}",
-                            render_available_agents(&available)
-                        )));
+                        return Err(ToolError::InvalidInput(
+                            format!(
+                                "{SUBAGENT_TYPE_REQUIRED_MESSAGE}. Available agents: {}",
+                                render_available_agents(&available)
+                            )
+                            .into(),
+                        ));
                     }
                     GENERAL_PURPOSE_AGENT_TYPE.to_string()
                 }
                 Some(explicit) => {
+                    // Keep the raw catalog as the execution resolver: a
+                    // model-selected type remains dispatchable even if a Mod
+                    // hid it from future offers. Only after an exact miss do
+                    // aliases and error suggestions use the model-facing set.
                     let mut listing = spawner.agent_listing().await;
                     drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
                     if listing.iter().any(|a| a.agent_type == explicit) {
                         explicit.to_string()
                     } else {
+                        let mut offered_listing = spawner.agent_listing_for_model().await;
+                        drop_coordinator_hidden_builtins(&mut offered_listing, is_coordinator);
                         // The `Available agents:` set is the deny-filtered listing
                         // (claude-code `Pxe`), so a denied type never appears as a
                         // suggestion.
@@ -4230,7 +4990,7 @@ impl Tool for AgentTool {
                         denied.extend(tools_denied.iter().cloned());
                         let is_denied = |t: &str| denied.iter().any(|d| d.as_str() == t);
                         let available = || {
-                            listing
+                            offered_listing
                                 .iter()
                                 .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
                                 .map(|a| a.agent_type.clone())
@@ -4248,7 +5008,7 @@ impl Tool for AgentTool {
                         // an ambiguity error; zero (or a single denied match) falls
                         // through to not-found.
                         let norm = normalize_agent_type(explicit);
-                        let matches: Vec<String> = listing
+                        let matches: Vec<String> = offered_listing
                             .iter()
                             .filter(|a| normalize_agent_type(&a.agent_type) == norm)
                             .map(|a| a.agent_type.clone())
@@ -4291,7 +5051,7 @@ impl Tool for AgentTool {
                             .await;
                             return Err(ToolError::InvalidInput(format!(
                                 "Agent type '{explicit}' is ambiguous — matches {matches_disp}. {tail}"
-                            )));
+                            ).into()));
                         }
                         if matches.len() == 1 && !is_denied(&matches[0]) {
                             matches.into_iter().next().unwrap()
@@ -4313,9 +5073,9 @@ impl Tool for AgentTool {
                                 started.elapsed().as_millis() as u64,
                             )
                             .await;
-                            return Err(ToolError::InvalidInput(agent_type_tools_denied_error(
-                                &matched,
-                            )));
+                            return Err(ToolError::InvalidInput(
+                                agent_type_tools_denied_error(&matched).into(),
+                            ));
                         } else {
                             Self::emit_failed(
                                 &bus,
@@ -4324,23 +5084,27 @@ impl Tool for AgentTool {
                                 started.elapsed().as_millis() as u64,
                             )
                             .await;
-                            return Err(ToolError::InvalidInput(format!(
-                                "Agent type '{explicit}' not found. Available agents: {}",
-                                available_display()
-                            )));
+                            return Err(ToolError::InvalidInput(
+                                format!(
+                                    "Agent type '{explicit}' not found. Available agents: {}",
+                                    available_display()
+                                )
+                                .into(),
+                            ));
                         }
                     }
                 }
             }
         };
 
-        let selected = spawner
+        let mut selected = spawner
             .resolve_selection(&effective_type, parsed.model.as_deref())
             .await;
         if caller_is_in_process_teammate && selected.background {
             return Err(ToolError::InvalidInput(format!(
-                "In-process teammates cannot spawn background agents. Agent '{}' has background: true in its definition.", selected.agent_type
-            )));
+                "In-process teammates cannot spawn background agents. Agent '{}' has background: true in its definition.",
+                selected.agent_type
+            ).into()));
         }
 
         // Claude Code 2.1.217 rejects rather than queues a launch once the
@@ -4356,9 +5120,9 @@ impl Tool for AgentTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                concurrent_cap,
-            )));
+            return Err(ToolError::InvalidInput(
+                concurrent_subagent_limit_error(concurrent_cap).into(),
+            ));
         }
 
         // Share the main session's max-budget gate with every foreground and
@@ -4380,11 +5144,10 @@ impl Tool for AgentTool {
             )
             .await;
             return Err(match budget.max_session_nano_usd() {
-                Some(limit_nano_usd) => ToolError::InvalidInput(budget_limit_reached_error(
-                    current_nano_usd,
-                    limit_nano_usd,
-                )),
-                None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+                Some(limit_nano_usd) => ToolError::InvalidInput(
+                    budget_limit_reached_error(current_nano_usd, limit_nano_usd).into(),
+                ),
+                None => ToolError::Internal(format_budget_denied(current_nano_usd).into()),
             });
         }
 
@@ -4409,11 +5172,14 @@ impl Tool for AgentTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
+                return Err(ToolError::InvalidInput(
+                    format!(
+                        "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
 Complete the remaining work directly with your tools instead of spawning more agents. \
 If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
-                )));
+                    )
+                    .into(),
+                ));
             }
         }
 
@@ -4491,12 +5257,15 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::Internal(format!(
-                    "Agent '{effective_type}' requires MCP servers matching: {}. \
+                return Err(ToolError::Internal(
+                    format!(
+                        "Agent '{effective_type}' requires MCP servers matching: {}. \
 MCP servers with tools: {servers_list}. \
 Use /mcp to configure and authenticate the required MCP servers.",
-                    missing.join(", ")
-                )));
+                        missing.join(", ")
+                    )
+                    .into(),
+                ));
             }
         }
 
@@ -4514,7 +5283,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             &bus,
             &invocation_id,
             &effective_type,
-            parsed.prompt.chars().count(),
+            prompt_source
+                .string_units("")
+                .map_or(0, |units| units.len()),
         )
         .await;
 
@@ -4562,7 +5333,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // only an explicit `run_in_background: true`, or `background: true` in a
         // definition, still can. The two explicit arms stay outside the factor,
         // exactly as the binary has them.
-        let run_in_background = should_run_in_background(BackgroundDecision {
+        let mut run_in_background = should_run_in_background(BackgroundDecision {
             wants_background: parsed.run_in_background,
             definition_background: selected.background,
             is_builtin_web_fetch: selected.is_built_in && effective_type == WEB_FETCH_AGENT_TYPE,
@@ -4574,6 +5345,270 @@ Use /mcp to configure and authenticate the required MCP servers.",
             caller_is_in_process_teammate,
             background_tasks_disabled,
         });
+        // Claude's `agent.spawn` Mod chain is two-phase: `next(e)` first hands
+        // the rewritten request back to this tool, then waits for the real
+        // child to start. Keep the completion handle alive through all
+        // revalidation and worktree setup; dropping it rejects `next(e)`.
+        let original_type = effective_type.clone();
+        let original_cwd = parsed.cwd.clone();
+        let original_background = run_in_background;
+        let mut spawn_input = json!({
+            "tool_use_id": ctx.tool_use_id.as_ref().map(ToString::to_string).unwrap_or_default(),
+            "prompt": parsed.prompt,
+            "description": parsed.description,
+            "subagentType": effective_type,
+            "provider": if selected.is_built_in {
+                json!({"plugin":"engine","tier":"core"})
+            } else if selected.source == "plugin" {
+                json!({"plugin":effective_type.split(':').next().unwrap_or("engine"),"tier":"user"})
+            } else {
+                json!({"plugin":"engine","tier":"core"})
+            },
+            "parentModel": main_loop_model_parent(&ctx).unwrap_or_else(|| self.ctx.default_model.clone()),
+            "permissionMode": self.ctx.permission_gate.as_ref()
+                .and_then(|gate| gate.permission_mode())
+                .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_owned()),
+            "background": run_in_background,
+            "fork": is_fork,
+        });
+        if let Some(agent_id) = ctx.agent_id {
+            spawn_input["parentAgentId"] = json!(agent_id.as_uuid().to_string());
+        }
+        if let Some(name) = parsed.name.as_deref() {
+            spawn_input["name"] = json!(name);
+        }
+        if !is_fork {
+            if let Some(model) = parsed.model.as_deref() {
+                spawn_input["model"] = json!(model);
+            }
+        }
+        if let Some(cwd) = parsed.cwd.as_deref() {
+            spawn_input["cwd"] = json!(cwd);
+        }
+        let original_spawn_input =
+            generated_spawn_source(&spawn_input, &prompt_source, &description_source);
+        let mut mod_start: Option<Box<dyn AgentSpawnStart>> = None;
+        match spawner
+            .begin_agent_spawn(
+                generated_spawn_source(&spawn_input, &prompt_source, &description_source),
+                ctx.agent_spawn_provenance.clone(),
+            )
+            .await
+        {
+            Ok(AgentSpawnAdmission::Bypass) => {}
+            Ok(AgentSpawnAdmission::Answered(answer)) => {
+                self.release_spawn_reservation();
+                return Err(ToolError::InvalidInput(plugin_spawn_denied_message(
+                    &answer,
+                )));
+            }
+            Ok(AgentSpawnAdmission::Forwarded { input, start }) => {
+                let rewritten = input != original_spawn_input;
+                let next_type = input
+                    .get_property("subagentType")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput("agent.spawn has no subagentType".into())
+                    })?;
+                if next_type != effective_type {
+                    let exists = !is_fork
+                        && spawner
+                            .agent_listing()
+                            .await
+                            .iter()
+                            .any(|entry| entry.agent_type == next_type);
+                    if !exists {
+                        self.release_spawn_reservation();
+                        return Err(ToolError::InvalidInput(format!(
+                            "a hook's subagentType '{next_type}' names no agent this call can dispatch"
+                        ).into()));
+                    }
+                    if let Some(gate) = &self.ctx.permission_gate {
+                        if let Some(source) = gate.agent_type_deny(next_type).await {
+                            self.release_spawn_reservation();
+                            return Err(ToolError::InvalidInput(format!(
+                                "A plugin's agent.spawn hook rewrote this spawn to agent type '{next_type}', which a permission rule denies ({source}). Dispatch it directly."
+                            ).into()));
+                        }
+                    }
+                    if spawner
+                        .tools_denied_agent_types()
+                        .await
+                        .iter()
+                        .any(|kind| kind == next_type)
+                    {
+                        self.release_spawn_reservation();
+                        return Err(ToolError::InvalidInput(
+                            agent_type_tools_denied_error(next_type).into(),
+                        ));
+                    }
+                    selected = spawner
+                        .resolve_selection(
+                            next_type,
+                            input.get_property("model").and_then(|value| value.as_str()),
+                        )
+                        .await;
+                    effective_type = next_type.to_owned();
+                }
+                let Some(rewritten_prompt) = input.subprojection("/prompt").ok().filter(|value| {
+                    value
+                        .at_pointer("")
+                        .is_some_and(|root| root.code_units().is_some())
+                }) else {
+                    self.release_spawn_reservation();
+                    return Err(ToolError::InvalidInput(
+                        "agent.spawn has no string prompt".into(),
+                    ));
+                };
+                parsed.prompt = rewritten_prompt
+                    .string_at("")
+                    .unwrap_or_default()
+                    .to_owned();
+                prompt_source = rewritten_prompt;
+                description_source = input
+                    .subprojection("/description")
+                    .ok()
+                    .filter(|value| value.string_units("").is_some())
+                    .map(|value| normalize_description_source(&value))
+                    .unwrap_or_else(|| source_text_projection(""));
+                parsed.description = String::from_utf16_lossy(
+                    &description_source
+                        .string_units("")
+                        .expect("description source is a root string"),
+                );
+                parsed.model = input
+                    .get_property("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                parsed.cwd = input
+                    .get_property("cwd")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                if parsed.model
+                    != original_spawn_input
+                        .get_property("model")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                {
+                    selected = spawner
+                        .resolve_selection(&effective_type, parsed.model.as_deref())
+                        .await;
+                }
+                let background = input
+                    .get_property("background")
+                    .and_then(|value| value.as_bool());
+                if background != Some(original_background) || effective_type != original_type {
+                    if caller_is_in_process_teammate
+                        && background == Some(true)
+                        && !original_background
+                    {
+                        self.release_spawn_reservation();
+                        return Err(ToolError::InvalidInput(
+                            "In-process teammates cannot spawn background agents; a plugin's agent.spawn hook backgrounded this one.".into()
+                        ));
+                    }
+                    parsed.run_in_background = background;
+                    run_in_background = should_run_in_background(BackgroundDecision {
+                        wants_background: parsed.run_in_background,
+                        definition_background: selected.background,
+                        is_builtin_web_fetch: selected.is_built_in
+                            && effective_type == WEB_FETCH_AGENT_TYPE,
+                        is_coordinator: self
+                            .ctx
+                            .coordinator_mode
+                            .as_ref()
+                            .is_some_and(|m| m.is_enabled()),
+                        caller_is_in_process_teammate,
+                        background_tasks_disabled,
+                    });
+                }
+                let effective_isolation_after_rewrite = parsed
+                    .isolation
+                    .as_deref()
+                    .or(selected.isolation.as_deref());
+                if parsed.cwd != original_cwd
+                    && effective_isolation_after_rewrite == Some("worktree")
+                {
+                    self.release_spawn_reservation();
+                    return Err(ToolError::InvalidInput(
+                        "A plugin's agent.spawn hook set cwd on a spawn isolated in a worktree; cwd and isolation: \"worktree\" are mutually exclusive.".into()
+                    ));
+                }
+                if effective_type != original_type {
+                    let required = spawner.resolve_required_mcp_servers(&effective_type).await;
+                    if !required.is_empty() {
+                        let available = match &self.ctx.mcp_registry {
+                            Some(registry) => registry.servers_with_tools().await,
+                            None => Vec::new(),
+                        };
+                        let missing: Vec<_> = required
+                            .iter()
+                            .filter(|pattern| {
+                                !available.iter().any(|server| {
+                                    server.to_lowercase().contains(&pattern.to_lowercase())
+                                })
+                            })
+                            .collect();
+                        if !missing.is_empty() {
+                            self.release_spawn_reservation();
+                            return Err(ToolError::InvalidInput(format!(
+                                "Agent '{}', named by a plugin's agent.spawn hook, requires MCP servers matching: {}; none has tools yet. Use /mcp to configure and authenticate them.",
+                                effective_type,
+                                missing
+                                    .iter()
+                                    .map(|value| value.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ).into()));
+                        }
+                    }
+                }
+                if rewritten {
+                    if let Some(gate) = &self.ctx.permission_gate {
+                        let mut rewritten_input = generated_builtin_result(&json!({
+                            "subagent_type": effective_type,
+                            "prompt": "",
+                            "description": parsed.description,
+                            "model": parsed.model,
+                            "run_in_background": run_in_background,
+                            "cwd": parsed.cwd,
+                        }));
+                        rewritten_input
+                            .set_field("prompt", prompt_source.clone())
+                            .expect("generated Agent input has its prompt field");
+                        if let Some(verdict) = gate.check_mod_query(
+                            "Agent",
+                            &rewritten_input,
+                            &lingxi_core::host::permission_gate::PermissionCheckContext::default(),
+                        ).await {
+                            if verdict.verdict.rule.is_some() && verdict.verdict.decision != lingxi_core::host::permission_gate::ModToolCheckDecision::Allow {
+                                self.release_spawn_reservation();
+                                let mut message = "A plugin's agent.spawn hook rewrote this spawn into one a permission rule refuses: ".encode_utf16().collect::<Vec<_>>();
+                                message.extend(
+                                    verdict
+                                        .verdict
+                                        .reason
+                                        .as_ref()
+                                        .and_then(|reason| reason.string_units(""))
+                                        .unwrap_or_else(|| "permission denied".encode_utf16().collect()),
+                                );
+                                message.extend(" Dispatch it directly.".encode_utf16());
+                                return Err(ToolError::InvalidInput(
+                                    source_text_projection_units(&message),
+                                ));
+                            }
+                        }
+                    }
+                }
+                mod_start = Some(start);
+            }
+            Err(error) => {
+                self.release_spawn_reservation();
+                return Err(ToolError::Internal(
+                    format!("agent.spawn Mod dispatch failed: {error}").into(),
+                ));
+            }
+        }
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -4652,9 +5687,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
-                    return Err(ToolError::Internal(format!(
-                        "Cannot create agent worktree: {e}"
-                    )));
+                    return Err(ToolError::Internal(
+                        format!("Cannot create agent worktree: {e}").into(),
+                    ));
                 }
             }
         }
@@ -4674,6 +5709,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     started,
                     spawner.as_ref(),
                     &parsed,
+                    &prompt_source,
+                    &description_source,
                     &effective_type,
                     &selected,
                     is_fork,
@@ -4684,6 +5721,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     effective_isolation.clone(),
                     resolved_cwd,
                     agent_worktree,
+                    mod_start,
                 )
                 .await;
         }
@@ -4701,56 +5739,41 @@ Use /mcp to configure and authenticate the required MCP servers.",
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> =
+            spawner.decorate_tool_invoker(Arc::new(invoker_impl));
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget: budget.clone(),
         };
-        // Fork path: build the byte-exact forked prefix from the parent's LAST
-        // assistant message (claude `assistantMessage` = the in-flight assistant
-        // turn that issued THIS tool_use — the most recent
-        // `ConversationMessage::Assistant` in `ctx.messages`). With no assistant
-        // message present, `build_forked_messages` falls back to a single
-        // directive user message (its no-tool_use branch). The directive text is
-        // ALREADY the trailing block inside that prefix, so on the fork path
+        // Fork path: preserve the parent's history and replace its in-flight
+        // assistant with the cloned tool-use/placeholder directive tail. The
+        // directive text is already the trailing block, so on the fork path
         // `request.prompt` is unused as a seed (the spawner seeds an empty
         // prompt_messages — see handle.rs spawn note (A)).
-        let fork_context_messages: Option<Vec<lingxi_core::types::ConversationMessage>> =
-            if is_fork {
-                let assistant = ctx.messages.iter().rev().find(|m| {
-                    matches!(m, lingxi_core::types::ConversationMessage::Assistant { .. })
-                });
-                let fork_msgs = match assistant {
-                    Some(a) => {
-                        lingxi_core::host::fork_subagent::build_forked_messages(&parsed.prompt, a)
-                    }
-                    // No assistant turn yet → fallback directive-only user message.
-                    None => lingxi_core::host::fork_subagent::build_forked_messages(
-                        &parsed.prompt,
-                        &lingxi_core::types::ConversationMessage::Assistant {
-                            id: lingxi_core::types::MessageId::new(),
-                            content: vec![],
-                            stop_reason: None,
-                        },
-                    ),
-                };
-                // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
-                // runs in an isolated worktree, claude appends
-                // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
-                // fork prefix. LingXi's fork path deliberately carries no
-                // teammate/isolation/cwd overrides (see the request fields below), so
-                // there is no worktree to notice here — do NOT fabricate one.
-                Some(fork_msgs)
-            } else {
-                None
-            };
+        let fork_context_messages: Option<Vec<lingxi_core::types::ConversationMessage>> = if is_fork
+        {
+            let fork_msgs = lingxi_core::host::fork_subagent::build_forked_context(
+                &prompt_source,
+                &ctx.messages,
+            );
+            // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
+            // runs in an isolated worktree, claude appends
+            // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
+            // fork prefix. LingXi's fork path deliberately carries no
+            // teammate/isolation/cwd overrides (see the request fields below), so
+            // there is no worktree to notice here — do NOT fabricate one.
+            Some(fork_msgs)
+        } else {
+            None
+        };
 
         let request = SubagentSpawnRequest {
+            agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),
-            prompt: parsed.prompt.clone(),
+            prompt: prompt_source.clone(),
             observer: selected.observer.clone().or_else(|| {
                 ctx.observer
                     .as_ref()
@@ -4763,7 +5786,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // resolved `cwd`/`worktree` are computed above before the sync/async
             // branch. Remote/team-specific execution remains a higher-level
             // router concern.
-            description: Some(parsed.description.clone()),
+            description: Some(description_source.clone()),
             // Fork path sends `model: None` (claude `model: undefined`) so the
             // FORK_AGENT's `Inherit` resolves to the parent model unchanged; the
             // explicit-model override is honored only on the non-fork path.
@@ -4806,6 +5829,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // `ToolUseContext`) means the child runs with FORK_AGENT's empty
             // system prompt — functional, not byte-identical — see follow-ups.
             fork_context_messages,
+            instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: if is_fork {
                 ctx.fork_parent_system_prompt.clone()
             } else {
@@ -4815,9 +5839,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             structured_output_mode: StructuredOutputMode::default(),
             structured_output_parse_retries: 0,
             effort: None,
-            // Sync spawn: no background task / notification, so no tool_use_id
-            // to stamp (only the async/background path threads it).
-            tool_use_id: None,
+            // Keep the model's tool-use identity across both launch paths so
+            // foreground registration and Mod `agent.spawn` name the same call.
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             creator_teammate_name: ctx.agent_name.clone(),
             creator_team_name: ctx.team_name.clone(),
             creator_agent_id: ctx.agent_id,
@@ -4850,6 +5874,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback_opt_in: !is_fork,
+            parent_permission_mode: parent_permission_mode(&ctx, self.ctx.permission_gate.as_ref()),
+            handback_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            handback_ends_turn_enabled: None,
+            restore_handback_start: None,
+            parent_native_query_depth: ctx.native_query_depth,
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per
@@ -4867,65 +5899,123 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // payload so the turn loop's stream-json sink can re-emit it with
                 // `parent_tool_use_id` set. Everything else is a plain nested
                 // activity line.
-                let data = decode_forward_subagent_message(&line).map_or_else(
-                    || serde_json::json!({ "subagent_activity": line }),
-                    |message| serde_json::json!({ "forward_subagent_message": message }),
-                );
+                let data = if let Some((message, display_only)) =
+                    decode_forward_subagent_tombstone(&line)
+                {
+                    serde_json::json!({
+                        "forward_server_fallback_tombstone": {
+                            "message": message,
+                            "display_only": display_only,
+                        }
+                    })
+                } else {
+                    decode_forward_subagent_message(&line).map_or_else(
+                        || serde_json::json!({ "subagent_activity": line }),
+                        |message| serde_json::json!({ "forward_subagent_message": message }),
+                    )
+                };
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: lingxi_core::types::ToolUseId::new(),
-                        data,
+                        data: generated_builtin_result(&data),
                     })
                     .await;
             }
         });
 
-        let (outcome, foreground_worktree_result) =
-            if let Some(registry) = self.ctx.task_registry.clone() {
-                match foreground_task::run(
-                    spawner.clone(),
-                    request,
-                    inherit,
-                    prog_tx,
-                    progress.clone(),
-                    ctx.tool_use_id.clone(),
-                    registry,
-                    self.ctx.clone(),
-                )
-                .await
-                {
-                    foreground_task::ForegroundResult::Finished(result, worktree) => {
-                        (result, Some(worktree))
-                    }
-                    foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
-                        if let Some(name) = parsed.name.as_deref() {
-                            if let Some(names) = self.ctx.agent_name_registry.as_ref() {
-                                names.register(name, launch.agent_id).await;
-                            } else {
-                                spawner.register_name(name, launch.agent_id).await;
-                            }
+        let (outcome, foreground_worktree_result) = if let Some(registry) =
+            self.ctx.task_registry.clone()
+        {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let has_mod = mod_start.is_some();
+            let run = foreground_task::run(
+                spawner.clone(),
+                request,
+                inherit,
+                prog_tx,
+                progress.clone(),
+                ctx.tool_use_id.clone(),
+                registry,
+                self.ctx.clone(),
+                has_mod.then_some(started_tx),
+            );
+            let result = if let Some(start) = mod_start.take() {
+                let mut run = Box::pin(run);
+                tokio::select! {
+                    biased;
+                    receipt = started_rx => {
+                        match receipt {
+                            Ok((agent_id, model)) => start.started(agent_id, model),
+                            Err(_) => start.failed("agent.spawn: the foreground child did not start".into()),
                         }
-                        let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| {
-                            reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
-                        });
-                        return Ok(async_launch_result(
-                            launch,
-                            Some(task_id),
-                            &parsed.prompt,
-                            &parsed.description,
-                            &selected.resolved_model,
-                            can_read,
-                        ));
+                        run.await
+                    }
+                    result = &mut run => {
+                        start.failed("agent.spawn: the foreground child did not start".into());
+                        result
                     }
                 }
             } else {
-                (
-                    spawner
-                        .spawn_with_progress(request, inherit, Some(prog_tx))
-                        .await,
-                    None,
-                )
+                run.await
             };
+            match result {
+                foreground_task::ForegroundResult::Finished(result, worktree) => {
+                    (result, Some(worktree))
+                }
+                foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
+                    if let Some(name) = parsed.name.as_deref() {
+                        if let Some(names) = self.ctx.agent_name_registry.as_ref() {
+                            names.register(name, launch.agent_id).await;
+                        } else {
+                            spawner.register_name(name, launch.agent_id).await;
+                        }
+                    }
+                    let can_read = ctx.subagent_registry.as_ref().is_some_and(|reg| {
+                        reg.find_by_name("Read").is_some() || reg.find_by_name("Bash").is_some()
+                    });
+                    return Ok(async_launch_result(
+                        launch,
+                        Some(task_id),
+                        &prompt_source,
+                        &description_source,
+                        &selected.resolved_model,
+                        can_read,
+                    ));
+                }
+            }
+        } else {
+            let result = if let Some(start) = mod_start.take() {
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let observer = Arc::new(ModStartReceiptObserver(std::sync::Mutex::new(Some(
+                    started_tx,
+                ))));
+                let mut spawn = Box::pin(spawner.spawn_with_observer(
+                    request,
+                    inherit,
+                    Some(prog_tx),
+                    Some(observer),
+                ));
+                tokio::select! {
+                    biased;
+                    receipt = started_rx => {
+                        match receipt {
+                            Ok((agent_id, model)) => start.started(agent_id, model),
+                            Err(_) => start.failed("agent.spawn: the foreground child did not start".into()),
+                        }
+                        spawn.await
+                    }
+                    result = &mut spawn => {
+                        start.failed("agent.spawn: the foreground child did not start".into());
+                        result
+                    }
+                }
+            } else {
+                spawner
+                    .spawn_with_progress(request, inherit, Some(prog_tx))
+                    .await
+            };
+            (result, None)
+        };
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -4938,7 +6028,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // agents' background work is untouched.
         if let Some(agent_id) = outcome.as_ref().ok().map(subagent_result_agent_id) {
             if let Some(registry) = self.ctx.task_registry.as_ref() {
-                let killed = registry.kill_background_shells_for_agent(agent_id).await;
+                let retains_owned_work = matches!(
+                    &outcome,
+                    Ok(SubagentResult::Completed { handback: Some(state), .. }) if state.active
+                ) && registry.agent_waiting_on_owned_work(agent_id).await;
+                let killed = if retains_owned_work {
+                    0
+                } else {
+                    registry.kill_background_shells_for_agent(agent_id).await
+                };
                 if killed > 0 {
                     tracing::debug!(
                         target: "tool_agent",
@@ -4972,6 +6070,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
 
         match outcome {
             Ok(SubagentResult::Completed {
+                handback,
                 agent_id,
                 content,
                 usage,
@@ -4990,7 +6089,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     &bus,
                     &effective_type,
                     &selected.resolved_model,
-                    parsed.prompt.chars().count() as u64,
+                    prompt_source
+                        .string_units("")
+                        .map_or(0, |units| units.len()) as u64,
                     response_char_count,
                     assistant_message_count,
                     total_tool_use_count,
@@ -5010,9 +6111,26 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // the agent's final text blocks (backward-scan applied in the
                 // runner). Re-materialize the `{type:'text', text}` blocks for the
                 // result's `content` array.
-                let raw_content_texts = extract_content_texts(&content);
-
                 let agent_id_str = agent_id.as_uuid().to_string();
+                let waiting_on_owned_work = if let Some(registry) = self.ctx.task_registry.as_ref()
+                {
+                    registry.agent_waiting_on_owned_work(agent_id).await
+                } else {
+                    false
+                };
+                let raw_content_texts = handback_completion_texts(
+                    handback.as_ref(),
+                    &content,
+                    parsed.name.as_deref().unwrap_or_else(|| {
+                        if selected.agent_type.is_empty() {
+                            &effective_type
+                        } else {
+                            &selected.agent_type
+                        }
+                    }),
+                    waiting_on_owned_work,
+                    self.ctx.task_registry.is_some(),
+                );
 
                 // (2.1.212) Indirect-prompt-injection hardening (claude
                 // `ZDu`/`tHu`): run the output guard over the subagent's returned
@@ -5041,7 +6159,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         &effective_type,
                         !raw_content_texts.is_empty(),
                     );
-                    content_texts.insert(0, note);
+                    content_texts.insert(0, note.encode_utf16().collect());
                 }
                 // `EZe` — the auto-mode classifier's second consumer. A
                 // subagent's hand-back is agent-authored untrusted output that
@@ -5051,24 +6169,51 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // In front of the harness notes too, matching upstream, which
                 // unshifts onto the already-noted content. The work is always
                 // delivered — this only ever adds a warning.
-                if let Some(gate) = self.ctx.permission_gate.as_ref() {
+                let completed_work_review =
+                    match handback.as_ref().and_then(|state| state.disposition) {
+                        Some(
+                            lingxi_core::host::handback::HandbackDisposition::Send
+                            | lingxi_core::host::handback::HandbackDisposition::Flagged,
+                        ) => None,
+                        Some(lingxi_core::host::handback::HandbackDisposition::Withheld) => {
+                            Some(source_text_projection(""))
+                        }
+                        None => Some(source_text_projection_units(&join_utf16_lines(
+                            &content_texts,
+                        ))),
+                    };
+                if let (Some(gate), Some(handed_back)) =
+                    (self.ctx.permission_gate.as_ref(), completed_work_review)
+                {
                     let transcript = self
                         .ctx
                         .subagent_spawner
                         .as_ref()
                         .and_then(|spawner| spawner.transcript_path(agent_id));
-                    let handed_back = content_texts.join("\n");
                     if let Some(review) = gate
                         .review_subagent_handoff(transcript.as_deref(), &handed_back)
                         .await
                     {
-                        content_texts.insert(0, render_handoff_review(&review));
+                        content_texts.insert(
+                            0,
+                            render_handoff_review(&review)
+                                .string_units("")
+                                .expect("handoff warning is a root string"),
+                        );
                     }
                 }
-                let content_blocks: Vec<Value> = content_texts
+                let content_blocks: Vec<Utf16JsonProjection> = content_texts
                     .iter()
-                    .map(|t| json!({ "type": "text", "text": t }))
+                    .map(|units| {
+                        Utf16JsonProjection::object(vec![
+                            ("type".into(), source_text_projection("text")),
+                            ("text".into(), source_text_projection_units(units)),
+                        ])
+                        .expect("generated Agent text block is an object")
+                    })
                     .collect();
+                let content_blocks = Utf16JsonProjection::array(content_blocks)
+                    .expect("generated Agent content is an array");
 
                 // The model-facing string (claude `mapToolResultToToolResultBlockParam`,
                 // AgentTool.tsx:1340-1373) — consumed by orchestrator
@@ -5098,59 +6243,53 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // web-fetch request counts, service tier, 1h/5m cache split)
                 // is DEFERRED pending the deeper `llm_runtime::ExecutionUsage` extension
                 // (see SubagentUsage doc); the key SHAPE matches now.
-                let mut data = json!({
+                let usage_data = generated_builtin_result(&json!({
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": usage.cache_read_input_tokens,
+                    "server_tool_use": serde_json::Value::Null,
+                    "service_tier": serde_json::Value::Null,
+                    "cache_creation": serde_json::Value::Null,
+                }));
+                let mut data = generated_builtin_result(&json!({
                     "status": "completed",
-                    "prompt": parsed.prompt,
+                    "prompt": "",
                     "agentId": agent_id_str,
                     "agentType": effective_type,
-                    "content": content_blocks,
+                    "content": [],
                     "totalToolUseCount": total_tool_use_count,
                     "totalDurationMs": total_duration_ms,
                     "totalTokens": total_tokens,
-                    "usage": {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                        "cache_read_input_tokens": usage.cache_read_input_tokens,
-                        "server_tool_use": serde_json::Value::Null,
-                        "service_tier": serde_json::Value::Null,
-                        "cache_creation": serde_json::Value::Null,
-                    },
-                    // model-facing string consumed by orchestrator
-                    // `tool_result_to_model_text` (turn_loop.rs).
-                    "model_content": model_content,
-                    // R7 (single-fire): the child runner (`run_subagent`)
-                    // already fired the canonical `SubagentStart` (collecting
-                    // additionalContext for the child) and the child's own
-                    // frontmatter `Stop`→`SubagentStop`, exactly as claude
-                    // does inside `runAgent`. This engine-internal flag tells
-                    // the orchestrator chokepoint to SKIP its own
-                    // SubagentStart fire (no double-fire) and to fire only the
-                    // session/plugin `SubagentStop` complement. Invisible to
-                    // the model (it reads `model_content`) and never written
-                    // to JSONL — same category as `model_content` itself.
-                    "subagentHooksFired": true,
-                });
+                    "usage": {},
+                }));
+                data.set_field("prompt", prompt_source.clone())
+                    .expect("generated completed Agent result is an object");
+                data.set_field("content", content_blocks)
+                    .expect("generated completed Agent result is an object");
+                data.set_field("usage", usage_data)
+                    .expect("generated completed Agent result is an object");
                 // claude spreads `worktreePath`/`worktreeBranch` into `data` ONLY
                 // when the worktree was KEPT (the agent left changes).
                 if let Some((path, branch)) = &worktree_result {
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.insert("worktreePath".into(), json!(path));
-                        obj.insert("worktreeBranch".into(), json!(branch));
-                    }
+                    data.set_field("worktreePath", source_text_projection(path))
+                        .expect("generated completed Agent result is an object");
+                    data.set_field("worktreeBranch", source_text_projection(branch))
+                        .expect("generated completed Agent result is an object");
                 }
                 Ok(ToolCallResult {
                     data,
-                    model_content: None,
+                    model_content: Some(model_content),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: true,
                 })
             }
             Ok(SubagentResult::Failed { reason, .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "subagent_failed", duration_ms).await;
-                Err(ToolError::Internal(reason))
+                Err(ToolError::SubagentFailed(reason.into()))
             }
             Ok(SubagentResult::Killed { .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
@@ -5179,9 +6318,12 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     duration_ms,
                 )
                 .await;
-                Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
-                )))
+                Err(ToolError::InvalidInput(
+                    concurrent_subagent_limit_error(
+                        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
+                    )
+                    .into(),
+                ))
             }
             // A plugin hook saying "no" is a POLICY outcome, not a crash.
             // Folding it into `Internal` told the user the runtime broke and
@@ -5197,11 +6339,17 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // and repeatedly.
                 self.release_spawn_reservation();
                 Self::emit_failed(&bus, &invocation_id, "spawn_denied_by_hook", duration_ms).await;
-                Err(ToolError::InvalidInput(format!("Agent: {reason}")))
+                Err(ToolError::InvalidInput(agent_spawn_error_message(
+                    "Agent: ",
+                    &lingxi_core::host::subagent_spawn::SubagentSpawnError::DeniedByHook(reason),
+                )))
             }
             Err(e) => {
                 Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;
-                Err(ToolError::Internal(format!("Agent: spawner failed: {e}")))
+                Err(ToolError::SubagentFailed(agent_spawn_error_message(
+                    "Agent: spawner failed: ",
+                    &e,
+                )))
             }
         }
     }
@@ -5219,6 +6367,33 @@ Use /mcp to configure and authenticate the required MCP servers.",
 /// builder. That is how they raced.
 #[cfg(test)]
 pub(crate) static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod forwarded_server_fallback_progress_tests {
+    use super::decode_forward_subagent_tombstone;
+
+    #[test]
+    fn tombstone_progress_preserves_the_complete_row_and_display_flag() {
+        let row = serde_json::json!({
+            "type": "assistant",
+            "uuid": "outer-row-id",
+            "timestamp": "2026-10-04T00:00:00.000Z",
+            "message": {"id": "inner-message-id", "content": []},
+        });
+        let line = serde_json::json!({
+            lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL: {
+                "message": row,
+                "display_only": true,
+            }
+        })
+        .to_string();
+        let (decoded, display_only) =
+            decode_forward_subagent_tombstone(&line).expect("typed progress envelope");
+        assert_eq!(decoded["uuid"], "outer-row-id");
+        assert_eq!(decoded["message"]["id"], "inner-message-id");
+        assert!(display_only);
+    }
+}
 
 #[cfg(test)]
 #[path = "agent_test.rs"]

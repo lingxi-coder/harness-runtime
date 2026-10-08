@@ -1,0 +1,11 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Return the fixed provider error fixture response.",
+  "response_body_case": "nested-error-message-lone-surrogate",
+  "response_header": { "x-should-retry": "false" },
+  "cases": [
+    { "id": "http-401-no-retry-header", "session_id": "00000000-0000-4000-8000-000000002961", "http_status": 401 },
+    { "id": "http-500-no-retry-header", "session_id": "00000000-0000-4000-8000-000000002962", "http_status": 500 }
+  ]
+}

@@ -59,7 +59,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use crate::CommandRegistry;
 use async_trait::async_trait;
-use std::collections::HashSet;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -199,12 +199,18 @@ fn home_dir() -> PathBuf {
 /// Snapshot the names of every registry entry loaded from the skills layer
 /// (`SlashCommand.loaded_from == Some("skills")`) — the Rust analog of the TS
 /// `new Set(r.map((p) => p.name))` over `ZR(n)`'s result.
-fn skill_loaded_names(reg: &CommandRegistry) -> HashSet<String> {
-    reg.list_all()
+fn skill_loaded_names(reg: &CommandRegistry) -> Vec<Utf16JsonProjection> {
+    let mut names = Vec::new();
+    for command in reg
+        .list_all()
         .into_iter()
-        .filter(|c| c.loaded_from.as_deref() == Some("skills"))
-        .map(|c| c.name.clone())
-        .collect()
+        .filter(|command| command.loaded_from.as_deref() == Some("skills"))
+    {
+        if !names.contains(&command.name) {
+            names.push(command.name.clone());
+        }
+    }
+    names
 }
 
 /// Port of `Jtf`'s final template (v2.1.198):
@@ -289,16 +295,13 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
         };
 
         // `a = Un(s, (p) => !o.has(p.name))`, `l = Un(r, (p) => !i.has(p.name))`.
-        let added = after.difference(&before).count();
-        let removed = before.difference(&after).count();
+        let added = after.iter().filter(|name| !before.contains(name)).count();
+        let removed = before.iter().filter(|name| !after.contains(name)).count();
 
         CommandResult::Done {
-            display: Some(format_reload_message(
-                after.len(),
-                added,
-                removed,
-                self.safe_mode,
-            )),
+            display: Some(
+                (format_reload_message(after.len(), added, removed, self.safe_mode)).into(),
+            ),
         }
     }
 
@@ -345,15 +348,15 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "reload-skills".to_string(),
-            raw_args: String::new(),
+            name: "reload-skills".into(),
+            raw_args: String::new().into(),
             positional_args: Vec::new(),
         }
     }
 
     fn bundled_cmd(name: &str) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
+            name: name.into(),
             description: format!("{name} bundled"),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
@@ -531,7 +534,7 @@ mod tests {
             run(&h).await,
             "Reloaded skills: 0 skills available (1 removed)"
         );
-        assert!(registry.read().await.resolve("demo").is_none());
+        assert!(registry.read().await.resolve(&"demo".into()).is_none());
         fs::remove_dir_all(root).ok();
     }
 
@@ -642,7 +645,7 @@ mod tests {
         let reader = tokio::spawn(async move {
             let reg = read_registry.read().await;
             reader_finished_flag.store(true, Ordering::SeqCst);
-            reg.resolve("demo")
+            reg.resolve(&"demo".into())
                 .and_then(|cmd| cmd.loaded_from.clone())
                 .expect("demo resolves")
         });

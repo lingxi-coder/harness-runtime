@@ -1,0 +1,9 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "model": "claude-sonnet-4-5",
+  "session_id": "00000000-0000-4000-8000-000000003091",
+  "skill_name": "native-width-probe",
+  "ascii_tail_length": 250,
+  "prompt": "Return the fixed skill-width probe response."
+}

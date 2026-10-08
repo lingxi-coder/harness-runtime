@@ -35,7 +35,7 @@ impl BuiltinCommandHandler for DoctorHandler {
         let report = self.handle.run_doctor_checks().await;
         telemetry::emit_command_completed(cmd_evt::DOCTOR_COMPLETED, "");
         CommandResult::Done {
-            display: Some(render_doctor(&report)),
+            display: Some((render_doctor(&report)).into()),
         }
     }
     fn name(&self) -> &str {
@@ -77,7 +77,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "doctor".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

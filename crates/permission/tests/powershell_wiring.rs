@@ -7,12 +7,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::filesystem::FsRoots;
 use permission::policy::PermissionPolicy;
 use permission::powershell_parse::{parse_ps_ast_json, ParseResult, PwshParser};
 use permission::result::PermissionResult;
 use permission::PermissionMode;
-use serde_json::json;
+
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+    };
+}
 
 /// A parser that returns a fixed AST built from a JSON fixture (bypasses `pwsh`).
 struct FakeParser(ParseResult);
@@ -68,8 +74,8 @@ fn powershell_outside_cwd_asks_with_containment_message() {
     );
     match result {
         PermissionResult::Ask { prompt, .. } => assert_eq!(
-            prompt.message,
-            "get-content targeting '/etc/passwd' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/proj/work'."
+            prompt.message.string_at(""),
+            Some("get-content targeting '/etc/passwd' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/proj/work'.")
         ),
         other => panic!("expected containment Ask, got {other:?}"),
     }
@@ -81,7 +87,7 @@ fn powershell_remove_item_protected_denies() {
     let result = policy.authorize("PowerShell", &json!({ "command": "Remove-Item /etc" }));
     match result {
         PermissionResult::Deny { explanation, .. } => assert_eq!(
-            explanation.as_deref(),
+            explanation.as_ref().and_then(|source| source.string_at("")),
             Some("Remove-Item on system path '/etc' is blocked. This path is protected from removal.")
         ),
         other => panic!("expected containment Deny, got {other:?}"),
@@ -97,9 +103,13 @@ fn powershell_inside_cwd_does_not_trigger_containment() {
     let result = policy.authorize("PowerShell", &json!({ "command": "Get-Content notes.txt" }));
     if let PermissionResult::Ask { prompt, .. } = &result {
         assert!(
-            !prompt.message.contains("targeting"),
+            !prompt
+                .message
+                .string_at("")
+                .unwrap_or_default()
+                .contains("targeting"),
             "inside-cwd path must not produce the containment message: {}",
-            prompt.message
+            prompt.message.string_at("").unwrap_or_default()
         );
     }
 }
@@ -120,8 +130,8 @@ fn powershell_without_parser_passes_through() {
     let result = policy.authorize("PowerShell", &json!({ "command": "echo `u{263A}" }));
     match result {
         PermissionResult::Ask { prompt, .. } => assert_eq!(
-            prompt.message,
-            "PowerShell command could not be statically validated: PowerShell parser precheck rejected unsupported `u{...}` escape"
+            prompt.message.string_at(""),
+            Some("PowerShell command could not be statically validated: PowerShell parser precheck rejected unsupported `u{...}` escape")
         ),
         other => panic!("expected invalid-parse Ask, got {other:?}"),
     }
@@ -137,7 +147,11 @@ fn powershell_without_parser_passes_through() {
     );
     if let PermissionResult::Ask { prompt, .. } = &result {
         assert!(
-            !prompt.message.contains("targeting"),
+            !prompt
+                .message
+                .string_at("")
+                .unwrap_or_default()
+                .contains("targeting"),
             "invalid parse must pass through"
         );
     }

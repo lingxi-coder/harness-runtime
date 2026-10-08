@@ -23,54 +23,59 @@ pub fn strip_images_from_messages(messages: Vec<ConversationMessage>) -> Vec<Con
     messages.into_iter().map(strip_one).collect()
 }
 
-fn strip_one(message: ConversationMessage) -> ConversationMessage {
-    // TS strips only `user` messages (`compact.ts:147`); others pass through.
-    let ConversationMessage::User {
-        id,
-        content,
-        is_meta,
-        is_compact_summary,
-        is_visible_in_transcript_only,
-    } = message
-    else {
+fn strip_one(mut message: ConversationMessage) -> ConversationMessage {
+    let ConversationMessage::User { content, .. } = &mut message else {
         return message;
     };
-    let new_content = content
-        .into_iter()
-        .map(|block| match block {
-            ContentBlock::Image { .. } => ContentBlock::Text {
-                text: STRIPPED_IMAGE_PLACEHOLDER.to_string(),
-            },
-            ContentBlock::Document { .. } => ContentBlock::Text {
-                text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string(),
-            },
+    for block in content {
+        match block {
+            ContentBlock::Image { .. } => {
+                *block = ContentBlock::Text {
+                    text: STRIPPED_IMAGE_PLACEHOLDER.into(),
+                    citations: None,
+                }
+            }
+            ContentBlock::Document { .. } => {
+                *block = ContentBlock::Text {
+                    text: STRIPPED_DOCUMENT_PLACEHOLDER.into(),
+                    citations: None,
+                }
+            }
             ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                provider_tool_use_id,
                 content_blocks: Some(blocks),
-            } => ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                provider_tool_use_id,
-                content_blocks: Some(blocks.into_iter().map(|block| match block.get("type").and_then(serde_json::Value::as_str) {
-                    Some("image") => serde_json::json!({"type": "text", "text": STRIPPED_IMAGE_PLACEHOLDER}),
-                    Some("document") => serde_json::json!({"type": "text", "text": STRIPPED_DOCUMENT_PLACEHOLDER}),
-                    _ => block,
-                }).collect()),
-            },
-            other => other,
-        })
-        .collect();
-    ConversationMessage::User {
-        id,
-        content: new_content,
-        is_meta,
-        is_compact_summary,
-        is_visible_in_transcript_only,
+                ..
+            } => {
+                let mapped = (0..blocks
+                    .array_len("")
+                    .expect("tool result content is an array"))
+                    .map(|index| {
+                        let block = blocks
+                            .subprojection(&format!("/{index}"))
+                            .expect("indexed content exists");
+                        match block.string_at("/type") {
+                            Some("image") => {
+                                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                                    r#"{"type":"text","text":"[image]"}"#,
+                                )
+                                .unwrap()
+                            }
+                            Some("document") => {
+                                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                                    r#"{"type":"text","text":"[document]"}"#,
+                                )
+                                .unwrap()
+                            }
+                            _ => block,
+                        }
+                    })
+                    .collect();
+                *blocks = lingxi_core::types::utf16_json::Utf16JsonProjection::array(mapped)
+                    .expect("stripped blocks form an array");
+            }
+            _ => {}
+        }
     }
+    message
 }
 
 #[cfg(test)]
@@ -93,15 +98,21 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "before".to_string(),
+                    citations: None,
                 },
                 image_block(),
                 ContentBlock::Text {
                     text: "after".to_string(),
+                    citations: None,
                 },
             ],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let out = strip_images_from_messages(vec![msg]);
         let ConversationMessage::User { content, .. } = &out[0] else {
@@ -110,9 +121,9 @@ mod tests {
         // The image became a `[image]` text block; surrounding text is intact
         // and block order/count is preserved.
         assert_eq!(content.len(), 3);
-        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "before"));
-        assert!(matches!(&content[1], ContentBlock::Text { text } if text == "[image]"));
-        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "after"));
+        assert!(matches!(&content[0], ContentBlock::Text { text, .. } if text == "before"));
+        assert!(matches!(&content[1], ContentBlock::Text { text, .. } if text == "[image]"));
+        assert!(matches!(&content[2], ContentBlock::Text { text, .. } if text == "after"));
     }
 
     #[test]
@@ -130,6 +141,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![image_block()],
             stop_reason: None,
+            resumable: None,
         };
         let out = strip_images_from_messages(vec![assistant.clone()]);
         assert_eq!(out[0], assistant);
@@ -143,17 +155,26 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content: "read result".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: Some("provider-read".into()),
-                content_blocks: Some(vec![
+                content_blocks: Some(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!([
                     serde_json::json!({"type":"text", "text":"page 1"}),
                     serde_json::json!({"type":"image", "source":{"data":"large image"}}),
                     serde_json::json!({"type":"document", "source":{"data":"large document"}}),
-                ]),
+                        ]),
+                    )
+                    .expect("test content blocks are valid JSON"),
+                ),
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let output = strip_images_from_messages(vec![input]);
         let ConversationMessage::User { content, .. } = &output[0] else {
@@ -170,15 +191,13 @@ mod tests {
             panic!("tool result");
         };
         assert_eq!(tool_use_id, &id);
-        assert_eq!(content, "read result");
+        assert_eq!(content.string_at("").as_deref(), Some("read result"));
         assert_eq!(provider_tool_use_id.as_deref(), Some("provider-read"));
-        assert_eq!(
-            content_blocks.as_ref().unwrap(),
-            &vec![
-                serde_json::json!({"type":"text", "text":"page 1"}),
-                serde_json::json!({"type":"text", "text":"[image]"}),
-                serde_json::json!({"type":"text", "text":"[document]"}),
-            ]
-        );
+        let content_blocks = content_blocks.as_ref().unwrap();
+        assert_eq!(content_blocks.array_len(""), Some(3));
+        assert_eq!(content_blocks.string_at("/0/type"), Some("text"));
+        assert_eq!(content_blocks.string_at("/0/text"), Some("page 1"));
+        assert_eq!(content_blocks.string_at("/1/text"), Some("[image]"));
+        assert_eq!(content_blocks.string_at("/2/text"), Some("[document]"));
     }
 }

@@ -39,9 +39,9 @@
 
 use std::path::Path;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
 use mcp::normalization::normalize_name_for_mcp;
 use mcp::{binary_blob_saved_message, decode_base64, persist_binary_content, PersistBinaryResult};
-use serde_json::{json, Value};
 
 /// Side data the blob-persisting cases (`audio`, non-image `resource` blob)
 /// need: where to write decoded bytes, plus the `(now_millis, rand_tag)` seed
@@ -86,23 +86,29 @@ fn is_image_mime(mime: Option<&str>) -> bool {
     IMAGE_MIME_TYPES.contains(&normalized)
 }
 
-/// Transform an MCP tool-result `content` Value into its model-facing form.
-///
-/// When `content` is a JSON array, each element is run through
-/// [`transform_block`] and the (flattened) results are collected — mirroring
-/// `transformMCPResult`'s `result.content.map(transformResultContent).flat()`
-/// (`client.ts:2686-2697`). Any other Value (bare string, object, etc.) is
-/// returned unchanged, because the TS only reshapes the array form.
+/// Transform an MCP tool-result content value while retaining exact source
+/// strings and keys. Only JSON arrays are reshaped; all other source values are
+/// returned unchanged.
 #[must_use]
-pub fn transform_result_content(content: &Value, server_name: &str, ctx: PersistContext) -> Value {
-    let Some(items) = content.as_array() else {
+pub fn transform_result_content_source(
+    content: &UJP,
+    server_name: &str,
+    ctx: PersistContext,
+) -> UJP {
+    let Some(length) = content.array_len("") else {
         return content.clone();
     };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        out.extend(transform_block(item, server_name, ctx));
+    let mut out = Vec::with_capacity(length);
+    for index in 0..length {
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        let Ok(item) = content.subprojection(&format!("/{index}")) else {
+            continue;
+        };
+        out.extend(transform_block_source(&item, server_name, ctx));
     }
-    Value::Array(out)
+    UJP::array(out).expect("transformed MCP content is a valid JSON array")
 }
 
 /// Transform ONE content block, returning the model-facing block(s).
@@ -119,8 +125,8 @@ pub fn transform_result_content(content: &Value, server_name: &str, ctx: Persist
 /// - any unrecognized block → the original block verbatim (the TS `default`
 ///   returns `[]`, but here we preserve the block so unknown shapes survive the
 ///   round-trip rather than vanishing).
-fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec<Value> {
-    let kind = block.get("type").and_then(Value::as_str);
+fn transform_block_source(block: &UJP, server_name: &str, ctx: PersistContext) -> Vec<UJP> {
+    let kind = block.string_at("/type");
     match kind {
         // case 'text': `let o={type:"text",text}; if(r){if(e._meta)o._meta=e._meta}`
         // — on the tool-result path the binary `Voo`/`Rzr` runs with the 4th arg
@@ -130,22 +136,25 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
         // (no null key). The model-facing STRING reads only `text`, so the
         // preserved `_meta` does not perturb the model-text path.
         Some("text") => {
-            let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-            let mut out = text_block(text);
-            if let (Some(meta), Some(obj)) = (block.get("_meta"), out.as_object_mut()) {
-                obj.insert("_meta".to_string(), meta.clone());
+            let text = source_string_field(block, "text").unwrap_or_else(|| "".into());
+            let mut out = text_block_source(text);
+            if let Some(meta) = source_field(block, "_meta") {
+                out.set_field("_meta", meta)
+                    .expect("text block metadata field is unique");
             }
             vec![out]
         }
         // case 'audio': persistBlobToTextBlock(decode(data), mimeType, server,
         //   `[Audio from ${server}] `)  (client.ts:2490-2502)
         Some("audio") => {
-            let data = block.get("data").and_then(Value::as_str).unwrap_or("");
-            let mime = block.get("mimeType").and_then(Value::as_str);
-            let source_description = format!("[Audio from {server_name}] ");
-            vec![persist_blob_to_text_block(
-                data,
-                mime,
+            let Some(data) = strict_string_field(block, "data") else {
+                return vec![block.clone()];
+            };
+            let mime = strict_string_field(block, "mimeType");
+            let source_description = generated_text(&format!("[Audio from {server_name}] "));
+            vec![persist_blob_to_text_block_source(
+                &data,
+                mime.as_deref(),
                 server_name,
                 &source_description,
                 ctx,
@@ -156,15 +165,17 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
         // disk as a `[Image from <server>] ` text block (NOT emitted as a broken
         // image the API would reject).
         Some("image") => {
-            let data = block.get("data").and_then(Value::as_str).unwrap_or("");
-            let mime = block.get("mimeType").and_then(Value::as_str);
-            if is_image_mime(mime) {
-                vec![image_block(data, mime)]
+            let Some(data) = strict_string_field(block, "data") else {
+                return vec![block.clone()];
+            };
+            let mime = strict_string_field(block, "mimeType");
+            if is_image_mime(mime.as_deref()) {
+                vec![image_block_source(&data, mime.as_deref())]
             } else {
-                let source_description = format!("[Image from {server_name}] ");
-                vec![persist_blob_to_text_block(
-                    data,
-                    mime,
+                let source_description = generated_text(&format!("[Image from {server_name}] "));
+                vec![persist_blob_to_text_block_source(
+                    &data,
+                    mime.as_deref(),
                     server_name,
                     &source_description,
                     ctx,
@@ -173,10 +184,10 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
         }
         // case 'resource': text → prefixed text block; blob → image block or
         //   persisted text block (client.ts:2524-2573)
-        Some("resource") => transform_resource(block, server_name, ctx),
+        Some("resource") => transform_resource_source(block, server_name, ctx),
         // case 'resource_link': `[Resource link: ...] ...`
         Some("resource_link") => {
-            vec![text_block(&resource_link_text(block))]
+            vec![text_block_source(resource_link_text_source(block))]
         }
         // Any other/unknown block: pass the original block through verbatim (see
         // fn-doc for why TS `default`'s `[]` is intentionally not mirrored).
@@ -189,36 +200,42 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
 /// - `blob` with an image mimeType (in [`IMAGE_MIME_TYPES`]) → a prefix text
 ///   block + an image block;
 /// - `blob` with a non-image mimeType → [`persist_blob_to_text_block`].
-fn transform_resource(block: &Value, server_name: &str, ctx: PersistContext) -> Vec<Value> {
-    let Some(resource) = block.get("resource") else {
+fn transform_resource_source(block: &UJP, server_name: &str, ctx: PersistContext) -> Vec<UJP> {
+    let Some(resource) = source_field(block, "resource") else {
         // No `resource` field — not a shape TS produces; pass through.
         return vec![block.clone()];
     };
-    let uri = resource.get("uri").and_then(Value::as_str).unwrap_or("");
-    // prefix = `[Resource from ${serverName} at ${resource.uri}] `
-    let prefix = format!("[Resource from {server_name} at {uri}] ");
+    let uri = source_string_field(&resource, "uri").unwrap_or_else(|| "".into());
+    let prefix = concat_text(&[
+        &generated_text(&format!("[Resource from {server_name} at ")),
+        &uri,
+        &generated_text("] "),
+    ]);
 
     // if ('text' in resource) → `${prefix}${resource.text}`
-    if let Some(text) = resource.get("text").and_then(Value::as_str) {
-        return vec![text_block(&format!("{prefix}{text}"))];
+    if let Some(text) = source_string_field(&resource, "text") {
+        return vec![text_block_source(concat_text(&[&prefix, &text]))];
     }
 
     // else if ('blob' in resource) → image sub-case or persist.
-    if let Some(blob) = resource.get("blob").and_then(Value::as_str) {
-        let mime = resource.get("mimeType").and_then(Value::as_str);
-        let is_image = is_image_mime(mime);
+    if let Some(blob) = strict_string_field(&resource, "blob") {
+        let mime = strict_string_field(&resource, "mimeType");
+        let is_image = is_image_mime(mime.as_deref());
         if is_image {
             // content.push(prefix text) then content.push(image block). The TS
             // `if (prefix)` guard is always truthy here — `prefix` is the
             // non-empty `[Resource from ...] ` template — so the prefix block is
             // always emitted, matching `client.ts:2548-2553`.
-            return vec![text_block(&prefix), image_block(blob, mime)];
+            return vec![
+                text_block_source(prefix),
+                image_block_source(&blob, mime.as_deref()),
+            ];
         }
         // non-image blob → persistBlobToTextBlock(decode(blob), mimeType,
         //   server, prefix)  (client.ts:2564-2571)
-        return vec![persist_blob_to_text_block(
-            blob,
-            mime,
+        return vec![persist_blob_to_text_block_source(
+            &blob,
+            mime.as_deref(),
             server_name,
             &prefix,
             ctx,
@@ -236,16 +253,19 @@ fn transform_resource(block: &Value, server_name: &str, ctx: PersistContext) -> 
 /// `` `image/${resized.mediaType}` `` with `resized.mediaType = ext`
 /// (`client.ts:2506,2517-2518`). Within-budget bytes keep the original base64
 /// spelling; oversized images use the shared resize/downsample result.
-fn image_block(data: &str, mime_type: Option<&str>) -> Value {
+fn image_block_source(data: &str, mime_type: Option<&str>) -> UJP {
     let (resized_data, media_ext) = maybe_resize(data, mime_type);
-    json!({
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "data": resized_data,
-            "media_type": format!("image/{media_ext}"),
-        }
-    })
+    source_object(vec![
+        ("type".into(), "image".into()),
+        (
+            "source".into(),
+            source_object(vec![
+                ("type".into(), "base64".into()),
+                ("data".into(), resized_data.into()),
+                ("media_type".into(), format!("image/{media_ext}").into()),
+            ]),
+        ),
+    ])
 }
 
 /// Analogue of claude-code's `maybeResizeAndDownsampleImageBuffer`
@@ -301,13 +321,13 @@ fn maybe_resize(data: &str, mime_type: Option<&str>) -> (String, String) {
 /// to disk: <error>"`, mirroring the TS `'error' in result` branch
 /// (`client.ts:2607-2613`). NOTE: that error branch reports a RAW BYTE COUNT
 /// (`bytes.length`), not `formatFileSize`.
-fn persist_blob_to_text_block(
+fn persist_blob_to_text_block_source(
     base64_data: &str,
     mime_type: Option<&str>,
     server_name: &str,
-    source_description: &str,
+    source_description: &UJP,
     ctx: PersistContext,
-) -> Value {
+) -> UJP {
     let mime_label = mime_type
         .filter(|m| !m.is_empty())
         .unwrap_or("unknown type");
@@ -319,9 +339,12 @@ fn persist_blob_to_text_block(
     let bytes = match decode_base64(base64_data) {
         Ok(b) => b,
         Err(e) => {
-            return text_block(&format!(
-                "{source_description}Binary content ({mime_label}, 0 bytes) could not be saved to disk: {e}"
-            ));
+            return text_block_source(concat_text(&[
+                source_description,
+                &generated_text(&format!(
+                    "Binary content ({mime_label}, 0 bytes) could not be saved to disk: {e}"
+                )),
+            ]));
         }
     };
 
@@ -334,36 +357,93 @@ fn persist_blob_to_text_block(
     );
 
     match persist_binary_content(&bytes, mime_type, &persist_id, ctx.output_dir) {
-        PersistBinaryResult::Ok { filepath, size, .. } => text_block(
-            &binary_blob_saved_message(&filepath, mime_type, size, source_description),
+        PersistBinaryResult::Ok { filepath, size, .. } => text_block_source(
+            binary_blob_saved_message(&filepath, mime_type, size, source_description),
         ),
-        PersistBinaryResult::Err { error } => text_block(&format!(
-            "{source_description}Binary content ({mime_label}, {} bytes) could not be saved to disk: {error}",
-            bytes.len()
-        )),
+        PersistBinaryResult::Err { error } => text_block_source(concat_text(&[
+            source_description,
+            &generated_text(&format!(
+                "Binary content ({mime_label}, {} bytes) could not be saved to disk: {error}",
+                bytes.len()
+            )),
+        ])),
     }
 }
 
 /// Build the `resource_link` text form, byte-faithful to `client.ts:2576-2580`:
 /// `[Resource link: ${name}] ${uri}` with an optional ` (${description})`
 /// suffix when `description` is present.
-fn resource_link_text(block: &Value) -> String {
-    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-    let uri = block.get("uri").and_then(Value::as_str).unwrap_or("");
-    let mut text = format!("[Resource link: {name}] {uri}");
-    if let Some(description) = block.get("description").and_then(Value::as_str) {
+fn resource_link_text_source(block: &UJP) -> UJP {
+    let name = source_string_field(block, "name").unwrap_or_else(|| "".into());
+    let uri = source_string_field(block, "uri").unwrap_or_else(|| "".into());
+    let mut parts = vec![
+        generated_text("[Resource link: "),
+        name,
+        generated_text("] "),
+        uri,
+    ];
+    if let Some(description) = source_string_field(block, "description") {
         // TS appends only when truthy; an empty string is falsy in JS and is
         // therefore NOT appended.
-        if !description.is_empty() {
-            text.push_str(&format!(" ({description})"));
+        if description
+            .string_units("")
+            .is_some_and(|units| !units.is_empty())
+        {
+            parts.push(generated_text(" ("));
+            parts.push(description);
+            parts.push(generated_text(")"));
         }
     }
-    text
+    concat_text(&parts.iter().collect::<Vec<_>>())
 }
 
-/// A `{ "type": "text", "text": <text> }` content block.
-fn text_block(text: &str) -> Value {
-    json!({ "type": "text", "text": text })
+fn generated_text(text: &str) -> UJP {
+    text.into()
+}
+
+fn source_field(value: &UJP, field: &str) -> Option<UJP> {
+    value.subprojection(&format!("/{field}")).ok()
+}
+
+fn source_string_field(value: &UJP, field: &str) -> Option<UJP> {
+    source_field(value, field).filter(|field| field.string_units("").is_some())
+}
+
+fn strict_string_field(value: &UJP, field: &str) -> Option<String> {
+    String::from_utf16(&source_string_field(value, field)?.string_units("")?).ok()
+}
+
+fn concat_text(parts: &[&UJP]) -> UJP {
+    let units = parts
+        .iter()
+        .flat_map(|part| part.string_units("").unwrap_or_default())
+        .collect::<Vec<_>>();
+    UJP::root_string(String::from_utf16_lossy(&units), units)
+        .expect("concatenated UTF-16 strings form a source projection")
+}
+
+fn source_object(fields: Vec<(String, UJP)>) -> UJP {
+    UJP::object(fields).expect("generated MCP result fields are unique")
+}
+
+fn text_block_source(text: UJP) -> UJP {
+    source_object(vec![("type".into(), "text".into()), ("text".into(), text)])
+}
+
+#[cfg(test)]
+fn transform_result_content(
+    content: &serde_json::Value,
+    server_name: &str,
+    ctx: PersistContext,
+) -> serde_json::Value {
+    let source = UJP::parse(&content.to_string()).expect("test JSON fixture is valid");
+    let transformed = transform_result_content_source(&source, server_name, ctx);
+    serde_json::from_str(
+        &transformed
+            .to_json_string()
+            .expect("JSON source is serializable"),
+    )
+    .expect("transformed source is valid JSON")
 }
 
 #[cfg(test)]
@@ -488,6 +568,15 @@ mod tests {
         );
         assert!(bare[0].get("_meta").is_none());
         assert_eq!(bare, json!([{ "type": "text", "text": "x" }]));
+    }
+
+    #[test]
+    fn text_block_preserves_lone_utf16_surrogate_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = UJP::parse(r#"[{"type":"text","text":"\ud800"}]"#)
+            .expect("escaped lone surrogate is valid JSON source");
+        let got = transform_result_content_source(&content, "srv", ctx(dir.path()));
+        assert_eq!(got.string_units("/0/text"), Some(vec![0xd800]));
     }
 
     #[test]

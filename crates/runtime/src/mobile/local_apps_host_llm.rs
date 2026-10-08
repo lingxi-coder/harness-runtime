@@ -20,9 +20,10 @@ use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
 use lingxi_core::host::OutputStream;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::{HistoryContentDelta, HistoryEvent};
 use local_apps::AppCapability;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -124,6 +125,34 @@ fn truncate_on_char_boundary(text: &str, limit: usize) -> (String, bool) {
         end -= 1;
     }
     (text[..end].to_string(), true)
+}
+
+fn truncate_source_text(source: &Utf16JsonProjection, limit: usize) -> (Utf16JsonProjection, bool) {
+    let units = source
+        .string_units("")
+        .expect("streamed model text is a root-string source projection");
+    let display = String::from_utf16_lossy(&units);
+    let (truncated, changed) = truncate_on_char_boundary(&display, limit);
+    if !changed {
+        return (source.clone(), false);
+    }
+    let retained_units = truncated.encode_utf16().count();
+    let retained = units[..retained_units].to_vec();
+    (
+        Utf16JsonProjection::root_string(truncated, retained)
+            .expect("truncated display matches the retained UTF-16 source prefix"),
+        true,
+    )
+}
+
+fn source_string(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_string(), value.encode_utf16().collect())
+        .expect("Rust string is a valid source projection")
+}
+
+fn source_value(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value)
+        .expect("generated response value is a valid source projection")
 }
 
 /// Media kinds an app may attach. Audio is deliberately absent — see
@@ -417,12 +446,12 @@ impl LocalAppsHostBroker {
         }))
     }
 
-    pub(super) async fn llm_stream_value(
+    pub(super) async fn llm_stream_source_value(
         &self,
         app_id: &str,
         request_id: &str,
         payload: &Value,
-    ) -> Result<Value, BridgeFailure> {
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
         let request = self.parse_chat_request(app_id, payload, true)?;
         self.authorize_declared_capability(
             app_id,
@@ -470,19 +499,48 @@ impl LocalAppsHostBroker {
                 .await
                 .map_err(|error| error.to_string())?;
             let mut stop_reason = None;
+            let mut cost_quotes = Vec::new();
             while let Some(event) = events.next().await {
                 match event.map_err(|error| error.to_string())? {
                     HistoryEvent::ContentBlockDelta {
                         delta: HistoryContentDelta::TextDelta { text },
                         ..
-                    } => output.emit_text(&text).await,
+                    } => {
+                        let code_units = text.encode_utf16().collect();
+                        let source = Utf16JsonProjection::root_string(text, code_units)
+                            .expect("history text is a valid root string");
+                        output.emit_text(&source).await;
+                    }
+                    HistoryEvent::ContentBlockDelta {
+                        delta:
+                            HistoryContentDelta::TextJsUtf16Delta {
+                                text,
+                                utf16_code_units,
+                            },
+                        ..
+                    } => {
+                        let source = Utf16JsonProjection::root_string(text, utf16_code_units)
+                            .expect("history display and exact units describe one root string");
+                        output.emit_text(&source).await;
+                    }
                     HistoryEvent::MessageDelta { delta, .. } => {
                         stop_reason = delta.stop_reason.or(stop_reason);
                     }
                     HistoryEvent::Completed { response } => {
                         stop_reason = response.stop_reason.clone().or(stop_reason);
                     }
+                    HistoryEvent::CostQuoteObserved {
+                        estimate,
+                        native_server_fallback,
+                        summary_model,
+                    } => cost_quotes.push(json!({
+                        "estimate": estimate,
+                        "nativeServerFallback": native_server_fallback,
+                        "summaryModel": summary_model,
+                    })),
                     HistoryEvent::WebSearch { .. }
+                    | HistoryEvent::ServerFallback { .. }
+                    | HistoryEvent::ResponseObserved { .. }
                     | HistoryEvent::MessageStart { .. }
                     | HistoryEvent::ContentBlockStart { .. }
                     | HistoryEvent::ContentBlockDelta { .. }
@@ -490,7 +548,11 @@ impl LocalAppsHostBroker {
                     | HistoryEvent::MessageStop => {}
                 }
             }
-            Ok::<_, String>((output.text_snapshot().await, stop_reason))
+            Ok::<_, String>((
+                output.text_source_snapshot().await,
+                stop_reason,
+                cost_quotes,
+            ))
         })
         .await;
         inflight.release().await;
@@ -507,15 +569,40 @@ impl LocalAppsHostBroker {
                 output.error("llm_unavailable", error.clone()).await;
                 Err(BridgeFailure::coded("llm_unavailable", error))
             }
-            Ok(Ok((text, stop_reason))) => {
+            Ok(Ok((text, stop_reason, cost_quotes))) => {
                 output.completed().await;
-                let (text, truncated) = truncate_on_char_boundary(&text, MAX_CHAT_TEXT_BYTES);
-                Ok(json!({
-                    "streamId": stream_id,
-                    "text": text,
-                    "stopReason": stop_reason,
-                    "truncated": truncated,
-                }))
+                let (text, truncated) = truncate_source_text(&text, MAX_CHAT_TEXT_BYTES);
+                let stop_reason = stop_reason
+                    .as_deref()
+                    .map_or_else(|| source_value(&Value::Null), source_string);
+                let mut fields = Vec::new();
+                if !cost_quotes.is_empty() {
+                    let quotes = cost_quotes.iter().map(source_value).collect::<Vec<_>>();
+                    fields.push((
+                        "costQuotes".to_string(),
+                        Utf16JsonProjection::array(quotes).map_err(|error| {
+                            BridgeFailure::coded(
+                                "llm_response_invalid",
+                                format!("could not project stream cost quotes: {error}"),
+                            )
+                        })?,
+                    ));
+                }
+                fields.extend([
+                    ("stopReason".to_string(), stop_reason),
+                    ("streamId".to_string(), source_string(&stream_id)),
+                    ("text".to_string(), text),
+                    (
+                        "truncated".to_string(),
+                        source_value(&Value::Bool(truncated)),
+                    ),
+                ]);
+                Utf16JsonProjection::object(fields).map_err(|error| {
+                    BridgeFailure::coded(
+                        "llm_response_invalid",
+                        format!("could not project model stream response: {error}"),
+                    )
+                })
             }
         }
     }
@@ -540,10 +627,10 @@ mod tests {
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver,
+        AppCapability, AppLayout, AppService, NoopAppEventObserver, load_manifest,
+        load_permissions, save_manifest, save_permissions,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -663,12 +750,13 @@ mod tests {
         devices: crate::mobile::local_apps_device::DeviceCapabilities,
     ) -> Harness {
         let h = build_harness(model).await;
-        assert!(h
-            .broker
-            .attach_device(Arc::new(
-                crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices)
-            ))
-            .is_ok());
+        assert!(
+            h.broker
+                .attach_device(Arc::new(
+                    crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices)
+                ))
+                .is_ok()
+        );
         h
     }
 
@@ -692,9 +780,11 @@ mod tests {
             None,
         );
         assert!(broker.attach_service(service.clone()).is_ok());
-        assert!(broker
-            .attach_llm(Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model)))))
-            .is_ok());
+        assert!(
+            broker
+                .attach_llm(Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model)))))
+                .is_ok()
+        );
         let record = service
             .create_app(Some("Chatty"), "an llm test app", None)
             .await
@@ -1006,8 +1096,19 @@ mod tests {
                 delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
+                    resumable: None,
                 },
                 usage: None,
+            }),
+            Ok(HistoryEvent::CostQuoteObserved {
+                estimate: None,
+                native_server_fallback: true,
+                summary_model: Some("claude-sonnet-4".into()),
+            }),
+            Ok(HistoryEvent::CostQuoteObserved {
+                estimate: None,
+                native_server_fallback: false,
+                summary_model: None,
             }),
             Ok(HistoryEvent::MessageStop),
         ]);
@@ -1075,7 +1176,91 @@ mod tests {
             serde_json::from_str(response.result_json.as_deref().unwrap()).expect("stream result");
         assert_eq!(result["text"], "第一段第二段");
         assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(result["costQuotes"].as_array().map(Vec::len), Some(2));
+        assert!(result["costQuotes"][0]["estimate"].is_null());
+        assert_eq!(result["costQuotes"][0]["nativeServerFallback"], true);
+        assert_eq!(result["costQuotes"][0]["summaryModel"], "claude-sonnet-4");
+        assert_eq!(result["costQuotes"][1]["nativeServerFallback"], false);
+        assert!(result["costQuotes"][1]["summaryModel"].is_null());
         assert_eq!(activity_flags(&h).await, [true, false]);
+    }
+
+    #[tokio::test]
+    async fn llm_stream_keeps_lone_utf16_text_visible_as_display_text() {
+        let model = ChatModel::streaming(vec![
+            Ok(HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                },
+            }),
+            Ok(HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                    resumable: None,
+                },
+                usage: None,
+            }),
+            Ok(HistoryEvent::MessageStop),
+        ]);
+        let h = harness(model).await;
+        declare_and_grant(&h);
+        let request_id = "utf16-stream-request";
+        h.broker
+            .execute_bridge(AppBridgeRequestDto {
+                request_id: request_id.into(),
+                app_id: h.app_id.clone(),
+                operation: AppBridgeOperationDto::LlmStream,
+                payload_json: Some(
+                    json!({
+                        "messages": [{"role": "user", "content": "stream"}],
+                        "maxTokens": 128
+                    })
+                    .to_string(),
+                ),
+            })
+            .await;
+
+        let events = h.sink.events().await;
+        let mut frames = Vec::new();
+        let response = events
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeStreamFrame { frame, .. },
+                } => {
+                    if let client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                        data_json,
+                        ..
+                    } = frame
+                    {
+                        frames.push(data_json);
+                    }
+                    None
+                }
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response },
+                } if response.request_id == request_id => Some(response),
+                _ => None,
+            })
+            .expect("stream response");
+
+        assert!(
+            response.ok,
+            "{:?} {:?}",
+            response.error, response.error_code
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&frames[0]).unwrap()["text"],
+            "�"
+        );
+        assert!(!frames[0].contains("utf16_code_units"));
+        let result: Value =
+            serde_json::from_str(response.result_json.as_deref().unwrap()).expect("stream result");
+        assert_eq!(result["text"], "�");
     }
 
     #[tokio::test]

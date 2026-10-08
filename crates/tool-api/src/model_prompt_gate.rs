@@ -51,21 +51,9 @@ fn is_early_access_model(model: &str) -> bool {
 /// `v_(e=ro())` = `firstParty || anthropicAws || anthropicGoogleCloud ||
 /// gateway` @283311030). 2.1.220 `oug` @228079696 is identical, order included.
 ///
-/// **Branch order (A) before (B) is the oracle's, and it is reproduced here.**
-/// It is not currently observable: a model is classified differently by the two
-/// orders only if it BOTH carries `lean_prompt` (or is `claude-mythos-5`) AND
-/// matches the classic name list, and no such id exists in either catalog —
-/// `F2` reads the *baked* catalog (`q0` → `uBs().entriesById`, 2.1.238
-/// @281155200), where `lean_prompt` is carried by exactly `claude-opus-4-8`,
-/// `claude-opus-5`, `claude-fable-5`, and `claude-mythos-5` carries
-/// `capabilities:[]`. The only input that could distinguish the orders upstream
-/// is a host-injected `F2` fallback (`NIr().runtimeCapabilityLookup`, default
-/// `void 0` and never assigned in the shipped JS) answering `lean_prompt` for a
-/// sonnet/haiku id — an SDK-embedding hook LingXi has no substrate for. The
-/// invariant that keeps the order unobservable is pinned by
-/// `no_registry_model_is_both_lean_and_classic` below: the day a lean-prompt
-/// sonnet/haiku ships, that test goes red instead of this file going quietly
-/// wrong.
+/// Current native `Yr` evaluates the capability before the classic name
+/// list. Sonnet 5.5 carries `lean_prompt` and also matches `sonnet`, making this
+/// order observable. The current source fixture pins that discriminator.
 ///
 /// `Fo` (binary offset ~ `function Fo(`) resolves application-inference-profiles
 /// and strips Bedrock region prefixes. LingXi has no `Fo` port; the capability
@@ -206,51 +194,34 @@ mod tests {
             || t == "claude-opus-4-7"
     }
 
-    /// Tripwire for the branch ORDER inside [`uwu_standard_model`].
-    ///
-    /// The oracle (2.1.238 `BKb` @285080711) evaluates the `lean_prompt`
-    /// capability arm BEFORE the classic name list; this port now does too. The
-    /// order is unobservable today only because the two arms are disjoint over
-    /// the whole model table — the oracle's baked catalog gives `lean_prompt`
-    /// to exactly `claude-opus-4-8` / `claude-opus-5` / `claude-fable-5`, none
-    /// of which contains `claude-3-`/`haiku`/`sonnet` or equals an
-    /// `opus-4-0..4-7`, and `claude-mythos-5` matches neither.
-    ///
-    /// If a future model is ever both — a lean-prompt Sonnet, say — the order
-    /// becomes load-bearing and this test goes red, pointing at the branch that
-    /// has to stay first. The id list mirrors
-    /// `lingxi_core::host::model_capabilities::KNOWN_MODEL_IDS` (private to that crate);
-    /// extend it whenever the registry gains a model.
+    /// Sonnet 5.5 hits both branches. The current native capability observation
+    /// must win before its classic family-name classification.
     #[test]
-    fn no_registry_model_is_both_lean_and_classic() {
-        for id in [
-            "claude-sonnet-4-6",
-            "claude-sonnet-5",
-            "claude-opus-4-5",
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-opus-5",
-            "claude-fable-5-1",
-            "claude-mythos-5-1",
-            // Catalog entries the port's registry does not enumerate but the
-            // oracle does; all `capabilities:[]` or `["context_management"]`.
-            "claude-3-5-haiku",
-            "claude-haiku-4-5",
-            "claude-3-5-sonnet",
-            "claude-3-7-sonnet",
-            "claude-sonnet-4-0",
-            "claude-sonnet-4-5",
-            "claude-opus-4-0",
-            "claude-opus-4-1",
-        ] {
-            assert!(
-                !(capability_arm(id) && classic_name_arm(id)),
-                "{id} matches BOTH the lean_prompt arm and the classic name \
-                 list — the branch order in uwu_standard_model is now \
-                 observable. The oracle evaluates the capability arm FIRST \
-                 (2.1.238 BKb @285080711), so {id} must classify as \
-                 non-standard (SHORT prompt)."
+    fn current_lean_sonnet_takes_capability_branch_before_classic_name() {
+        let model = "claude-sonnet-5-5";
+        assert!(capability_arm(model));
+        assert!(classic_name_arm(model));
+        assert!(!uwu_standard_model(model));
+        assert!(dh_simple_system_prompt(Some(model)));
+    }
+
+    #[test]
+    fn current_baked_standard_gate_matches_native_source() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../core/tests/fixtures/model_capabilities_2_1_287.json"
+        ))
+        .unwrap();
+        for row in fixture["leanCases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["support"].is_null() && row["firstParty"] == true)
+        {
+            let model = row["model"].as_str().unwrap();
+            assert_eq!(
+                uwu_standard_model(model),
+                row["standard"].as_bool().unwrap(),
+                "{row}"
             );
         }
     }

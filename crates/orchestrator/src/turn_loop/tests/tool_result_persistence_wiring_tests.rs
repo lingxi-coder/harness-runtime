@@ -3,7 +3,7 @@ use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use crate::tool_result_persistence::{PERSISTED_OUTPUT_OPEN, TOOL_RESULTS_DIR};
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
-use lingxi_core::types::{ContentBlock, ToolUseId};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,22 +41,22 @@ impl Tool for SizedTool {
     fn persistence_threshold(&self) -> Option<usize> {
         Some(THRESHOLD)
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -68,36 +68,37 @@ impl Tool for SizedTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "sized".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let len = usize::try_from(
-            input
-                .get("len")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap(),
-        )
-        .unwrap();
+        let len = usize::try_from(input.number_at("/len").unwrap() as u64).unwrap();
         let mut body = "x".repeat(len);
         if input
-            .get("split_surrogate")
-            .and_then(serde_json::Value::as_bool)
+            .at_pointer("/split_surrogate")
+            .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool)
             == Some(true)
         {
             body.replace_range(1999..2001, "😀");
         }
         Ok(ToolCallResult {
-            data: json!(body),
-            model_content: Some(body),
+            data: body.clone().into(),
+            model_content: Some(body.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -125,13 +126,19 @@ fn orch_with(tool: Arc<dyn Tool>, config_home: Option<PathBuf>) -> ConversationO
     }
 }
 
-fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
-    vec![(ToolUseId::new(), name.into(), json!({ "len": len }), None)]
+fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, Utf16JsonProjection, Option<String>)> {
+    let input = json!({ "len": len });
+    vec![(
+        ToolUseId::new(),
+        name.into(),
+        Utf16JsonProjection::from_serde_value(&input).unwrap(),
+        None,
+    )]
 }
 
 async fn dispatch_content(
     orch: &ConversationOrchestrator,
-    uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
+    uses: &[(ToolUseId, String, Utf16JsonProjection, Option<String>)],
 ) -> String {
     let (results, _p, _i, _m) = dispatch_tool_uses_tracked(orch, uses, None)
         .await
@@ -139,7 +146,7 @@ async fn dispatch_content(
     let ContentBlock::ToolResult { content, .. } = &results[0] else {
         panic!("expected ToolResult");
     };
-    content.clone()
+    content.string_at("").unwrap_or_default().to_owned()
 }
 
 #[tokio::test]
@@ -154,7 +161,12 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     ));
     let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
     let mut call = use_of("Sized", 4000).remove(0);
-    call.2["split_surrogate"] = json!(true);
+    call.2
+        .set_field(
+            "split_surrogate",
+            Utf16JsonProjection::parse("true").unwrap(),
+        )
+        .unwrap();
     let assistant = ConversationMessage::Assistant {
         id: MessageId::new(),
         stop_reason: Some("tool_use".into()),
@@ -164,6 +176,7 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
             input: call.2.clone(),
             provider_id: None,
         }],
+        resumable: None,
     };
     orch.persist_message_to_jsonl(&assistant).await;
     let (results, ..) = dispatch_tool_uses_tracked(&orch, &[call], None)
@@ -200,8 +213,15 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
             )
             .unwrap();
         let body = serde_json::from_slice(&encoded.body).unwrap();
-        let wire =
-            String::from_utf8(sdk::exact_json::serialize(&body, &overrides).unwrap()).unwrap();
+        let wire = String::from_utf8(
+            sdk::exact_json::serialize(
+                &body,
+                &overrides,
+                sdk::exact_json::JsonEncoding::JavaScript,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert!(
             wire.contains("\\ud83d\\n..."),
             "exact JS surrogate must reach wire: {wire}"
@@ -286,7 +306,8 @@ async fn process_output_persistence_reuses_task_file_without_duplicate_write() {
         "persistedOutputPath": output_path,
         "persistedOutputSize": 5_000,
     });
-    let output_file = super::process_output_file_from_data(&data).expect("all metadata");
+    let data = Utf16JsonProjection::from_serde_value(&data).unwrap();
+    let output_file = super::process_output_file_from_source(&data).expect("all metadata");
     assert_eq!(output_file.task_id, "local_bash_spilled");
     let id = ToolUseId::new();
     let outcome = super::apply_tool_result_persistence_with_process_output(
@@ -294,15 +315,16 @@ async fn process_output_persistence_reuses_task_file_without_duplicate_write() {
         "Bash",
         &id,
         Some(THRESHOLD),
-        "x".repeat(5_000),
+        "x".repeat(5_000).into(),
         None,
         Some(&output_file),
     )
     .await;
 
     assert!(outcome.replaced);
-    assert!(outcome.content.starts_with(PERSISTED_OUTPUT_OPEN));
-    assert!(outcome.content.contains(&output_file.path));
+    let display = outcome.content.string_at("").unwrap_or_default();
+    assert!(display.starts_with(PERSISTED_OUTPUT_OPEN));
+    assert!(display.contains(&output_file.path));
     assert_eq!(std::fs::read_to_string(&output_path).unwrap().len(), 5_000);
     assert!(
         !tmp.path().join("projects").exists(),
@@ -311,22 +333,13 @@ async fn process_output_persistence_reuses_task_file_without_duplicate_write() {
 }
 
 #[test]
-fn process_output_file_from_data_accepts_legacy_and_2_1_263_names() {
-    let legacy = json!({
-        "outputTaskId": "legacy-id",
-        "outputFilePath": "/tmp/legacy.out",
-        "outputFileSize": 12,
-    });
-    let file = super::process_output_file_from_data(&legacy).expect("legacy");
-    assert_eq!(file.task_id, "legacy-id");
-    assert_eq!(file.path, "/tmp/legacy.out");
-    assert_eq!(file.size, 12);
-
+fn process_output_file_from_source_retains_native_metadata() {
     let current = json!({
         "persistedOutputPath": "/tmp/current.out",
         "persistedOutputSize": 34,
     });
-    let file = super::process_output_file_from_data(&current).expect("current");
+    let current = Utf16JsonProjection::from_serde_value(&current).unwrap();
+    let file = super::process_output_file_from_source(&current).expect("current");
     assert_eq!(file.task_id, "current");
     assert_eq!(file.path, "/tmp/current.out");
     assert_eq!(file.size, 34);
@@ -344,7 +357,8 @@ async fn media_bearing_block_arrays_are_never_persisted() {
     let id = ToolUseId::new();
 
     for media in ["image", "document"] {
-        let blocks = vec![big_text.clone(), json!({ "type": media })];
+        let blocks = json!([big_text.clone(), json!({ "type": media })]);
+        let blocks = Utf16JsonProjection::from_serde_value(&blocks).unwrap();
         let out = super::apply_tool_result_persistence(
             &orch,
             "Sized",
@@ -355,12 +369,17 @@ async fn media_bearing_block_arrays_are_never_persisted() {
         )
         .await
         .content;
-        assert_eq!(out, "IGNORED", "{media} block must suppress persistence");
+        assert_eq!(
+            out.string_at(""),
+            Some("IGNORED"),
+            "{media} block must suppress persistence"
+        );
     }
     assert!(!tmp.path().join("projects").exists());
 
     // Control: the identical array minus the media block IS persisted.
-    let blocks = vec![big_text];
+    let blocks = json!([big_text]);
+    let blocks = Utf16JsonProjection::from_serde_value(&blocks).unwrap();
     let out = super::apply_tool_result_persistence(
         &orch,
         "Sized",
@@ -371,6 +390,7 @@ async fn media_bearing_block_arrays_are_never_persisted() {
     )
     .await
     .content;
+    let out = out.string_at("").unwrap_or_default();
     assert!(out.starts_with(PERSISTED_OUTPUT_OPEN), "control: {out}");
     // An ARRAY body is written as pretty JSON under a `.json` stem (`kKr`).
     assert!(out.contains(&format!("{}.json", id.as_str())), "{out}");
@@ -411,22 +431,22 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
         fn persistence_threshold(&self) -> Option<usize> {
             Some(THRESHOLD)
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -438,22 +458,28 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
             "big".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
         async fn call(
             &self,
-            _: serde_json::Value,
+            _: Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             let body = "y".repeat(THRESHOLD * 4);
             Ok(ToolCallResult {
-                data: json!([{ "type": "text", "text": body }]),
-                model_content: Some(body),
+                data: Utf16JsonProjection::from_serde_value(
+                    &json!([{ "type": "text", "text": body }]),
+                )
+                .unwrap(),
+                model_content: Some(body.into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
@@ -467,7 +493,7 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
     let uses = vec![(
         ToolUseId::new(),
         "mcp__srv__big".to_string(),
-        json!({}),
+        Utf16JsonProjection::parse("{}").unwrap(),
         None,
     )];
     let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -481,7 +507,9 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
             ..
         } => {
             assert!(
-                content.starts_with(PERSISTED_OUTPUT_OPEN),
+                content
+                    .string_at("")
+                    .is_some_and(|text| text.starts_with(PERSISTED_OUTPUT_OPEN)),
                 "oversized MCP result must be persisted, got: {content}"
             );
             assert!(

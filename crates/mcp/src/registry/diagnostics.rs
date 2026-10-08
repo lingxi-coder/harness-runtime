@@ -540,8 +540,10 @@ pub(super) fn xaa_flow_failure_stage(error: &crate::xaa::XaaError) -> &'static s
 pub(super) fn xaa_provider_failure_stage(error: &McpError) -> &'static str {
     match error {
         McpError::OAuth(message)
-            if message.starts_with("XAA IdP: OIDC discovery")
-                || message.starts_with("XAA IdP: refusing non-HTTPS token endpoint") =>
+            if message.string_at("").is_some_and(|message| {
+                message.starts_with("XAA IdP: OIDC discovery")
+                    || message.starts_with("XAA IdP: refusing non-HTTPS token endpoint")
+            }) =>
         {
             "discovery"
         }

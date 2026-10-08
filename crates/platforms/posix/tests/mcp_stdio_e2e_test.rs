@@ -72,8 +72,8 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert!(caps.logging, "expected logging capability from fixture");
     assert_eq!(
         caps.experimental
-            .get("foo")
-            .and_then(serde_json::Value::as_bool),
+            .get_property("foo")
+            .and_then(|value| value.as_bool()),
         Some(true),
         "experimental map must decode the fixture's `foo: true` entry"
     );
@@ -90,7 +90,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         "fixture pushes a notifications/message line after initialized"
     );
     assert_eq!(
-        pushed.params.pointer("/data").and_then(|v| v.as_str()),
+        pushed.params.string_at("/data"),
         Some("mock server initialized"),
         "notification params must round-trip through the broadcast bridge"
     );
@@ -102,12 +102,12 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("list_tools failed");
     assert_eq!(tools.len(), 1, "fixture exposes exactly one tool");
     assert_eq!(tools[0].tool_name(), "echo");
-    assert_eq!(tools[0].description(), "Echo the provided text back.");
     assert_eq!(
-        tools[0]
-            .input_schema()
-            .pointer("/type")
-            .and_then(|v| v.as_str()),
+        tools[0].description().string_at(""),
+        Some("Echo the provided text back.")
+    );
+    assert_eq!(
+        tools[0].input_schema().string_at("/type"),
         Some("object"),
         "inputSchema must decode into the input_schema field"
     );
@@ -117,9 +117,13 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert_eq!(tools[0].full_name, "mcp____echo");
 
     // --- tools/call ----------------------------------------------------
+    let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &serde_json::json!({ "text": "hi there" }),
+    )
+    .unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.call_tool(&conn, "echo", serde_json::json!({ "text": "hi there" })),
+        transport.call_tool(&conn, "echo", input),
     )
     .await
     .expect("call_tool timed out")
@@ -127,7 +131,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert!(!result.is_error, "echo should not flag an error");
     // The fixture echoes `arguments.text` back inside a text content block.
     assert_eq!(
-        result.content.pointer("/0/text").and_then(|v| v.as_str()),
+        result.content.string_at("/0/text"),
         Some("hi there"),
         "echo must round-trip the input text in content[0].text"
     );
@@ -138,7 +142,14 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     // `McpError::ToolNotFound` end-to-end.
     let not_found = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.call_tool(&conn, "nope", serde_json::json!({})),
+        transport.call_tool(
+            &conn,
+            "nope",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({}),
+            )
+            .unwrap(),
+        ),
     )
     .await
     .expect("call_tool(unknown) timed out");
@@ -153,8 +164,8 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("list_resources timed out")
         .expect("list_resources failed");
     assert_eq!(resources.len(), 1, "fixture exposes one resource");
-    assert_eq!(resources[0].uri, "mock://readme");
-    assert_eq!(resources[0].name, "README");
+    assert_eq!(resources[0].uri.string_at(""), Some("mock://readme"));
+    assert_eq!(resources[0].name.string_at(""), Some("README"));
     assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
 
     // --- resources/templates/list (§26a) --------------------------------
@@ -166,39 +177,59 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     .expect("list_resource_templates timed out")
     .expect("list_resource_templates failed");
     assert_eq!(templates.len(), 1, "fixture exposes one resource template");
-    assert_eq!(templates[0].uri_template, "mock://files/{path}");
-    assert_eq!(templates[0].name, "file-template");
     assert_eq!(
-        templates[0].description.as_deref(),
+        templates[0].uri_template.string_at(""),
+        Some("mock://files/{path}")
+    );
+    assert_eq!(templates[0].name.string_at(""), Some("file-template"));
+    assert_eq!(
+        templates[0]
+            .description
+            .as_ref()
+            .and_then(|description| description.string_at("")),
         Some("A file under mock://files")
     );
     assert_eq!(templates[0].mime_type.as_deref(), Some("text/plain"));
 
     // --- resources/read ------------------------------------------------
-    let content = tokio::time::timeout(
-        Duration::from_secs(5),
-        transport.read_resource(&conn, "mock://readme"),
-    )
-    .await
-    .expect("read_resource timed out")
-    .expect("read_resource failed");
-    assert_eq!(content.uri, "mock://readme", "read echoes the resource uri");
-    assert_eq!(content.content, "hello from mock resource");
+    let uri = lingxi_core::types::utf16_json::Utf16JsonProjection::from("mock://readme");
+    let content =
+        tokio::time::timeout(Duration::from_secs(5), transport.read_resource(&conn, &uri))
+            .await
+            .expect("read_resource timed out")
+            .expect("read_resource failed");
+    assert_eq!(
+        content.uri.string_at(""),
+        Some("mock://readme"),
+        "read echoes the resource uri"
+    );
+    assert_eq!(
+        content.content.string_at(""),
+        Some("hello from mock resource")
+    );
 
     // --- resources/read (MCP-5d rich multi-content path) ---------------
     // `read_resource_rich` returns the full `contents[]` array; the mock's
     // text block surfaces as a `text` entry with no persisted blob.
     let out_dir = tempfile::tempdir().expect("tempdir");
+    let rich_uri = lingxi_core::types::utf16_json::Utf16JsonProjection::from("mock://readme");
     let rich = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.read_resource_rich(&conn, "mock://readme", out_dir.path()),
+        transport.read_resource_rich(&conn, &rich_uri, out_dir.path()),
     )
     .await
     .expect("read_resource_rich timed out")
     .expect("read_resource_rich failed");
     assert_eq!(rich.len(), 1, "fixture exposes one content block");
-    assert_eq!(rich[0].uri, "mock://readme", "rich read echoes the uri");
-    assert_eq!(rich[0].text.as_deref(), Some("hello from mock resource"));
+    assert_eq!(
+        rich[0].uri.string_at(""),
+        Some("mock://readme"),
+        "rich read echoes the uri"
+    );
+    assert_eq!(
+        rich[0].text.as_ref().and_then(|text| text.string_at("")),
+        Some("hello from mock resource")
+    );
     assert_eq!(rich[0].blob_saved_to, None, "text block persists nothing");
     // Nothing written to disk for a pure text resource.
     assert!(
@@ -214,9 +245,12 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("list_prompts timed out")
         .expect("list_prompts failed");
     assert_eq!(prompts.len(), 1, "fixture exposes one prompt");
-    assert_eq!(prompts[0].name, "greet");
+    assert_eq!(prompts[0].name.string_at(""), Some("greet"));
     assert_eq!(
-        prompts[0].description.as_deref(),
+        prompts[0]
+            .description
+            .as_ref()
+            .and_then(|description| description.string_at("")),
         Some("Greet someone by name.")
     );
 
@@ -271,6 +305,7 @@ async fn modern_probe_falls_back_and_redials_stdio_legacy() {
                 expected_era: Some(McpProtocolEra::Modern),
                 deadline_ms: 5_000,
                 probe_timeout_ms: Some(3_000),
+                elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             },
         )
         .await

@@ -1,0 +1,13 @@
+
+middleware.test.ts:
+(pass) session.append middleware next rewrite returns raw rewritten event [19.27ms]
+(pass) session.append middleware direct return is skipped and the original row is kept [7.77ms]
+(pass) session.append middleware can return a denial without next [6.54ms]
+(pass) session.append middleware exception is surfaced to the caller [6.21ms]
+
+unregister-probe/unregister.test.ts:
+(pass) probe on() subscription disposer policy [20.56ms]
+
+ 5 pass
+ 0 fail
+Ran 5 tests across 2 files. [0.18s]

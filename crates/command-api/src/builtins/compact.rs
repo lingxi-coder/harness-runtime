@@ -59,14 +59,14 @@ impl BuiltinCommandHandler for CompactHandler {
                 // `tui::root`). Dimming is applied by the TUI render layer (LingXi
                 // command displays are plain strings), not embedded here.
                 CommandResult::Done {
-                    display: Some(COMPACT_DISPLAY.to_string()),
+                    display: Some((COMPACT_DISPLAY.to_string()).into()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::COMPACT_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(compact_failure_display(&msg)),
+                    display: Some((compact_failure_display(&msg)).into()),
                 }
             }
         }
@@ -177,8 +177,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "compact".to_string(),
-            raw_args: String::new(),
+            name: "compact".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -192,10 +192,12 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = CompactHandler::new(mock.clone());
         let mut a = args();
-        a.raw_args = "focus on the API changes".to_string();
+        a.raw_args = "focus on the API changes".into();
         let _ = h.handle(&a).await;
         assert_eq!(
-            mock.last_compact_instructions().as_deref(),
+            mock.last_compact_instructions()
+                .as_ref()
+                .and_then(|text| text.string_at("")),
             Some("focus on the API changes"),
             "raw_args must reach force_compact_with_instructions"
         );
@@ -210,7 +212,7 @@ mod tests {
             messages_before: 42,
             messages_after: 7,
             bytes_saved: 18_345,
-            summary: "kept context".to_string(),
+            summary: "kept context".into(),
         });
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
@@ -309,11 +311,15 @@ mod tests {
         );
         // Manual-path tz errors surface from the marker on.
         assert_eq!(
-            f("compaction failed: internal: Error during compaction: summarization produced empty response"),
+            f(
+                "compaction failed: internal: Error during compaction: summarization produced empty response"
+            ),
             "Error during compaction: summarization produced empty response"
         );
         assert_eq!(
-            f("compaction failed: internal: Failed to generate conversation summary - response did not contain valid text content"),
+            f(
+                "compaction failed: internal: Failed to generate conversation summary - response did not contain valid text content"
+            ),
             "Failed to generate conversation summary - response did not contain valid text content"
         );
         assert_eq!(f("anything else"), "Error compacting conversation");
@@ -339,7 +345,7 @@ mod tests {
             messages_before: 0,
             messages_after: 0,
             bytes_saved: 0,
-            summary: String::new(),
+            summary: String::new().into(),
         });
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
@@ -410,6 +416,7 @@ mod tests {
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
+                            citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
                     });

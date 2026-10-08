@@ -1,0 +1,10 @@
+
+append.test.ts:
+(pass) session.append preserves lone UTF-16 units [18.35ms]
+(pass) session.append returns middleware rewritten content [6.22ms]
+(pass) session.append middleware rewrites system content with a lone UTF-16 unit [5.82ms]
+(pass) mock.session retains successful rewritten rows and skips denied rows [0.55ms]
+
+ 4 pass
+ 0 fail
+Ran 4 tests across 1 file. [0.16s]

@@ -24,12 +24,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(test)]
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
 mod attempts;
 mod retention;
+mod tool_execution;
 use attempts::AttemptProjection;
+use lingxi_core::host::{
+    DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
+    ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
+};
+use tool_execution::ToolProjection;
 
 #[derive(Debug, Clone, Default)]
 struct CoordinatorProjection {
@@ -3959,10 +3966,3 @@ mod tests {
         assert!(!coordinator.journal().root().join("quarantine").exists());
     }
 }
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
-mod tool_execution;
-use lingxi_core::host::{
-    DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
-    ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
-};
-use tool_execution::ToolProjection;

@@ -8,11 +8,163 @@
 //!
 //! See M4-05 wiring follow-up plan.
 
+use crate::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use crate::types::{AgentId, MessageId, SessionId};
 use async_trait::async_trait;
-use serde_json::Value;
 use std::any::Any;
+use std::sync::Arc;
 use thiserror::Error;
+
+/// Resolve a Native `tool.call` middleware `ref` to a zero-based core-run
+/// index. The wire reference is one-based; Native applies JavaScript's
+/// `runs[ref - 1]`, including its `ToNumber` coercion, before the bounded array
+/// lookup. `None` means that the value does not select one of the completed
+/// runs (including `ref: 0`).
+#[must_use]
+pub fn tool_call_ref_index(reference: JsonValueView<'_>, run_count: usize) -> Option<usize> {
+    if run_count == 0 {
+        return None;
+    }
+    let numeric_ref = js_number(reference)?;
+    let index = numeric_ref - 1.0;
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index >= run_count as f64 {
+        return None;
+    }
+    Some(index as usize)
+}
+
+fn js_number(value: JsonValueView<'_>) -> Option<f64> {
+    if let Some(value) = value.as_number() {
+        return Some(value);
+    }
+    if value.is_null() {
+        return Some(0.0);
+    }
+    if let Some(value) = value.as_bool() {
+        return Some(if value { 1.0 } else { 0.0 });
+    }
+    if let Some(value) = value.code_units() {
+        return js_number_from_string(&String::from_utf16(value).ok()?);
+    }
+    if value.array_len().is_some() {
+        return js_number_from_string(&js_array_to_string(value)?);
+    }
+    None
+}
+
+fn js_number_from_string(value: &str) -> Option<f64> {
+    let value = value.trim_matches(is_ecmascript_whitespace);
+    if value.is_empty() {
+        return Some(0.0);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return js_radix_number(digits, 16);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        return js_radix_number(digits, 2);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        return js_radix_number(digits, 8);
+    }
+    value.parse::<f64>().ok()
+}
+
+fn js_radix_number(digits: &str, radix: u32) -> Option<f64> {
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value = 0.0;
+    for byte in digits.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' => u32::from(byte - b'a') + 10,
+            b'A'..=b'F' => u32::from(byte - b'A') + 10,
+            _ => return None,
+        };
+        if digit >= radix {
+            return None;
+        }
+        value = value * f64::from(radix) + f64::from(digit);
+    }
+    Some(value)
+}
+
+fn js_array_to_string(value: JsonValueView<'_>) -> Option<String> {
+    enum Task<'a> {
+        Value(JsonValueView<'a>),
+        Comma,
+    }
+
+    let count = value.array_len()?;
+    let mut pending = Vec::with_capacity(count.saturating_mul(2));
+    for index in (0..count).rev() {
+        pending.push(Task::Value(value.get_index(index)?));
+        if index > 0 {
+            pending.push(Task::Comma);
+        }
+    }
+    let mut result = String::new();
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Comma => result.push(','),
+            Task::Value(value) => {
+                if value.is_null() {
+                    // Array join renders null/undefined elements as empty text.
+                } else if let Some(text) = value.as_bool() {
+                    result.push_str(if text { "true" } else { "false" });
+                } else if let Some(number) = value.as_number() {
+                    result.push_str(&js_number_to_string(number));
+                } else if let Some(units) = value.code_units() {
+                    result.push_str(&String::from_utf16(units).ok()?);
+                } else if let Some(count) = value.array_len() {
+                    for index in (0..count).rev() {
+                        pending.push(Task::Value(value.get_index(index)?));
+                        if index > 0 {
+                            pending.push(Task::Comma);
+                        }
+                    }
+                } else if value.object_entries().is_some() {
+                    result.push_str("[object Object]");
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(result)
+}
+
+fn js_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".into();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".into();
+    }
+    if value == 0.0 {
+        return "0".into();
+    }
+    ryu_js::Buffer::new().format_finite(value).to_owned()
+}
+
+fn is_ecmascript_whitespace(character: char) -> bool {
+    // Rust includes U+0085 NEXT LINE in `char::is_whitespace`, but ECMAScript
+    // StringToNumber trimming does not. U+FEFF is ECMAScript whitespace even
+    // though Rust does not classify it that way.
+    character.is_whitespace() && character != '\u{0085}' || character == '\u{FEFF}'
+}
 
 /// Trusted host-selected execution policy for one nested tool invocation.
 ///
@@ -32,6 +184,15 @@ pub enum ToolExecutionPolicy {
     FusionPanel,
 }
 
+/// Host-owned conversation state carried only for nested explicit forks.
+#[derive(Debug, Clone)]
+pub struct SubagentForkContext {
+    /// The dispatching agent's actual conversation, including lazy policies.
+    pub messages: Vec<crate::types::ConversationMessage>,
+    /// The exact rendered parent system prompt, used by explicit forks.
+    pub system_prompt: Option<crate::types::utf16_json::Utf16JsonProjection>,
+}
+
 /// Per-call invocation context handed to a [`ToolInvoker`].
 ///
 /// Carries the identity of the parent agent (used by the recursion-lock test
@@ -40,9 +201,16 @@ pub enum ToolExecutionPolicy {
 /// concrete `ToolUseContext` from `lingxi-tools`.
 #[derive(Debug, Clone)]
 pub struct SubagentInvocationContext {
+    /// Cancellation scope for this physical tool call. A streamed Agent tool
+    /// use owns a distinct token; receivers must copy it into the concrete
+    /// `ToolUseContext` rather than reusing a previous call's token.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
     pub permission_pause_observer: Option<crate::host::permission_gate::PermissionPauseObserver>,
     /// Parent agent id (the agent that is dispatching the child).
     pub parent_agent_id: Option<AgentId>,
+    /// Current Native query depth of the caller when known. This is not the
+    /// separate Agent spawn-nesting depth and remains None for non-query calls.
+    pub native_query_depth: Option<u32>,
     /// Trusted originating session for nested Agent/Fusion budget scoping.
     /// Receivers must propagate this value explicitly and must not infer it
     /// from hook/session metadata.
@@ -51,6 +219,11 @@ pub struct SubagentInvocationContext {
     /// the concrete tool-use context path, including the
     /// workspace-lease entrypoint; it is not model-controlled.
     pub tool_execution_policy: ToolExecutionPolicy,
+    /// Inherited instruction context and lazy discovery cursor.
+    pub instruction_context: Option<crate::host::instructions::InstructionContext>,
+    /// Actual parent history needed by the Agent tool's explicit fork path.
+    /// Other tools can omit this to avoid copying their agent's transcript.
+    pub fork_context: Option<SubagentForkContext>,
     /// DISPLAY NAME of the teammate dispatching this tool call, if known
     /// (claude-code `getAgentName()` — the teammate's human name, e.g.
     /// `"researcher"`, NOT the `agent:<uuid>` form). `None` for the main
@@ -127,6 +300,26 @@ pub struct SubagentInvocationContext {
     /// must inherit both values; carrying only the wire id is ambiguous when
     /// multiple configured providers expose the same model.
     pub parent_model_profile: Option<String>,
+    /// Trusted plugin caller/origin captured when this agent was spawned.
+    /// Receivers preserve the exact missing/null/value distinctions and must
+    /// never infer provenance from model input or hook output.
+    pub agent_spawn_provenance: crate::host::subagent_spawn::AgentSpawnProvenance,
+    /// The actual per-agent ToolUseContext state after earlier nested tool
+    /// effects. Core keeps this host-owned type opaque; tool-api is the only
+    /// crate that downcasts it to its concrete ToolUseContext container.
+    /// Each agent loop owns its own state and supplies it to later calls.
+    pub tool_context_state: Option<ToolInvocationContextState>,
+    /// Current agent history at this dispatch. This is refreshed on every
+    /// call, so a persisted ToolUseContext snapshot can never replay stale
+    /// messages after a tool result or injected message has been appended.
+    pub current_history: Vec<crate::types::ConversationMessage>,
+    /// The accepted assistant row for the completed block being handled.
+    /// This remains separate from `current_history`, which is the pre-query
+    /// snapshot and must not acquire the live assistant row by concatenation.
+    pub assistant_message: Option<crate::types::ConversationMessage>,
+    /// Tool-use blocks from earlier sibling rows in this same query. The
+    /// current row is excluded; callers refresh this per physical invocation.
+    pub same_turn_tool_uses: Vec<crate::types::ContentBlock>,
     /// The dispatching subagent's EFFECTIVE permission mode as a WIRE string
     /// (claude-code 2.1.207 Agent `mode` → the child's
     /// `toolPermissionContext.mode`, `wKe`/`ve`). `Some("plan")` ⇒ the dispatch
@@ -165,6 +358,142 @@ pub struct SubagentInvocationContext {
     pub frozen_command_denies: Vec<String>,
 }
 
+/// Opaque, host-owned context state carried through the provider-neutral Core
+/// boundary. The concrete runtime type is selected by the caller and checked
+/// with [`Self::downcast_arc`]; Core never imports tool-api.
+#[derive(Clone)]
+pub struct ToolInvocationContextState {
+    inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl ToolInvocationContextState {
+    /// Wrap a concrete host context without exposing its type to Core.
+    #[must_use]
+    pub fn new<T: Any + Send + Sync>(value: Arc<T>) -> Self {
+        Self { inner: value }
+    }
+
+    /// Borrow the contained host context by cloning its Arc. A failed type
+    /// check leaves this state intact and available for a correct downcast.
+    pub fn downcast_arc<T: Any + Send + Sync>(
+        &self,
+    ) -> Result<Arc<T>, ToolInvocationContextStateError> {
+        Arc::clone(&self.inner)
+            .downcast::<T>()
+            .map_err(|_| ToolInvocationContextStateError::TypeMismatch)
+    }
+}
+
+impl std::fmt::Debug for ToolInvocationContextState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolInvocationContextState")
+            .finish_non_exhaustive()
+    }
+}
+
+/// A context-state downcast failed without consuming or mutating the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ToolInvocationContextStateError {
+    /// The erased state was not the requested concrete host context type.
+    #[error("tool invocation context state has a different concrete type")]
+    TypeMismatch,
+}
+
+trait ErasedToolInvocationContextModifier: Send + Sync {
+    fn apply_boxed(
+        &self,
+        context: Box<dyn Any + Send>,
+    ) -> Result<Box<dyn Any + Send>, ToolInvocationContextModifierError>;
+}
+
+struct OnceToolInvocationContextModifier<T, F> {
+    modifier: std::sync::Mutex<Option<F>>,
+    marker: std::marker::PhantomData<fn(T)>,
+}
+
+impl<T, F> ErasedToolInvocationContextModifier for OnceToolInvocationContextModifier<T, F>
+where
+    T: Any + Send + 'static,
+    F: FnOnce(T) -> T + Send + 'static,
+{
+    fn apply_boxed(
+        &self,
+        context: Box<dyn Any + Send>,
+    ) -> Result<Box<dyn Any + Send>, ToolInvocationContextModifierError> {
+        let context = context
+            .downcast::<T>()
+            .map_err(|_| ToolInvocationContextModifierError::TypeMismatch)?;
+        let modifier = self
+            .modifier
+            .lock()
+            .map_err(|_| ToolInvocationContextModifierError::Poisoned)?
+            .take()
+            .ok_or(ToolInvocationContextModifierError::AlreadyApplied)?;
+        Ok(Box::new(modifier(*context)))
+    }
+}
+
+/// A one-shot host callback that mutates a concrete context without making
+/// Core depend on tool-api's `ToolUseContext` type. Clones share the same
+/// `FnOnce`: only the first successful apply can consume it. The closure is
+/// required to be `Send`, not `Sync`.
+#[derive(Clone)]
+pub struct ToolInvocationContextModifier {
+    inner: Arc<dyn ErasedToolInvocationContextModifier>,
+}
+
+impl ToolInvocationContextModifier {
+    /// Store one typed context mutation behind Core's erased host boundary.
+    #[must_use]
+    pub fn new<T, F>(modifier: F) -> Self
+    where
+        T: Any + Send + 'static,
+        F: FnOnce(T) -> T + Send + 'static,
+    {
+        Self {
+            inner: Arc::new(OnceToolInvocationContextModifier::<T, F> {
+                modifier: std::sync::Mutex::new(Some(modifier)),
+                marker: std::marker::PhantomData,
+            }),
+        }
+    }
+
+    /// Apply this one-shot callback to a context of its declared type.
+    /// A type mismatch does not consume the callback, so the caller can retry
+    /// with the correct concrete context.
+    pub fn apply<T: Any + Send + 'static>(
+        &self,
+        context: T,
+    ) -> Result<T, ToolInvocationContextModifierError> {
+        self.inner
+            .apply_boxed(Box::new(context))?
+            .downcast::<T>()
+            .map(|context| *context)
+            .map_err(|_| ToolInvocationContextModifierError::TypeMismatch)
+    }
+}
+
+impl std::fmt::Debug for ToolInvocationContextModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolInvocationContextModifier")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Failure to apply a host-owned nested context modifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ToolInvocationContextModifierError {
+    /// The supplied context type did not match the modifier's concrete type.
+    #[error("tool invocation context modifier received a different concrete type")]
+    TypeMismatch,
+    /// The shared one-shot callback has already been applied.
+    #[error("tool invocation context modifier was already applied")]
+    AlreadyApplied,
+    /// The callback mutex was poisoned by a prior panic.
+    #[error("tool invocation context modifier lock was poisoned")]
+    Poisoned,
+}
+
 /// Failure modes for [`ToolInvoker::invoke`].
 #[derive(Debug, Error)]
 pub enum ToolInvokerError {
@@ -172,11 +501,11 @@ pub enum ToolInvokerError {
     #[error("ToolInvoker: tool '{0}' not found")]
     NotFound(String),
     /// The tool surfaced an invalid input.
-    #[error("ToolInvoker: invalid input: {0}")]
-    InvalidInput(String),
+    #[error("ToolInvoker: invalid input")]
+    InvalidInput(Utf16JsonProjection),
     /// A schema or tool precondition rejected input before execution.
-    #[error("ToolInvoker: input validation failed: {0}")]
-    Validation(String),
+    #[error("ToolInvoker: input validation failed")]
+    Validation(Utf16JsonProjection),
     /// Permission policy terminated the owning prompt-avoiding agent.
     ///
     /// Unlike an ordinary denial, callers must not convert this into a
@@ -184,8 +513,8 @@ pub enum ToolInvokerError {
     #[error("{0}")]
     Abort(String),
     /// Any other internal failure.
-    #[error("ToolInvoker: internal error: {0}")]
-    Internal(String),
+    #[error("ToolInvoker: internal error: {}", .0.string_at("").unwrap_or_default())]
+    Internal(Utf16JsonProjection),
 }
 
 impl ToolInvokerError {
@@ -197,22 +526,67 @@ impl ToolInvokerError {
     /// [`tool_api::ToolError::model_facing_message`]. `NotFound` carries only
     /// the tool name, so it is rendered into a full message here.
     #[must_use]
-    pub fn model_facing_message(&self) -> String {
+    pub fn model_facing_message(&self) -> Utf16JsonProjection {
         match self {
-            Self::NotFound(name) => format!("tool '{name}' not found"),
-            Self::InvalidInput(s) | Self::Validation(s) | Self::Abort(s) | Self::Internal(s) => {
-                s.clone()
+            Self::NotFound(name) => format!("tool '{name}' not found").into(),
+            Self::InvalidInput(message) | Self::Validation(message) | Self::Internal(message) => {
+                message.clone()
             }
+            Self::Abort(message) => message.clone().into(),
         }
     }
     /// Native result wrappers differ for pre-execution validation and thrown errors.
     #[must_use]
-    pub fn model_tool_result_content(&self) -> String {
+    pub fn model_tool_result_content(&self) -> Utf16JsonProjection {
         match self {
-            Self::Validation(message) => format!("<tool_use_error>{message}</tool_use_error>"),
-            _ => format!("Error: {}", self.model_facing_message()),
+            Self::Validation(message) => {
+                wrap_source_error_text("<tool_use_error>", message, "</tool_use_error>")
+            }
+            _ => wrap_source_error_text("Error: ", &self.model_facing_message(), ""),
         }
     }
+}
+
+fn wrap_source_error_text(
+    prefix: &str,
+    message: &Utf16JsonProjection,
+    suffix: &str,
+) -> Utf16JsonProjection {
+    let message_units = message
+        .string_units("")
+        .expect("ToolInvoker model-facing error messages are root strings");
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(message_units);
+    units.extend(suffix.encode_utf16());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("UTF-16 error wrappers have a valid display form")
+}
+
+/// Why a successful tool result ended the current turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultTurnEndSource {
+    /// The native tool result returned `endsTurn: true`.
+    Tool,
+    /// The tool result's MCP `_meta` block requested turn termination.
+    McpMeta,
+}
+
+impl ToolResultTurnEndSource {
+    /// Analytics wire value used by `tengu_mcp_tool_result_ended_turn`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::McpMeta => "mcp_meta",
+        }
+    }
+}
+
+/// Trusted successful-result control, separate from model-facing JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultTurnEnd {
+    /// Marker that won the oracle's `tool`-before-`mcp_meta` precedence.
+    pub source: ToolResultTurnEndSource,
 }
 
 /// A tool's structured result plus its independent model-facing text.
@@ -221,9 +595,25 @@ pub struct ToolInvocationResult {
     /// Tool-reported failure, distinct from an invocation/transport failure.
     pub is_error: bool,
     /// Structured result retained for tool consumers and media handling.
-    pub data: Value,
+    pub data: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional prose supplied by the tool's model-facing result mapper.
-    pub model_content: Option<String>,
+    pub model_content: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Extra conversation messages returned by the underlying tool.
+    pub new_messages: Vec<crate::types::ConversationMessage>,
+    /// One-shot mutation of the concrete per-agent ToolUseContext, kept
+    /// separate from model-only reminders in [`Self::context`].
+    pub context_modifier: Option<ToolInvocationContextModifier>,
+    /// Opaque tool metadata retained for host-side result handling.
+    pub mcp_meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Trusted host-computed control. Model input or result JSON cannot set it.
+    pub turn_end: Option<ToolResultTurnEnd>,
+    /// Model-only reminders attached by `tool.call` after the tool result.
+    /// Exact JavaScript UTF-16 units remain paired with their display strings
+    /// until the owning Agent loop projects them into history and attachments.
+    pub context: crate::types::utf16_json::Utf16JsonProjection,
+    /// Actual ToolUseContext used for this call, carried forward by the owning
+    /// agent loop so future invocations can preserve applied mutations.
+    pub context_state: Option<ToolInvocationContextState>,
 }
 
 /// Tool invocation seam used by `AgentTool` to recurse into the registry.
@@ -232,13 +622,70 @@ pub struct ToolInvocationResult {
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync + Any {
+    /// Release this Agent's computer inputs after its loop has settled.
+    async fn cleanup_computer_inputs(
+        &self,
+        _agent_id: AgentId,
+        _origin_session_id: Option<SessionId>,
+    ) -> Result<(), ToolInvokerError> {
+        Ok(())
+    }
+
+    /// Trusted current enforcing mode. Wrappers preserve their actual local
+    /// policy override, or forward the inner bound gate's live value.
+    fn permission_mode(&self) -> Option<String> {
+        None
+    }
+
+    /// Re-render a Mod replacement with the named tool's model-text mapper.
+    fn map_result_text(
+        &self,
+        _name: &str,
+        _result: &crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<crate::types::utf16_json::Utf16JsonProjection> {
+        None
+    }
+
+    /// Tool mapper's logical error flag for a replacement result, if defined.
+    fn map_result_is_error(
+        &self,
+        _name: &str,
+        _result: &crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// Parse a replacement result through the registered tool's native output
+    /// parser without executing the tool body. The returned projection is the
+    /// parser's transformed value, not merely a validation verdict.
+    async fn parse_output(
+        &self,
+        _name: &str,
+        _output: &crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Err(ToolInvokerError::Internal(
+            "Source tool output parser is unavailable".into(),
+        ))
+    }
+
+    /// Resolve concurrency safety from the actual registered tool selected for
+    /// this call. `None` means this invoker cannot resolve the tool; callers
+    /// must not infer safety from a tool name or model-facing JSON.
+    fn tool_is_concurrency_safe(
+        &self,
+        _name: &str,
+        _input: &crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Invoke the tool named `name` with the supplied JSON `input`.
     async fn invoke(
         &self,
         name: &str,
-        input: Value,
+        input: crate::types::utf16_json::Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError>;
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ToolInvokerError>;
 
     /// Invoke with an ephemeral workspace lease. Implementations that do not
     /// participate in lease-aware permission enforcement retain the legacy
@@ -246,10 +693,10 @@ pub trait ToolInvoker: Send + Sync + Any {
     async fn invoke_with_workspace_lease(
         &self,
         name: &str,
-        input: Value,
+        input: crate::types::utf16_json::Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         _workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
         self.invoke(name, input, ctx).await
     }
 
@@ -257,7 +704,7 @@ pub trait ToolInvoker: Send + Sync + Any {
     async fn invoke_detailed(
         &self,
         name: &str,
-        input: Value,
+        input: crate::types::utf16_json::Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
@@ -267,29 +714,187 @@ pub trait ToolInvoker: Send + Sync + Any {
                 is_error: false,
                 data,
                 model_content: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+                turn_end: None,
+                context: crate::types::utf16_json::Utf16JsonProjection::parse("[]")
+                    .expect("empty JSON array is valid"),
+                context_state: None,
             })
+    }
+
+    /// Invoke one host-supplied child tool through the same enforcing dispatch
+    /// path. The opaque carrier is minted by the runtime, never model JSON.
+    /// Wrappers must forward it unchanged; unsupported hosts fail closed.
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        _input: crate::types::utf16_json::Utf16JsonProjection,
+        _ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+        _supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        Err(ToolInvokerError::Internal(
+            format!("Host-supplied tool {name} dispatch is unavailable").into(),
+        ))
     }
 
     /// Cast to `&dyn Any` for downcast-based test introspection.
     /// Default impl works for all `Sized + 'static` implementors.
     fn as_any(&self) -> &dyn Any;
-    /// Release this Agent's computer inputs after its loop has settled.
-    async fn cleanup_computer_inputs(
-        &self,
-        _agent_id: AgentId,
-        _origin_session_id: Option<SessionId>,
-    ) -> Result<(), ToolInvokerError> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::Arc;
 
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn ToolInvoker>> = None;
+    }
+
+    #[test]
+    fn native_tool_call_ref_uses_one_based_js_number_coercion() {
+        for (reference, count, expected) in [
+            ("1", 2, Some(0)),
+            ("2.0", 2, Some(1)),
+            ("\"1\"", 2, Some(0)),
+            ("\" 2 \"", 2, Some(1)),
+            ("true", 2, Some(0)),
+            ("[1]", 2, Some(0)),
+            ("[2]", 2, Some(1)),
+            ("[[1]]", 2, Some(0)),
+            ("\"0x2\"", 2, Some(1)),
+            ("\"0b10\"", 2, Some(1)),
+            ("\"0o2\"", 2, Some(1)),
+            ("\"\\ufeff1\"", 2, Some(0)),
+            ("false", 2, None),
+            ("null", 2, None),
+            ("[]", 2, None),
+            ("[null]", 2, None),
+            ("{}", 2, None),
+            ("0", 2, None),
+            ("3", 2, None),
+            ("1.5", 2, None),
+            ("\"1.5\"", 2, None),
+            ("\"bad\"", 2, None),
+            ("\"NaN\"", 2, None),
+            ("\"Infinity\"", 2, None),
+            ("\"\\u00851\"", 2, None),
+            ("1", 0, None),
+        ] {
+            let projection = crate::types::utf16_json::Utf16JsonProjection::parse(reference)
+                .expect("test input is JSON");
+            assert_eq!(
+                tool_call_ref_index(projection.at_pointer("").unwrap(), count),
+                expected,
+                "reference={reference}, run_count={count}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_tool_call_ref_numbers_round_through_ieee754_before_bounds_check() {
+        let large_integer =
+            crate::types::utf16_json::Utf16JsonProjection::parse("9007199254740993").unwrap();
+        let reference = large_integer.at_pointer("").unwrap();
+        assert_eq!(js_number(reference), Some(9_007_199_254_740_992.0));
+        assert_eq!(tool_call_ref_index(reference, 2), None);
+    }
+
+    #[test]
+    fn context_state_downcast_failure_keeps_the_snapshot_available() {
+        let state = ToolInvocationContextState::new(Arc::new(42_u32));
+
+        assert!(matches!(
+            state.downcast_arc::<String>(),
+            Err(ToolInvocationContextStateError::TypeMismatch)
+        ));
+        assert_eq!(
+            *state.downcast_arc::<u32>().expect("original type remains"),
+            42
+        );
+    }
+
+    #[test]
+    fn context_modifier_accepts_send_not_sync_fn_once_and_applies_once_across_clones() {
+        // Cell is Send but not Sync. The adapter must not strengthen the
+        // ToolCallResult FnOnce contract to require Sync.
+        let counter = Cell::new(7_u32);
+        let modifier = ToolInvocationContextModifier::new(move |mut context: Vec<u32>| {
+            context.push(counter.get());
+            counter.set(counter.get() + 1);
+            context
+        });
+        let cloned = modifier.clone();
+
+        assert_eq!(
+            modifier.apply(Vec::<u32>::new()).expect("first apply"),
+            vec![7_u32]
+        );
+        assert!(matches!(
+            cloned.apply(Vec::<u32>::new()),
+            Err(ToolInvocationContextModifierError::AlreadyApplied)
+        ));
+    }
+
+    #[test]
+    fn context_modifier_type_error_does_not_consume_the_fn_once() {
+        let modifier = ToolInvocationContextModifier::new(|value: Vec<u8>| value);
+
+        assert!(matches!(
+            modifier.apply(String::from("wrong type")),
+            Err(ToolInvocationContextModifierError::TypeMismatch)
+        ));
+        assert_eq!(
+            modifier.apply(vec![1_u8, 2]).expect("correct type"),
+            vec![1_u8, 2]
+        );
+    }
+}
+
+#[cfg(test)]
+mod source_error_projection_tests {
+    use super::ToolInvokerError;
+    use crate::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn internal_error_preserves_source_text_in_tool_result() {
+        let detail = Utf16JsonProjection::parse(r#""permission \ud800 denied""#).unwrap();
+        let error = ToolInvokerError::Internal(detail.clone());
+        assert_eq!(
+            error.model_facing_message().string_units(""),
+            detail.string_units("")
+        );
+        assert_eq!(
+            error.model_tool_result_content().string_units(""),
+            Some(
+                "Error: permission "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" denied".encode_utf16())
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn validation_wrapper_preserves_lone_surrogate_error_text() {
+        let detail = Utf16JsonProjection::parse(r#""bad \ud800 value""#).unwrap();
+        let error = ToolInvokerError::Validation(detail);
+        let content = error.model_tool_result_content();
+        assert_eq!(
+            content.string_units(""),
+            Some(
+                "<tool_use_error>bad "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" value</tool_use_error>".encode_utf16())
+                    .collect()
+            )
+        );
     }
 }

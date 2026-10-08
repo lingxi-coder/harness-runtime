@@ -22,10 +22,11 @@
 //! throwaway current-thread `block_on` on the render-loop's blocking thread),
 //! so the multi-second isolated query behaves exactly like `/recap`'s.
 
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{trim_source_text, BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{OrchestratorHandle, RecapOutcome};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Shown when `/btw` is invoked with no question. (The TUI dispatcher also
@@ -55,35 +56,51 @@ const FABRICATED_TOOL_CALL_NOTICE: &str = "_/btw can't run tools: any tool calls
 /// — an optional namespace prefix, then an opening `function_calls`/`invoke`
 /// tag or either closing tag. Hand-rolled rather than adding a `regex`
 /// dependency to this crate; the alternatives are few and fixed.
-fn writes_tool_calls_as_text(answer: &str) -> bool {
-    // `<`, optional `<prefix>:`, then the opening forms.
-    let opens =
-        |rest: &str| rest.starts_with("function_calls>") || rest.starts_with("invoke name=");
-    let closes = |rest: &str| rest.starts_with("function_calls>") || rest.starts_with("invoke>");
-    let mut rest = answer;
-    while let Some(i) = rest.find('<') {
-        let after = &rest[i + 1..];
-        let (after, is_close) = match after.strip_prefix('/') {
-            Some(tail) => (tail, true),
-            None => (after, false),
-        };
-        // Skip an optional `ns:` prefix (the oracle's `${fwt}` slot).
-        let body = match after.split_once(':') {
-            Some((ns, tail))
-                if !ns.is_empty()
-                    && ns.len() <= 32
-                    && ns
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+fn writes_tool_calls_as_text(answer: &Utf16JsonProjection) -> bool {
+    let Some(units) = answer.string_units("") else {
+        return false;
+    };
+    let starts_with_ascii = |offset: usize, value: &str| {
+        units
+            .get(offset..)
+            .is_some_and(|suffix| suffix.starts_with(&value.encode_utf16().collect::<Vec<_>>()))
+    };
+
+    for (index, unit) in units.iter().enumerate() {
+        if *unit != u16::from(b'<') {
+            continue;
+        }
+        let mut body = index + 1;
+        let is_close = units.get(body) == Some(&u16::from(b'/'));
+        if is_close {
+            body += 1;
+        }
+
+        // Skip an optional namespace prefix only when its source units match
+        // the native ASCII grammar. Other units remain opaque model text.
+        if let Some(colon) = units[body..]
+            .iter()
+            .position(|unit| *unit == u16::from(b':'))
+        {
+            if (1..=32).contains(&colon)
+                && units[body..body + colon].iter().all(|unit| {
+                    *unit <= 0x7f
+                        && (char::from_u32(u32::from(*unit)).is_some_and(|character| {
+                            character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                        }))
+                })
             {
-                tail
+                body += colon + 1;
             }
-            _ => after,
-        };
-        if (is_close && closes(body)) || (!is_close && opens(body)) {
+        }
+
+        if if is_close {
+            starts_with_ascii(body, "function_calls>") || starts_with_ascii(body, "invoke>")
+        } else {
+            starts_with_ascii(body, "function_calls>") || starts_with_ascii(body, "invoke name=")
+        } {
             return true;
         }
-        rest = &rest[i + 1..];
     }
     false
 }
@@ -109,10 +126,13 @@ impl SideQuestionHandler {
 #[async_trait]
 impl BuiltinCommandHandler for SideQuestionHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let question = args.raw_args.trim();
-        if question.is_empty() {
+        let question = trim_source_text(&args.raw_args);
+        if question
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
             return CommandResult::Done {
-                display: Some(USAGE_MESSAGE.to_string()),
+                display: Some((USAGE_MESSAGE.to_string()).into()),
             };
         }
         telemetry::emit_command_started("tengu_command_btw_started");
@@ -124,13 +144,21 @@ impl BuiltinCommandHandler for SideQuestionHandler {
         //   Text (empty)     → the fixed "No response received" line
         //   Cancelled        → the fixed "Side question cancelled." line
         //   Err              → an honest failure line
-        match self.handle.answer_side_question(question).await {
-            Ok(RecapOutcome::Text(text)) if !text.trim().is_empty() => {
+        match self.handle.answer_side_question(&question).await {
+            Ok(RecapOutcome::Text(text))
+                if !trim_source_text(&text)
+                    .string_units("")
+                    .is_some_and(|units| units.is_empty()) =>
+            {
                 telemetry::emit_command_completed("tengu_command_btw_completed", "ok");
                 // 2.1.269: flag an answer that wrote tool calls as text, so the
                 // reader knows nothing in it was executed.
                 let display = if writes_tool_calls_as_text(&text) {
-                    format!("{text}\n\n{FABRICATED_TOOL_CALL_NOTICE}")
+                    crate::model::source_concat([
+                        crate::model::PromptPart::Source(&text),
+                        crate::model::PromptPart::Text("\n\n"),
+                        crate::model::PromptPart::Text(FABRICATED_TOOL_CALL_NOTICE),
+                    ])
                 } else {
                     text
                 };
@@ -141,19 +169,19 @@ impl BuiltinCommandHandler for SideQuestionHandler {
             Ok(RecapOutcome::Text(_)) => {
                 telemetry::emit_command_completed("tengu_command_btw_completed", "empty");
                 CommandResult::Done {
-                    display: Some(NO_RESPONSE_MESSAGE.to_string()),
+                    display: Some((NO_RESPONSE_MESSAGE.to_string()).into()),
                 }
             }
             Ok(RecapOutcome::Cancelled) => {
                 telemetry::emit_command_completed("tengu_command_btw_completed", "cancelled");
                 CommandResult::Done {
-                    display: Some(CANCELLED_MESSAGE.to_string()),
+                    display: Some((CANCELLED_MESSAGE.to_string()).into()),
                 }
             }
             Err(e) => {
                 telemetry::emit_command_failed("tengu_command_btw_failed", &e.to_string());
                 CommandResult::Done {
-                    display: Some(format!("Couldn't answer side question: {e}")),
+                    display: Some((format!("Couldn't answer side question: {e}")).into()),
                 }
             }
         }
@@ -175,9 +203,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "btw".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "btw".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 
@@ -239,7 +267,10 @@ mod fabricated_tool_call_tests {
             "</invoke>",
             "<invoke name=\"Read\">",
         ] {
-            assert!(writes_tool_calls_as_text(answer), "must flag: {answer:?}");
+            assert!(
+                writes_tool_calls_as_text(&Utf16JsonProjection::from(answer)),
+                "must flag: {answer:?}"
+            );
         }
     }
 
@@ -256,7 +287,7 @@ mod fabricated_tool_call_tests {
             "",
         ] {
             assert!(
-                !writes_tool_calls_as_text(answer),
+                !writes_tool_calls_as_text(&Utf16JsonProjection::from(answer)),
                 "must NOT flag: {answer:?}"
             );
         }

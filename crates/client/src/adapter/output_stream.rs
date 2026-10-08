@@ -15,6 +15,9 @@
 //! |-----------------------------|-------------------------------------|
 //! | `emit_text`                 | `TextDelta`                         |
 //! | `emit_system_notice`        | `SystemNotice`                     |
+//! | `emit_mod_log`              | `UiLog`                            |
+//! | `emit_mod_ui_client_frame`  | `UiClientFrame`                    |
+//! | `emit_mod_ui_invalidate`    | `UiInvalidate`                     |
 //! | `emit_tool_call`            | `ToolUseStarted`                    |
 //! | `emit_tool_heartbeat`       | `ToolHeartbeat`                     |
 //! | `emit_tool_result`          | `ToolUseResult`                     |
@@ -53,12 +56,17 @@
 
 use std::sync::Arc;
 
-use crate::protocol::events::{ClientEvent, TurnOutcomeDto};
+use crate::protocol::events::{
+    ClientEvent, RefusalContinuationJoinDto, RefusalContinuationPhaseDto,
+    ServerFallbackProviderMessageDto, ServerFallbackTombstoneMessageDto, TurnOutcomeDto,
+};
 use crate::protocol::message::{MessageBlockDto, MessageDto};
+use crate::protocol::text::ClientTextDto;
 use async_trait::async_trait;
-use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::host::{CostSnapshot, OutputStream, ServerFallbackTombstoneMessage};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-use crate::adapter::lowering::{lower_cost_snapshot, value_to_json_string};
+use crate::adapter::lowering::lower_cost_snapshot;
 use crate::adapter::sink::ClientEventSink;
 
 /// An [`lingxi_core::host::OutputStream`] that lowers every live-turn callback into a
@@ -75,7 +83,7 @@ pub struct AdapterOutputStream {
     /// orchestrator calls `emit_message_boundary` after persistence and before
     /// any terminal `emit_end_turn`, making this the production message-level
     /// source of truth for mobile/web transcript reducers.
-    message_blocks: Arc<tokio::sync::Mutex<Vec<MessageBlockDto>>>,
+    message_blocks: Arc<tokio::sync::Mutex<MessageBuffer>>,
     /// `tool_use_id` → `(tool name, call input)` for calls awaiting a result,
     /// in INSERTION ORDER.
     ///
@@ -91,7 +99,128 @@ pub struct AdapterOutputStream {
     /// A `std::sync::Mutex`, never held across an `.await`, so the struct
     /// stays `Send + Sync` without churning the async signatures.
     pending:
-        Arc<std::sync::Mutex<std::collections::VecDeque<(String, (String, serde_json::Value))>>>,
+        Arc<std::sync::Mutex<std::collections::VecDeque<(String, (String, Utf16JsonProjection))>>>,
+}
+
+#[derive(Default)]
+struct MessageBuffer {
+    blocks: Vec<BufferedMessageBlock>,
+    active_block_key: Option<u64>,
+    last_completed_row_id: Option<String>,
+    pending_continuation: Option<PendingContinuation>,
+}
+
+struct BufferedMessageBlock {
+    block: MessageBlockDto,
+    block_key: Option<u64>,
+    row_id: Option<String>,
+}
+
+struct PendingContinuation {
+    salvage_text: ClientTextDto,
+    display_salvage_text: bool,
+    replaces_uuids: std::collections::HashSet<String>,
+}
+
+impl MessageBuffer {
+    fn association(&self) -> (Option<u64>, Option<String>) {
+        match self.active_block_key {
+            Some(block_key) => (Some(block_key), None),
+            None => (None, self.last_completed_row_id.clone()),
+        }
+    }
+
+    fn append(&mut self, block: MessageBlockDto) {
+        let (block_key, row_id) = self.association();
+        let same_association = self
+            .blocks
+            .last()
+            .is_some_and(|previous| previous.block_key == block_key && previous.row_id == row_id);
+        let mut next = Some(block);
+        if same_association {
+            if let Some(previous) = self.blocks.last_mut() {
+                match (&mut previous.block, next.take().expect("pending block")) {
+                    (MessageBlockDto::Text { text: current }, MessageBlockDto::Text { text }) => {
+                        current.code_units.extend(text.code_units);
+                    }
+                    (
+                        MessageBlockDto::Thinking {
+                            thinking: current,
+                            signature: current_signature,
+                        },
+                        MessageBlockDto::Thinking {
+                            thinking,
+                            signature,
+                        },
+                    ) => {
+                        current.push_str(&thinking);
+                        if signature.is_some() {
+                            *current_signature = signature;
+                        }
+                    }
+                    (_, other) => next = Some(other),
+                }
+            }
+        }
+        if let Some(block) = next {
+            self.blocks.push(BufferedMessageBlock {
+                block,
+                block_key,
+                row_id: row_id.clone(),
+            });
+        }
+        self.apply_pending_if_eligible(row_id.as_deref());
+    }
+
+    fn bind_identity(&mut self, block_key: u64, row_id: &str) {
+        for entry in &mut self.blocks {
+            if entry.block_key == Some(block_key) {
+                entry.row_id = Some(row_id.to_string());
+            }
+        }
+        self.last_completed_row_id = Some(row_id.to_string());
+        if self.active_block_key == Some(block_key) {
+            self.active_block_key = None;
+        }
+        self.apply_pending_if_eligible(Some(row_id));
+    }
+
+    fn apply_pending_if_eligible(&mut self, row_id: Option<&str>) {
+        let Some(row_id) = row_id else {
+            return;
+        };
+        let Some(index) = self.blocks.iter().position(|entry| {
+            entry.row_id.as_deref() == Some(row_id)
+                && matches!(&entry.block, MessageBlockDto::Text { .. })
+        }) else {
+            return;
+        };
+        let MessageBlockDto::Text { text } = &mut self.blocks[index].block else {
+            return;
+        };
+        if !has_non_whitespace_js(text) {
+            return;
+        }
+        let Some(pending) = self.pending_continuation.take() else {
+            return;
+        };
+        if pending.display_salvage_text {
+            text.code_units
+                .splice(0..0, pending.salvage_text.code_units);
+        }
+        self.blocks.retain(|entry| {
+            !entry
+                .row_id
+                .as_ref()
+                .is_some_and(|uuid| pending.replaces_uuids.contains(uuid))
+        });
+    }
+}
+
+fn has_non_whitespace_js(text: &ClientTextDto) -> bool {
+    text.display()
+        .chars()
+        .any(|character| !character.is_whitespace() && character != '\u{feff}')
 }
 
 /// Belt-and-braces bound on [`AdapterOutputStream::pending`] so a turn that
@@ -105,7 +234,7 @@ impl AdapterOutputStream {
     pub fn new(sink: Arc<dyn ClientEventSink>) -> Self {
         Self {
             sink,
-            message_blocks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            message_blocks: Arc::new(tokio::sync::Mutex::new(MessageBuffer::default())),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
@@ -113,7 +242,7 @@ impl AdapterOutputStream {
     /// Clear an unfinished response before a host starts a new turn or after a
     /// hard failure that did not reach an engine message boundary.
     pub async fn reset_message_buffer(&self) {
-        self.message_blocks.lock().await.clear();
+        *self.message_blocks.lock().await = MessageBuffer::default();
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
@@ -129,7 +258,7 @@ impl AdapterOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
     ) {
         let Ok(mut pending) = self.pending.lock() else {
             return;
@@ -145,7 +274,10 @@ impl AdapterOutputStream {
     }
 
     /// Take back a dispatched call's input, if it is still pending.
-    fn take_call(&self, id: &lingxi_core::types::ToolUseId) -> Option<(String, serde_json::Value)> {
+    fn take_call(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+    ) -> Option<(String, Utf16JsonProjection)> {
         let mut pending = self.pending.lock().ok()?;
         let key = id.to_string();
         let at = pending
@@ -160,28 +292,42 @@ impl AdapterOutputStream {
     /// top-level `"error"` key (`orchestrator/src/turn_loop.rs:327`); any other
     /// shape is a success payload. This keeps the adapter aligned with the
     /// engine's existing error-payload contract.
-    fn result_is_error(result: &serde_json::Value) -> bool {
-        result.get("error").is_some()
+    fn result_is_error(result: &Utf16JsonProjection) -> bool {
+        result.contains_property("error")
+    }
+
+    /// Materialize a display-only view for the existing tool-card renderer.
+    /// Machine-facing event JSON continues to serialize the source projection.
+    fn display_value(value: &Utf16JsonProjection) -> serde_json::Value {
+        value
+            .to_json_string()
+            .ok()
+            .and_then(|source| serde_json::from_str(&source).ok())
+            .unwrap_or(serde_json::Value::Null)
     }
 
     async fn emit_tool_result_event(
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        result: &serde_json::Value,
+        result: &Utf16JsonProjection,
     ) {
         let is_error = Self::result_is_error(result);
         let call_input = self.take_call(id).map(|(_, input)| input);
+        let display_input = call_input.as_ref().map(Self::display_value);
+        let display_result = Self::display_value(result);
         self.sink
             .emit(ClientEvent::ToolUseResult {
                 id: id.to_string(),
                 tool: tool.to_string(),
-                result_json: value_to_json_string(result),
+                result_json: result
+                    .to_json_string()
+                    .expect("tool result source is valid JSON"),
                 is_error,
                 display: Some(crate::adapter::tool_display::lower_tool_result_display(
                     tool,
-                    call_input.as_ref(),
-                    result,
+                    display_input.as_ref(),
+                    &display_result,
                     is_error,
                 )),
             })
@@ -201,7 +347,16 @@ impl AdapterOutputStream {
     }
 
     async fn emit_buffered_message(&self, stop_reason: Option<&str>, include_empty: bool) {
-        let blocks = std::mem::take(&mut *self.message_blocks.lock().await);
+        let blocks = {
+            let mut buffer = self.message_blocks.lock().await;
+            buffer.active_block_key = None;
+            buffer.last_completed_row_id = None;
+            buffer.pending_continuation = None;
+            std::mem::take(&mut buffer.blocks)
+                .into_iter()
+                .map(|entry| entry.block)
+                .collect::<Vec<_>>()
+        };
         if blocks.is_empty() && !include_empty {
             return;
         }
@@ -221,10 +376,12 @@ impl AdapterOutputStream {
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
-    async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
+    async fn emit_task_lifecycle(&self, event: &Utf16JsonProjection) {
         self.sink
             .emit(ClientEvent::TaskLifecycle {
-                event_json: event.to_string(),
+                event_json: event
+                    .to_json_string()
+                    .expect("task lifecycle source is valid JSON"),
             })
             .await;
     }
@@ -252,21 +409,14 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_text(&self, text: &str) {
-        let mut blocks = self.message_blocks.lock().await;
-        if let Some(MessageBlockDto::Text { text: current }) = blocks.last_mut() {
-            current.push_str(text);
-        } else {
-            blocks.push(MessageBlockDto::Text {
-                text: text.to_string(),
-            });
-        }
-        drop(blocks);
-        self.sink
-            .emit(ClientEvent::TextDelta {
-                text: text.to_string(),
-            })
-            .await;
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let text = ClientTextDto::from_projection(text)
+            .expect("OutputStream text is a root-string source projection");
+        self.message_blocks
+            .lock()
+            .await
+            .append(MessageBlockDto::Text { text: text.clone() });
+        self.sink.emit(ClientEvent::TextDelta { text }).await;
     }
 
     async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
@@ -277,8 +427,30 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_user_transcript_row_identity(&self, row_token: &str, uuid: &str) {
+        self.sink
+            .emit(ClientEvent::UserTranscriptRowIdentity {
+                row_token: row_token.to_string(),
+                uuid: uuid.to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_assistant_transcript_row_uuids(
+        &self,
+        message_id: &lingxi_core::types::MessageId,
+        uuids: &[Option<String>],
+    ) {
+        self.sink
+            .emit(ClientEvent::AssistantTranscriptRowUuids {
+                message_id: message_id.as_uuid().to_string(),
+                uuids: uuids.to_vec(),
+            })
+            .await;
+    }
+
     async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
-        self.message_blocks.lock().await.clear();
+        *self.message_blocks.lock().await = MessageBuffer::default();
         self.sink
             .emit(ClientEvent::MessageRetracted {
                 message_id: message_id.as_uuid().to_string(),
@@ -286,11 +458,207 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_system_notice(&self, message: &str, is_error: bool) {
+    async fn emit_server_fallback_query_model_change(&self, to_model: &str) {
+        self.sink
+            .emit(ClientEvent::QueryModelChange {
+                to_model: to_model.to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_assistant_block_start(&self, block_key: u64) {
+        self.message_blocks.lock().await.active_block_key = Some(block_key);
+        self.sink
+            .emit(ClientEvent::AssistantBlockStart { block_key })
+            .await;
+    }
+
+    async fn emit_assistant_block_identity(
+        &self,
+        block_key: u64,
+        row_id: &lingxi_core::types::MessageId,
+    ) {
+        let message_uuid = row_id.as_uuid().to_string();
+        self.message_blocks
+            .lock()
+            .await
+            .bind_identity(block_key, &message_uuid);
+        self.sink
+            .emit(ClientEvent::AssistantBlockIdentity {
+                block_key,
+                message_uuid,
+            })
+            .await;
+    }
+
+    async fn emit_server_fallback_tombstone(
+        &self,
+        message: &ServerFallbackTombstoneMessage,
+        display_only: bool,
+    ) {
+        let row_id = message.uuid.as_uuid().to_string();
+        let discarded_tool_ids: std::collections::HashSet<String> = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                lingxi_core::types::ContentBlock::ToolUse { id, .. } => Some(id.to_string()),
+                lingxi_core::types::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    Some(tool_use_id.to_string())
+                }
+                lingxi_core::types::ContentBlock::ServerToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        {
+            let mut buffer = self.message_blocks.lock().await;
+            buffer.blocks.retain(|entry| {
+                if entry.row_id.as_deref() == Some(row_id.as_str()) {
+                    return false;
+                }
+                match &entry.block {
+                    MessageBlockDto::ToolUse { id, .. }
+                    | MessageBlockDto::ToolResult { id, .. } => !discarded_tool_ids.contains(id),
+                    _ => true,
+                }
+            });
+            if buffer.last_completed_row_id.as_deref() == Some(row_id.as_str()) {
+                buffer.last_completed_row_id = None;
+            }
+        }
+        if !discarded_tool_ids.is_empty() {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.retain(|(pending_id, _)| !discarded_tool_ids.contains(pending_id));
+            }
+        }
+
+        let dto = ServerFallbackTombstoneMessageDto {
+            uuid: row_id,
+            message_type: message.message_type.clone(),
+            timestamp: message.timestamp.clone(),
+            request_id: message.request_id.clone(),
+            request_ref_json: message.request_ref.as_ref().map(|request_ref| {
+                serde_json::to_string(request_ref).expect("request reference serializes to JSON")
+            }),
+            message: ServerFallbackProviderMessageDto {
+                id: message.provider_message_id.clone(),
+                model: message.model.clone(),
+                stop_reason: message.stop_reason.clone(),
+                stop_details_json: message.stop_details.as_ref().map(|details| {
+                    serde_json::to_string(details).expect("stop details serialize to JSON")
+                }),
+                usage_json: message.usage.as_ref().map(|usage| {
+                    serde_json::to_string(usage).expect("usage facts serialize to JSON")
+                }),
+                content_json: serde_json::to_string(&message.content)
+                    .expect("core content blocks serialize to JSON"),
+            },
+            is_api_error_message: message.is_api_error_message,
+            supersedes_uuids: message.supersedes_uuids.as_ref().map(|uuids| {
+                uuids
+                    .iter()
+                    .map(|uuid| uuid.as_uuid().to_string())
+                    .collect()
+            }),
+        };
+        self.sink
+            .emit(ClientEvent::Tombstone {
+                message: dto,
+                display_only,
+            })
+            .await;
+    }
+
+    async fn emit_refusal_continuation_begin(
+        &self,
+        salvage_text: &str,
+        replaces_uuids: &[lingxi_core::types::MessageId],
+        display_salvage_text: bool,
+    ) {
+        self.message_blocks.lock().await.pending_continuation = Some(PendingContinuation {
+            salvage_text: ClientTextDto::from_utf8(salvage_text),
+            display_salvage_text,
+            replaces_uuids: replaces_uuids
+                .iter()
+                .map(|uuid| uuid.as_uuid().to_string())
+                .collect(),
+        });
+        self.sink
+            .emit(ClientEvent::RefusalContinuation {
+                phase: RefusalContinuationPhaseDto::Begin,
+                salvage_text: salvage_text.to_string(),
+                join: RefusalContinuationJoinDto::Exact,
+                replaces_uuids: replaces_uuids
+                    .iter()
+                    .map(|uuid| uuid.as_uuid().to_string())
+                    .collect(),
+                display_salvage_text,
+            })
+            .await;
+    }
+
+    async fn emit_system_notice(&self, message: &Utf16JsonProjection, is_error: bool) {
         self.sink
             .emit(ClientEvent::SystemNotice {
-                message: message.to_string(),
+                message: ClientTextDto::from_projection(message)
+                    .expect("system notice is a root string projection"),
                 is_error,
+            })
+            .await;
+    }
+
+    async fn emit_mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+        self.sink
+            .emit(ClientEvent::UiLog {
+                plugin: plugin.to_string(),
+                text: ClientTextDto::from_projection(text)
+                    .expect("Mod log text is a root-string source projection"),
+            })
+            .await;
+    }
+
+    async fn emit_mod_toast(&self, plugin: &str, text: &Utf16JsonProjection, timeout_ms: u64) {
+        self.sink
+            .emit(ClientEvent::UiToast {
+                plugin: plugin.to_string(),
+                text: ClientTextDto::from_projection(text)
+                    .expect("Mod toast text is a root-string source projection"),
+                timeout_ms,
+            })
+            .await;
+    }
+
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
+        self.sink
+            .emit(ClientEvent::UiStatus {
+                plugin: plugin.to_string(),
+                text: text.map(|text| {
+                    ClientTextDto::from_projection(text)
+                        .expect("Mod status text is a root-string source projection")
+                }),
+            })
+            .await;
+    }
+
+    async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame_json: &str) {
+        self.sink
+            .emit(ClientEvent::UiClientFrame {
+                runtime_id: runtime_id.to_string(),
+                frame_json: frame_json.to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_mod_ui_invalidate(
+        &self,
+        instances_json: Option<&str>,
+        uuid: &str,
+        session_id: &str,
+    ) {
+        self.sink
+            .emit(ClientEvent::UiInvalidate {
+                instances_json: instances_json.map(str::to_string),
+                uuid: uuid.to_string(),
+                session_id: session_id.to_string(),
             })
             .await;
     }
@@ -299,29 +667,40 @@ impl OutputStream for AdapterOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
     ) {
         self.remember_call(id, tool, input);
+        let display_input = Self::display_value(input);
+        let input_json = input
+            .to_json_string()
+            .expect("tool input source is valid JSON");
         self.message_blocks
             .lock()
             .await
-            .push(MessageBlockDto::ToolUse {
+            .append(MessageBlockDto::ToolUse {
                 id: id.to_string(),
                 tool: tool.to_string(),
-                input_json: value_to_json_string(input),
-                header: Some(crate::adapter::tool_display::lower_tool_header(tool, input)),
+                input_json: input_json.clone(),
+                header: Some(crate::adapter::tool_display::lower_tool_header(
+                    tool,
+                    &display_input,
+                )),
             });
         self.sink
             .emit(ClientEvent::ToolUseStarted {
                 id: id.to_string(),
                 tool: tool.to_string(),
-                input_json: value_to_json_string(input),
-                header: Some(crate::adapter::tool_display::lower_tool_header(tool, input)),
+                input_json,
+                header: Some(crate::adapter::tool_display::lower_tool_header(
+                    tool,
+                    &display_input,
+                )),
             })
             .await;
         // TodoWrite rewrites the whole plan. Emitted on the CALL, not the
         // result, matching how the terminal updates its pinned block.
-        if let Some(tasks) = crate::adapter::tool_display::plan_from_tool_call(tool, input) {
+        if let Some(tasks) = crate::adapter::tool_display::plan_from_tool_call(tool, &display_input)
+        {
             self.sink.emit(ClientEvent::PlanUpdated { tasks }).await;
         }
     }
@@ -345,8 +724,8 @@ impl OutputStream for AdapterOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        _model_text: &str,
-        result: &serde_json::Value,
+        _model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
     ) {
         // The `client::protocol` `ToolUseResult` DTO is wire-frozen, so we do NOT
         // add a `model_text` field yet — the adapter ignores it and keeps
@@ -361,8 +740,8 @@ impl OutputStream for AdapterOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        _model_text: &str,
-        result: &serde_json::Value,
+        _model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
         denial_kind: &str,
     ) {
         // Keep the frozen `ClientEvent` shape while carrying the engine's
@@ -371,11 +750,10 @@ impl OutputStream for AdapterOutputStream {
         // distinguish cancellation from a real tool failure without matching a
         // localized error string.
         let mut tagged = result.clone();
-        if let serde_json::Value::Object(fields) = &mut tagged {
-            fields.insert(
-                "tool_denial_kind".to_string(),
-                serde_json::Value::String(denial_kind.to_string()),
-            );
+        if tagged.object_entries().is_some() {
+            tagged
+                .set_field("tool_denial_kind", denial_kind.into())
+                .expect("tool result root is an object");
         }
         self.emit_tool_result_event(id, tool, &tagged).await;
     }
@@ -469,23 +847,13 @@ impl OutputStream for AdapterOutputStream {
     /// (the cryptographic signature only arrives on the completed thinking
     /// block, not per-delta) — see `lingxi_core::host::OutputStream::emit_thinking`.
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
-        let mut blocks = self.message_blocks.lock().await;
-        if let Some(MessageBlockDto::Thinking {
-            thinking: current,
-            signature: current_signature,
-        }) = blocks.last_mut()
-        {
-            current.push_str(thinking);
-            if signature.is_some() {
-                *current_signature = signature.map(str::to_string);
-            }
-        } else {
-            blocks.push(MessageBlockDto::Thinking {
+        self.message_blocks
+            .lock()
+            .await
+            .append(MessageBlockDto::Thinking {
                 thinking: thinking.to_string(),
                 signature: signature.map(str::to_string),
             });
-        }
-        drop(blocks);
         self.sink
             .emit(ClientEvent::ThinkingDelta {
                 thinking: thinking.to_string(),
@@ -498,7 +866,7 @@ impl OutputStream for AdapterOutputStream {
         self.message_blocks
             .lock()
             .await
-            .push(MessageBlockDto::RedactedThinking {
+            .append(MessageBlockDto::RedactedThinking {
                 data: data.to_string(),
             });
     }
@@ -580,6 +948,15 @@ impl OutputStream for AdapterOutputStream {
             })
             .await;
     }
+
+    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+        self.sink
+            .emit(ClientEvent::TerminalApiError {
+                api_error_status,
+                terminal_reason: terminal_reason.to_owned(),
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -589,18 +966,83 @@ mod tests {
     use super::*;
     use crate::adapter::test_support::MockSink;
 
+    fn projection(text: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect())
+            .expect("scalar text is a valid root string")
+    }
+
+    fn json_projection(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("generated JSON is a valid projection")
+    }
+
     /// `emit_text` → exactly one `TextDelta` carrying the payload verbatim.
     #[tokio::test]
     async fn task_lifecycle_reaches_client_event_sink() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
-        let event = serde_json::json!({"type":"system", "subtype":"task_updated", "task_id":"b12345678", "patch":{"status":"completed"}});
+        let event = Utf16JsonProjection::parse(
+            r#"{"type":"system","subtype":"task_updated","task_id":"b12345678","patch":{"status":"completed","description":"\ud800"}}"#,
+        )
+        .unwrap();
         stream.emit_task_lifecycle(&event).await;
         assert_eq!(
             sink.events().await,
             vec![ClientEvent::TaskLifecycle {
-                event_json: event.to_string()
+                event_json: event.to_json_string().unwrap()
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_api_error_forwards_status_and_reason_without_text_inference() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_terminal_api_error(None, "api_error").await;
+        stream
+            .emit_terminal_api_error(Some(413), "image_error")
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![
+                ClientEvent::TerminalApiError {
+                    api_error_status: None,
+                    terminal_reason: "api_error".into(),
+                },
+                ClientEvent::TerminalApiError {
+                    api_error_status: Some(413),
+                    terminal_reason: "image_error".into(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_row_identity_events_preserve_stop_time_jsonl_uuids() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let message_id = lingxi_core::types::MessageId::new();
+        let uuids = vec![Some("persisted-text-row".into()), None];
+
+        stream
+            .emit_user_transcript_row_identity("pending-user-row", "persisted-user-row")
+            .await;
+        stream
+            .emit_assistant_transcript_row_uuids(&message_id, &uuids)
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![
+                ClientEvent::UserTranscriptRowIdentity {
+                    row_token: "pending-user-row".into(),
+                    uuid: "persisted-user-row".into(),
+                },
+                ClientEvent::AssistantTranscriptRowUuids {
+                    message_id: message_id.as_uuid().to_string(),
+                    uuids,
+                },
+            ]
         );
     }
 
@@ -638,16 +1080,46 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        stream.emit_text("hello world").await;
+        stream.emit_text(&projection("hello world")).await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
             ClientEvent::TextDelta {
-                text: "hello world".to_string()
+                text: "hello world".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn emit_text_preserves_lone_surrogate_in_live_and_completed_dtos() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let units = vec![b'a' as u16, 0xd800, b'b' as u16];
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("root string display matches exact units");
+
+        stream.emit_text(&source).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let events = sink.events().await;
+        let ClientEvent::TextDelta { text } = &events[0] else {
+            panic!("expected live text delta")
+        };
+        assert_eq!(text.code_units, units);
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().expect("completed message")
+        else {
+            panic!("expected completed message")
+        };
+        let MessageBlockDto::Text { text } = &message.blocks[0] else {
+            panic!("expected completed text block")
+        };
+        assert_eq!(text.code_units, units);
     }
 
     #[tokio::test]
@@ -655,10 +1127,10 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
         let id = lingxi_core::types::MessageId::new();
-        stream.emit_text("rejected").await;
+        stream.emit_text(&projection("rejected")).await;
         stream.emit_assistant_message_identity(&id).await;
         stream.emit_message_retracted(&id).await;
-        stream.emit_text("clean").await;
+        stream.emit_text(&projection("clean")).await;
         stream.emit_message_boundary(Some("end_turn"), None).await;
         let events = sink.events().await;
         assert_eq!(
@@ -688,6 +1160,253 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn server_fallback_forwards_model_change_and_complete_tombstone_row() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let old_id = lingxi_core::types::MessageId::new();
+        let new_id = lingxi_core::types::MessageId::new();
+        let discarded_tool = lingxi_core::types::ToolUseId::from("toolu_discarded");
+        let discarded_input = json_projection(&serde_json::json!({"file_path": "/tmp/discarded"}));
+
+        stream
+            .emit_server_fallback_query_model_change("claude-sonnet-4")
+            .await;
+        stream.emit_assistant_block_start(41).await;
+        stream.emit_text(&projection("old assistant output")).await;
+        stream.emit_assistant_block_identity(41, &old_id).await;
+        stream
+            .emit_tool_call(&discarded_tool, "Read", &discarded_input)
+            .await;
+        stream
+            .emit_server_fallback_tombstone(
+                &ServerFallbackTombstoneMessage {
+                    uuid: old_id,
+                    message_type: "assistant".into(),
+                    timestamp: "2026-10-03T12:00:00.000Z".into(),
+                    request_id: Some("request-1".into()),
+                    request_ref: Some(serde_json::json!({"lane": "main"})),
+                    provider_message_id: Some("provider-message-1".into()),
+                    model: Some("claude-opus-4".into()),
+                    stop_reason: Some("tool_use".into()),
+                    stop_details: Some(serde_json::json!({"category": "cyber"})),
+                    usage: Some(serde_json::json!({"input_tokens": 11, "output_tokens": 3})),
+                    content: vec![
+                        lingxi_core::types::ContentBlock::Text {
+                            text: "old assistant output".into(),
+                            citations: None,
+                        },
+                        lingxi_core::types::ContentBlock::ToolUse {
+                            id: discarded_tool.clone(),
+                            name: "Read".into(),
+                            input: discarded_input.clone(),
+                            provider_id: Some("toolu_discarded".into()),
+                        },
+                    ],
+                    is_api_error_message: Some(false),
+                    supersedes_uuids: None,
+                },
+                true,
+            )
+            .await;
+        stream.emit_assistant_block_start(42).await;
+        stream.emit_text(&projection("new response")).await;
+        stream.emit_assistant_block_identity(42, &new_id).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let events = sink.events().await;
+        assert_eq!(
+            events[0],
+            ClientEvent::QueryModelChange {
+                to_model: "claude-sonnet-4".into(),
+            }
+        );
+        assert_eq!(
+            events[1],
+            ClientEvent::AssistantBlockStart { block_key: 41 }
+        );
+        assert!(matches!(
+            &events[3],
+            ClientEvent::AssistantBlockIdentity { block_key: 41, message_uuid }
+                if message_uuid == &old_id.as_uuid().to_string()
+        ));
+        let ClientEvent::Tombstone {
+            message,
+            display_only,
+        } = &events[5]
+        else {
+            panic!("missing row tombstone")
+        };
+        assert!(*display_only);
+        assert_eq!(message.uuid, old_id.as_uuid().to_string());
+        assert_eq!(message.message_type, "assistant");
+        assert_eq!(message.timestamp, "2026-10-03T12:00:00.000Z");
+        assert_eq!(message.request_id.as_deref(), Some("request-1"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(message.request_ref_json.as_deref().unwrap())
+                .unwrap(),
+            serde_json::json!({"lane": "main"})
+        );
+        assert_eq!(message.message.id.as_deref(), Some("provider-message-1"));
+        assert_eq!(message.message.model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                message.message.stop_details_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({"category": "cyber"})
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                message.message.usage_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({"input_tokens": 11, "output_tokens": 3})
+        );
+        let content: serde_json::Value =
+            serde_json::from_str(&message.message.content_json).expect("content array JSON");
+        assert_eq!(content.as_array().map(Vec::len), Some(2));
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().expect("message boundary event")
+        else {
+            panic!("missing completed message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: "new response".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_continuation_begin_seeds_exact_prefix_on_stop_time_row() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let first_replaced = lingxi_core::types::MessageId::new();
+        let second_replaced = lingxi_core::types::MessageId::new();
+        let replaced_ids = vec![first_replaced, second_replaced];
+        let incoming_id = lingxi_core::types::MessageId::new();
+
+        stream.emit_assistant_block_start(7).await;
+        stream.emit_text(&projection("old first row")).await;
+        stream
+            .emit_assistant_block_identity(7, &first_replaced)
+            .await;
+        stream.emit_assistant_block_start(8).await;
+        stream.emit_text(&projection("old second row")).await;
+        stream
+            .emit_assistant_block_identity(8, &second_replaced)
+            .await;
+        stream
+            .emit_refusal_continuation_begin("retained🙂", &replaced_ids, true)
+            .await;
+        stream.emit_assistant_block_start(9).await;
+        stream.emit_text(&projection("fresh text")).await;
+        stream.emit_assistant_block_identity(9, &incoming_id).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let events = sink.events().await;
+        let begin_index = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::RefusalContinuation { .. }))
+            .expect("continuation begin event");
+        assert_eq!(
+            events[begin_index],
+            ClientEvent::RefusalContinuation {
+                phase: RefusalContinuationPhaseDto::Begin,
+                salvage_text: "retained🙂".into(),
+                join: RefusalContinuationJoinDto::Exact,
+                replaces_uuids: replaced_ids
+                    .iter()
+                    .map(|uuid| uuid.as_uuid().to_string())
+                    .collect(),
+                display_salvage_text: true,
+            }
+        );
+        assert!(matches!(
+            &events[begin_index + 2],
+            ClientEvent::TextDelta { text } if text.display() == "fresh text"
+        ));
+        assert!(matches!(
+            &events[begin_index + 3],
+            ClientEvent::AssistantBlockIdentity { block_key: 9, message_uuid }
+                if message_uuid == &incoming_id.as_uuid().to_string()
+        ));
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().expect("message boundary event")
+        else {
+            panic!("missing completed message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: "retained🙂fresh text".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_continuation_hook_and_ineligible_text_do_not_get_seeded() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let row_id = lingxi_core::types::MessageId::new();
+
+        stream
+            .emit_refusal_continuation_begin("native retained", &[], false)
+            .await;
+        stream.emit_assistant_block_start(1).await;
+        stream.emit_assistant_block_identity(1, &row_id).await;
+        stream.emit_text(&projection("hook override")).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let events = sink.events().await;
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().expect("message boundary event")
+        else {
+            panic!("missing completed hook message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: "hook override".into()
+            }]
+        );
+
+        let second_sink = MockSink::arc();
+        let second = AdapterOutputStream::new(second_sink.clone());
+        let whitespace_row = lingxi_core::types::MessageId::new();
+        second
+            .emit_refusal_continuation_begin("must remain pending", &[], true)
+            .await;
+        second.emit_assistant_block_start(2).await;
+        second.emit_text(&projection(" \u{feff} \n")).await;
+        second
+            .emit_assistant_block_identity(2, &whitespace_row)
+            .await;
+        second.emit_message_boundary(Some("end_turn"), None).await;
+        let events = second_sink.events().await;
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().expect("whitespace message boundary")
+        else {
+            panic!("missing whitespace message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: " \u{feff} \n".into()
+            }]
+        );
+    }
+
     /// Non-terminal persistence diagnostics must cross the adapter boundary;
     /// silently accepting the trait default would hide them from clients.
     #[tokio::test]
@@ -696,14 +1415,144 @@ mod tests {
         let stream = AdapterOutputStream::new(sink.clone());
 
         stream
-            .emit_system_notice("Conversation changes could not be saved.", true)
+            .emit_system_notice(&"Conversation changes could not be saved.".into(), true)
             .await;
 
         assert_eq!(
             sink.events().await,
             vec![ClientEvent::SystemNotice {
-                message: "Conversation changes could not be saved.".to_string(),
+                message: "Conversation changes could not be saved.".into(),
                 is_error: true,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_log_keeps_plugin_and_plain_text_separate() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_mod_log("review", &projection("Found a mismatch"))
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiLog {
+                plugin: "review".to_string(),
+                text: "Found a mismatch".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_log_preserves_unpaired_surrogate_on_client_wire() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let source = Utf16JsonProjection::parse(r#""log-\ud800""#).unwrap();
+
+        stream.emit_mod_log("native", &source).await;
+
+        let events = sink.events().await;
+        let ClientEvent::UiLog { text, .. } = &events[0] else {
+            panic!("expected UI log event")
+        };
+        assert_eq!(
+            text.code_units,
+            vec![b'l' as u16, b'o' as u16, b'g' as u16, b'-' as u16, 0xD800]
+        );
+        assert_eq!(
+            serde_json::to_string(&events[0]).unwrap(),
+            r#"{"type":"ui_log","plugin":"native","text":"log-\ud800"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_toast_preserves_plugin_text_and_timeout() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_mod_toast("review", &projection("Done"), 4000)
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiToast {
+                plugin: "review".to_string(),
+                text: "Done".into(),
+                timeout_ms: 4000,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_status_uses_nullable_clear() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_mod_status("review", Some(&projection("Working")))
+            .await;
+        stream.emit_mod_status("review", None).await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![
+                ClientEvent::UiStatus {
+                    plugin: "review".to_string(),
+                    text: Some("Working".into()),
+                },
+                ClientEvent::UiStatus {
+                    plugin: "review".to_string(),
+                    text: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_ui_client_frame_forwards_runtime_and_frame_json() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_mod_ui_client_frame(
+                "runtime-1",
+                r#"{"type":"ui.render","tree":{"type":"text"}}"#,
+            )
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiClientFrame {
+                runtime_id: "runtime-1".into(),
+                frame_json: r#"{"type":"ui.render","tree":{"type":"text"}}"#.into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_ui_invalidate_preserves_targeted_instances_and_identity() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_mod_ui_invalidate(
+                Some(r#"[{"surface":"desktop","component":"Status","instance_id":"one"}]"#),
+                "event-1",
+                "session-1",
+            )
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiInvalidate {
+                instances_json: Some(
+                    r#"[{"surface":"desktop","component":"Status","instance_id":"one"}]"#.into(),
+                ),
+                uuid: "event-1".into(),
+                session_id: "session-1".into(),
             }]
         );
     }
@@ -717,7 +1566,8 @@ mod tests {
 
         let id = lingxi_core::types::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
-        stream.emit_tool_call(&id, "Read", &input).await;
+        let input_source = json_projection(&input);
+        stream.emit_tool_call(&id, "Read", &input_source).await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
@@ -738,6 +1588,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn emit_tool_call_preserves_exact_json_source_for_wire_payload() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let id = lingxi_core::types::ToolUseId::new();
+        let input = Utf16JsonProjection::parse(r#"{"path":"\ud800"}"#).unwrap();
+        let expected = input.to_json_string().unwrap();
+
+        stream.emit_tool_call(&id, "Read", &input).await;
+
+        let events = sink.events().await;
+        let ClientEvent::ToolUseStarted { input_json, .. } = &events[0] else {
+            panic!("expected tool-use event")
+        };
+        assert_eq!(input_json, &expected);
+    }
+
     /// A success tool result (no top-level `"error"` key) lowers to
     /// `ToolUseResult { is_error: false }`.
     #[tokio::test]
@@ -747,7 +1614,10 @@ mod tests {
 
         let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"content": "ok", "lines": 3});
-        stream.emit_tool_result(&id, "Read", "ok", &result).await;
+        let result_source = json_projection(&result);
+        stream
+            .emit_tool_result(&id, "Read", &projection("ok"), &result_source)
+            .await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
@@ -778,8 +1648,9 @@ mod tests {
 
         let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"error": "file not found"});
+        let result_source = json_projection(&result);
         stream
-            .emit_tool_result(&id, "Read", "file not found", &result)
+            .emit_tool_result(&id, "Read", &projection("file not found"), &result_source)
             .await;
 
         let events = sink.events().await;
@@ -799,8 +1670,15 @@ mod tests {
 
         let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"error": "interrupted"});
+        let result_source = json_projection(&result);
         stream
-            .emit_tool_result_denied(&id, "Bash", "interrupted", &result, "interrupted")
+            .emit_tool_result_denied(
+                &id,
+                "Bash",
+                &projection("interrupted"),
+                &result_source,
+                "interrupted",
+            )
             .await;
 
         let events = sink.events().await;
@@ -1086,13 +1964,13 @@ mod tests {
         let sink = MockSink::arc();
         let stream: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(sink.clone()));
 
-        stream.emit_text("via trait object").await;
+        stream.emit_text(&projection("via trait object")).await;
 
         let events = sink.events().await;
         assert_eq!(
             events[0],
             ClientEvent::TextDelta {
-                text: "via trait object".to_string()
+                text: "via trait object".into()
             }
         );
     }
@@ -1106,12 +1984,11 @@ mod tests {
         let stream = AdapterOutputStream::new(sink.clone());
         let id = lingxi_core::types::ToolUseId::new();
 
-        stream.emit_text("A").await;
+        stream.emit_text(&projection("A")).await;
         stream.emit_thinking("reason", Some("sig")).await;
-        stream
-            .emit_tool_call(&id, "Read", &serde_json::json!({"path": "a"}))
-            .await;
-        stream.emit_text("B").await;
+        let input = json_projection(&serde_json::json!({"path": "a"}));
+        stream.emit_tool_call(&id, "Read", &input).await;
+        stream.emit_text(&projection("B")).await;
         stream.emit_message_boundary(Some("end_turn"), None).await;
         stream
             .emit_end_turn("end_turn", &CostSnapshot::default())
@@ -1136,7 +2013,7 @@ mod tests {
                 ..
             } => {
                 assert!(
-                    matches!(&message.blocks[0], MessageBlockDto::Text { text } if text == "A")
+                    matches!(&message.blocks[0], MessageBlockDto::Text { text } if text.display() == "A")
                 );
                 assert!(
                     matches!(&message.blocks[1], MessageBlockDto::Thinking { thinking, .. } if thinking == "reason")
@@ -1145,7 +2022,7 @@ mod tests {
                     matches!(&message.blocks[2], MessageBlockDto::ToolUse { id: got, .. } if got == &id.to_string())
                 );
                 assert!(
-                    matches!(&message.blocks[3], MessageBlockDto::Text { text } if text == "B")
+                    matches!(&message.blocks[3], MessageBlockDto::Text { text } if text.display() == "B")
                 );
             }
             other => panic!("expected completed message, got {other:?}"),
@@ -1190,6 +2067,8 @@ mod tests {
             "userModified": false,
             "replaceAll": false,
         });
+        let input_source = json_projection(&input);
+        let result_source = json_projection(&result);
         // What the transcript actually persists for that same call: the
         // model-facing string (`ToolCallResult.model_content`).
         let content = "The file /tmp/x.rs has been updated.";
@@ -1197,8 +2076,10 @@ mod tests {
         // ── live ──────────────────────────────────────────────────────────
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
-        stream.emit_tool_call(&id, tool, &input).await;
-        stream.emit_tool_result(&id, tool, "", &result).await;
+        stream.emit_tool_call(&id, tool, &input_source).await;
+        stream
+            .emit_tool_result(&id, tool, &projection(""), &result_source)
+            .await;
         let live = sink
             .events()
             .await
@@ -1216,7 +2097,7 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
                     name: tool.to_string(),
-                    input: input.clone(),
+                    input: input_source.clone(),
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
@@ -1226,7 +2107,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: content.to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -1275,6 +2156,7 @@ mod tests {
                 "old_string": "a\n",
                 "new_string": "b\n",
             });
+            let input = json_projection(&input);
             stream.emit_tool_call(id, "Edit", &input).await;
         }
 

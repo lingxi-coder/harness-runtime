@@ -2,20 +2,23 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::deep_link::DeepLinkError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::PermissionResult;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::BuiltinToolContext;
 use url::Url;
 
-use crate::device_support::{ask, execute, failure, invalid, parse};
+use crate::device_support::{
+    ask, execute, failure, generated_projection, generated_schema_repair, invalid, parse,
+};
 
 /// Canonical model-facing tool name.
 pub const TOOL_NAME: &str = "open_url";
@@ -27,7 +30,7 @@ struct Input {
     url: String,
 }
 
-fn validated_url(input: &Value) -> Result<String, ValidationError> {
+fn validated_url(input: &Utf16JsonProjection) -> Result<String, ValidationError> {
     let request: Input = parse(input)?;
     let raw = &request.url;
     if raw.is_empty()
@@ -62,7 +65,8 @@ fn validated_url(input: &Value) -> Result<String, ValidationError> {
             }
         }
     }
-    let parsed = Url::parse(raw).map_err(|e| ValidationError(format!("invalid URL: {e}")))?;
+    let parsed =
+        Url::parse(raw).map_err(|e| ValidationError(format!("invalid URL: {e}").into()))?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(ValidationError("url must not contain credentials".into()));
     }
@@ -106,7 +110,7 @@ fn validated_url(input: &Value) -> Result<String, ValidationError> {
         _ => {
             return Err(ValidationError(
                 "url scheme must be http, https, mailto or tel".into(),
-            ))
+            ));
         }
     }
     Ok(parsed.to_string())
@@ -126,13 +130,13 @@ impl OpenUrlTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object", "properties": {
             "url": { "type": "string", "minLength": 1, "maxLength": MAX_URL_CHARS,
                 "description": "An absolute http, https, mailto or tel URL. No credentials, internal/file/script schemes or control characters." }
         }, "required": ["url"], "additionalProperties": false
-    })
+    }))
 });
 
 #[async_trait]
@@ -140,49 +144,60 @@ impl Tool for OpenUrlTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.deep_link.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         8192
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("Open external browser, website, email composer or phone dialer URL")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("Open external browser, website, email composer or phone dialer URL".into())
     }
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         ask(
             TOOL_NAME,
             &format!(
                 "Open this URL in an external app: {}",
-                input.get("url").and_then(Value::as_str).unwrap_or_default()
+                input
+                    .get_property("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
             ),
         )
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Opening a URL in an external app".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Open an absolute http/https web URL, mailto recipient or tel phone number in the device's external app. Opening is an external side effect subject to tool permission; success reports that the host submitted the open request, not that an app opened, an email was sent or a call completed.".into()
     }
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         validated_url(input).map(|_| ())
     }
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -194,7 +209,9 @@ impl Tool for OpenUrlTool {
             ));
         };
         Ok(match execute(&ctx, opener.open(url.clone())).await? {
-            Ok(()) => ToolCallResult::from_data(json!({ "requested": true, "url": url })),
+            Ok(()) => ToolCallResult::from_data(generated_projection(
+                &json!({ "requested": true, "url": url }),
+            )),
             Err(error) => failure(
                 match &error {
                     DeepLinkError::Unavailable => "unavailable",

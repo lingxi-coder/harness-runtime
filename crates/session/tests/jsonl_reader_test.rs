@@ -1,6 +1,7 @@
 //! `JsonlReader` full + lite parity.
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::reader::{route_lines, JsonlReader, SessionMetadata};
@@ -18,7 +19,10 @@ fn user_msg(n: u8) -> JsonlMessage {
         timestamp: format!("2026-05-25T14:30:0{n}.000Z"),
         cwd: "/tmp/proj".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":format!("msg {n}")}),
+        message: Utf16JsonProjection::from_serde_value(
+            &json!({"role":"user","content":format!("msg {n}")}),
+        )
+        .unwrap(),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -26,7 +30,16 @@ fn user_msg(n: u8) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Map::default(),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty JSON object"),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     }
 }
 
@@ -63,7 +76,10 @@ async fn read_lite_extracts_metadata_from_first_line_only() {
     let big_content = "x".repeat(2_000);
     for n in 1..40 {
         let mut m = user_msg(n);
-        m.message = json!({"role":"user","content":big_content.clone()});
+        m.message = Utf16JsonProjection::from_serde_value(
+            &json!({"role":"user","content":big_content.clone()}),
+        )
+        .unwrap();
         writer.append(&m).await.expect("append n");
     }
 
@@ -165,7 +181,12 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     // Tolerant defaults: the attachment/system lines lacked `message` /
     // `timestamp` / some outer fields — they parsed anyway.
     let att = &routed.by_uuid["att-1"];
-    assert!(att.message.is_null(), "absent `message` defaults to null");
+    assert!(
+        att.message
+            .at_pointer("")
+            .is_some_and(JsonValueView::is_null),
+        "absent `message` defaults to null"
+    );
     assert_eq!(att.timestamp, "", "absent `timestamp` defaults to empty");
 
     // Tier-1 side-maps populated.

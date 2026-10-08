@@ -84,7 +84,7 @@ fn auth_failure_status(e: &McpError) -> Option<u16> {
 fn auth_header_rejected(status: u16) -> McpError {
     McpError::Connection(format!(
         "Server rejected the configured Authorization header (HTTP {status}). Check that the token is valid for this MCP endpoint — OAuth fallback is disabled when headers.Authorization is set."
-    ))
+    ).into())
 }
 
 /// `HEADERS_HELPER_AUTH_REJECTED` — byte-exact message from the 2.1.251
@@ -92,7 +92,7 @@ fn auth_header_rejected(status: u16) -> McpError {
 fn headers_helper_auth_rejected(status: u16) -> McpError {
     McpError::Connection(format!(
         "Server rejected the Authorization header minted by the configured headersHelper (HTTP {status}). Check that the helper command returns a valid credential for this MCP endpoint — OAuth fallback is disabled when the helper supplies Authorization."
-    ))
+    ).into())
 }
 
 /// Reclassify a connect failure per the oracle's `hasUserAuthHeader` /
@@ -171,7 +171,10 @@ mod tests {
     fn classify_passes_through_non_auth_failures() {
         let e = McpError::Connection("connection refused".into());
         let out = classify_auth_failure(e, true, false);
-        assert!(matches!(out, McpError::Connection(m) if m == "connection refused"));
+        assert!(matches!(
+            out,
+            McpError::Connection(m) if m.string_at("") == Some("connection refused")
+        ));
     }
 
     #[test]
@@ -195,8 +198,9 @@ mod tests {
         let out = classify_auth_failure(e, true, true);
         match out {
             McpError::Connection(m) => {
-                assert!(m
-                    .starts_with("Server rejected the configured Authorization header (HTTP 401)."))
+                assert!(m.string_at("").is_some_and(|text| text.starts_with(
+                    "Server rejected the configured Authorization header (HTTP 401)."
+                )))
             }
             other => panic!("expected AUTH_HEADER_REJECTED copy, got {other:?}"),
         }
@@ -244,12 +248,12 @@ mod tests {
         ] {
             let out = classify_auth_failure(McpError::Connection(message.into()), true, true);
             assert!(
-                matches!(&out, McpError::Connection(m) if m == message),
+                matches!(&out, McpError::Connection(m) if m.string_at("") == Some(message)),
                 "`{message}` must pass through unchanged, got {out:?}"
             );
             let out = classify_auth_failure(McpError::Handshake(message.into()), true, true);
             assert!(
-                matches!(&out, McpError::Handshake(m) if m == message),
+                matches!(&out, McpError::Handshake(m) if m.string_at("") == Some(message)),
                 "`{message}` must pass through unchanged, got {out:?}"
             );
         }

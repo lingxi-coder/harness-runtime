@@ -1,7 +1,7 @@
 //! `LspClient` — typed JSON-RPC wrapper around a `jsonrpc::Connection`.
 //!
 //! Mirrors claude-code's `LSPClient` (`claude-code/src/services/lsp/LSPClient.ts`)
-//! in shape: typed `initialize`, untyped `request<P, R>` for arbitrary LSP
+//! in shape: typed `initialize`, Source-native `request` for arbitrary LSP
 //! methods, fire-and-forget `notify`, and a `shutdown` sequence that issues
 //! the canonical LSP `shutdown` request + `exit` notification.
 //!
@@ -12,13 +12,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use jsonrpc::{Connection, ConnectionError};
+use jsonrpc::{Connection, ConnectionError, JsonPayload};
 use lingxi_core::host::{LspError, LspServerConfig};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp_types::{
     InitializeResult, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -85,7 +85,7 @@ impl LspClient {
 
     /// Register Claude Code's always-present `workspace/configuration`
     /// request handler before the initialize handshake starts.
-    pub async fn register_workspace_configuration(&self, settings: Option<Value>) {
+    pub async fn register_workspace_configuration(&self, settings: Option<Utf16JsonProjection>) {
         self.connection
             .register_handler(
                 "workspace/configuration",
@@ -123,7 +123,7 @@ impl LspClient {
                 "name": "Claude Code",
                 "version": LSP_CLIENT_VERSION,
             },
-            "initializationOptions": config.initialization_options.clone().unwrap_or_else(|| json!({})),
+            "initializationOptions": {},
             "workspaceFolders": [{
                 "uri": root_uri,
                 "name": workspace_name,
@@ -168,20 +168,43 @@ impl LspClient {
             },
         });
 
-        let result_value = if let Some(timeout_ms) = config.startup_timeout {
+        let mut params = Utf16JsonProjection::from_serde_value(&params)
+            .map_err(|error| LspError::Transport(format!("project initialize params: {error}")))?;
+        params
+            .replace_pointer_projection(
+                "/initializationOptions",
+                config
+                    .initialization_options
+                    .clone()
+                    .unwrap_or_else(empty_object_projection),
+            )
+            .map_err(|error| {
+                LspError::Transport(format!("project initialization options: {error}"))
+            })?;
+        let params_json = params.to_json_string().map_err(|error| {
+            LspError::Transport(format!("serialize initialize params: {error}"))
+        })?;
+        let result_json = if let Some(timeout_ms) = config.startup_timeout {
             self.connection
-                .call_with_timeout("initialize", params, Duration::from_millis(timeout_ms))
+                .call_raw_json_with_timeout(
+                    "initialize",
+                    params_json,
+                    Duration::from_millis(timeout_ms),
+                )
                 .await
         } else {
-            self.connection.call_unbounded("initialize", params).await
+            self.connection
+                .call_raw_json_unbounded("initialize", params_json)
+                .await
         }
         .map_err(|e| self.map_connection_error("initialize", e))?;
-        let result: InitializeResult = serde_json::from_value(result_value)
+        let result: InitializeResult = serde_json::from_str(&result_json)
             .map_err(|e| LspError::Transport(format!("decode initialize result: {e}")))?;
 
         // Cache capabilities then send the `initialized` notification.
         *self.capabilities.write().await = Some(result.capabilities.clone());
-        self.notify("initialized", json!({})).await?;
+        self.notify("initialized", empty_object_projection())
+            .await?;
         if let Some(settings) = &config.settings {
             self.notify_did_change_configuration_best_effort(settings)
                 .await;
@@ -194,27 +217,32 @@ impl LspClient {
         Ok(result.capabilities)
     }
 
-    /// Issue a JSON-RPC request and decode the response.
+    /// Issue a JSON-RPC request and retain the peer's raw result as Source.
     ///
     /// `method` is the LSP method name (e.g. `"textDocument/hover"`).
-    /// `params` is serialized as the request `params` field; the response
-    /// `result` is deserialized into `R`.
+    /// `params` and the response remain flat projections, so arbitrary LSP
+    /// strings never pass through `serde_json::Value` or Rust `String`.
     ///
     /// # Errors
     /// Returns [`LspError::Transport`] on transport failure or serialization
     /// errors, and [`LspError::ServerError`] when the server returns a
     /// JSON-RPC error response.
-    pub async fn request<P: Serialize, R: DeserializeOwned>(
+    pub async fn request(
         &self,
         method: &str,
-        params: P,
-    ) -> Result<R, LspError> {
-        let params_value = serde_json::to_value(params)
-            .map_err(|e| LspError::Transport(format!("serialize {method} params: {e}")))?;
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
+        let params_json = params
+            .to_json_string()
+            .map_err(|error| LspError::Transport(format!("serialize {method} params: {error}")))?;
         let mut attempt = 0;
-        let result_value: Value = loop {
-            match self.connection.call(method, params_value.clone()).await {
-                Ok(value) => break value,
+        let result_json = loop {
+            match self
+                .connection
+                .call_raw_json(method, params_json.clone())
+                .await
+            {
+                Ok(json) => break json,
                 Err(ConnectionError::Router(jsonrpc::router::RouterError::Remote(remote)))
                     if remote.code == CONTENT_MODIFIED && attempt < CONTENT_MODIFIED_RETRIES =>
                 {
@@ -234,8 +262,8 @@ impl LspClient {
                 Err(error) => return Err(self.map_connection_error(method, error)),
             }
         };
-        serde_json::from_value(result_value)
-            .map_err(|e| LspError::Transport(format!("decode {method} result: {e}")))
+        Utf16JsonProjection::parse(&result_json)
+            .map_err(|error| LspError::Transport(format!("decode {method} result: {error}")))
     }
 
     /// Issue a JSON-RPC notification (fire-and-forget).
@@ -249,11 +277,14 @@ impl LspClient {
     /// Returns [`LspError::Transport`] on parameter serialization or delivery
     /// failure.
     #[allow(clippy::unused_async)]
-    pub async fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<(), LspError> {
-        let params_value = serde_json::to_value(params)
-            .map_err(|e| LspError::Transport(format!("serialize {method} notify: {e}")))?;
+    pub async fn notify(&self, method: &str, params: Utf16JsonProjection) -> Result<(), LspError> {
+        let params_json = params
+            .to_json_string()
+            .map_err(|error| LspError::Transport(format!("serialize {method} notify: {error}")))?;
+        let params = JsonPayload::parse(params_json)
+            .map_err(|error| LspError::Transport(format!("serialize {method} notify: {error}")))?;
         self.connection
-            .notify(method, params_value)
+            .notify(method, params)
             .map_err(|error| self.map_notification_error(method, &error))
     }
 
@@ -277,13 +308,19 @@ impl LspClient {
         let request = async {
             let raw = if let Some(timeout_ms) = timeout_ms {
                 self.connection
-                    .call_with_timeout("shutdown", json!({}), Duration::from_millis(timeout_ms))
+                    .call_raw_json_with_timeout(
+                        "shutdown",
+                        "{}".to_string(),
+                        Duration::from_millis(timeout_ms),
+                    )
                     .await
             } else {
-                self.connection.call_unbounded("shutdown", json!({})).await
+                self.connection
+                    .call_raw_json_unbounded("shutdown", "{}".to_string())
+                    .await
             }
             .map_err(|error| self.map_connection_error("shutdown", error))?;
-            serde_json::from_value::<Option<Value>>(raw)
+            Utf16JsonProjection::parse(&raw)
                 .map_err(|error| LspError::Transport(format!("decode shutdown result: {error}")))
         };
         match request.await {
@@ -293,7 +330,7 @@ impl LspClient {
                     server = %self.name,
                     "shutdown ack"
                 );
-                self.notify("exit", json!({})).await
+                self.notify("exit", empty_object_projection()).await
             }
             Err(error) => {
                 warn!(
@@ -310,10 +347,18 @@ impl LspClient {
     fn map_connection_error(&self, method: &str, err: ConnectionError) -> LspError {
         use jsonrpc::router::RouterError;
         match err {
-            ConnectionError::Router(RouterError::Remote(remote)) => LspError::ServerError(format!(
-                "LSP request '{method}' failed for server '{}': {}",
-                self.name, remote.message
-            )),
+            ConnectionError::Router(RouterError::Remote(remote)) => {
+                let prefix = format!("LSP request '{method}' failed for server '{}': ", self.name);
+                let mut code_units = prefix.encode_utf16().collect::<Vec<_>>();
+                code_units.extend_from_slice(remote.message.code_units());
+                LspError::ServerError(
+                    Utf16JsonProjection::root_string(
+                        String::from_utf16_lossy(&code_units),
+                        code_units,
+                    )
+                    .expect("display form derives from the exact server error units"),
+                )
+            }
             other => LspError::Transport(format!(
                 "LSP request '{method}' failed for server '{}': {other}",
                 self.name
@@ -328,12 +373,13 @@ impl LspClient {
         ))
     }
 
-    async fn notify_did_change_configuration_best_effort(&self, settings: &Value) {
+    async fn notify_did_change_configuration_best_effort(&self, settings: &Utf16JsonProjection) {
+        let params = Utf16JsonProjection::object(vec![("settings".to_string(), settings.clone())]);
+        let Ok(params) = params else {
+            return;
+        };
         if let Err(error) = self
-            .notify(
-                "workspace/didChangeConfiguration",
-                json!({ "settings": settings }),
-            )
+            .notify("workspace/didChangeConfiguration", params)
             .await
         {
             warn!(
@@ -345,6 +391,10 @@ impl LspClient {
             );
         }
     }
+}
+
+fn empty_object_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("static empty JSON object is valid")
 }
 
 fn path_wire_string(path: &Path) -> String {
@@ -375,7 +425,7 @@ pub fn text_document_sync_label(capability: Option<&TextDocumentSyncCapability>)
 }
 
 struct WorkspaceConfigurationHandler {
-    settings: Option<Value>,
+    settings: Option<Utf16JsonProjection>,
 }
 
 #[async_trait::async_trait]
@@ -384,43 +434,113 @@ impl jsonrpc::InboundHandler for WorkspaceConfigurationHandler {
         let values = request
             .params
             .as_ref()
-            .and_then(|params| params.get("items"))
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        let section = item.get("section").and_then(Value::as_str);
-                        configuration_section(self.settings.as_ref(), section)
+            .and_then(|params| Utf16JsonProjection::parse(params.as_json()).ok())
+            .and_then(|params| {
+                let items = params.get_property("items")?;
+                let count = items.array_len()?;
+                let values = (0..count)
+                    .map(|index| {
+                        let Some(item) = items.get_index(index) else {
+                            return null_projection();
+                        };
+                        let Some(section) = item.get_property("section") else {
+                            return configuration_section(self.settings.as_ref(), None);
+                        };
+                        let Some(units) = section.code_units() else {
+                            return configuration_section(self.settings.as_ref(), None);
+                        };
+                        configuration_section(self.settings.as_ref(), Some(units))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                Utf16JsonProjection::array(values).ok()
             })
-            .unwrap_or_default();
-        jsonrpc::Response::success(request.id, Value::Array(values))
+            .unwrap_or_else(|| {
+                Utf16JsonProjection::array(Vec::new()).expect("empty array is valid")
+            });
+        let result_json = values
+            .to_json_string()
+            .expect("a validated projection serializes as JSON");
+        jsonrpc::Response::success_raw_json(request.id, result_json)
+            .expect("a validated projection is valid JSON")
     }
 }
 
-fn configuration_section(settings: Option<&Value>, section: Option<&str>) -> Value {
-    let Some(mut current) = settings else {
-        return Value::Null;
+fn configuration_section(
+    settings: Option<&Utf16JsonProjection>,
+    section: Option<&[u16]>,
+) -> Utf16JsonProjection {
+    let Some(current) = settings else {
+        return null_projection();
     };
     let Some(section) = section.filter(|section| !section.is_empty()) else {
         return current.clone();
     };
-    for part in section.split('.') {
-        let Some(next) = current.as_object().and_then(|object| object.get(part)) else {
-            return Value::Null;
-        };
-        current = next;
+    let mut pointer = Vec::new();
+    for part in section.split(|unit| *unit == u16::from(b'.')) {
+        pointer.push(u16::from(b'/'));
+        for unit in part {
+            match unit {
+                0x007e => pointer.extend([u16::from(b'~'), u16::from(b'0')]),
+                0x002f => pointer.extend([u16::from(b'~'), u16::from(b'1')]),
+                _ => pointer.push(*unit),
+            }
+        }
     }
-    current.clone()
+    current
+        .subprojection_units(&pointer)
+        .unwrap_or_else(|_| null_projection())
+}
+
+fn null_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("static JSON null is valid")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use jsonrpc::{Id, JsonPayload, Request};
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn workspace_configuration_reads_raw_params_without_value_ingress() {
+        let handler = WorkspaceConfigurationHandler {
+            settings: Some(
+                Utf16JsonProjection::parse(r#"{ "servers": { "timeout": 100 } }"#).unwrap(),
+            ),
+        };
+        let response = handler
+            .handle(Request::new(
+                "workspace/configuration",
+                Some(
+                    JsonPayload::parse(
+                        r#"{"items":[{"section":"servers.timeout"},{}, {"section":"\ud800"},{"section":false}]}"#,
+                    )
+                    .unwrap(),
+                ),
+                Id::Number(1),
+            ))
+            .await;
+        assert_eq!(
+            response.result.unwrap().as_json(),
+            "[100,{\"servers\":{\"timeout\":100}},null,{\"servers\":{\"timeout\":100}}]"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_configuration_returns_source_settings_without_value_projection() {
+        let handler = WorkspaceConfigurationHandler {
+            settings: Some(Utf16JsonProjection::parse(r#"{"\ud800":"\ud800"}"#).unwrap()),
+        };
+        let response = handler
+            .handle(Request::new(
+                "workspace/configuration",
+                Some(JsonPayload::parse(r#"{"items":[{"section":"\ud800"}]}"#).unwrap()),
+                Id::Number(1),
+            ))
+            .await;
+
+        assert_eq!(response.result.unwrap().as_json(), r#"["\ud800"]"#);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn did_change_configuration_remains_best_effort() {
@@ -433,7 +553,7 @@ mod tests {
         let error = client
             .notify(
                 "workspace/didChangeConfiguration",
-                json!({ "settings": {} }),
+                Utf16JsonProjection::parse(r#"{"settings":{}}"#).unwrap(),
             )
             .await
             .expect_err("ordinary notifications should surface delivery errors");
@@ -443,7 +563,9 @@ mod tests {
         );
 
         client
-            .notify_did_change_configuration_best_effort(&json!({ "test-server": true }))
+            .notify_did_change_configuration_best_effort(
+                &Utf16JsonProjection::parse(r#"{"test-server":true}"#).unwrap(),
+            )
             .await;
     }
 }

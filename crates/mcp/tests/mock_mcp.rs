@@ -21,7 +21,12 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::Registry;
 
 use lingxi_core::host::{McpNegotiatedProtocol, McpProtocolEra};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mcp::McpClient;
+
+fn source_json(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("test fixture is JSON")
+}
 
 /// Records every outgoing JSON-RPC payload received from the client end.
 /// Tests inspect this to assert literal byte content.
@@ -304,10 +309,11 @@ async fn initialize_emits_literal_claude_code_clientinfo() {
         frame.contains(r#""protocolVersion":"2025-11-25""#),
         "literal protocolVersion must appear, got: {frame}",
     );
-    // Capabilities are EXACTLY {"roots":{"listChanged":true},"elicitation":{}}
-    // (parity 2.1.207 J7n(): roots advertises listChanged:true).
+    // Current ordinary transport capabilities advertise both form and URL.
     assert!(
-        frame.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{}}"#),
+        frame.contains(
+            r#""capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}"#
+        ),
         "literal capability shape must appear, got: {frame}",
     );
 }
@@ -372,15 +378,16 @@ async fn initialize_truncates_long_server_instructions() {
         .server_instructions()
         .await
         .expect("instructions captured");
+    let stored_text = stored.string_at("").expect("instructions are a string");
     assert!(
-        stored.ends_with("\u{2026} [truncated]"),
+        stored_text.ends_with("\u{2026} [truncated]"),
         "instructions must end with the literal truncation suffix, got: {stored:?}",
     );
     // Truncated value must be strictly shorter than the original 3000-char input.
     assert!(
-        stored.chars().count() < long_text.chars().count(),
+        stored_text.chars().count() < long_text.chars().count(),
         "truncated value must be shorter than original 3000-char input ({} chars)",
-        stored.chars().count(),
+        stored_text.chars().count(),
     );
 }
 
@@ -505,8 +512,10 @@ async fn modern_list_tools_emits_the_aggregate_shape_even_for_one_page() {
                 }),
                 "tools/list" => json!({
                     "resultType": "complete",
+                    "ttlMs": 0,
+                    "cacheScope": "private",
                     "tools": [
-                        { "name": "read_file", "description": "Read", "inputSchema": {} }
+                        { "name": "read_file", "description": "Read", "inputSchema": { "type": "object" } }
                     ]
                 }),
                 _ => return None,
@@ -579,7 +588,7 @@ async fn full_name_normalizes_invalid_server_name_and_round_trips() {
     // The normalized FQN strips back correctly: the wire `name` is the bare
     // tool name, proving the build/strip round-trip is self-consistent.
     client
-        .call_tool("mcp__my_server__read_file", json!({}))
+        .call_tool("mcp__my_server__read_file", source_json(&json!({})))
         .await
         .expect("normalized FQN should strip + call");
     // give the spawned capture task a tick
@@ -617,7 +626,7 @@ async fn call_tool_times_out_with_locked_error_string() {
     let err = client
         .call_tool_with_timeout(
             "mcp__filesystem__read_file",
-            json!({}),
+            source_json(&json!({})),
             std::time::Duration::from_millis(50),
         )
         .await
@@ -676,7 +685,7 @@ async fn call_tool_full_name_validation_rejects_wrong_prefix() {
 
     client.initialize().await.expect("init");
     client
-        .call_tool("mcp__filesystem__read_file", json!({}))
+        .call_tool("mcp__filesystem__read_file", source_json(&json!({})))
         .await
         .expect("call");
 
@@ -724,14 +733,17 @@ async fn list_tools_truncates_oversized_descriptions() {
     client.initialize().await.expect("init");
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 1);
+    let description = tools[0]
+        .description()
+        .string_units("")
+        .expect("MCP tool description is a source string");
+    let suffix = "\u{2026} [truncated]".encode_utf16().collect::<Vec<_>>();
     assert!(
-        tools[0].description().ends_with("\u{2026} [truncated]"),
-        "must end with truncation sentinel, got: …{}",
-        &tools[0].description()[tools[0].description().len().saturating_sub(40)..],
+        description.ends_with(&suffix),
+        "must end with truncation sentinel"
     );
     assert!(
-        tools[0].description().chars().count()
-            <= mcp::MAX_MCP_DESCRIPTION_LENGTH + "\u{2026} [truncated]".chars().count(),
+        description.len() <= mcp::MAX_MCP_DESCRIPTION_LENGTH + suffix.len(),
         "must not exceed MAX_MCP_DESCRIPTION_LENGTH + sentinel length",
     );
 }
@@ -773,15 +785,21 @@ async fn raw_tool_decodes_anthropic_meta_block() {
     client.initialize().await.expect("init");
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].search_hint.as_deref(), Some("shell"));
+    assert_eq!(
+        tools[0]
+            .search_hint
+            .as_ref()
+            .and_then(|hint| hint.string_at("")),
+        Some("shell")
+    );
     assert_eq!(tools[0].always_load, Some(true));
     assert_eq!(
         tools[0].meta,
-        Some(json!({
+        Some(source_json(&json!({
             "anthropic/searchHint": "shell",
             "anthropic/alwaysLoad": true,
             "vendor/opaque": { "preserved": [1, 2, 3] }
-        }))
+        })))
     );
 }
 
@@ -815,9 +833,15 @@ async fn list_prompts_returns_server_prompts() {
     client.initialize().await.expect("init");
     let prompts = client.list_prompts().await.expect("list");
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0].name, "summarize");
-    assert_eq!(prompts[0].description.as_deref(), Some("Summarize text"));
-    assert_eq!(prompts[1].name, "translate");
+    assert_eq!(prompts[0].name.string_at(""), Some("summarize"));
+    assert_eq!(
+        prompts[0]
+            .description
+            .as_ref()
+            .and_then(|description| description.string_at("")),
+        Some("Summarize text")
+    );
+    assert_eq!(prompts[1].name.string_at(""), Some("translate"));
     assert_eq!(prompts[1].description, None);
 }
 
@@ -868,7 +892,10 @@ async fn list_prompts_aggregates_paginated_pages() {
     client.initialize().await.expect("init");
     let prompts = client.list_prompts().await.expect("list");
     assert_eq!(
-        prompts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        prompts
+            .iter()
+            .map(|p| p.name.string_at("").unwrap_or(""))
+            .collect::<Vec<_>>(),
         vec!["summarize", "translate"]
     );
     let frames = captured.snapshot().await;
@@ -910,10 +937,10 @@ async fn get_prompt_sends_name_and_arguments() {
 
     client.initialize().await.expect("init");
     let resp = client
-        .get_prompt("summarize", json!({"target": "rust"}))
+        .get_prompt("summarize", source_json(&json!({"target": "rust"})))
         .await
         .expect("get");
-    assert!(resp.get("messages").is_some());
+    assert!(resp.at_pointer("/messages").is_some());
 
     // Verify wire bytes carry the literal `prompts/get` method + name.
     let frames = captured.snapshot().await;
@@ -952,12 +979,13 @@ async fn list_resources_and_read_resource_roundtrip() {
     client.initialize().await.expect("init");
     let resources = client.list_resources().await.expect("list");
     assert_eq!(resources.len(), 1);
-    assert_eq!(resources[0].uri, "file:///a.txt");
+    assert_eq!(resources[0].uri.string_at(""), Some("file:///a.txt"));
     assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
 
-    let content = client.read_resource("file:///a.txt").await.expect("read");
-    assert_eq!(content.uri, "file:///a.txt");
-    assert_eq!(content.content, "hello");
+    let uri = lingxi_core::types::utf16_json::Utf16JsonProjection::from("file:///a.txt");
+    let content = client.read_resource(&uri).await.expect("read");
+    assert_eq!(content.uri.string_at(""), Some("file:///a.txt"));
+    assert_eq!(content.content.string_at(""), Some("hello"));
 }
 
 #[tokio::test]
@@ -1007,7 +1035,10 @@ async fn list_resources_aggregates_paginated_pages() {
     client.initialize().await.expect("init");
     let resources = client.list_resources().await.expect("list");
     assert_eq!(
-        resources.iter().map(|r| r.uri.as_str()).collect::<Vec<_>>(),
+        resources
+            .iter()
+            .map(|r| r.uri.string_at("").unwrap_or(""))
+            .collect::<Vec<_>>(),
         vec!["file:///a.txt", "file:///b.txt"]
     );
     let frames = captured.snapshot().await;
@@ -1108,7 +1139,7 @@ async fn list_prompts_emits_error_paginated_telemetry() {
                             "jsonrpc":"2.0",
                             "id": id,
                             "error": { "code": -32602, "message": "invalid cursor" }
-                        }))
+                        }));
                     }
                     other => panic!("unexpected page request {other}"),
                 },
@@ -1122,7 +1153,7 @@ async fn list_prompts_emits_error_paginated_telemetry() {
     client.initialize().await.expect("init");
     let err = client.list_prompts().await.expect_err("second page fails");
     assert!(
-        matches!(err, mcp::McpClientError::Rpc(ref message) if message.contains("invalid cursor")),
+        matches!(err, mcp::McpClientError::Rpc(ref message) if message.display().contains("invalid cursor")),
         "unexpected error: {err:?}"
     );
     assert_contains_single_list_paginated_row(ListPaginatedRow {
@@ -1172,21 +1203,28 @@ async fn read_resource_rich_returns_multi_content_with_blob_persisted() {
     client.initialize().await.expect("init");
 
     let out_dir = tempfile::tempdir().expect("tempdir");
+    let uri = lingxi_core::types::utf16_json::Utf16JsonProjection::from("file:///doc");
     let contents = client
-        .read_resource_rich("file:///doc", out_dir.path())
+        .read_resource_rich(&uri, out_dir.path())
         .await
         .expect("read_resource_rich");
 
     assert_eq!(contents.len(), 2, "both content blocks surfaced");
 
     // Text block: passthrough, no blob.
-    assert_eq!(contents[0].uri, "file:///doc");
+    assert_eq!(contents[0].uri.string_at(""), Some("file:///doc"));
     assert_eq!(contents[0].mime_type.as_deref(), Some("text/markdown"));
-    assert_eq!(contents[0].text.as_deref(), Some("# Title"));
+    assert_eq!(
+        contents[0]
+            .text
+            .as_ref()
+            .and_then(|text| text.string_at("")),
+        Some("# Title")
+    );
     assert_eq!(contents[0].blob_saved_to, None);
 
     // Blob block: decoded + persisted under out_dir; mimeType carried.
-    assert_eq!(contents[1].uri, "file:///doc.pdf");
+    assert_eq!(contents[1].uri.string_at(""), Some("file:///doc.pdf"));
     assert_eq!(contents[1].mime_type.as_deref(), Some("application/pdf"));
     let saved = contents[1]
         .blob_saved_to
@@ -1209,7 +1247,11 @@ async fn read_resource_rich_returns_multi_content_with_blob_persisted() {
         "raw decoded bytes written verbatim (not base64)"
     );
     // text carries the getBinaryBlobSavedMessage line with the server name.
-    let text = contents[1].text.as_deref().expect("blob saved message");
+    let text = contents[1]
+        .text
+        .as_ref()
+        .and_then(|text| text.string_at(""))
+        .expect("blob saved message");
     assert!(
         text.starts_with(
             "[Resource from rich-srv at file:///doc.pdf] Binary content (application/pdf,"
@@ -1572,7 +1614,7 @@ async fn list_tools_keeps_a_meta_invalid_schema_with_warning_by_default() {
     client.initialize().await.expect("init");
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 1, "kept-with-warning, not dropped: {tools:?}");
-    assert_eq!(tools[0].input_schema, json!({ "type": 5 }));
+    assert_eq!(tools[0].input_schema, source_json(&json!({ "type": 5 })));
 
     // "Kept" alone is what the PRE-§20a code already did, so the assertions
     // above cannot tell warn-and-keep apart from silent forwarding. Pin the

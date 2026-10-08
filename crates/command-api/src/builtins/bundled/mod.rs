@@ -511,6 +511,7 @@ fn register_explain_usage_skill(reg: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     /// The bundled-skill NAME SET, locked against Claude Code 2.1.267.
     ///
@@ -607,7 +608,7 @@ mod tests {
             "workshop",
         ] {
             assert!(
-                reg.resolve(absent).is_none(),
+                reg.resolve(&absent.into()).is_none(),
                 "{absent} needs a surface this port does not have -- registering \
                  it would advertise a skill that cannot run"
             );
@@ -618,16 +619,23 @@ mod tests {
     fn registers_loop_when_cron_enabled() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
-        let cmd = reg.resolve("loop").expect("loop registered");
+        let cmd = reg.resolve(&"loop".into()).expect("loop registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
-        assert_eq!(cmd.argument_hint.as_deref(), Some("[interval] [prompt]"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("[interval] [prompt]")
+        );
         assert!(cmd.has_user_specified_description);
         assert!(matches!(cmd.kind, SlashCommandKind::Bundled { .. }));
         assert_eq!(
-            cmd.description,
-            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace."
+            cmd.description.string_at(""),
+            Some(
+                "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace."
+            )
         );
     }
 
@@ -636,12 +644,17 @@ mod tests {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
 
-        let cmd = reg.resolve("cron").expect("cron registered");
+        let cmd = reg.resolve(&"cron".into()).expect("cron registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.disable_model_invocation);
-        assert_eq!(cmd.argument_hint.as_deref(), Some("<schedule or action>"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("<schedule or action>")
+        );
         assert_eq!(
             cmd.menu_description.as_deref(),
             Some("Create, list, or cancel scheduled prompts")
@@ -663,7 +676,7 @@ mod tests {
                 let prompt = prompt_fn
                     .as_ref()
                     .expect("prompt_fn set")
-                    .build("启动一个每天早上汇报武汉天气的任务");
+                    .build(&"启动一个每天早上汇报武汉天气的任务".into());
                 assert!(prompt.contains("CronCreate"));
                 assert!(prompt.contains("启动一个每天早上汇报武汉天气的任务"));
             }
@@ -676,8 +689,8 @@ mod tests {
         // The shared scheduler kill-switch keeps both entry points out of the catalog.
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        assert!(reg.resolve("loop").is_none());
-        assert!(reg.resolve("cron").is_none());
+        assert!(reg.resolve(&"loop".into()).is_none());
+        assert!(reg.resolve(&"cron".into()).is_none());
     }
 
     #[test]
@@ -685,7 +698,7 @@ mod tests {
         // `/verify` has no `isEnabled` gate — present even when cron is off.
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("verify").expect("verify registered");
+        let cmd = reg.resolve(&"verify".into()).expect("verify registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
@@ -697,10 +710,10 @@ mod tests {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 assert!(f
-                    .build("")
+                    .build(&"".into())
                     .starts_with("**Verification is runtime observation.**"));
                 assert!(f
-                    .build("check X")
+                    .build(&"check X".into())
                     .contains("\n\n## User Request\n\ncheck X"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
@@ -711,7 +724,7 @@ mod tests {
     fn run_is_registered_unconditionally() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("run").expect("run registered");
+        let cmd = reg.resolve(&"run".into()).expect("run registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
@@ -722,7 +735,7 @@ mod tests {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 assert!(f
-                    .build("")
+                    .build(&"".into())
                     .starts_with("**Running means launching the actual app"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
@@ -733,11 +746,18 @@ mod tests {
     fn simplify_is_registered_with_argument_hint() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("simplify").expect("simplify registered");
+        let cmd = reg
+            .resolve(&"simplify".into())
+            .expect("simplify registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
-        assert_eq!(cmd.argument_hint.as_deref(), Some("[<target>]"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("[<target>]")
+        );
         assert!(cmd
             .description
             .contains("reuse, simplification, efficiency, and altitude"));
@@ -745,8 +765,12 @@ mod tests {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 // Inline skill PREPENDS a target line (contrast verify/run).
-                assert!(f.build("").starts_with("`/simplify → 4 cleanup agents"));
-                assert!(f.build("pull/9").starts_with("Review target: `pull/9`\n\n"));
+                assert!(f
+                    .build(&"".into())
+                    .starts_with("`/simplify → 4 cleanup agents"));
+                assert!(f
+                    .build(&"pull/9".into())
+                    .starts_with("Review target: `pull/9`\n\n"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
@@ -756,7 +780,9 @@ mod tests {
     fn run_skill_generator_is_user_only() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("run-skill-generator").expect("registered");
+        let cmd = reg
+            .resolve(&"run-skill-generator".into())
+            .expect("registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.user_invocable, Some(true));
         // Reference `disableModelInvocation:!0` — the model may not invoke it.
@@ -768,23 +794,27 @@ mod tests {
         assert!(!reg
             .model_invocable_commands()
             .iter()
-            .any(|c| c.name == "run-skill-generator"));
+            .any(|c| c.name.string_at("") == Some("run-skill-generator")));
     }
 
     #[test]
     fn fewer_permission_prompts_is_registered() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("fewer-permission-prompts").expect("registered");
+        let cmd = reg
+            .resolve(&"fewer-permission-prompts".into())
+            .expect("registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.description.contains(".lingxi/settings.json"));
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
-                assert!(f.build("").starts_with("# Fewer Permission Prompts"));
                 assert!(f
-                    .build("x")
+                    .build(&"".into())
+                    .starts_with("# Fewer Permission Prompts"));
+                assert!(f
+                    .build(&"x".into())
                     .contains("\n\n## Additional instructions from the user\n\nx"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
@@ -795,24 +825,26 @@ mod tests {
     fn code_review_is_registered_with_argument_hint() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("code-review").expect("registered");
+        let cmd = reg.resolve(&"code-review".into()).expect("registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.user_invocable, Some(true));
         assert_eq!(
-            cmd.argument_hint.as_deref(),
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
             Some("[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]")
         );
         assert!(cmd
             .description
             .starts_with("Review the current diff for correctness bugs"));
         // Distinct command from the builtin `/review`.
-        assert!(reg.resolve("review").is_none());
+        assert!(reg.resolve(&"review".into()).is_none());
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 // Default = the medium effort body; explicit level selects another.
-                assert!(f.build("").starts_with("`medium effort"));
-                assert!(f.build("high").starts_with("`high effort"));
+                assert!(f.build(&"".into()).starts_with("`medium effort"));
+                assert!(f.build(&"high".into()).starts_with("`high effort"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
@@ -822,10 +854,15 @@ mod tests {
     fn deep_research_is_manual_only_and_uses_workflow_name_launcher() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("deep-research").expect("registered");
+        let cmd = reg.resolve(&"deep-research".into()).expect("registered");
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.disable_model_invocation);
-        assert_eq!(cmd.argument_hint.as_deref(), Some("<question>"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("<question>")
+        );
         match &cmd.kind {
             SlashCommandKind::Bundled {
                 frontmatter,
@@ -835,7 +872,7 @@ mod tests {
                     frontmatter.allowed_tools.as_deref(),
                     Some(["Workflow".to_string()].as_slice())
                 );
-                let prompt = prompt_fn.as_ref().expect("prompt").build("why?");
+                let prompt = prompt_fn.as_ref().expect("prompt").build(&"why?".into());
                 assert!(prompt.contains("\"name\":\"deep-research\""));
                 assert!(prompt.contains("\"args\":\"why?\""));
             }
@@ -847,11 +884,16 @@ mod tests {
     fn batch_is_user_only_with_when_to_use() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("batch").expect("registered");
+        let cmd = reg.resolve(&"batch".into()).expect("registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.disable_model_invocation);
-        assert_eq!(cmd.argument_hint.as_deref(), Some("<instruction>"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("<instruction>")
+        );
         assert!(cmd
             .when_to_use
             .as_deref()
@@ -861,8 +903,10 @@ mod tests {
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
-                assert!(f.build("").starts_with("Provide an instruction"));
-                assert!(f.build("do X").contains("## User Instruction\n\ndo X"));
+                assert!(f.build(&"".into()).starts_with("Provide an instruction"));
+                assert!(f
+                    .build(&"do X".into())
+                    .contains("## User Instruction\n\ndo X"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
@@ -872,7 +916,7 @@ mod tests {
     fn dataviz_is_unconditional_user_invocable_bundle_with_reference_assets() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve("dataviz").expect("dataviz registered");
+        let cmd = reg.resolve(&"dataviz".into()).expect("dataviz registered");
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
@@ -888,9 +932,11 @@ mod tests {
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let prompt = prompt_fn.as_ref().expect("prompt_fn set");
-                assert!(prompt.build("").starts_with("# Data Visualization\n"));
                 assert!(prompt
-                    .build("make this dashboard accessible")
+                    .build(&"".into())
+                    .starts_with("# Data Visualization\n"));
+                assert!(prompt
+                    .build(&"make this dashboard accessible".into())
                     .contains("\n\n## User Request\n\nmake this dashboard accessible"));
             }
             other => panic!("expected bundled command, got {other:?}"),
@@ -908,17 +954,17 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
-        let cmd = reg.resolve("loop").expect("loop registered");
+        let cmd = reg.resolve(&"loop".into()).expect("loop registered");
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 // 2.1.263: empty args → the autonomous default (dynamic pacing);
                 // non-empty → the dynamic prompt builder.
                 assert!(f
-                    .build("")
+                    .build(&"".into())
                     .starts_with("# /loop — autonomous default with dynamic pacing"));
                 assert!(f
-                    .build("5m /x")
+                    .build(&"5m /x".into())
                     .starts_with("# /loop — schedule a recurring or self-paced prompt"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),

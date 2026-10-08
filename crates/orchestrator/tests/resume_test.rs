@@ -755,10 +755,10 @@ fn resume_drops_malformed_text_blocks_without_losing_valid_siblings() {
             content,
             &vec![
                 lingxi_core::types::ContentBlock::Text {
-                    text: "before".into()
+                    text: "before".into(), citations: None
                 },
                 lingxi_core::types::ContentBlock::Text {
-                    text: "after".into()
+                    text: "after".into(), citations: None
                 },
             ]
         );
@@ -1387,8 +1387,11 @@ mod deferred_tool_resume_tests {
             "echo".into()
         }
 
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+            String::new().into()
         }
 
         async fn call(
@@ -1831,8 +1834,11 @@ async fn replay_recovers_the_structured_client_state_results_the_transcript_stam
         .await
         .expect("replay ok");
     assert_eq!(
-        replayed.client_state_tool_results.get("toolu_spawn"),
-        Some(&json!({"status": "async_launched", "agentId": agent_id})),
+        replayed
+            .client_state_tool_results
+            .get("toolu_spawn")
+            .and_then(|value| value.to_json_string().ok()),
+        Some(json!({"status": "async_launched", "agentId": agent_id}).to_string()),
         "the structured result is keyed by the tool_use_id it answers",
     );
 }
@@ -1904,7 +1910,10 @@ fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
 
     let recovered = orchestrator::client_state_tool_results_from_messages(&messages);
     assert_eq!(
-        recovered,
+        recovered
+            .into_iter()
+            .map(|(key, value)| (key, serde_json::from_str::<serde_json::Value>(&value.to_json_string().unwrap()).unwrap()))
+            .collect::<std::collections::HashMap<_, _>>(),
         std::collections::HashMap::from([
             ("toolu_spawn".to_string(), spawn),
             ("toolu_plan".to_string(), plan),
@@ -1997,4 +2006,36 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
             ..Default::default()
         })
     );
+}
+
+#[test]
+fn resume_normalizes_nontext_tool_results_like_claude_2_1_286() {
+    use lingxi_core::types::ContentBlock;
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/tool-result-2.1.286/cases.json")).unwrap();
+    for case in cases {
+        let sid = Uuid::new_v4();
+        let result_id = Uuid::new_v4();
+        let raw = json!({
+            "type":"user", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-09-30T00:00:00.000Z",
+            "message":{"role":"user","content":[
+                {"type":"text","text":"before"},
+                {"type":"tool_result","tool_use_id":result_id.to_string(),"is_error":false,"content":case["input"]},
+                {"type":"text","text":"after"}
+            ]}
+        });
+        let row: session::jsonl::JsonlMessage = serde_json::from_value(raw).unwrap();
+        let original = row.message.clone();
+        let state = state_from_messages(sid, std::slice::from_ref(&row));
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!("user");
+        };
+        assert_eq!(content.len(), 3, "{}: valid siblings survive", case["name"]);
+        let ContentBlock::ToolResult { content: text, .. } = &content[1] else {
+            panic!("tool result");
+        };
+        assert_eq!(text, case["expected"].as_str().unwrap(), "{}", case["name"]);
+        assert_eq!(row.message, original, "raw transcript is not rewritten");
+    }
 }

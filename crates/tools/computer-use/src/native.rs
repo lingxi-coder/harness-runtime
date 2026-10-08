@@ -1,5 +1,6 @@
 use crate::{json, ComputerTool, ToolError, ToolUseContext, Value};
 use lingxi_core::host::computer_control::ComputerFrameGeometry;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_llm_client::protocol::computer::{
     ComputerCapabilities, ComputerFrame, ComputerMouseButton, ComputerOperation,
     ComputerOperationKind, ComputerPoint, ComputerScrollDirection, ComputerTarget,
@@ -33,7 +34,9 @@ impl ComputerTool {
             .and_then(|cc| cc.desktop_lock_scope())
             .unwrap_or_else(|| self.lock_home.clone());
         let lease = crate::lock::DesktopLease::acquire(&scope).map_err(|e| {
-            ToolError::InvalidInput(format!("computer observation cannot acquire desktop: {e}"))
+            ToolError::InvalidInput(
+                format!("computer observation cannot acquire desktop: {e}").into(),
+            )
         })?;
         lease
             .generation()
@@ -190,7 +193,8 @@ impl ComputerTool {
             ),
         };
         data["computer_frame"] = json!({"width":width,"height":height,"geometry_version":frame.geometry_version,"display_id":source.display_id,"capture_width":source.pixel_width,"capture_height":source.pixel_height,"origin":[source.origin_x,source.origin_y],"scale":source.scale,"crop":[0,0,source.pixel_width,source.pixel_height]});
-        let image_blocks = tool_api::tool_result_media::image_content_blocks(data)
+        let source_data = tool_api::tool_trait::generated_builtin_result(data);
+        let image_blocks = tool_api::tool_result_media::image_content_blocks(&source_data)
             .ok_or_else(|| ToolError::Internal("screenshot has no model image".into()))?;
         let image_fingerprint = image_fingerprint(&image_blocks)
             .ok_or_else(|| ToolError::Internal("screenshot image source unavailable".into()))?;
@@ -224,10 +228,10 @@ impl ComputerTool {
     }
     pub(crate) async fn validate_geometry(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<(), ToolError> {
-        let Some(version) = input.get("geometry_version").and_then(Value::as_str) else {
+        let Some(version) = input.string_at("/geometry_version") else {
             return Ok(());
         };
         let owner = Self::owner(ctx).await;
@@ -263,8 +267,8 @@ impl ComputerTool {
     pub(crate) async fn apply_model_observation(
         &self,
         ctx: &ToolUseContext,
-        content: &str,
-        blocks: Option<&[Value]>,
+        content: &Utf16JsonProjection,
+        blocks: Option<&[Utf16JsonProjection]>,
     ) -> Result<(), ToolError> {
         let owner = Self::owner(ctx).await;
         let call_id = ctx.tool_use_id.as_ref().map(ToString::to_string);
@@ -281,40 +285,34 @@ impl ComputerTool {
         let Some(observed) = observed else {
             return Ok(());
         };
-        let parsed = serde_json::from_str::<Value>(content).ok();
+        let parsed = content
+            .string_units("")
+            .and_then(|units| Utf16JsonProjection::parse_utf16_json(&units).ok());
         let derived = parsed.as_ref().and_then(|data| {
-            if let Some(array) = data.as_array() {
-                Some(array.clone())
+            if data
+                .at_pointer("")
+                .and_then(JsonValueView::array_len)
+                .is_some()
+            {
+                tool_api::tool_result_media::media_content_blocks(data)
             } else {
                 tool_api::tool_result_media::media_content_blocks_for_tool(
                     "computer", data, content,
                 )
             }
         });
-        let batch_images = parsed
-            .as_ref()
-            .filter(|data| data["stepsCompleted"].is_u64())
-            .and_then(|data| data["results"].as_array())
-            .map(|results| {
-                results
-                    .iter()
-                    .filter(|item| {
-                        matches!(item["action"].as_str(), Some("screenshot" | "zoom"))
-                            && item["result"]["type"] == "image"
-                    })
-                    .collect::<Vec<_>>()
-            });
+        let batch_images = parsed.as_ref().and_then(computer_batch_image_actions);
         let visible = blocks.or(derived.as_deref());
         let actual = if let Some(images) = &batch_images {
             visible.and_then(|blocks| {
                 let actual: Vec<_> = blocks
                     .iter()
-                    .filter(|block| block["type"] == "image")
+                    .filter(|block| block.string_at("/type") == Some("image"))
                     .collect();
                 if actual.len() != images.len()
                     || images
                         .last()
-                        .is_none_or(|item| item["action"] != "screenshot")
+                        .is_none_or(|(_, action)| action != "screenshot")
                 {
                     return None;
                 }
@@ -326,18 +324,55 @@ impl ComputerTool {
         let frame_metadata = batch_images
             .as_ref()
             .and_then(|images| images.last())
-            .and_then(|item| item["result"].get("computer_frame"))
-            .or_else(|| parsed.as_ref().and_then(|data| data.get("computer_frame")));
-        let metadata_matches=frame_metadata.is_none_or(|frame| {
-            // JavaScript JSON renders 2.0 as 2. Normalize only floating-point
-            // geometry fields; all other fields and unknown keys remain exact.
-            let Some(origin) = frame["origin"].as_array() else { return false; };
-            let [x, y] = origin.as_slice() else { return false; };
-            let (Some(x), Some(y), Some(scale)) = (x.as_f64(), y.as_f64(), frame["scale"].as_f64()) else { return false; };
-            let mut actual = frame.clone();
-            actual["origin"] = json!([x, y]);
-            actual["scale"] = json!(scale);
-            actual==json!({"width":observed.frame.width,"height":observed.frame.height,"geometry_version":observed.frame.geometry_version,"display_id":observed.source.display_id,"capture_width":observed.source.pixel_width,"capture_height":observed.source.pixel_height,"origin":[observed.source.origin_x,observed.source.origin_y],"scale":observed.source.scale,"crop":[0,0,observed.source.pixel_width,observed.source.pixel_height]})
+            .and_then(|(index, _)| {
+                parsed
+                    .as_ref()?
+                    .subprojection(&format!("/results/{index}/result/computer_frame"))
+                    .ok()
+            })
+            .or_else(|| parsed.as_ref()?.subprojection("/computer_frame").ok());
+        let metadata_matches = frame_metadata.as_ref().is_none_or(|frame| {
+            // Compare the same native geometry fields while retaining the
+            // source projection for every field and unknown property.
+            let Some(origin) = frame.at_pointer("/origin") else {
+                return false;
+            };
+            if origin.array_len() != Some(2) {
+                return false;
+            }
+            let (Some(x), Some(y), Some(scale)) = (
+                origin.get_index(0).and_then(JsonValueView::as_number),
+                origin.get_index(1).and_then(JsonValueView::as_number),
+                frame.number_at("/scale"),
+            ) else {
+                return false;
+            };
+            let mut normalized = frame.clone();
+            let Ok(normalized_origin) = Utf16JsonProjection::from_serde_value(&json!([x, y]))
+            else {
+                return false;
+            };
+            let Ok(normalized_scale) = Utf16JsonProjection::from_serde_value(&json!(scale)) else {
+                return false;
+            };
+            if normalized.set_field("origin", normalized_origin).is_err()
+                || normalized.set_field("scale", normalized_scale).is_err()
+            {
+                return false;
+            }
+            let expected = json!({
+                "width": observed.frame.width,
+                "height": observed.frame.height,
+                "geometry_version": observed.frame.geometry_version,
+                "display_id": observed.source.display_id,
+                "capture_width": observed.source.pixel_width,
+                "capture_height": observed.source.pixel_height,
+                "origin": [observed.source.origin_x, observed.source.origin_y],
+                "scale": observed.source.scale,
+                "crop": [0, 0, observed.source.pixel_width, observed.source.pixel_height]
+            });
+            Utf16JsonProjection::from_serde_value(&expected)
+                .is_ok_and(|expected| normalized.semantically_eq(&expected))
         });
         let mut runtime = self
             .runtime
@@ -421,7 +456,7 @@ impl ComputerTool {
     ) -> Result<Value, ToolError> {
         operation
             .validate(frame)
-            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+            .map_err(|e| ToolError::InvalidInput(e.to_string().into()))?;
         let snapshot = {
             let runtime = self
                 .runtime
@@ -596,31 +631,57 @@ impl ComputerTool {
             }
             ComputerOperation::CursorPosition => json!({"action":"cursor_position"}),
         };
-        self.validate_final_input(value["action"].as_str().unwrap_or_default(), &value)?;
+        let source_value = Utf16JsonProjection::from_serde_value(&value)
+            .map_err(|_| ToolError::Internal("generated computer input is invalid JSON".into()))?;
+        let action = source_value.string_at("/action").unwrap_or_default();
+        self.validate_final_input(action, &source_value)?;
         // Keep geometry validation attached through hooks to the final input.
         value["geometry_version"] = json!(frame.geometry_version);
         Ok(value)
     }
 }
 
-fn image_fingerprint(blocks: &[Value]) -> Option<[u8; 32]> {
+fn computer_batch_image_actions(data: &Utf16JsonProjection) -> Option<Vec<(usize, String)>> {
+    let steps_completed = data.at_pointer("/stepsCompleted")?.as_number()?;
+    if !steps_completed.is_finite()
+        || steps_completed < 0.0
+        || steps_completed.fract() != 0.0
+        || steps_completed >= u64::MAX as f64
+    {
+        return None;
+    }
+    let results = data.at_pointer("/results")?;
+    let mut images = Vec::new();
+    for index in 0..results.array_len()? {
+        let item = results.get_index(index)?;
+        let action = item.get_property("action").and_then(JsonValueView::as_str);
+        let result_type = item
+            .get_property("result")
+            .and_then(|result| result.get_property("type"))
+            .and_then(JsonValueView::as_str);
+        if matches!(action, Some("screenshot" | "zoom")) && result_type == Some("image") {
+            images.push((index, action.expect("matched action is present").to_owned()));
+        }
+    }
+    Some(images)
+}
+
+fn image_fingerprint(blocks: &[Utf16JsonProjection]) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     let images = blocks
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .filter(|block| block.string_at("/type") == Some("image"))
         .collect::<Vec<_>>();
     if images.len() != 1 {
         return None;
     }
     let image = images[0];
     let data = image
-        .pointer("/source/data")
-        .or_else(|| image.get("data"))
-        .and_then(Value::as_str)?;
+        .string_at("/source/data")
+        .or_else(|| image.string_at("/data"))?;
     let media_type = image
-        .pointer("/source/media_type")
-        .or_else(|| image.get("mimeType"))
-        .and_then(Value::as_str)?;
+        .string_at("/source/media_type")
+        .or_else(|| image.string_at("/mimeType"))?;
     if data.is_empty() {
         return None;
     }

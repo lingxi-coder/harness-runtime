@@ -7,19 +7,22 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::camera::{CameraError, CameraPosition, CapturePhotoOpts};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::image_budget::{process_image, IMAGE_MAX_DIM};
-use tool_api::BuiltinToolContext;
+use tool_api::util::image_budget::{IMAGE_MAX_DIM, process_image};
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "camera";
@@ -38,8 +41,8 @@ impl CameraTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_projection(&json!({
         "type": "object",
         "properties": {
             "action": { "type": "string", "enum": ["capture", "pick_from_library"] },
@@ -47,7 +50,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "allow_editing": { "type": "boolean" }
         },
         "required": ["action"]
-    })
+    }))
 });
 
 fn map_camera_err(e: &CameraError) -> ToolError {
@@ -64,23 +67,31 @@ impl Tool for CameraTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         self.ctx.camera.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "camera tool — native OS permission prompt gates capture".into(),
@@ -91,23 +102,29 @@ impl Tool for CameraTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        match input.get("action").and_then(Value::as_str) {
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("pick_from_library") => "Picking an image from the photo library".into(),
             _ => "Capturing a photo with the camera".into(),
         }
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Capture a photo or let the user pick one from the device photo library. The image is attached for visual analysis. A cancelled picker returns cancelled=true without an image.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("capture" | "pick_from_library") => Ok(()),
             _ => Err(ValidationError(
                 "`action` must be `capture` or `pick_from_library`".into(),
@@ -117,7 +134,7 @@ impl Tool for CameraTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -127,19 +144,22 @@ impl Tool for CameraTool {
             })?;
 
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .unwrap_or("capture");
         let captured = if action == "pick_from_library" {
             camera.pick_from_library_sized(IMAGE_MAX_DIM, 0.8).await
         } else {
-            let position = match input.get("position").and_then(Value::as_str) {
+            let position = match input
+                .get_property("position")
+                .and_then(|value| value.as_str())
+            {
                 Some("front") => CameraPosition::Front,
                 _ => CameraPosition::Back,
             };
             let allow_editing = input
-                .get("allow_editing")
-                .and_then(Value::as_bool)
+                .get_property("allow_editing")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false);
             camera
                 .capture_photo_sized(
@@ -155,10 +175,10 @@ impl Tool for CameraTool {
         let image = match captured {
             Ok(image) => image,
             Err(CameraError::Cancelled) => {
-                return Ok(ToolCallResult::from_data(json!({
+                return Ok(ToolCallResult::from_data(generated_projection(&json!({
                     "captured": false,
                     "cancelled": true,
-                })));
+                }))));
             }
             Err(error) => return Err(map_camera_err(&error)),
         };
@@ -186,7 +206,7 @@ impl Tool for CameraTool {
         }
 
         Ok(ToolCallResult {
-            data: json!({
+            data: generated_projection(&json!({
                 "type": "image",
                 "file": file,
                 "captured": true,
@@ -194,7 +214,7 @@ impl Tool for CameraTool {
                 "width": width,
                 "height": height,
                 "jpeg_bytes_len": original_size,
-            }),
+            })),
             // Both main and subagent dispatch convert the image data shape
             // into a real image block; avoid duplicating base64 as model text.
             model_content: Some("[Camera image attached for visual analysis.]".into()),
@@ -202,6 +222,7 @@ impl Tool for CameraTool {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

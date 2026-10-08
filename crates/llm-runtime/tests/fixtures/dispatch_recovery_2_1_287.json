@@ -1,0 +1,4915 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "XMe header selector",
+      "start": 187810394,
+      "end": 187810594,
+      "sha256": "ac48d8bc89b755691c54817e3b323a5fa1b4aa8cd36ea685bce018794713b2f0"
+    },
+    {
+      "label": "hYe/yYe per-query recovery",
+      "start": 187859394,
+      "end": 187860301,
+      "sha256": "099d5b08eeece0d319491d98e6513d6df9fcde631a38ef3840c547b77e9263b4"
+    },
+    {
+      "label": "q/gtr/htr headerless decline and wait",
+      "start": 180474906,
+      "end": 180475121,
+      "sha256": "85163a4f8f06a554ad91f7a43595668888fff55b75ec6e1895a91114be71efc2"
+    },
+    {
+      "label": "sL native rounded backoff",
+      "start": 180473531,
+      "end": 180473746,
+      "sha256": "e2693d2fe5f7de14fb6f9ab4655584d18672e87a9616c4ad8548d31197b2e736"
+    },
+    {
+      "label": "pC proportional jitter",
+      "start": 177883935,
+      "end": 177884260,
+      "sha256": "2549b8346d60c5f8fa5d9659276c0731edbb10feecc756f4cfa56584ad4e5b59"
+    },
+    {
+      "label": "native abort/connection/timeout error classes",
+      "start": 177887832,
+      "end": 177888148,
+      "sha256": "4778d9b20f6b1933a25bd6fbe404b5f76a0a661797a7c8993dab925b01f0be68"
+    },
+    {
+      "label": "body-phase eligibility",
+      "start": 187917603,
+      "end": 187917640,
+      "sha256": "14f2efaf6d258a1b0dedf2f5ed41b1c3c65b7b8884b4c36d72b77f69558f001f"
+    }
+  ],
+  "scope": "Exact XMe, hYe/yYe, q/gtr/htr, sL/pC and body-phase eligibility. First-party route and query category are supplied inputs; no SDK retries, side-query 4xx budget, post-event stream policy or whole CLI claim.",
+  "cases": [
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": false,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_retryable_503",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          },
+          {
+            "sleepMs": 563
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_decline",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2s",
+        "again": "v2s",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 500,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 529,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2s",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2s",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 599,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 500,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 529,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 599,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "main"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 500,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 529,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": false,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 599,
+              "query_source": "main",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_retryable_503",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          },
+          {
+            "sleepMs": 563
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_decline",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_retryable_503",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          },
+          {
+            "sleepMs": 563
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": null,
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "none",
+              "resend_dispatch": "v2p",
+              "reason": "headerless_decline",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": false,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": null,
+        "retry": null,
+        "again": null,
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "auxiliary"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "auxiliary"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 500,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 529,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": false,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 599,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "connection",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "auxiliary"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "timeout",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "conn_err",
+              "status": "none",
+              "query_source": "auxiliary"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "aborted",
+        "status": null,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 400,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 403,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 408,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 409,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 429,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2d",
+        "again": "v2d",
+        "recovered": false,
+        "repeated": null,
+        "resending": false,
+        "trace": []
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 500,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 500,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 503,
+        "declined": true
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 503,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 529,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 529,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "firstParty": true,
+        "auxiliary": true,
+        "dreamy": true,
+        "cedar": true,
+        "kind": "http",
+        "status": 599,
+        "declined": false
+      },
+      "expected": {
+        "first": "v2d",
+        "retry": "v2p",
+        "again": "v2p",
+        "recovered": true,
+        "repeated": null,
+        "resending": true,
+        "trace": [
+          {
+            "name": "tengu_dispatch_header_fallback",
+            "metadata": {
+              "model": "fixture-model",
+              "dispatch": "v2d",
+              "resend_dispatch": "v2p",
+              "reason": "5xx",
+              "status": 599,
+              "query_source": "auxiliary",
+              "request_id": "fixture-request"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "bodyCases": [
+    {
+      "input": {
+        "carried": false,
+        "resending": false,
+        "connection": false,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": false,
+        "connection": false,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": false,
+        "connection": true,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": false,
+        "connection": true,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": true,
+        "connection": false,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": true,
+        "connection": false,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": true,
+        "connection": true,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": false,
+        "resending": true,
+        "connection": true,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": false,
+        "connection": false,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": false,
+        "connection": false,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": false,
+        "connection": true,
+        "anyEvent": false
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": false,
+        "connection": true,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": true,
+        "connection": false,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": true,
+        "connection": false,
+        "anyEvent": true
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": true,
+        "connection": true,
+        "anyEvent": false
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "carried": true,
+        "resending": true,
+        "connection": true,
+        "anyEvent": true
+      },
+      "expected": false
+    }
+  ],
+  "delayCases": [
+    {
+      "random": 0,
+      "expected": 500
+    },
+    {
+      "random": 0.004,
+      "expected": 501
+    },
+    {
+      "random": 0.1,
+      "expected": 513
+    },
+    {
+      "random": 0.5,
+      "expected": 563
+    },
+    {
+      "random": 0.996,
+      "expected": 625
+    },
+    {
+      "random": 0.999999,
+      "expected": 625
+    }
+  ]
+}

@@ -34,7 +34,7 @@ impl BuiltinCommandHandler for InitHandler {
         let details = format!("{{\"template_bytes\":{}}}", OLD_INIT_PROMPT.len());
         telemetry::emit_command_completed(cmd_evt::INIT_COMPLETED, &details);
         CommandResult::InjectMessage {
-            content: OLD_INIT_PROMPT.to_string(),
+            content: OLD_INIT_PROMPT.to_string().into(),
         }
     }
 
@@ -50,13 +50,14 @@ impl BuiltinCommandHandler for InitHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[tokio::test]
     async fn returns_inject_message_with_locked_template() {
         let h = InitHandler::new();
         let args = ParsedSlashCommand {
-            name: "init".to_string(),
-            raw_args: String::new(),
+            name: "init".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
@@ -71,8 +72,8 @@ mod tests {
     async fn inject_message_content_starts_with_locked_first_sentence() {
         let h = InitHandler::new();
         let args = ParsedSlashCommand {
-            name: "init".to_string(),
-            raw_args: String::new(),
+            name: "init".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         let r = h.handle(&args).await;

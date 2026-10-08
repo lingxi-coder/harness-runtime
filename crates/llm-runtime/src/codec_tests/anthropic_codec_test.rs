@@ -1,3 +1,4 @@
+use super::json_payload;
 use crate::upstream::codec_fixtures::HistoryFixture;
 use crate::upstream::codec_fixtures::{AnthropicMessagesCodec, FixtureCodec};
 use llm_runtime::{
@@ -18,7 +19,8 @@ fn encode_image_url_block_emits_url_source() {
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let block = &provider_request.body_json["messages"][0]["content"][0];
+    let block =
+        &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0];
     assert_eq!(block["type"], "image");
     assert_eq!(block["source"]["type"], "url");
     assert_eq!(block["source"]["url"], "https://x/y.png");
@@ -41,7 +43,7 @@ fn decode_server_tool_use_block() {
     let decoded = codec.decode_response(response).unwrap();
     assert!(matches!(
         &decoded.content[0],
-        ContentBlock::ServerToolUse { id, name, input } if id == "stu_01" && name == "advisor" && input["query"] == "?"
+        ContentBlock::ServerToolUse { id, name, input } if id == "stu_01" && name == "advisor" && input.string_at("/query").as_deref() == Some("?")
     ));
 }
 
@@ -81,7 +83,9 @@ fn decode_advisor_tool_result_block() {
     assert!(matches!(
         &decoded.content[0],
         ContentBlock::AdvisorToolResult { tool_use_id, content, is_error }
-            if tool_use_id == "stu_01" && content == "result text" && !is_error
+            if tool_use_id == "stu_01"
+                && content.as_json_source() == r#""result text""#
+                && !is_error
     ));
 }
 
@@ -183,11 +187,12 @@ fn server_tool_use_round_trip_encode() {
         content: vec![ContentBlock::ServerToolUse {
             id: "stu_01".to_string(),
             name: "advisor".to_string(),
-            input: serde_json::json!({"query": "?"}),
+            input: super::json_payload(serde_json::json!({"query": "?"})),
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let block = &provider_request.body_json["messages"][0]["content"][0];
+    let block =
+        &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0];
     assert_eq!(block["type"], "server_tool_use");
     assert_eq!(block["id"], "stu_01");
     assert_eq!(block["name"], "advisor");
@@ -207,7 +212,8 @@ fn connector_text_encode_preserves_native_content() {
     });
     let encoded = codec.encode_request(&request).unwrap();
     assert_eq!(
-        encoded.body_json["messages"][0]["content"][0]["connector_text"],
+        super::json_payload_value(&encoded.body_json)["messages"][0]["content"][0]
+            ["connector_text"],
         "hi"
     );
 }
@@ -220,13 +226,13 @@ fn advisor_tool_result_encode_preserves_native_content() {
         role: "user".to_string(),
         content: vec![ContentBlock::AdvisorToolResult {
             tool_use_id: "stu_01".to_string(),
-            content: serde_json::json!("result"),
+            content: super::json_payload(serde_json::json!("result")),
             is_error: false,
         }],
     });
     let encoded = codec.encode_request(&request).unwrap();
     assert_eq!(
-        encoded.body_json["messages"][0]["content"][0]["content"],
+        super::json_payload_value(&encoded.body_json)["messages"][0]["content"][0]["content"],
         "result"
     );
 }
@@ -241,12 +247,13 @@ fn encode_request_shape_is_anthropic_messages() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
+            citations: None,
         }],
     });
     request.tools.push(ToolDeclaration {
         name: "Read".to_string(),
-        description: "Read a file".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: "Read a file".into(),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
 
@@ -256,13 +263,19 @@ fn encode_request_shape_is_anthropic_messages() {
     assert!(provider_request.url.ends_with("/v1/messages"));
     assert_eq!(provider_request.headers["anthropic-version"], "2023-06-01");
     assert_eq!(
-        provider_request.body_json["model"],
+        super::json_payload_value(&provider_request.body_json)["model"],
         "claude-sonnet-4-20250514"
     );
-    assert_eq!(provider_request.body_json["system"][0]["text"], "sys");
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "user");
     assert_eq!(
-        provider_request.body_json["tools"][0]["input_schema"]["type"],
+        super::json_payload_value(&provider_request.body_json)["system"][0]["text"],
+        "sys"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "user"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["tools"][0]["input_schema"]["type"],
         "object"
     );
 }
@@ -279,6 +292,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
         content: vec![ContentBlock::Text {
             text: "use the computer".to_string(),
             cache_control: None,
+            citations: None,
         }],
     });
     let mut extra = serde_json::Map::new();
@@ -286,8 +300,8 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
     extra.insert("display_height_px".to_string(), serde_json::json!(768));
     request.tools.push(ToolDeclaration {
         name: "computer".to_string(),
-        description: String::new(),
-        input_schema: serde_json::Value::Null,
+        description: String::new().into(),
+        input_schema: json_payload(serde_json::Value::Null),
         tool_type: Some("computer_use_20250124".to_string()),
         extra,
         strict: false,
@@ -296,7 +310,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    let tool = &provider_request.body_json["tools"][0];
+    let tool = &super::json_payload_value(&provider_request.body_json)["tools"][0];
     assert_eq!(tool["type"], "computer_use_20250124");
     assert_eq!(tool["name"], "computer");
     assert_eq!(tool["display_width_px"], 1024);
@@ -319,12 +333,13 @@ fn encode_request_no_beta_header_without_hosted_tool() {
         content: vec![ContentBlock::Text {
             text: "hi".to_string(),
             cache_control: None,
+            citations: None,
         }],
     });
     request.tools.push(ToolDeclaration {
         name: "Read".to_string(),
-        description: "Read a file".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: "Read a file".into(),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
 
@@ -345,8 +360,8 @@ fn encode_request_maps_image_and_tool_result_blocks() {
             },
             ContentBlock::ToolResult {
                 tool_call_id: "tool-1".to_string(),
-                output: serde_json::json!({"ok": true}),
-                is_error: false,
+                output: super::json_payload(serde_json::json!({"ok": true})),
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             },
@@ -356,31 +371,36 @@ fn encode_request_maps_image_and_tool_result_blocks() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][0]["type"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0]["type"],
         "image"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][0]["source"]["type"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0]
+            ["source"]["type"],
         "base64"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][0]["source"]["media_type"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0]
+            ["source"]["media_type"],
         "image/png"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][0]["source"]["data"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0]
+            ["source"]["data"],
         "AQID"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][1]["type"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][1]["type"],
         "tool_result"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][1]["tool_use_id"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][1]
+            ["tool_use_id"],
         "tool-1"
     );
     assert_eq!(
-        provider_request.body_json["messages"][0]["content"][1]["content"],
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][1]
+            ["content"],
         "{\"ok\":true}"
     );
 }
@@ -397,17 +417,18 @@ fn encode_request_passes_tool_result_content_block_array_verbatim() {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "tool-1".to_string(),
-            output: serde_json::json!([
+            output: super::json_payload(serde_json::json!([
                 { "type": "text", "text": "see image:" },
                 { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AQID" } },
-            ]),
-            is_error: false,
+            ])),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
     });
     let req = codec.encode_request(&request).unwrap();
-    let content = &req.body_json["messages"][0]["content"][0]["content"];
+    let content =
+        &super::json_payload_value(&req.body_json)["messages"][0]["content"][0]["content"];
     assert!(
         content.is_array(),
         "array output must stay an array, got {content:?}"
@@ -429,8 +450,8 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
         content: vec![
             ContentBlock::ToolResult {
                 tool_call_id: "toolu_abc".to_string(),
-                output: serde_json::json!("body"),
-                is_error: false,
+                output: super::json_payload(serde_json::json!("body")),
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: Some("toolu_abc".to_string()),
             },
@@ -443,7 +464,7 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
 
     // tool_result carries cache_reference.
     assert_eq!(content[0]["type"], "tool_result");
@@ -468,14 +489,14 @@ fn encode_request_omits_cache_reference_when_absent() {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "toolu_abc".to_string(),
-            output: serde_json::json!("body"),
-            is_error: false,
+            output: super::json_payload(serde_json::json!("body")),
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let tr = &provider_request.body_json["messages"][0]["content"][0];
+    let tr = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0];
     assert_eq!(tr["type"], "tool_result");
     assert!(
         tr.get("cache_reference").is_none(),
@@ -504,7 +525,8 @@ fn encode_request_maps_supported_tool_choice_variants() {
         let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
         request.tools.push(ToolDeclaration {
             name: "Read".into(),
-            input_schema: serde_json::json!({"type":"object"}),
+            description: json_payload(serde_json::json!("Read a file")),
+            input_schema: json_payload(serde_json::json!({"type":"object"})),
             ..Default::default()
         });
         request.request.set_tool_choice(Some(choice));
@@ -512,11 +534,14 @@ fn encode_request_maps_supported_tool_choice_variants() {
         let provider_request = codec.encode_request(&request).unwrap();
 
         assert_eq!(
-            provider_request.body_json["tool_choice"]["type"],
+            super::json_payload_value(&provider_request.body_json)["tool_choice"]["type"],
             expected_type
         );
         if let Some(name) = expected_name {
-            assert_eq!(provider_request.body_json["tool_choice"]["name"], name);
+            assert_eq!(
+                super::json_payload_value(&provider_request.body_json)["tool_choice"]["name"],
+                name
+            );
         }
     }
 }
@@ -543,20 +568,27 @@ fn encode_omits_empty_tools_array() {
     let bare = codec
         .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
-    assert!(bare.body_json.get("tools").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("tools")
+        .is_none());
 
     let mut with_tools = HistoryFixture::new("claude-sonnet-4-20250514");
     with_tools.tools.push(ToolDeclaration {
         name: "Read".to_string(),
-        description: "d".to_string(),
-        input_schema: serde_json::json!({"type":"object"}),
+        description: "d".into(),
+        input_schema: json_payload(serde_json::json!({"type":"object"})),
         ..Default::default()
     });
     let encoded = codec.encode_request(&with_tools).unwrap();
-    assert_eq!(encoded.body_json["tools"][0]["name"], "Read");
+    assert_eq!(
+        super::json_payload_value(&encoded.body_json)["tools"][0]["name"],
+        "Read"
+    );
     // Default (strict == false) omits the `strict` field entirely — wire bytes
     // are the plain `{name, description, input_schema}` object.
-    assert!(encoded.body_json["tools"][0].get("strict").is_none());
+    assert!(super::json_payload_value(&encoded.body_json)["tools"][0]
+        .get("strict")
+        .is_none());
 }
 
 #[test]
@@ -565,16 +597,18 @@ fn encode_strict_tool_sends_converted_schema_and_strict_flag() {
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.tools.push(ToolDeclaration {
         name: "StructuredOutput".to_string(),
-        description: "emit".to_string(),
-        input_schema: serde_json::json!({
+        description: "emit".into(),
+        input_schema: json_payload(serde_json::json!({
             "type": "object",
             "properties": { "answer": { "type": "string" } },
             "required": ["answer"]
-        }),
+        })),
         strict: true,
         ..Default::default()
     });
-    let tool = &codec.encode_request(&request).unwrap().body_json["tools"][0];
+    let encoded = codec.encode_request(&request).unwrap();
+    let body = super::json_payload_value(&encoded.body_json);
+    let tool = &body["tools"][0];
     assert_eq!(tool["strict"], serde_json::json!(true));
     // The converted schema closes the object with additionalProperties:false.
     assert_eq!(
@@ -591,12 +625,14 @@ fn encode_strict_tool_with_bad_schema_falls_back_to_non_strict() {
     let schema = serde_json::json!({ "type": "string" });
     request.tools.push(ToolDeclaration {
         name: "Bad".to_string(),
-        description: "d".to_string(),
-        input_schema: schema.clone(),
+        description: "d".into(),
+        input_schema: json_payload(schema.clone()),
         strict: true,
         ..Default::default()
     });
-    let tool = &codec.encode_request(&request).unwrap().body_json["tools"][0];
+    let encoded = codec.encode_request(&request).unwrap();
+    let body = super::json_payload_value(&encoded.body_json);
+    let tool = &body["tools"][0];
     assert!(tool.get("strict").is_none());
     assert_eq!(tool["input_schema"], schema);
 }
@@ -608,7 +644,10 @@ fn encode_request_pins_default_max_tokens_to_4096() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["max_tokens"], 4096);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["max_tokens"],
+        4096
+    );
 }
 
 #[test]
@@ -646,7 +685,8 @@ fn encode_thinking_round_trip_requires_signature() {
         }],
     });
     let provider_request = codec.encode_request(&signed).unwrap();
-    let block = &provider_request.body_json["messages"][0]["content"][0];
+    let block =
+        &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0];
     assert_eq!(block["type"], "thinking");
     assert_eq!(block["thinking"], "pondering");
     assert_eq!(block["signature"], "sig_abc");
@@ -690,7 +730,8 @@ fn redacted_thinking_round_trips() {
         content: decoded.content,
     });
     let provider_request = codec.encode_request(&request).unwrap();
-    let block = &provider_request.body_json["messages"][0]["content"][0];
+    let block =
+        &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"][0];
     assert_eq!(block["type"], "redacted_thinking");
     assert_eq!(block["data"], "opaque-bytes");
 }
@@ -722,15 +763,22 @@ fn encode_tool_result_error_flag() {
         content: vec![
             ContentBlock::ToolResult {
                 tool_call_id: "tool-1".to_string(),
-                output: serde_json::json!("boom"),
-                is_error: true,
+                output: super::json_payload(serde_json::json!("boom")),
+                is_error: Some(true),
                 cache_control: None,
                 cache_reference: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "tool-2".to_string(),
-                output: serde_json::json!("fine"),
-                is_error: false,
+                output: super::json_payload(serde_json::json!("fine")),
+                is_error: Some(false),
+                cache_control: None,
+                cache_reference: None,
+            },
+            ContentBlock::ToolResult {
+                tool_call_id: "tool-3".to_string(),
+                output: super::json_payload(serde_json::json!("omitted flag")),
+                is_error: None,
                 cache_control: None,
                 cache_reference: None,
             },
@@ -738,10 +786,11 @@ fn encode_tool_result_error_flag() {
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
-    let content = &provider_request.body_json["messages"][0]["content"];
+    let content = &super::json_payload_value(&provider_request.body_json)["messages"][0]["content"];
 
     assert_eq!(content[0]["is_error"], true);
-    assert!(content[1].get("is_error").is_none());
+    assert_eq!(content[1]["is_error"], false);
+    assert!(content[2].get("is_error").is_none());
 }
 
 #[test]
@@ -755,20 +804,35 @@ fn encode_sampling_controls() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["max_tokens"], 1024);
-    assert_eq!(provider_request.body_json["temperature"], 0.5);
-    assert_eq!(provider_request.body_json["top_p"], 0.9);
     assert_eq!(
-        provider_request.body_json["stop_sequences"],
+        super::json_payload_value(&provider_request.body_json)["max_tokens"],
+        1024
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["temperature"],
+        0.5
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["top_p"],
+        0.9
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["stop_sequences"],
         serde_json::json!(["END"])
     );
 
     let bare = codec
         .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
-    assert!(bare.body_json.get("temperature").is_none());
-    assert!(bare.body_json.get("top_p").is_none());
-    assert!(bare.body_json.get("stop_sequences").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("temperature")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("top_p")
+        .is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("stop_sequences")
+        .is_none());
 }
 
 #[test]
@@ -863,11 +927,14 @@ fn decode_preserves_unknown_content_block_types() {
     let decoded = codec.decode_response(response).unwrap();
 
     assert!(
-        matches!(decoded.content.as_slice(), [ContentBlock::ProviderContent { value, .. }, ContentBlock::Text { text, .. }] if text == "hi" && value["data"] == "opaque")
+        matches!(decoded.content.as_slice(), [ContentBlock::ProviderContent { value, .. }, ContentBlock::Text { text, .. }] if text == "hi" && value.string_at("/data").as_deref() == Some("opaque"))
     );
     assert_eq!(
-        decoded.provider_metadata["content"][0]["type"],
-        "some_future_block_type"
+        decoded
+            .provider_metadata
+            .string_at("/content/0/type")
+            .as_deref(),
+        Some("some_future_block_type")
     );
 }
 
@@ -889,7 +956,7 @@ fn stream_decoder_preserves_hosted_observations_without_fabricating_deltas() {
     assert!(
         unknown_block_start.iter().any(|event| matches!(event,
             llm_runtime::HistoryEvent::WebSearch { result }
-                if result.metadata["events"][0]["content_block"]["type"] == "web_search_tool_result"
+                if result.metadata.string_at("/events/0/content_block/type").as_deref() == Some("web_search_tool_result")
         )),
         "{unknown_block_start:?}"
     );
@@ -913,7 +980,7 @@ fn stream_decoder_preserves_hosted_observations_without_fabricating_deltas() {
     assert!(
         unknown_delta.iter().any(
             |event| matches!(event, llm_runtime::HistoryEvent::WebSearch { result }
-                if result.metadata["events"][0]["delta"]["type"] == "some_future_delta_type"
+                if result.metadata.string_at("/events/0/delta/type").as_deref() == Some("some_future_delta_type")
             )
         ),
         "{unknown_delta:?}"
@@ -968,16 +1035,21 @@ fn encode_reasoning_budget_as_thinking() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["thinking"]["type"], "enabled");
     assert_eq!(
-        provider_request.body_json["thinking"]["budget_tokens"],
+        super::json_payload_value(&provider_request.body_json)["thinking"]["type"],
+        "enabled"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["thinking"]["budget_tokens"],
         2048
     );
 
     let bare = codec
         .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
-    assert!(bare.body_json.get("thinking").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("thinking")
+        .is_none());
 }
 
 #[test]
@@ -990,24 +1062,29 @@ fn encode_adaptive_reasoning_as_thinking() {
 
     let provider_request = codec.encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["thinking"]["type"], "adaptive");
-    assert!(provider_request.body_json["thinking"]
-        .get("budget_tokens")
-        .is_none());
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["thinking"]["type"],
+        "adaptive"
+    );
+    assert!(
+        super::json_payload_value(&provider_request.body_json)["thinking"]
+            .get("budget_tokens")
+            .is_none()
+    );
 }
 
 #[test]
 fn encode_metadata_user_id() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-opus-4-8");
-    request.request.input.metadata = serde_json::json!({
+    request.request.input.metadata = super::json_payload(serde_json::json!({
         "user_id": "{\"device_id\":\"abc\",\"session_id\":\"s1\"}",
-    });
+    }));
 
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(
-        provider_request.body_json["metadata"]["user_id"],
+        super::json_payload_value(&provider_request.body_json)["metadata"]["user_id"],
         "{\"device_id\":\"abc\",\"session_id\":\"s1\"}"
     );
 
@@ -1015,7 +1092,9 @@ fn encode_metadata_user_id() {
     let bare = codec
         .encode_request(&HistoryFixture::new("claude-opus-4-8"))
         .unwrap();
-    assert!(bare.body_json.get("metadata").is_none());
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("metadata")
+        .is_none());
 }
 
 #[test]
@@ -1024,11 +1103,11 @@ fn encode_system_blocks_and_cache_control() {
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.system = vec![
         llm_runtime::SystemBlock {
-            text: "stable prefix".to_string(),
+            text: "stable prefix".into(),
             cache_control: Some(llm_runtime::CacheControl::Ephemeral),
         },
         llm_runtime::SystemBlock {
-            text: "tail".to_string(),
+            text: "tail".into(),
             cache_control: None,
         },
     ];
@@ -1038,11 +1117,12 @@ fn encode_system_blocks_and_cache_control() {
             ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: Some(llm_runtime::CacheControl::Ephemeral),
+                citations: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "tool-1".to_string(),
-                output: serde_json::json!("ok"),
-                is_error: false,
+                output: super::json_payload(serde_json::json!("ok")),
+                is_error: Some(false),
                 cache_control: Some(llm_runtime::CacheControl::Ephemeral),
                 cache_reference: None,
             },
@@ -1050,7 +1130,7 @@ fn encode_system_blocks_and_cache_control() {
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
-    let body = &provider_request.body_json;
+    let body = &super::json_payload_value(&provider_request.body_json);
 
     assert_eq!(body["system"][0]["type"], "text");
     assert_eq!(body["system"][0]["text"], "stable prefix");
@@ -1068,10 +1148,14 @@ fn encode_system_blocks_and_cache_control() {
     let bare = codec
         .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514").with_user_text("hi"))
         .unwrap();
-    assert!(bare.body_json.get("system").is_none());
-    assert!(bare.body_json["messages"][0]["content"][0]
-        .get("cache_control")
+    assert!(super::json_payload_value(&bare.body_json)
+        .get("system")
         .is_none());
+    assert!(
+        super::json_payload_value(&bare.body_json)["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1082,26 +1166,27 @@ fn encode_cache_control_scope_and_ttl() {
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514").with_user_text("hi");
     request.system = vec![
         llm_runtime::SystemBlock {
-            text: "global static".to_string(),
+            text: "global static".into(),
             cache_control: Some(llm_runtime::CacheControl::EphemeralScoped {
                 scope: Some(llm_runtime::CacheScope::Global),
                 ttl_1h: true,
             }),
         },
         llm_runtime::SystemBlock {
-            text: "ttl only".to_string(),
+            text: "ttl only".into(),
             cache_control: Some(llm_runtime::CacheControl::EphemeralScoped {
                 scope: None,
                 ttl_1h: true,
             }),
         },
         llm_runtime::SystemBlock {
-            text: "plain org".to_string(),
+            text: "plain org".into(),
             cache_control: Some(llm_runtime::CacheControl::Ephemeral),
         },
     ];
 
-    let body = codec.encode_request(&request).unwrap().body_json;
+    let encoded = codec.encode_request(&request).unwrap();
+    let body = super::json_payload_value(&encoded.body_json);
 
     // Block 0: type+ttl+scope.
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
@@ -1125,15 +1210,27 @@ fn count_tokens_request_and_response_round_trip() {
 
     let provider_request = codec.encode_count_tokens_request(&request).unwrap();
 
-    assert!(provider_request.url.ends_with("/v1/messages/count_tokens"));
+    assert!(provider_request
+        .url
+        .ends_with("/v1/messages/count_tokens?beta=true"));
     assert_eq!(
-        provider_request.body_json["model"],
+        super::json_payload_value(&provider_request.body_json)["model"],
         "claude-sonnet-4-20250514"
     );
-    assert_eq!(provider_request.body_json["messages"][0]["role"], "user");
-    assert_eq!(provider_request.body_json["system"][0]["text"], "sys");
-    assert!(provider_request.body_json.get("max_tokens").is_none());
-    assert!(provider_request.body_json.get("stream").is_none());
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["messages"][0]["role"],
+        "user"
+    );
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["system"][0]["text"],
+        "sys"
+    );
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("max_tokens")
+        .is_none());
+    assert!(super::json_payload_value(&provider_request.body_json)
+        .get("stream")
+        .is_none());
 
     let count = codec
         .decode_count_tokens_response(&ProviderResponse::json(

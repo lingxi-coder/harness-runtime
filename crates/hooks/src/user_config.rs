@@ -23,143 +23,264 @@
 //! both forms (`else r.push(n)` / no-op replace), so a `${user_config.MISSING}`
 //! never turns into the literal `undefined`.
 
-use serde_json::{Map, Value};
+use lingxi_core::types::utf16_json::{
+    JsonValueView, Utf16JsonBuilder, Utf16JsonProjection as Source,
+};
 
-/// The literal `${user_config.` prefix (14 bytes: `${` + `user_config` + `.`).
 const PREFIX: &str = "${user_config.";
 
-/// `String(value)` semantics for a resolved userConfig value: strings pass
-/// through, numbers/booleans use their JS `String()` form, and an array joins
-/// its (stringified) elements with `,` (`String(["a","b"]) === "a,b"`). Objects
-/// collapse to `[object Object]` and null to `null`, matching JS coercion —
-/// userConfig values are declared as `string | number | boolean | string[]`, so
-/// these last two are defensive.
-#[must_use]
-pub fn value_to_env_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Null => "null".to_string(),
-        Value::Array(a) => a
-            .iter()
-            .map(value_to_env_string)
-            .collect::<Vec<_>>()
-            .join(","),
-        Value::Object(_) => "[object Object]".to_string(),
-    }
+fn source_text(units: Vec<u16>) -> Source {
+    Source::root_string(String::from_utf16_lossy(&units), units).expect("source text")
 }
 
-/// If `s` is EXACTLY `${user_config.KEY}` (whole-string form), return `KEY`.
-/// Mirrors `^\$\{user_config\.[^}]+\}$`: the inner segment must be non-empty and
-/// contain no `}` (so `${user_config.A}${user_config.B}` does NOT match).
-fn whole_string_key(s: &str) -> Option<&str> {
-    let inner = s.strip_prefix(PREFIX)?.strip_suffix('}')?;
-    if inner.is_empty() || inner.contains('}') {
-        return None;
+fn number_string(number: f64) -> String {
+    if number.is_nan() {
+        return "NaN".into();
     }
-    Some(inner)
+    if number == f64::INFINITY {
+        return "Infinity".into();
+    }
+    if number == f64::NEG_INFINITY {
+        return "-Infinity".into();
+    }
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_number(number);
+    builder
+        .finish(root)
+        .expect("number source")
+        .to_json_string()
+        .expect("JS number encoding")
 }
 
-/// Replace every inline `${user_config.KEY}` occurrence in `s` with
-/// `String(value)`. Unresolved keys (and the degenerate empty-key
-/// `${user_config.}`, which `[^}]+` never matches) are emitted verbatim.
-fn substitute_inline(s: &str, ctx: &Map<String, Value>) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find(PREFIX) {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + PREFIX.len()..];
-        match after.find('}') {
-            // Empty key — not a `[^}]+` match; emit the prefix literally and
-            // continue scanning after it.
-            Some(0) => {
-                out.push_str(PREFIX);
-                rest = after;
+fn coercion_units(value: JsonValueView<'_>) -> Vec<u16> {
+    enum Work<'a> {
+        Value(JsonValueView<'a>, bool),
+        Comma,
+    }
+    let mut work = vec![Work::Value(value, false)];
+    let mut out = Vec::new();
+    while let Some(task) = work.pop() {
+        let (value, array_element) = match task {
+            Work::Comma => {
+                out.push(44);
+                continue;
             }
-            Some(end) => {
-                let key = &after[..end];
-                match ctx.get(key) {
-                    Some(v) => out.push_str(&value_to_env_string(v)),
-                    None => {
-                        out.push_str(PREFIX);
-                        out.push_str(key);
-                        out.push('}');
-                    }
+            Work::Value(value, array_element) => (value, array_element),
+        };
+        if let Some(units) = value.code_units() {
+            out.extend_from_slice(units);
+        } else if value.is_null() {
+            if !array_element {
+                out.extend("null".encode_utf16());
+            }
+        } else if let Some(value) = value.as_bool() {
+            out.extend(if value { "true" } else { "false" }.encode_utf16());
+        } else if let Some(value) = value.as_number() {
+            out.extend(number_string(value).encode_utf16());
+        } else if let Some(length) = value.array_len() {
+            for index in (0..length).rev() {
+                work.push(Work::Value(
+                    value.get_index(index).expect("array child"),
+                    true,
+                ));
+                if index > 0 {
+                    work.push(Work::Comma);
                 }
-                rest = &after[end + 1..];
             }
-            // No closing brace at all — the tail can hold no further match.
-            None => {
-                out.push_str(PREFIX);
-                out.push_str(after);
-                return out;
-            }
+        } else {
+            out.extend("[object Object]".encode_utf16());
         }
     }
-    out.push_str(rest);
     out
 }
 
-/// Substitute `${user_config.*}` references throughout a JSON value.
-///
-/// Objects recurse per-value; arrays recurse per-element with whole-string
-/// spread (an element that IS `${user_config.KEY}` resolving to an array is
-/// flattened into the parent); strings use whole-string type-preservation when
-/// they match exactly, else inline `String()` substitution.
+/// JavaScript String(value), retaining source units, including nested array joins.
 #[must_use]
-pub fn substitute_value(v: &Value, ctx: &Map<String, Value>) -> Value {
-    match v {
-        Value::String(s) => match whole_string_key(s) {
-            Some(key) => ctx.get(key).cloned().unwrap_or_else(|| v.clone()),
-            None => Value::String(substitute_inline(s, ctx)),
-        },
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                if let Value::String(s) = item {
-                    if let Some(key) = whole_string_key(s) {
-                        match ctx.get(key) {
-                            Some(Value::Array(inner)) => out.extend(inner.iter().cloned()),
-                            Some(other) => out.push(other.clone()),
-                            None => out.push(item.clone()),
+pub fn value_to_string_source(value: &Source) -> Source {
+    source_text(coercion_units(value.at_pointer("").expect("source root")))
+}
+
+/// Convert a substituted value at the actual process/environment boundary.
+#[must_use]
+pub fn value_to_env_string(value: &Source) -> String {
+    String::from_utf16_lossy(&coercion_units(value.at_pointer("").expect("source root")))
+}
+
+fn whole_string_key(units: &[u16]) -> Option<&[u16]> {
+    let prefix = PREFIX.encode_utf16().collect::<Vec<_>>();
+    let inner = units
+        .strip_prefix(prefix.as_slice())?
+        .strip_suffix(&[125])?;
+    (!inner.is_empty() && !inner.contains(&125)).then_some(inner)
+}
+
+fn substitute_inline(units: &[u16], ctx: JsonValueView<'_>) -> Vec<u16> {
+    let prefix = PREFIX.encode_utf16().collect::<Vec<_>>();
+    let mut out = Vec::with_capacity(units.len());
+    let mut cursor = 0;
+    while let Some(relative) = units[cursor..]
+        .windows(prefix.len())
+        .position(|window| window == prefix)
+    {
+        let start = cursor + relative;
+        out.extend_from_slice(&units[cursor..start]);
+        let key_start = start + prefix.len();
+        let Some(end) = units[key_start..]
+            .iter()
+            .position(|unit| *unit == 125)
+            .map(|offset| key_start + offset)
+        else {
+            out.extend_from_slice(&units[start..]);
+            return out;
+        };
+        if key_start != end {
+            if let Some(value) = ctx.get_property_units(&units[key_start..end]) {
+                out.extend(coercion_units(value));
+            } else {
+                out.extend_from_slice(&units[start..=end]);
+            }
+        } else {
+            out.extend_from_slice(&units[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    out.extend_from_slice(&units[cursor..]);
+    out
+}
+
+/// Substitute source string values; exact whole-string array references spread
+/// once into their containing array. Replacement values are not re-evaluated.
+#[must_use]
+pub fn substitute_value(value: &Source, ctx: &Source) -> Source {
+    enum Work<'a> {
+        Visit(JsonValueView<'a>, bool),
+        Array(usize),
+        Object(Vec<Vec<u16>>),
+    }
+    let ctx = ctx.at_pointer("").expect("source context root");
+    let mut builder = Utf16JsonBuilder::new();
+    let mut work = vec![Work::Visit(
+        value.at_pointer("").expect("source root"),
+        true,
+    )];
+    let mut completed = Vec::new();
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Array(length) => {
+                let children = completed.split_off(completed.len() - length);
+                completed.push(builder.push_array(children).expect("source array"));
+            }
+            Work::Object(keys) => {
+                let children = completed.split_off(completed.len() - keys.len());
+                completed.push(
+                    builder
+                        .push_object_units(keys.into_iter().zip(children).collect())
+                        .expect("source object"),
+                );
+            }
+            Work::Visit(value, substitute) => {
+                if let Some(units) = value.code_units() {
+                    if substitute {
+                        if let Some(replacement) =
+                            whole_string_key(units).and_then(|key| ctx.get_property_units(key))
+                        {
+                            work.push(Work::Visit(replacement, false));
+                        } else {
+                            completed
+                                .push(builder.push_string_units(substitute_inline(units, ctx)));
                         }
-                        continue;
+                    } else {
+                        completed.push(builder.push_string_units(units.to_vec()));
                     }
+                } else if value.is_null() {
+                    completed.push(builder.push_null());
+                } else if let Some(value) = value.as_bool() {
+                    completed.push(builder.push_bool(value));
+                } else if let Some(value) = value.as_number() {
+                    completed.push(builder.push_number(value));
+                } else if let Some(length) = value.array_len() {
+                    let mut children = Vec::new();
+                    for index in 0..length {
+                        let child = value.get_index(index).expect("array child");
+                        let replacement = substitute
+                            .then(|| {
+                                child
+                                    .code_units()
+                                    .and_then(whole_string_key)
+                                    .and_then(|key| ctx.get_property_units(key))
+                            })
+                            .flatten();
+                        if let Some(replacement) = replacement {
+                            if let Some(count) = replacement.array_len() {
+                                children.extend((0..count).map(|index| {
+                                    (
+                                        replacement.get_index(index).expect("replacement child"),
+                                        false,
+                                    )
+                                }));
+                            } else {
+                                children.push((replacement, false));
+                            }
+                        } else {
+                            children.push((child, substitute));
+                        }
+                    }
+                    work.push(Work::Array(children.len()));
+                    work.extend(
+                        children
+                            .into_iter()
+                            .rev()
+                            .map(|(value, substitute)| Work::Visit(value, substitute)),
+                    );
+                } else {
+                    let entries = value.object_entries().expect("source object");
+                    work.push(Work::Object(
+                        entries
+                            .iter()
+                            .map(|entry| entry.code_units.to_vec())
+                            .collect(),
+                    ));
+                    work.extend(
+                        entries
+                            .into_iter()
+                            .rev()
+                            .map(|entry| Work::Visit(entry.value, substitute)),
+                    );
                 }
-                out.push(substitute_value(item, ctx));
             }
-            Value::Array(out)
         }
-        Value::Object(o) => {
-            let mut m = Map::with_capacity(o.len());
-            for (k, val) in o {
-                m.insert(k.clone(), substitute_value(val, ctx));
-            }
-            Value::Object(m)
-        }
-        other => other.clone(),
     }
+    builder
+        .finish(completed.pop().expect("substitution root"))
+        .expect("source substitution")
 }
 
-/// Substitute into a plain string field (an MCP `command`, an env value): the
-/// whole-string form is stringified (env/command values are always strings), so
-/// this flattens a resolved value through [`value_to_env_string`].
+/// Substitute a model-visible text field without crossing a display boundary.
 #[must_use]
-pub fn substitute_string_field(s: &str, ctx: &Map<String, Value>) -> String {
-    value_to_env_string(&substitute_value(&Value::String(s.to_string()), ctx))
+pub fn substitute_text_field(text: &Source, ctx: &Source) -> Source {
+    value_to_string_source(&substitute_value(text, ctx))
 }
 
-/// Substitute into an argv vector, honouring whole-string array-spread: an arg
-/// that IS `${user_config.KEY}` resolving to an array contributes one arg per
-/// element (`r.push(...i)`); every other arg is substituted in place.
+/// Substitute an OS command, URL, or environment field at its scalar boundary.
 #[must_use]
-pub fn substitute_args(args: &[String], ctx: &Map<String, Value>) -> Vec<String> {
-    let arr = Value::Array(args.iter().map(|a| Value::String(a.clone())).collect());
-    match substitute_value(&arr, ctx) {
-        Value::Array(items) => items.iter().map(value_to_env_string).collect(),
-        _ => args.to_vec(),
-    }
+pub fn substitute_string_field(text: &str, ctx: &Source) -> String {
+    value_to_env_string(&substitute_value(&text.into(), ctx))
+}
+
+/// Expand argv just before process dispatch, then apply the OS string conversion.
+#[must_use]
+pub fn substitute_args(args: &[String], ctx: &Source) -> Vec<String> {
+    let array = Source::array(args.iter().map(Source::from).collect()).expect("source argv");
+    let substituted = substitute_value(&array, ctx);
+    (0..substituted.array_len("").expect("argv array"))
+        .map(|index| {
+            value_to_env_string(
+                &substituted
+                    .subprojection(&format!("/{index}"))
+                    .expect("argv child"),
+            )
+        })
+        .collect()
 }
 
 /// `true` if `s` contains at least one `${user_config.KEY}` reference (with a
@@ -184,13 +305,12 @@ pub fn references_user_config(s: &str) -> bool {
 /// (`He.replace(/[^A-Za-z0-9_]/g,"_").toUpperCase()`).
 #[must_use]
 pub fn option_env_key(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
+    name.encode_utf16()
+        .map(|unit| match unit {
+            48..=57 | 65..=90 | 97..=122 | 95 => {
+                char::from_u32(u32::from(unit)).expect("ASCII option key")
             }
+            _ => '_',
         })
         .collect::<String>()
         .to_ascii_uppercase()
@@ -271,15 +391,12 @@ pub fn mcp_stdio_reference_rejection(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    macro_rules! json {
+        ($($value:tt)*) => { Source::from_serde_value(&serde_json::json!($($value)*)).unwrap() };
+    }
 
-    fn ctx() -> Map<String, Value> {
-        let mut m = Map::new();
-        m.insert("API_KEY".into(), json!("sk-123"));
-        m.insert("PORT".into(), json!(8080));
-        m.insert("DEBUG".into(), json!(true));
-        m.insert("HOSTS".into(), json!(["a", "b"]));
-        m
+    fn ctx() -> Source {
+        json!({"API_KEY":"sk-123", "PORT":8080, "DEBUG":true, "HOSTS":["a","b"]})
     }
 
     #[test]
@@ -368,6 +485,47 @@ mod tests {
             substitute_string_field("${user_config.PORT}", &ctx()),
             "8080"
         );
+    }
+
+    #[test]
+    fn source_substitution_preserves_exact_keys_units_and_nonrecursive_replacements() {
+        let ctx = Source::parse(
+            r#"{"\ud800":"\udc00","items":["\ud800",{"v":"${user_config.PORT}"}],"PORT":42}"#,
+        )
+        .unwrap();
+        let input = Source::parse(r#"{"text":"prefix ${user_config.\ud800}","args":["${user_config.items}"],"\ud800":"${user_config.PORT}"}"#).unwrap();
+        let result = substitute_value(&input, &ctx);
+        assert_eq!(
+            result.string_units("/text"),
+            Some("prefix ".encode_utf16().chain([0xdc00]).collect())
+        );
+        assert_eq!(result.string_units("/args/0"), Some(vec![0xd800]));
+        assert_eq!(result.string_at("/args/1/v"), Some("${user_config.PORT}"));
+        assert_eq!(
+            result
+                .subprojection_property_units(&[0xd800])
+                .unwrap()
+                .number_at(""),
+            Some(42.0)
+        );
+        assert_eq!(
+            value_to_env_string(&result.subprojection("/args/0").unwrap()),
+            "�"
+        );
+    }
+
+    #[test]
+    fn string_coercion_uses_javascript_array_null_and_number_semantics() {
+        assert_eq!(
+            value_to_string_source(&Source::parse(r#"[null,[null,"x"],1e-7,-0]"#).unwrap())
+                .string_at(""),
+            Some(",,x,1e-7,0")
+        );
+        assert_eq!(
+            value_to_string_source(&Source::parse("1e400").unwrap()).string_at(""),
+            Some("Infinity")
+        );
+        assert_eq!(option_env_key("a😀b"), "A__B");
     }
 
     #[test]

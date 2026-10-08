@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::observer_pairing::ObserverPairing;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
@@ -21,8 +22,9 @@ use std::sync::OnceLock;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 
 /// Oracle `se`.
@@ -64,7 +66,11 @@ pub trait ReportTargetLiveness: Send + Sync {
 #[async_trait]
 pub trait ObserverReportSink: Send + Sync {
     /// Deliver `report` from `pairing`'s observer to its report target.
-    async fn deliver(&self, pairing: &ObserverPairing, report: String) -> Result<(), String>;
+    async fn deliver(
+        &self,
+        pairing: &ObserverPairing,
+        report: Utf16JsonProjection,
+    ) -> Result<(), String>;
 }
 
 /// The tool.
@@ -117,10 +123,10 @@ impl ObserverReportTool {
     }
 }
 
-fn schema() -> &'static Value {
-    static SCHEMA: OnceLock<Value> = OnceLock::new();
+fn schema() -> &'static Utf16JsonProjection {
+    static SCHEMA: OnceLock<Utf16JsonProjection> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        json!({
+        generated_builtin_schema(&json!({
             "type": "object",
             "properties": {
                 "report": {
@@ -131,12 +137,12 @@ fn schema() -> &'static Value {
             },
             "required": ["report"],
             "additionalProperties": false
-        })
+        }))
     })
 }
 
-fn failure(message: &str) -> Value {
-    json!({ "success": false, "message": message })
+fn failure(message: &str) -> Utf16JsonProjection {
+    generated_builtin_result(&json!({ "success": false, "message": message }))
 }
 
 #[async_trait]
@@ -144,8 +150,15 @@ impl Tool for ObserverReportTool {
     fn name(&self) -> &str {
         OBSERVER_REPORT_TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         schema()
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Oracle `isEnabled(){return!0}`: always registered. Reachability is
@@ -153,34 +166,38 @@ impl Tool for ObserverReportTool {
         // observer gets a REASON rather than an unknown tool.
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         // Oracle `isReadOnly(){return!1}`.
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         OBSERVER_REPORT_MAX_RESULT_SIZE_CHARS
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         OBSERVER_REPORT_DESCRIPTION.to_string()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        OBSERVER_REPORT_DESCRIPTION.to_string()
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+        OBSERVER_REPORT_DESCRIPTION.to_string().into()
     }
 
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // Oracle: `async checkPermissions(m){return{behavior:"allow",
         // updatedInput:m}}`. An observer reporting to the agent that spawned it
         // crosses no boundary the pairing did not already cross.
@@ -196,7 +213,7 @@ impl Tool for ObserverReportTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -207,18 +224,24 @@ impl Tool for ObserverReportTool {
             }
         };
         let report = input
-            .get("report")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .subprojection("/report")
+            .ok()
+            .filter(|value| value.string_units("").is_some())
+            .ok_or_else(|| {
+                ToolError::InvalidInput(source_text_projection(
+                    "ObserverReport: missing or non-string report",
+                ))
+            })?;
         let Some(sink) = self.sink.as_ref() else {
             return Ok(ToolCallResult::from_data(failure(ERR_PAIRING_NOT_ARMED)));
         };
         match sink.deliver(&pairing, report).await {
-            Ok(()) => Ok(ToolCallResult::from_data(json!({
-                "success": true,
-                "message": format!("Report delivered to {}.", pairing.report_target_name)
-            }))),
+            Ok(()) => Ok(ToolCallResult::from_data(generated_builtin_result(
+                &json!({
+                    "success": true,
+                    "message": format!("Report delivered to {}.", pairing.report_target_name)
+                }),
+            ))),
             Err(error) => Ok(ToolCallResult::from_data(failure(&error))),
         }
     }
@@ -231,6 +254,10 @@ mod tests {
     use lingxi_core::host::subagent_spawn::ObserverSpec;
     use lingxi_core::types::AgentId;
     use std::sync::Arc;
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(
@@ -282,14 +309,15 @@ mod tests {
     #[test]
     fn the_schema_describe_is_byte_identical_to_2_1_270() {
         let f = fixture();
+        let schema = test_value(schema());
         assert_eq!(
-            schema()["properties"]["report"]["description"]
+            schema["properties"]["report"]["description"]
                 .as_str()
                 .unwrap(),
             f["schema_report_describe"].as_str().unwrap()
         );
         // `o().min(1)` — an empty report is not a report
-        assert_eq!(schema()["properties"]["report"]["minLength"], json!(1));
+        assert_eq!(schema["properties"]["report"]["minLength"], json!(1));
     }
 
     /// Three different failures, three different messages. The oracle words

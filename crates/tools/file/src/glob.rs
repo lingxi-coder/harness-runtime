@@ -32,6 +32,7 @@
 //! - Results sorted OLDEST-first by mtime, capped to the first 100 (claude-code
 //!   `--sort=modified` is oldest-first + `slice(0, limit)`, `utils/glob.ts:94,127`).
 
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
@@ -42,6 +43,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use tool_api::context::ToolUseContext;
+use tool_api::native_output::{
+    parse_object, string_array, OutputField, OutputFieldType, UnknownOutputKeys,
+};
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
@@ -73,6 +77,60 @@ pub const MAX_GLOB_MATCHES: usize = 100;
 
 /// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
 const NO_FILES_FOUND: &str = "No files found";
+
+/// Claude Code 2.1.287 `Glob.mapToolResultToToolResultBlockParam` and its
+/// truncation notice. Mod replacements must use this pure projection without
+/// re-running the filesystem search.
+fn map_glob_result_text(data: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let count = data.array_len("/filenames")?;
+    let filenames = (0..count)
+        .map(|index| data.string_units(&format!("/filenames/{index}")))
+        .collect::<Option<Vec<_>>>()?;
+    if filenames.is_empty() {
+        return Some(NO_FILES_FOUND.into());
+    }
+    let mut units = Vec::new();
+    for (index, filename) in filenames.iter().enumerate() {
+        if index > 0 {
+            units.push(b'\n' as u16);
+        }
+        units.extend_from_slice(filename);
+    }
+    if data
+        .at_pointer("/truncated")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        let count = filenames.len();
+        let notice = match data.number_at("/totalMatches").and_then(|number| {
+            (number >= 0.0 && number.fract() == 0.0 && number < u64::MAX as f64)
+                .then_some(number as u64)
+        }) {
+            None => "(Results are truncated. Consider using a more specific path or pattern.)"
+                .to_string(),
+            Some(total)
+                if data
+                    .at_pointer("/countIsComplete")
+                    .and_then(|value| value.as_bool())
+                    == Some(true) =>
+            {
+                format!(
+                    "(Showing {count} of {total} matching files; {} more are not listed. Narrow the pattern or path to see the rest.)",
+                    total as i128 - count as i128
+                )
+            }
+            Some(total) => format!(
+                "(Showing the first {count} files; there are more than {total} matches. Narrow the pattern or path to see the rest.)"
+            ),
+        };
+        units.push(b'\n' as u16);
+        units.extend(notice.encode_utf16());
+    }
+    Some(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("Glob model text remains a root-string projection"),
+    )
+}
 
 /// `lhe.maxResultSizeChars` = `1e5` (binary 2.1.238 @289926092). Glob's own cap,
 /// deliberately NOT the shared `MAX_TOOL_OUTPUT_LENGTH`.
@@ -188,8 +246,8 @@ impl GlobTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["pattern"],
@@ -197,7 +255,22 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "pattern": { "type": "string", "description": "The glob pattern to match files against" },
             "path":    { "type": "string", "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided." }
         }
-    })
+    }))
+});
+
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
+        "type":"object",
+        "required":["durationMs","numFiles","filenames","truncated"],
+        "properties":{
+            "durationMs":{"type":"number"},
+            "numFiles":{"type":"number"},
+            "filenames":{"type":"array","items":{"type":"string"}},
+            "truncated":{"type":"boolean"},
+            "totalMatches":{"type":"number"},
+            "countIsComplete":{"type":"boolean"}
+        }
+    }))
 });
 
 #[async_trait]
@@ -208,11 +281,64 @@ impl Tool for GlobTool {
 
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("find files by name pattern or wildcard")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("find files by name pattern or wildcard".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        let parsed = parse_object(
+            output,
+            TOOL_NAME,
+            &[
+                OutputField {
+                    name: "durationMs",
+                    kind: OutputFieldType::Number,
+                    required: true,
+                },
+                OutputField {
+                    name: "numFiles",
+                    kind: OutputFieldType::Number,
+                    required: true,
+                },
+                OutputField {
+                    name: "filenames",
+                    kind: OutputFieldType::Array,
+                    required: true,
+                },
+                OutputField {
+                    name: "truncated",
+                    kind: OutputFieldType::Boolean,
+                    required: true,
+                },
+                OutputField {
+                    name: "totalMatches",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "countIsComplete",
+                    kind: OutputFieldType::Boolean,
+                    required: false,
+                },
+            ],
+            UnknownOutputKeys::Strip,
+        )?;
+        string_array(output, "/filenames", TOOL_NAME, "filenames")?;
+        Ok(parsed)
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        map_glob_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -225,10 +351,10 @@ impl Tool for GlobTool {
     fn max_result_size_chars(&self) -> usize {
         GLOB_MAX_RESULT_SIZE_CHARS
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
@@ -245,14 +371,14 @@ impl Tool for GlobTool {
     /// `stat` — so the null-byte guard leads here too.
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
             &[
-                ("pattern", input.get("pattern").and_then(Value::as_str)),
-                ("path", input.get("path").and_then(Value::as_str)),
+                ("pattern", crate::input_string(input, "pattern")),
+                ("path", crate::input_string(input, "path")),
             ],
         )?;
         // TL-4 (2.1.260): the DISK probe does NOT belong here. `validate_input`
@@ -264,7 +390,11 @@ impl Tool for GlobTool {
         Ok(())
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -278,25 +408,29 @@ impl Tool for GlobTool {
     /// Oracle `async description(){return ISa(void 0)}` — `qk(undefined)` is
     /// false, so this is the LONG arm, itself gated on the subagent steer
     /// (ST-03).
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // Model-gated, mirroring claude-code `prompt({model:e}){return Jhi(e)}`
         // where `Jhi(e){if(Dh(e))return SHORT; return DZ()==="default"?BJb:znp}`
         // (2.1.238 `ISa`, @285270043). Predicate shared with TodoWrite via
         // `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            GLOB_PROMPT_SHORT.to_string()
+            GLOB_PROMPT_SHORT.into()
         } else {
-            glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
+            glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default()).into()
         }
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -306,9 +440,7 @@ impl Tool for GlobTool {
         // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
         let trusted = self.ctx.trusted_dirs();
 
-        let pattern = input
-            .get("pattern")
-            .and_then(Value::as_str)
+        let pattern = crate::input_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
 
         // claude-code Glob `getPath({path:e}){return e?$i(e):Ct()}`: a supplied
@@ -316,9 +448,7 @@ impl Tool for GlobTool {
         // fallback (`cwd_now()`==`ctx.workspace`) equals the former
         // `trusted_dirs.first()` boot cwd, so behavior is byte-identical until a
         // Bash `cd` moves the shared cell.
-        let base = input
-            .get("path")
-            .and_then(Value::as_str)
+        let base = crate::input_string(&input, "path")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.cwd_now());
 
@@ -346,7 +476,7 @@ impl Tool for GlobTool {
         // Desktop filesystems translate nothing and this is a no-op.
         let base = match translate_model_path(&self.ctx.fs, base, false) {
             Ok(base) => base,
-            Err(message) => return Err(ToolError::InvalidInput(message)),
+            Err(message) => return Err(ToolError::InvalidInput(message.into())),
         };
         // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
         // which runs BEFORE the permission decision, so a missing directory was
@@ -358,7 +488,7 @@ impl Tool for GlobTool {
         // must be probed as the host directory that actually backs it. In
         // `validate_input` it ran on the UNTRANSLATED path, so guest Glob failed
         // its own directory check on the main dispatch path.
-        if input.get("path").and_then(Value::as_str).is_some() {
+        if crate::input_string(&input, "path").is_some() {
             crate::dir_validate::validate_glob_directory(&base.to_string_lossy(), &self.cwd_now())
                 .map_err(|e| ToolError::InvalidInput(e.0))?;
         }
@@ -376,9 +506,9 @@ impl Tool for GlobTool {
         // matches `sub/x.rs`, fixing the old root-only behavior.
         let mut ob = OverrideBuilder::new(&canon_base);
         if let Err(e) = ob.add(pattern) {
-            return Err(ToolError::InvalidInput(format!(
-                "invalid glob pattern {pattern:?}: {e}"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("invalid glob pattern {pattern:?}: {e}").into(),
+            ));
         }
         // Read(deny) exclusions. Each active `Read`-`deny` rule (resolved at
         // boot by `permission::read_deny_exclude_globs`) is read from the live
@@ -415,7 +545,7 @@ impl Tool for GlobTool {
                     );
                     for exclusion in exclusions {
                         ob.add(&exclusion)
-                            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                            .map_err(|e| ToolError::InvalidInput(e.to_string().into()))?;
                     }
                 }
             }
@@ -423,9 +553,9 @@ impl Tool for GlobTool {
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
-                return Err(ToolError::InvalidInput(format!(
-                    "invalid glob pattern {pattern:?}: {e}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("invalid glob pattern {pattern:?}: {e}").into(),
+                ));
             }
         };
 
@@ -462,14 +592,14 @@ impl Tool for GlobTool {
             )
         })
         .await
-        .map_err(|e| ToolError::Io(e.to_string()))?
+        .map_err(|e| ToolError::Io(e.to_string().into()))?
         .map_err(|error| search_resolution_error(&search_path, error))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete); a timeout WITH
         // partial results returns them.
         if timed_out && hits.is_empty() {
-            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
+            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()));
         }
 
         let total = hits.len();
@@ -528,19 +658,20 @@ impl Tool for GlobTool {
         let duration_ms = started.elapsed().as_millis() as u64;
         let num_files = matches.len();
         Ok(ToolCallResult {
-            data: json!({
+            data: crate::generated_result(&json!({
                 "filenames": matches,
                 "durationMs": duration_ms,
                 "numFiles": num_files,
                 "truncated": truncated,
                 "totalMatches": total,
                 "countIsComplete": true,
-            }),
-            model_content: Some(content),
+            })),
+            model_content: Some(content.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -610,7 +741,7 @@ fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolErr
             "a path one of its Read deny rules is written through changed while the search was being prepared. Retry."
         }
     };
-    ToolError::InvalidInput(format!("Refusing to search {}: {reason}", path.display()))
+    ToolError::InvalidInput(format!("Refusing to search {}: {reason}", path.display()).into())
 }
 
 #[cfg(test)]
@@ -620,6 +751,73 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    fn mapped_display(data: &Utf16JsonProjection) -> Option<String> {
+        map_glob_result_text(data).and_then(|text| text.string_at("").map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn mod_replacement_uses_globs_result_mapper() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let valid = crate::generated_result(
+            &json!({"durationMs":1,"numFiles":0,"filenames":[],"truncated":false}),
+        );
+        assert!(tool.parse_output(&valid).await.is_ok());
+        let extra = crate::generated_result(&json!({
+            "durationMs":1,"numFiles":0,"filenames":["a.rs"],"truncated":false,
+            "unexpected":"strip me"
+        }));
+        let parsed = tool.parse_output(&extra).await.unwrap();
+        assert_eq!(parsed.string_at("/filenames/0").as_deref(), Some("a.rs"));
+        assert!(parsed.get_property("unexpected").is_none());
+        let invalid = crate::generated_result(
+            &json!({"durationMs":1,"numFiles":0,"filenames":"wrong","truncated":false}),
+        );
+        assert!(tool.parse_output(&invalid).await.is_err());
+        let invalid_item = crate::generated_result(
+            &json!({"durationMs":1,"numFiles":1,"filenames":[1],"truncated":false}),
+        );
+        assert!(tool.parse_output(&invalid_item).await.is_err());
+        assert_eq!(
+            mapped_display(&crate::generated_result(&json!({"filenames":[]}))).as_deref(),
+            Some("No files found")
+        );
+        let mut result = crate::generated_result(&json!({
+            "filenames":["a.rs","b.rs"], "truncated":true,
+            "totalMatches":5, "countIsComplete":true
+        }));
+        assert_eq!(
+            mapped_display(&result).as_deref(),
+            Some(
+                "a.rs\nb.rs\n(Showing 2 of 5 matching files; 3 more are not listed. Narrow the pattern or path to see the rest.)"
+            )
+        );
+        result.set_field("countIsComplete", "false".into()).unwrap();
+        assert_eq!(
+            mapped_display(&result).as_deref(),
+            Some(
+                "a.rs\nb.rs\n(Showing the first 2 files; there are more than 5 matches. Narrow the pattern or path to see the rest.)"
+            )
+        );
+        result.remove_field("totalMatches").unwrap();
+        assert_eq!(
+            mapped_display(&result).as_deref(),
+            Some(
+                "a.rs\nb.rs\n(Results are truncated. Consider using a more specific path or pattern.)"
+            )
+        );
+        let exact = Utf16JsonProjection::parse(
+            r#"{"filenames":["path/with\ud800.txt"],"truncated":false}"#,
+        )
+        .unwrap();
+        let mapped = map_glob_result_text(&exact).unwrap();
+        let mut expected = "path/with".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend(".txt".encode_utf16());
+        assert_eq!(mapped.string_units(""), Some(expected));
+    }
 
     /// S2 (PathAtlas): a guest base directory translates onto its host twin,
     /// so the search runs where the files actually live — an untranslated
@@ -636,16 +834,18 @@ mod tests {
         let tool = GlobTool::new(ctx);
         let result = tool
             .call(
-                serde_json::json!({ "pattern": "*.txt", "path": "/workspace/abc" }),
+                crate::generated_result(
+                    &serde_json::json!({ "pattern": "*.txt", "path": "/workspace/abc" }),
+                ),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
         assert!(
-            result.data.to_string().contains("hit.txt"),
+            result.data.to_json_string().unwrap().contains("hit.txt"),
             "glob over a guest base must find host files: {}",
-            result.data
+            result.data.to_json_string().unwrap()
         );
     }
 
@@ -675,20 +875,29 @@ mod tests {
         )));
         let tool = GlobTool::new(context);
         let result = tool
-            .call(json!({"pattern":"**/*"}), fresh_ctx(), fresh_tx())
-            .await
-            .unwrap();
-        assert!(result.data.to_string().contains("public.txt"));
-        assert!(!result.data.to_string().contains("b12345678.output"));
-        let result = tool
             .call(
-                json!({"pattern":"**/*", "path":output}),
+                crate::generated_result(&json!({"pattern":"**/*"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert!(!result.data.to_string().contains("b12345678.output"));
+        let data = result.data.to_json_string().unwrap();
+        assert!(data.contains("public.txt"));
+        assert!(!data.contains("b12345678.output"));
+        let result = tool
+            .call(
+                crate::generated_result(&json!({"pattern":"**/*", "path":output})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(!result
+            .data
+            .to_json_string()
+            .unwrap()
+            .contains("b12345678.output"));
     }
 
     #[tokio::test]
@@ -700,7 +909,7 @@ mod tests {
         // subagent steer unlatched ⇒ DZ()==="default" ⇒ BJb (with the bullet).
         let d = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -713,20 +922,24 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
-        assert_eq!(long, glob_description(true));
+        let long_display = long.string_at("").expect("prompt is a JSON string");
+        assert_eq!(long_display, glob_description(true));
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
-        assert_eq!(short, GLOB_PROMPT_SHORT);
+        let short_display = short.string_at("").expect("prompt is a JSON string");
+        assert_eq!(short_display, GLOB_PROMPT_SHORT);
         assert_eq!(
-            short,
+            short_display,
             "Fast file pattern matching. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time."
         );
     }
@@ -758,35 +971,52 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let err = tool
-            .validate_input(&json!({ "pattern": "a\0b" }), &fresh_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err.0,
-            "Glob pattern cannot contain null bytes (\\0). Remove the null byte and try again."
-        );
-        // `path` is checked second — and wins over the (nonexistent) directory
-        // error that would otherwise fire.
-        let err = tool
             .validate_input(
-                &json!({ "pattern": "*.rs", "path": "no_such\0dir" }),
+                &crate::generated_result(&json!({ "pattern": "a\0b" })),
                 &fresh_ctx(),
             )
             .await
             .unwrap_err();
         assert_eq!(
-            err.0,
-            "Glob path cannot contain null bytes (\\0). Remove the null byte and try again."
+            err.0.string_at("").as_deref(),
+            Some(
+                "Glob pattern cannot contain null bytes (\\0). Remove the null byte and try again."
+            )
+        );
+        // `path` is checked second — and wins over the (nonexistent) directory
+        // error that would otherwise fire.
+        let err = tool
+            .validate_input(
+                &crate::generated_result(&json!({ "pattern": "*.rs", "path": "no_such\0dir" })),
+                &fresh_ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.0.string_at("").as_deref(),
+            Some("Glob path cannot contain null bytes (\\0). Remove the null byte and try again.")
         );
         // `pattern` is found first when both are poisoned (JS `find`).
         let err = tool
-            .validate_input(&json!({ "pattern": "a\0", "path": "b\0" }), &fresh_ctx())
+            .validate_input(
+                &crate::generated_result(&json!({ "pattern": "a\0", "path": "b\0" })),
+                &fresh_ctx(),
+            )
             .await
             .unwrap_err();
-        assert!(err.0.starts_with("Glob pattern "), "got: {}", err.0);
+        assert!(
+            err.0
+                .string_at("")
+                .is_some_and(|message| message.starts_with("Glob pattern ")),
+            "got: {:?}",
+            err.0
+        );
         // Clean input still passes.
         assert!(tool
-            .validate_input(&json!({ "pattern": "*.rs" }), &fresh_ctx())
+            .validate_input(
+                &crate::generated_result(&json!({ "pattern": "*.rs" })),
+                &fresh_ctx()
+            )
             .await
             .is_ok());
     }
@@ -830,17 +1060,22 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2);
-        assert_eq!(result.data["numFiles"], 2);
-        assert_eq!(result.data["truncated"], false);
-        assert_eq!(result.data["totalMatches"], 2);
-        assert_eq!(result.data["countIsComplete"], true);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 2);
+        assert_eq!(crate::test_data(&result.data)["truncated"], false);
+        assert_eq!(crate::test_data(&result.data)["totalMatches"], 2);
+        assert_eq!(crate::test_data(&result.data)["countIsComplete"], true);
         // `durationMs` is always present (a non-negative integer).
-        assert!(result.data["durationMs"].is_u64());
+        assert!(crate::test_data(&result.data)["durationMs"].is_u64());
     }
 
     /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
@@ -866,16 +1101,21 @@ mod tests {
 
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         // Byte-identical to `matches_rs_files` above (pre-migration behavior).
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2);
-        assert_eq!(result.data["numFiles"], 2);
-        assert_eq!(result.data["truncated"], false);
-        assert_eq!(result.data["totalMatches"], 2);
-        assert_eq!(result.data["countIsComplete"], true);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 2);
+        assert_eq!(crate::test_data(&result.data)["truncated"], false);
+        assert_eq!(crate::test_data(&result.data)["totalMatches"], 2);
+        assert_eq!(crate::test_data(&result.data)["countIsComplete"], true);
     }
 
     /// Read(deny) exclude globs (`glob.ts` `lLa()`): a populated
@@ -895,11 +1135,17 @@ mod tests {
         {
             let (ctx, _sink) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
-            let matches: Vec<String> = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
-                .await
-                .unwrap()
-                .data["filenames"]
+            let matches: Vec<String> = crate::test_data(
+                &tool
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
+                    .await
+                    .unwrap()
+                    .data,
+            )["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -915,11 +1161,17 @@ mod tests {
             let (mut ctx, _sink) = make_ctx(&tmp);
             ctx.read_deny_exclude_globs = vec!["/secrets/**".to_string()];
             let tool = GlobTool::new(ctx);
-            let matches: Vec<String> = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
-                .await
-                .unwrap()
-                .data["filenames"]
+            let matches: Vec<String> = crate::test_data(
+                &tool
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
+                    .await
+                    .unwrap()
+                    .data,
+            )["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -951,13 +1203,13 @@ mod tests {
         let tool = GlobTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "*.rs", "path": link }),
+                crate::generated_result(&json!({ "pattern": "*.rs", "path": link })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        let matches: Vec<String> = result.data["filenames"]
+        let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -992,7 +1244,7 @@ mod tests {
         let tool = GlobTool::new(ctx);
         let error = tool
             .call(
-                json!({ "pattern": "*.rs", "path": tmp.path() }),
+                crate::generated_result(&json!({ "pattern": "*.rs", "path": tmp.path() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1029,7 +1281,7 @@ mod tests {
         let tool = GlobTool::new(ctx);
         let error = tool
             .call(
-                json!({ "pattern": "*.rs", "path": link }),
+                crate::generated_result(&json!({ "pattern": "*.rs", "path": link })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1073,7 +1325,11 @@ mod tests {
         ctx.read_deny_exclude_globs = vec!["/deny-link/**".to_string()];
         let tool = GlobTool::new(ctx);
         let error = tool
-            .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1103,11 +1359,17 @@ mod tests {
         let (mut ctx, _sink) = make_ctx(&tmp);
         ctx.read_deny_exclude_globs = vec!["secrets/**".to_string()];
         let tool = GlobTool::new(ctx);
-        let matches: Vec<String> = tool
-            .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
-            .await
-            .unwrap()
-            .data["filenames"]
+        let matches: Vec<String> = crate::test_data(
+            &tool
+                .call(
+                    crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap()
+                .data,
+        )["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -1141,10 +1403,14 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches: Vec<String> = result.data["filenames"]
+        let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -1173,10 +1439,15 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2, "**/*.rs should match both: {matches:?}");
     }
 
@@ -1190,15 +1461,20 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), MAX_GLOB_MATCHES);
-        assert_eq!(result.data["numFiles"], MAX_GLOB_MATCHES);
-        assert_eq!(result.data["truncated"], true);
-        assert_eq!(result.data["totalMatches"], 150);
-        assert_eq!(result.data["countIsComplete"], true);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], MAX_GLOB_MATCHES);
+        assert_eq!(crate::test_data(&result.data)["truncated"], true);
+        assert_eq!(crate::test_data(&result.data)["totalMatches"], 150);
+        assert_eq!(crate::test_data(&result.data)["countIsComplete"], true);
     }
 
     #[tokio::test]
@@ -1218,10 +1494,15 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches: Vec<&str> = result.data["filenames"]
+        let data = crate::test_data(&result.data);
+        let matches: Vec<&str> = data["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -1240,7 +1521,11 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let err = tool
-            .call(json!({ "pattern": "[invalid" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "[invalid" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid glob pattern"));
@@ -1272,10 +1557,14 @@ mod tests {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
             let result = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .call(
+                    crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["filenames"]
+            let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1293,10 +1582,14 @@ mod tests {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
             let result = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .call(
+                    crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["filenames"]
+            let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1331,10 +1624,14 @@ mod tests {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
             let result = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .call(
+                    crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["filenames"]
+            let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1352,10 +1649,14 @@ mod tests {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
             let result = tool
-                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .call(
+                    crate::generated_result(&json!({ "pattern": "**/*.rs" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["filenames"]
+            let matches: Vec<String> = crate::test_data(&result.data)["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1380,11 +1681,16 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         // `matches` is relativized (not the canonical absolute path).
-        let matches: Vec<&str> = result.data["filenames"]
+        let data = crate::test_data(&result.data);
+        let matches: Vec<&str> = data["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -1394,13 +1700,13 @@ mod tests {
         // The model-facing string now lives on `ToolCallResult.model_content`
         // (NOT a `data` field) — joined relative paths.
         assert_eq!(
-            result.model_content.as_deref(),
+            crate::test_model_text(result.model_content.as_ref()),
             Some("a.rs"),
             "model_content is the joined relative paths"
         );
         // `data` is pure metadata: no `content`/`matches` keys remain.
-        assert!(result.data.get("content").is_none());
-        assert!(result.data.get("matches").is_none());
+        assert!(crate::test_data(&result.data).get("content").is_none());
+        assert!(crate::test_data(&result.data).get("matches").is_none());
     }
 
     #[tokio::test]
@@ -1411,15 +1717,28 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        assert_eq!(result.model_content.as_deref(), Some("No files found"));
-        assert_eq!(result.data["filenames"].as_array().unwrap().len(), 0);
-        assert_eq!(result.data["numFiles"], 0);
-        assert_eq!(result.data["truncated"], false);
-        assert_eq!(result.data["totalMatches"], 0);
-        assert_eq!(result.data["countIsComplete"], true);
+        assert_eq!(
+            crate::test_model_text(result.model_content.as_ref()),
+            Some("No files found")
+        );
+        assert_eq!(
+            crate::test_data(&result.data)["filenames"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 0);
+        assert_eq!(crate::test_data(&result.data)["truncated"], false);
+        assert_eq!(crate::test_data(&result.data)["totalMatches"], 0);
+        assert_eq!(crate::test_data(&result.data)["countIsComplete"], true);
     }
 
     #[tokio::test]
@@ -1432,10 +1751,14 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "*.rs" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let content = result.model_content.as_deref().unwrap();
+        let content = crate::test_model_text(result.model_content.as_ref()).unwrap();
         // Binary `zem`: dynamic count message (150 hits, capped at 100 → 50 more).
         assert!(
             content.ends_with(
@@ -1443,11 +1766,11 @@ mod tests {
             ),
             "model_content should end with the dynamic truncation notice: {content}"
         );
-        assert_eq!(result.data["truncated"], true);
+        assert_eq!(crate::test_data(&result.data)["truncated"], true);
         // `totalMatches` is the pre-cap count (150); `numFiles` is the capped 100.
-        assert_eq!(result.data["numFiles"], MAX_GLOB_MATCHES);
-        assert_eq!(result.data["totalMatches"], 150);
-        assert_eq!(result.data["countIsComplete"], true);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], MAX_GLOB_MATCHES);
+        assert_eq!(crate::test_data(&result.data)["totalMatches"], 150);
+        assert_eq!(crate::test_data(&result.data)["countIsComplete"], true);
     }
 
     // --- absolute patterns re-rooted via extractGlobBaseDirectory ---
@@ -1492,16 +1815,21 @@ mod tests {
         // remaining `*.rs` is registered as a relative whitelist override.
         let pattern = format!("{}/*.rs", tmp.path().display());
         let result = tool
-            .call(json!({ "pattern": pattern }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": pattern })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert_eq!(
             matches.len(),
             2,
             "absolute pattern should match: {matches:?}"
         );
-        assert_eq!(result.data["truncated"], false);
+        assert_eq!(crate::test_data(&result.data)["truncated"], false);
     }
 
     #[tokio::test]
@@ -1512,7 +1840,7 @@ mod tests {
         let tool = GlobTool::new(ctx);
         let d = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1530,8 +1858,11 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(p, d);
     }
 
@@ -1552,11 +1883,17 @@ mod tests {
         {
             let (ctx, _sink) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
-            let names: Vec<String> = tool
-                .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
-                .await
-                .unwrap()
-                .data["filenames"]
+            let names: Vec<String> = crate::test_data(
+                &tool
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "*.rs" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
+                    .await
+                    .unwrap()
+                    .data,
+            )["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1575,11 +1912,17 @@ mod tests {
             let (ctx, _sink) = make_ctx(&tmp);
             let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
             let tool = GlobTool::new(ctx).with_live_cwd(cell);
-            let names: Vec<String> = tool
-                .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
-                .await
-                .unwrap()
-                .data["filenames"]
+            let names: Vec<String> = crate::test_data(
+                &tool
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "*.rs" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
+                    .await
+                    .unwrap()
+                    .data,
+            )["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1605,7 +1948,7 @@ mod tests {
         // `call` (post-permission), so this exercises `call`.
         assert!(
             tool.validate_input(
-                &json!({ "pattern": "*", "path": "no_such_dir" }),
+                &crate::generated_result(&json!({ "pattern": "*", "path": "no_such_dir" })),
                 &fresh_ctx()
             )
             .await
@@ -1614,14 +1957,14 @@ mod tests {
         );
         let err = tool
             .call(
-                json!({ "pattern": "*", "path": "no_such_dir" }),
+                crate::generated_result(&json!({ "pattern": "*", "path": "no_such_dir" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap_err();
         let err = match err {
-            ToolError::InvalidInput(message) => message,
+            ToolError::InvalidInput(message) => message.string_at("").unwrap().to_owned(),
             other => panic!("expected InvalidInput, got {other:?}"),
         };
         // The "does not exist" note prints the LIVE cwd (canonicalized sub), NOT

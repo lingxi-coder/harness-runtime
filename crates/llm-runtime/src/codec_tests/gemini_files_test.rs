@@ -52,7 +52,7 @@ fn start_upload_request_pins_url_headers_and_body_for_v1beta_base() {
     assert_eq!(request.headers, expected_headers);
 
     assert_eq!(
-        request.body_json,
+        super::json_payload_value(&request.body_json),
         serde_json::json!({"file": {"display_name": "my file"}})
     );
     assert_eq!(request.body_bytes, None);
@@ -158,7 +158,10 @@ fn upload_finalize_request_pins_headers_and_raw_body() {
     assert_eq!(request.headers, expected_headers);
 
     assert_eq!(request.body_bytes, Some(vec![1, 2, 3]));
-    assert_eq!(request.body_json, serde_json::Value::Null);
+    assert_eq!(
+        super::json_payload_value(&request.body_json),
+        serde_json::Value::Null
+    );
 }
 
 // ── parse_upload_response ─────────────────────────────────────────────────────
@@ -223,7 +226,10 @@ fn file_status_request_is_a_get_on_the_file_resource() {
         "https://generativelanguage.googleapis.com/v1beta/files/abc"
     );
     assert!(request.headers.is_empty());
-    assert_eq!(request.body_json, serde_json::Value::Null);
+    assert_eq!(
+        super::json_payload_value(&request.body_json),
+        serde_json::Value::Null
+    );
     assert_eq!(request.body_bytes, None);
 }
 
@@ -242,14 +248,22 @@ fn parse_file_status_reads_top_level_file_resource() {
     assert_eq!(file.state, "PROCESSING");
 }
 
-// ── BONUS (T5 review): legacy ProviderRequest JSON without body_bytes ─────────
+// Current ProviderRequest declares its encoding; raw bytes remain optional.
 
 #[test]
-fn provider_request_legacy_json_without_body_bytes_deserializes_to_none() {
+fn provider_request_current_json_declares_encoding_and_optional_raw_body() {
     let request: ProviderRequest = serde_json::from_str(
-        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1}}"#,
+        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1},"json_encoding":"Serde"}"#,
     )
-    .expect("legacy JSON must deserialize");
+    .expect("current JSON must deserialize");
+    assert_eq!(
+        request.json_encoding,
+        lingxi_llm_client::exact_json::JsonEncoding::Serde
+    );
+    assert!(serde_json::from_str::<ProviderRequest>(
+        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1}}"#
+    )
+    .is_err());
     assert_eq!(request.body_bytes, None);
 }
 
@@ -455,7 +469,7 @@ async fn upload_file_runs_the_two_step_authenticated_flow() {
         Some("3")
     );
     assert_eq!(
-        start.body_json,
+        super::json_payload_value(&start.body_json),
         serde_json::json!({"file": {"display_name": "shot.png"}})
     );
 
@@ -481,7 +495,10 @@ async fn upload_file_runs_the_two_step_authenticated_flow() {
         Some("0")
     );
     assert_eq!(upload.body_bytes, Some(vec![9, 8, 7]));
-    assert_eq!(upload.body_json, serde_json::Value::Null);
+    assert_eq!(
+        super::json_payload_value(&upload.body_json),
+        serde_json::Value::Null
+    );
 }
 
 #[tokio::test]
@@ -578,7 +595,7 @@ fn uploaded_file_uri_round_trips_into_gemini_file_data_encoding() {
         }],
     });
     let provider_request = codec.encode_request(&request).expect("encoded");
-    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    let part = &super::json_payload_value(&provider_request.body_json)["contents"][0]["parts"][0];
     assert_eq!(
         part["fileData"]["fileUri"],
         "https://generativelanguage.googleapis.com/v1beta/files/abc"

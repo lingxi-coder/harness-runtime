@@ -15,6 +15,10 @@ use lingxi_llm_client::providers::anthropic::{
 use serde_json::json;
 use std::collections::BTreeMap;
 
+fn classified_error<T>(result: &Result<T, LlmError>) -> Option<&LlmError> {
+    result.as_ref().err().map(LlmError::classification_source)
+}
+
 const MODEL: &str = "claude-sonnet-4-6";
 
 #[derive(Clone, Copy)]
@@ -61,9 +65,9 @@ fn response(status: u16) -> ProviderResponse {
         headers: BTreeMap::new(),
         request_id: None,
         body_json: if status >= 400 {
-            json!({"type":"error","error":{"type":if status == 529 {"overloaded_error"} else {"api_error"},"message":"temporarily unavailable"}})
+            wire::JsonPayload::from_generated_value(&json!({"type":"error","error":{"type":match status {429 => "rate_limit_error", 529 => "overloaded_error", _ => "api_error"},"message":"temporarily unavailable"}})).expect("fixture response is JSON")
         } else {
-            json!({"id":"msg_retry","model":MODEL,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})
+            wire::JsonPayload::from_generated_value(&json!({"id":"msg_retry","model":MODEL,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})).expect("fixture response is JSON")
         },
     }
 }
@@ -130,6 +134,175 @@ impl llm_runtime::test_support::FixtureTransport for ProbeTransport {
     }
 }
 llm_runtime::impl_fixture_transport!(ProbeTransport);
+
+/// HTTP retries, stream-body reopens and the non-streaming fallback must all
+/// spend one logical call's budget, even though each creates a new SDK call.
+struct MixedRetryTransport {
+    calls: Mutex<Vec<bool>>,
+}
+
+impl llm_runtime::test_support::FixtureTransport for MixedRetryTransport {
+    fn execute<'a>(
+        &'a self,
+        _request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+        self.calls.lock().unwrap().push(false);
+        Box::pin(async { Ok(response(500)) })
+    }
+
+    fn open_stream<'a>(
+        &'a self,
+        _request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(true);
+            calls.len()
+        };
+        let status = if count % 2 == 1 { 500 } else { 200 };
+        let frames = if status == 500 {
+            VecDeque::from([Ok(RawStreamFrame::new(
+                serde_json::to_vec(&response(status).body_json).unwrap(),
+            ))])
+        } else {
+            VecDeque::from([Err(connection_error())])
+        };
+        Box::pin(async move {
+            Ok(StreamingResponse {
+                status,
+                headers: BTreeMap::new(),
+                frames: Box::new(Frames(frames)),
+            })
+        })
+    }
+}
+llm_runtime::impl_fixture_transport!(MixedRetryTransport);
+
+struct WatchdogRetryTransport {
+    first_status: u16,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl llm_runtime::test_support::FixtureTransport for WatchdogRetryTransport {
+    fn execute<'a>(
+        &'a self,
+        _request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+        let count = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let status = if count == 0 { self.first_status } else { 500 };
+        Box::pin(async move { Ok(response(status)) })
+    }
+
+    fn open_stream<'a>(
+        &'a self,
+        _request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+        Box::pin(async { Err(LlmError::ProviderInternal) })
+    }
+}
+llm_runtime::impl_fixture_transport!(WatchdogRetryTransport);
+
+#[tokio::test(start_paused = true)]
+async fn watchdog_capacity_response_preserves_the_ordinary_http_retry() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    for first_status in [429, 529] {
+        let transport = Arc::new(WatchdogRetryTransport {
+            first_status,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = service(transport.clone(), false);
+        let settlements = SettlementProbe::default();
+        service.set_model_attempt_hooks(Arc::new(settlements.clone()));
+        let mut request = request(false);
+        request.execution.model_attempt = Some(
+            lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                .context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
+                .unwrap(),
+        );
+        let result = service
+            .drive_non_stream(
+                request,
+                RetryControl {
+                    max_retries: 1,
+                    watchdog: true,
+                    ..RetryControl::default()
+                },
+                DispatchHeaderState::default(),
+            )
+            .await;
+        assert!(matches!(
+            classified_error(&result),
+            Some(LlmError::ProviderInternal)
+        ));
+        // Capacity wait -> HTTP 500 -> one ordinary retry -> terminal HTTP 500.
+        assert_eq!(
+            transport.calls.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "HTTP {first_status} capacity response must not consume the ordinary retry"
+        );
+        assert_eq!(
+            *settlements.0.lock().unwrap(),
+            ["begin", "dispatched", "finish", "settled"].repeat(3)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn mixed_stream_reopens_and_nonstream_fallback_keep_the_call_budget() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    let transport = Arc::new(MixedRetryTransport {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut service = service(transport.clone(), false);
+    service.settings_max_retries = Some(3);
+    let settlements = SettlementProbe::default();
+    service.set_model_attempt_hooks(Arc::new(settlements.clone()));
+    let context = lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+        .context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
+        .unwrap();
+    let call = || {
+        let mut request = request(false);
+        request.execution.model_attempt = Some(context.clone());
+        request
+    };
+    let scope = ModelCallRetryScope::default();
+    // HTTP 500 -> stream body failure: one ordinary retry spent.
+    let mut first = scope.run(service.stream_request(call())).await.unwrap();
+    assert!(first.next().await.unwrap().is_err());
+    assert!(scope.take_stream_retry());
+    // Reopening consumes the second retry; its HTTP 500 consumes the third.
+    let mut second = scope.run(service.stream_request(call())).await.unwrap();
+    assert!(second.next().await.unwrap().is_err());
+    assert!(!scope.take_stream_retry());
+    // `Rse` allows a first non-streaming attempt at exhaustion, but it must not
+    // receive three fresh retries when the HTTP request fails again.
+    assert!(scope.take_non_streaming_fallback());
+    let result = scope
+        .run(service.drive_non_stream(
+            call(),
+            RetryControl {
+                max_retries: 3,
+                ..RetryControl::default()
+            },
+            DispatchHeaderState::default(),
+        ))
+        .await;
+    assert!(matches!(
+        classified_error(&result),
+        Some(LlmError::ProviderInternal)
+    ));
+    assert_eq!(
+        *transport.calls.lock().unwrap(),
+        vec![true, true, true, true, false]
+    );
+    assert!(!scope.take_non_streaming_fallback());
+    assert_eq!(
+        *settlements.0.lock().unwrap(),
+        ["begin", "dispatched", "finish", "settled"].repeat(5),
+    );
+}
 
 fn service(transport: Arc<dyn Transport>, with_connection_failover: bool) -> ApiService {
     service_on(
@@ -234,6 +407,47 @@ fn request(hosted: bool) -> LlmRequest {
     request
 }
 
+#[tokio::test]
+async fn auxiliary_success_cannot_commit_an_inherited_main_display_probe() {
+    use lingxi_llm_client::providers::anthropic::thinking_display::{
+        DisplayProbeBudget, ProbeAdmission, ProbeState,
+    };
+    let scope = ModelCallRetryScope::default();
+    assert!(scope.display_probe_error(
+        400,
+        ProbeAdmission {
+            header_sent: true,
+            ..Default::default()
+        },
+        &DisplayProbeBudget::default(),
+    ));
+    let conversation = crate::thinking_scope::ThinkingRecoveryScope::default();
+    let transport = ProbeTransport::new(Failure::Status(200));
+    let api = service(transport, false);
+    let mut call = request(false);
+    call.execution.thinking_recovery_scope = Some(conversation.clone());
+    scope
+        .run(api.execute_side_query_request(call.clone()))
+        .await
+        .unwrap();
+    assert_eq!(scope.display_probe().state(), ProbeState::Retrying);
+    assert!(!conversation.beta_rejections().rejected(
+        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingDisplayUpdates
+    ));
+    scope
+        .run(api.execute_non_stream_request(
+            call,
+            NonStreamingRequestClass::Main,
+            NonStreamingRetryOptions::default(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scope.display_probe().state(), ProbeState::Spent);
+    assert!(conversation.beta_rejections().rejected(
+        lingxi_llm_client::providers::anthropic::beta_repair::Beta::ThinkingDisplayUpdates
+    ));
+}
+
 #[derive(Clone, Default)]
 struct SettlementProbe(Arc<Mutex<Vec<&'static str>>>);
 
@@ -279,6 +493,7 @@ impl crate::ModelAttemptSettlement for SettlementProbe {
 
 #[tokio::test]
 async fn a_hosted_failure_settles_its_registered_attempt_before_returning() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for streaming in [false, true] {
         for failure in [Failure::Transport, Failure::Status(503), Failure::Body] {
             let transport = ProbeTransport::new(failure);
@@ -309,6 +524,7 @@ async fn a_hosted_failure_settles_its_registered_attempt_before_returning() {
 
 #[tokio::test]
 async fn hosted_nonstream_failures_never_retry_or_switch_connections() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for failure in [Failure::Transport, Failure::Status(503)] {
         for failover in [false, true] {
             let transport = ProbeTransport::new(failure);
@@ -330,6 +546,7 @@ async fn hosted_nonstream_failures_never_retry_or_switch_connections() {
 
 #[tokio::test]
 async fn hosted_stream_failures_never_retry_or_switch_connections() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for failure in [Failure::Transport, Failure::Status(503), Failure::Body] {
         for failover in [false, true] {
             let transport = ProbeTransport::new(failure);
@@ -349,7 +566,27 @@ async fn hosted_stream_failures_never_retry_or_switch_connections() {
 }
 
 #[tokio::test]
+async fn query_owned_http_fallback_authority_still_preserves_sdk_execution_safety() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
+    for hosted in [false, true] {
+        let transport = ProbeTransport::new(Failure::Status(503));
+        let service = service(transport.clone(), false);
+        let scope = ModelCallRetryScope::default().with_model_fallback();
+        assert!(scope
+            .run(service.stream_request(request(hosted)))
+            .await
+            .is_err());
+        assert_eq!(transport.count(), 1);
+        assert_eq!(
+            scope.take_model_fallback_request(),
+            if hosted { None } else { Some("server_error") }
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_hosted_tool_failure_is_dispatched_once() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for streaming in [false, true] {
         for failure in [Failure::Transport, Failure::Status(503)] {
             let transport = ProbeTransport::new(failure);
@@ -366,8 +603,11 @@ async fn native_hosted_tool_failure_is_dispatched_once() {
             }
             assert_eq!(transport.count(), 1);
             assert_eq!(
-                transport.seen.lock().unwrap()[0].body_json["tools"][0]["name"],
-                "web_fetch"
+                transport.seen.lock().unwrap()[0]
+                    .body_json
+                    .string_at("/tools/0/name")
+                    .as_deref(),
+                Some("web_fetch")
             );
         }
     }
@@ -382,6 +622,7 @@ fn client_toolset_options() -> wire::NativeExtension {
 
 #[tokio::test]
 async fn native_client_toolsets_preserve_ordinary_retry() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     const TOOLSET_MODEL: &str = "claude-sonnet-5";
     for streaming in [false, true] {
         let transport = ProbeTransport::new(Failure::Transport);
@@ -401,14 +642,18 @@ async fn native_client_toolsets_preserve_ordinary_retry() {
         }
         assert_eq!(transport.count(), 2);
         assert_eq!(
-            transport.seen.lock().unwrap()[0].body_json["tools"][0]["type"],
-            "browser_toolset_20260801"
+            transport.seen.lock().unwrap()[0]
+                .body_json
+                .string_at("/tools/0/type")
+                .as_deref(),
+            Some("browser_toolset_20260801")
         );
     }
 }
 
 #[tokio::test]
 async fn unknown_file_upload_outcome_is_never_retried_or_failed_over() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     let error = LlmError::FileUploadOutcomeUnknown {
         message: "provider may have accepted the upload".into(),
     };
@@ -437,6 +682,7 @@ async fn unknown_file_upload_outcome_is_never_retried_or_failed_over() {
 
 #[tokio::test]
 async fn plain_chat_preserves_nonstream_and_stream_retry() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for streaming in [false, true] {
         for failover in [false, true] {
             let transport = ProbeTransport::new(Failure::Transport);
@@ -457,6 +703,7 @@ async fn plain_chat_preserves_nonstream_and_stream_retry() {
 
 #[tokio::test]
 async fn hosted_overload_does_not_take_the_model_fallback_chain() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     let transport = ProbeTransport::new(Failure::Status(529));
     let service = service(transport.clone(), false);
     let fallback = "fallback-must-not-be-prepared".to_owned();
@@ -474,12 +721,16 @@ async fn hosted_overload_does_not_take_the_model_fallback_chain() {
             DispatchHeaderState::default(),
         )
         .await;
-    assert!(matches!(result, Err(LlmError::Overloaded { .. })));
+    assert!(matches!(
+        classified_error(&result),
+        Some(LlmError::Overloaded { .. })
+    ));
     assert_eq!(transport.count(), 1);
 }
 
 #[tokio::test]
 async fn scoped_continuation_transport_failure_is_dispatched_once() {
+    let _dispatch_off = super::service_test::cedar_lattice_read();
     for streaming in [false, true] {
         let transport = ProbeTransport::new(Failure::Transport);
         let service = service_on(
@@ -513,8 +764,11 @@ async fn scoped_continuation_transport_failure_is_dispatched_once() {
             "continuation must reach its scoped route exactly once"
         );
         assert_eq!(
-            transport.seen.lock().unwrap()[0].body_json["previous_response_id"],
-            "resp_previous"
+            transport.seen.lock().unwrap()[0]
+                .body_json
+                .string_at("/previous_response_id")
+                .as_deref(),
+            Some("resp_previous")
         );
     }
 }
@@ -533,7 +787,8 @@ fn native_execution_history_and_continuations_disable_replay() {
     ] {
         request.input.messages[0].content = vec![wire::ContentBlock::ProviderContent {
             protocol: wire::ProtocolFamily::AnthropicMessages,
-            value,
+            value: wire::JsonPayload::from_generated_value(&value)
+                .expect("test provider block is valid JSON"),
         }];
         assert!(!allows_automatic_replay(&request));
     }
@@ -563,7 +818,8 @@ fn ordinary_native_reasoning_and_client_tool_metadata_preserve_retry() {
     ] {
         request.input.messages[0].content = vec![wire::ContentBlock::ProviderContent {
             protocol: wire::ProtocolFamily::OpenAiResponses,
-            value,
+            value: wire::JsonPayload::from_generated_value(&value)
+                .expect("test provider block is valid JSON"),
         }];
         assert!(allows_automatic_replay(&request));
     }
@@ -648,8 +904,8 @@ fn durable_observations_are_removed_before_sdk_execution_classification() {
         &[crate::Message {
             role: "assistant".into(),
             content: vec![crate::ContentBlock::ProviderContent {
-                protocol: "anthropic_messages".into(),
-                value: json!({"type":"lingxi_observation","kind":"native_metadata","payload":{"container":{"id":"previous-container"}}}),
+            protocol: "anthropic_messages".into(),
+            value: wire::JsonPayload::from_generated_value(&json!({"type":"lingxi_observation","kind":"native_metadata","payload":{"container":{"id":"previous-container"}}})).expect("fixture provider content is JSON"),
             }],
         }],
         &[], &[], wire::ProtocolFamily::AnthropicMessages,
@@ -666,8 +922,12 @@ fn canonical_message_extensions_and_previous_response_id_disable_replay() {
     assert!(!allows_automatic_replay(&request));
     request.input.controls.responses.previous_response_id = None;
     request.input.messages[0].native_options.push(
-        wire::NativeExtension::new("future.message_state.v1", json!({"thread":"previous"}))
-            .unwrap(),
+        wire::NativeExtension::new(
+            "future.message_state.v1",
+            wire::JsonPayload::from_generated_value(&json!({"thread":"previous"}))
+                .expect("test extension is valid JSON"),
+        )
+        .unwrap(),
     );
     assert!(!allows_automatic_replay(&request));
 }
@@ -696,7 +956,11 @@ fn native_options_only_allow_known_client_toolset_policy_to_replay() {
             json!({"client_toolsets":42}),
         ),
     ] {
-        request.input.native_options = vec![wire::NativeExtension::new(format, data).unwrap()];
+        request.input.native_options = vec![wire::NativeExtension::new(
+            format,
+            wire::JsonPayload::from_generated_value(&data).expect("test extension is valid JSON"),
+        )
+        .unwrap()];
         assert!(
             !allows_automatic_replay(&request),
             "unrecognized native state cannot authorize replay"

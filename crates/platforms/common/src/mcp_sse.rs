@@ -117,7 +117,7 @@ impl From<SseConnectError> for McpError {
                 status,
                 www_authenticate,
             },
-            other => Self::Connection(other.to_string()),
+            other => Self::Connection(other.to_string().into()),
         }
     }
 }

@@ -148,7 +148,12 @@ fn tokens(raw: &str) -> Vec<String> {
 #[async_trait]
 impl BuiltinCommandHandler for AutoModeSetupHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let parsed = tokens(&args.raw_args);
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some((USAGE.to_string()).into()),
+            };
+        };
+        let parsed = tokens(raw_args);
         let (body, request_id) = match parse_apply_file_args(&parsed) {
             // `Gay`'s bare/`--help` branch: `{mode:"usage", message:Nj}` with
             // NO logCode, which `Way` turns into the usage arm carrying the
@@ -192,7 +197,7 @@ impl BuiltinCommandHandler for AutoModeSetupHandler {
             }
         };
         CommandResult::Done {
-            display: Some(propose_result_json(body, request_id.as_deref())),
+            display: Some((propose_result_json(body, request_id.as_deref())).into()),
         }
     }
 
@@ -227,9 +232,9 @@ mod tests {
 
     fn cmd(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "auto-mode-setup".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: tokens(raw),
+            name: "auto-mode-setup".into(),
+            raw_args: raw.into(),
+            positional_args: tokens(raw).into_iter().map(Into::into).collect(),
         }
     }
 

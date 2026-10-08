@@ -76,7 +76,7 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
             if rule.value.tool_name != "Read" {
                 continue;
             }
-            let Some(pattern) = rule.value.rule_content.as_deref() else {
+            let Some(pattern) = rule.value.rule_content_text() else {
                 continue;
             };
             let (rel_pattern, root) = pattern_with_root(pattern, source, roots);

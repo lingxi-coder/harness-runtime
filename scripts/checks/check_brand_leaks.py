@@ -79,6 +79,7 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",  # 2.1.287 xk reads actual environment grant scopes.
     # 下面十七个是 2026-09-16 逐个回 oracle 2.1.274 核过的。判据不是「二进制里
     # 出现了这个字符串」——那只证明它被写下过——而是**它被当成环境变量读出来**。
     # 上游有一张带类型的 env 注册表，键就是环境变量名，值是该名字的 schema

@@ -15,6 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{Map, Value};
 
 /// Which settings file to address.
@@ -53,9 +54,42 @@ pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
+/// Read a settings file as its exact source JSON object. Unlike
+/// [`read_settings_map`], this preserves JavaScript UTF-16 strings and object
+/// keys—including unpaired surrogates—without constructing `serde_json::Value`.
+/// Missing or blank files are an empty object, matching the existing settings
+/// writer's read contract.
+pub fn read_settings_source(path: &Path) -> Result<Utf16JsonProjection, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) if content.trim().is_empty() => empty_settings_source(),
+        Ok(content) => {
+            let source = Utf16JsonProjection::parse(&content).map_err(|_| {
+                format!("Invalid JSON syntax in settings file at {}", path.display())
+            })?;
+            if source.object_entries().is_none() {
+                return Err(format!(
+                    "Invalid JSON syntax in settings file at {}",
+                    path.display()
+                ));
+            }
+            Ok(source)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => empty_settings_source(),
+        Err(error) => Err(format!(
+            "Failed to read raw settings from {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn empty_settings_source() -> Result<Utf16JsonProjection, String> {
+    Utf16JsonProjection::object(Vec::new()).map_err(|error| error.to_string())
+}
+
 /// `updateSettingsForSource`: apply top-level key updates. `Some(v)` sets the
 /// key, `None` deletes it (TS `mergeWith` treats `undefined` as delete).
-/// All other keys preserved; pretty-printed + trailing newline.
+/// All other exact source values and UTF-16 keys are preserved; output is
+/// pretty-printed with a trailing newline.
 ///
 /// CALLER CONTRACT — top-level REPLACE, not deep-merge: TS uses a lodash
 /// `mergeWith` (deep; arrays replace), but every migration pre-builds its
@@ -92,7 +126,87 @@ pub fn update_settings_with_before_publish<F>(
 where
     F: FnOnce(),
 {
-    update_settings_with_hooks(path, updates, || {}, before_publish)
+    let source_updates = updates
+        .into_iter()
+        .map(|(key, value)| {
+            let value = value
+                .map(|value| {
+                    Utf16JsonProjection::from_serde_value(&value).map_err(|error| {
+                        format!("Failed to update settings field `{key}`: {error}")
+                    })
+                })
+                .transpose()?;
+            Ok((key, value))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    update_settings_source_with_before_publish(path, source_updates, before_publish)
+}
+
+/// Apply shallow top-level updates to a settings file without converting
+/// arbitrary source JSON through `serde_json::Value`. Existing file values and
+/// exact UTF-16 keys are retained; `None` deletes the named key. The path lock,
+/// watcher callback, atomic publication, mode preservation, and fallback are
+/// shared with [`update_settings_with_before_publish`].
+pub fn update_settings_source_with_before_publish<F>(
+    path: &Path,
+    updates: Vec<(String, Option<Utf16JsonProjection>)>,
+    before_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let target = crate::global_config::resolve_write_target(path);
+    let path_lock = settings_path_lock(&target);
+    let _guard = path_lock
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+    let mut source = read_settings_source(&target)?;
+    for (key, value) in updates {
+        match value {
+            Some(value) => source
+                .set_field(&key, value)
+                .map_err(|error| format!("Failed to update settings field `{key}`: {error}"))?,
+            None => {
+                source = remove_settings_source_field(&source, &key)
+                    .map_err(|error| format!("Failed to remove settings field `{key}`: {error}"))?;
+            }
+        }
+    }
+    let serialized = source.to_pretty_json_string().map_err(|error| {
+        format!(
+            "Failed to serialize settings for {}: {error}",
+            target.display()
+        )
+    })?;
+    before_publish();
+    write_settings_atomic(&target, (serialized + "\n").as_bytes())
+        .map_err(|error| format!("Failed to write settings to {}: {error}", target.display()))
+}
+
+fn remove_settings_source_field(
+    source: &Utf16JsonProjection,
+    field: &str,
+) -> Result<Utf16JsonProjection, String> {
+    let entries = source
+        .object_entries()
+        .ok_or_else(|| "settings root must be an object".to_owned())?;
+    let field_units: Vec<u16> = field.encode_utf16().collect();
+    let mut retained = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.code_units == field_units {
+            continue;
+        }
+        let value = source
+            .subprojection_property_units(entry.code_units)
+            .map_err(|error| error.to_string())?;
+        retained.push((entry.code_units.to_vec(), value));
+    }
+    Utf16JsonProjection::object_units(retained).map_err(|error| error.to_string())
 }
 
 /// A process-local lock per resolved settings path, matching the upstream
@@ -144,6 +258,7 @@ where
     update_settings_with_hooks(path, updates, after_read, || {})
 }
 
+#[cfg(test)]
 fn update_settings_with_hooks<A, B>(
     path: &Path,
     updates: Vec<(String, Option<Value>)>,
@@ -559,6 +674,71 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "   \n").unwrap();
         assert!(read_settings_map(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_update_keeps_utf16_values_and_uses_the_existing_publish_seam() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"opaque":{"value":"\udfff"}}"#,
+        )
+        .unwrap();
+
+        let replacement = Utf16JsonProjection::parse(r#"{"input":{"value":"\ud800"}}"#)
+            .expect("exact source replacement");
+        let published = std::sync::atomic::AtomicBool::new(false);
+        update_settings_source_with_before_publish(
+            &path,
+            vec![("hooks".into(), Some(replacement))],
+            || published.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .unwrap();
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(serialized.contains(r#""value": "\ud800""#));
+        assert!(serialized.contains(r#""value": "\udfff""#));
+
+        update_settings_source_with_before_publish(&path, vec![("hooks".into(), None)], || {})
+            .unwrap();
+        let source = read_settings_source(&path).unwrap();
+        assert!(source.get_property("hooks").is_none());
+        assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
+    }
+
+    #[test]
+    fn typed_update_preserves_existing_exact_source_values() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"opaque":{"value":"\udfff"}}"#,
+        )
+        .unwrap();
+
+        update_settings(
+            &path,
+            vec![("model".into(), Some(Value::String("opus".into())))],
+        )
+        .unwrap();
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(source.string_at("/model"), Some("opus"));
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
     }
 
     #[test]

@@ -44,6 +44,7 @@
 
 use crate::jsonl::reader::is_valid_atis_latch;
 use crate::jsonl::LITE_READ_BUF_SIZE;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -86,7 +87,7 @@ const LAST_PROMPT_MAX_UTF16: usize = 200;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionMetadataState {
     /// `currentSessionTitle` → `{type:"custom-title",customTitle,sessionId}`.
-    pub title: Option<String>,
+    pub title: Option<Utf16JsonProjection>,
     /// `currentSessionAiTitle` → `{type:"ai-title",aiTitle,sessionId}`.
     pub ai_title: Option<String>,
     /// `currentSessionTag` → `{type:"tag",tag,sessionId}`.
@@ -158,6 +159,8 @@ pub struct SessionMetadataState {
 pub struct ReAppendPlan {
     /// Records to append verbatim, one JSONL line each.
     pub entries: Vec<Value>,
+    /// Exact source record for the custom-title entry, when the plan contains one.
+    pub custom_title_source: Option<Utf16JsonProjection>,
 }
 
 impl ReAppendPlan {
@@ -174,7 +177,19 @@ impl ReAppendPlan {
     pub fn to_jsonl(&self) -> String {
         let mut out = String::new();
         for entry in &self.entries {
-            out.push_str(&serde_json::to_string(entry).unwrap_or_default());
+            if entry.get("type").and_then(Value::as_str) == Some("custom-title") {
+                if let Some(source) = self.custom_title_source.as_ref() {
+                    out.push_str(
+                        &source
+                            .to_json_string()
+                            .expect("custom-title source is valid JSON"),
+                    );
+                } else {
+                    out.push_str(&serde_json::to_string(entry).unwrap_or_default());
+                }
+            } else {
+                out.push_str(&serde_json::to_string(entry).unwrap_or_default());
+            }
             out.push('\n');
         }
         out
@@ -232,6 +247,45 @@ fn truthy(value: &Option<String>) -> Option<&str> {
         Some(s) if !s.is_empty() => Some(s.as_str()),
         _ => None,
     }
+}
+
+fn source_text(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+        .expect("Rust strings are valid UTF-16 projections")
+}
+
+fn truthy_source(value: &Option<Utf16JsonProjection>) -> Option<&Utf16JsonProjection> {
+    value.as_ref().filter(|value| {
+        value
+            .string_units("")
+            .is_some_and(|units| !units.is_empty())
+    })
+}
+
+fn custom_title_source_record(
+    title: &Utf16JsonProjection,
+    session_id: &str,
+) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(vec![
+        ("type".into(), source_text("custom-title")),
+        ("customTitle".into(), title.clone()),
+        ("sessionId".into(), source_text(session_id)),
+    ])
+    .expect("custom-title source record has unique fields")
+}
+
+fn parsed_custom_title_record(line: &str) -> Option<Utf16JsonProjection> {
+    let projection = Utf16JsonProjection::parse(line).ok()?;
+    (projection.string_at("/type") == Some("custom-title")).then_some(projection)
+}
+
+fn dedup_source_projection(projection: &Utf16JsonProjection) -> String {
+    let mut stripped = projection.clone();
+    let _ = stripped.remove_field("timestamp");
+    let _ = stripped.remove_field("ts");
+    stripped
+        .to_json_string()
+        .expect("parsed source metadata remains valid JSON")
 }
 
 /// `GOi` (226610241) — unescape a raw JSON string body.
@@ -409,16 +463,19 @@ pub fn plan_re_append(
 
     // ── 1. adopt back ───────────────────────────────────────────────────────
     if !skip_title_adopt {
-        if let Some(line) = lines
-            .iter()
-            .rev()
-            .find(|l| l.contains("\"type\":\"custom-title\"") && l.contains("\"customTitle\":\""))
-        {
-            if let Some(found) = extract_quoted_field(line, "customTitle") {
-                // `this.currentSessionTitle = g || undefined` — an adopted
-                // empty string CLEARS the in-memory title.
-                state.title = if found.is_empty() { None } else { Some(found) };
-            }
+        if let Some(title) = lines.iter().rev().find_map(|line| {
+            let projection = parsed_custom_title_record(line)?;
+            let title = projection.subprojection("/customTitle").ok()?;
+            title.string_units("")?;
+            Some(title)
+        }) {
+            // `this.currentSessionTitle = g || undefined` — an adopted
+            // empty string CLEARS the in-memory title.
+            state.title = if title.string_units("").is_some_and(|units| units.is_empty()) {
+                None
+            } else {
+                Some(title)
+            };
         }
         if let Some(line) = lines
             .iter()
@@ -463,6 +520,7 @@ pub fn plan_re_append(
     // ── 2. rebuild ──────────────────────────────────────────────────────────
     let sid = || Value::String(session_id.to_string());
     let mut entries: Vec<Value> = Vec::new();
+    let mut custom_title_source = None;
 
     if state.last_prompt.is_some() || state.leaf_uuid.is_some() {
         let mut pairs: Vec<(&str, Value)> = vec![("type", Value::String("last-prompt".into()))];
@@ -475,12 +533,14 @@ pub fn plan_re_append(
         pairs.push(("sessionId", sid()));
         entries.push(obj(pairs));
     }
-    if let Some(title) = truthy(&state.title) {
+    if let Some(title) = truthy_source(&state.title) {
+        let title_display = title.string_at("").unwrap_or_default();
         entries.push(obj(vec![
             ("type", Value::String("custom-title".into())),
-            ("customTitle", Value::String(title.to_string())),
+            ("customTitle", Value::String(title_display.to_owned())),
             ("sessionId", sid()),
         ]));
+        custom_title_source = Some(custom_title_source_record(title, session_id));
     }
     if let Some(ai_title) = truthy(&state.ai_title) {
         entries.push(obj(vec![
@@ -614,7 +674,10 @@ pub fn plan_re_append(
 
     // ── 3. dedup ────────────────────────────────────────────────────────────
     if skip_dedup || entries.is_empty() {
-        return Some(ReAppendPlan { entries });
+        return Some(ReAppendPlan {
+            entries,
+            custom_title_source,
+        });
     }
 
     // `new Set(l.map(f=>f.type))` — insertion-ordered, and each type is pushed
@@ -624,9 +687,10 @@ pub fn plan_re_append(
         .filter_map(|e| e.get("type").and_then(Value::as_str).map(str::to_string))
         .collect();
     let mut latest: Vec<(String, Value)> = Vec::new();
+    let mut latest_custom_title: Option<Utf16JsonProjection> = None;
     let mut budget = 0usize;
     for line in lines.iter().rev() {
-        if latest.len() == wanted.len() {
+        if latest.len() + usize::from(latest_custom_title.is_some()) == wanted.len() {
             break;
         }
         budget += line.len() + 1;
@@ -637,31 +701,52 @@ pub fn plan_re_append(
             continue;
         }
         let Some(hit) = wanted.iter().find(|ty| {
-            !latest.iter().any(|(seen, _)| seen == *ty)
-                && line.contains(&format!("\"type\":\"{ty}\""))
+            (if ty.as_str() == "custom-title" {
+                latest_custom_title.is_none()
+            } else {
+                !latest.iter().any(|(seen, _)| seen == *ty)
+            }) && line.contains(&format!("\"type\":\"{ty}\""))
         }) else {
             continue;
         };
-        if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+        if hit == "custom-title" {
+            if let Some(parsed) = parsed_custom_title_record(line) {
+                latest_custom_title = Some(parsed);
+            }
+        } else if let Ok(parsed) = serde_json::from_str::<Value>(line) {
             if parsed.get("type").and_then(Value::as_str) == Some(hit.as_str()) {
                 latest.push((hit.clone(), parsed));
             }
         }
     }
 
-    let kept = entries
+    let kept: Vec<Value> = entries
         .into_iter()
         .filter(|entry| {
             let Some(ty) = entry.get("type").and_then(Value::as_str) else {
                 return true;
             };
+            if ty == "custom-title" {
+                return match (&custom_title_source, &latest_custom_title) {
+                    (Some(wanted), Some(on_disk)) => {
+                        dedup_source_projection(wanted) != dedup_source_projection(on_disk)
+                    }
+                    _ => true,
+                };
+            }
             match latest.iter().find(|(seen, _)| seen == ty) {
                 None => true,
                 Some((_, on_disk)) => dedup_key(entry) != dedup_key(on_disk),
             }
         })
         .collect();
-    Some(ReAppendPlan { entries: kept })
+    let contains_title = kept
+        .iter()
+        .any(|entry| entry.get("type").and_then(Value::as_str) == Some("custom-title"));
+    Some(ReAppendPlan {
+        entries: kept,
+        custom_title_source: contains_title.then_some(custom_title_source).flatten(),
+    })
 }
 
 /// The dedup comparator (cc-238.js @296784560):
@@ -772,9 +857,13 @@ mod tests {
 
     fn state_with_title(title: &str) -> SessionMetadataState {
         SessionMetadataState {
-            title: Some(title.to_string()),
+            title: Some(title.into()),
             ..Default::default()
         }
+    }
+
+    fn title_text(state: &SessionMetadataState) -> Option<&str> {
+        state.title.as_ref().and_then(|title| title.string_at(""))
     }
 
     // ── record shape / order ────────────────────────────────────────────────
@@ -973,7 +1062,7 @@ mod tests {
     #[test]
     fn empty_string_fields_are_falsy() {
         let mut state = SessionMetadataState {
-            title: Some(String::new()),
+            title: Some(String::new().into()),
             mode: Some(String::new()),
             ..Default::default()
         };
@@ -1044,7 +1133,7 @@ mod tests {
         );
         let mut state = state_with_title("in memory");
         plan_re_append(tail, &mut state, "S1", false, true).unwrap();
-        assert_eq!(state.title.as_deref(), Some("from disk"));
+        assert_eq!(title_text(&state), Some("from disk"));
         assert_eq!(state.ai_title.as_deref(), Some("ai from disk"));
     }
 
@@ -1059,7 +1148,7 @@ mod tests {
         );
         let mut state = state_with_title("in memory");
         plan_re_append(tail, &mut state, "S1", true, true).unwrap();
-        assert_eq!(state.title.as_deref(), Some("in memory"));
+        assert_eq!(title_text(&state), Some("in memory"));
     }
 
     /// `tag` adopt-back is NOT gated by `skip_title_adopt` — it always runs.
@@ -1141,7 +1230,7 @@ mod tests {
         let mut state = state_with_title("in memory");
         plan_re_append(tail, &mut state, "S1", false, true).unwrap();
         assert_eq!(
-            state.title.as_deref(),
+            title_text(&state),
             Some("real title"),
             "the null record must be skipped, not merely un-extractable"
         );
@@ -1153,7 +1242,7 @@ mod tests {
         );
         let mut state2 = state_with_title("in memory");
         plan_re_append(only_null, &mut state2, "S1", false, true).unwrap();
-        assert_eq!(state2.title.as_deref(), Some("in memory"));
+        assert_eq!(title_text(&state2), Some("in memory"));
     }
 
     // ── dedup ───────────────────────────────────────────────────────────────

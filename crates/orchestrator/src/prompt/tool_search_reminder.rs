@@ -215,11 +215,15 @@ mod tests {
             id: lingxi_core::types::MessageId::new(),
             content: blocks,
             stop_reason: None,
+            resumable: None,
         }
     }
 
     fn text(s: &str) -> lingxi_core::types::ContentBlock {
-        lingxi_core::types::ContentBlock::Text { text: s.into() }
+        lingxi_core::types::ContentBlock::Text {
+            text: s.into(),
+            citations: None,
+        }
     }
 
     fn tool_search() -> lingxi_core::types::ContentBlock {

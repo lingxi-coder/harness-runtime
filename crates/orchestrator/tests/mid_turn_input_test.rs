@@ -15,7 +15,7 @@
 //!    injected — today's behavior unchanged.
 
 use async_trait::async_trait;
-use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, ToolUseId};
 use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag, MidTurnInputSource};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -33,8 +33,12 @@ use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    ToolStaticContext,
 };
+
+fn source_text(text: String) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect()).unwrap()
+}
 
 /// A concurrency-safe Cancel-behavior tool that blocks on its `ctx.cancel` token
 /// so the turn stays in-flight until we fire the turn's cancel — exercising the
@@ -46,10 +50,21 @@ impl Tool for CancelBlockingTool {
     fn name(&self) -> &str {
         "CancelTool"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
+            tool_api::tool_trait::generated_builtin_schema(&json!({
+                "type": "object",
+                "properties": {}
+            }))
+        });
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: Some(Default::default()),
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -57,25 +72,18 @@ impl Tool for CancelBlockingTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _input: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Cancel
-    }
-    async fn validate_input(
-        &self,
-        _input: &serde_json::Value,
-        _ctx: &tool_api::context::ToolUseContext,
-    ) -> Result<(), ValidationError> {
-        Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -87,7 +95,7 @@ impl Tool for CancelBlockingTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
         "cancel-tool".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
@@ -95,7 +103,7 @@ impl Tool for CancelBlockingTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -104,14 +112,11 @@ impl Tool for CancelBlockingTool {
                 t.cancelled().await;
                 Err(ToolError::Aborted)
             }
-            None => Ok(ToolCallResult {
-                data: json!({ "content": "ran-to-end" }),
-                model_content: None,
-                new_messages: vec![],
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-            }),
+            None => Ok(ToolCallResult::from_data(
+                tool_api::tool_trait::generated_builtin_result(&json!({
+                    "content": "ran-to-end"
+                })),
+            )),
         }
     }
 }
@@ -144,7 +149,7 @@ async fn history_has_interrupt(orch: &ConversationOrchestrator) -> bool {
     let s = session.lock().await;
     s.history.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("interrupted by user")),
+            |b| matches!(b, ContentBlock::Text { text, .. } if text.contains("interrupted by user")),
         ),
         _ => false,
     })
@@ -190,8 +195,8 @@ impl ScriptedSource {
 
 #[async_trait]
 impl MidTurnInputSource for ScriptedSource {
-    async fn take_mid_turn_input(&self) -> Option<String> {
-        self.0.lock().unwrap().pop_front()
+    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        self.0.lock().unwrap().pop_front().map(source_text)
     }
 }
 
@@ -211,13 +216,13 @@ impl DelayedOnceSource {
 
 #[async_trait]
 impl MidTurnInputSource for DelayedOnceSource {
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         let mut state = self.0.lock().unwrap();
         if state.0 != 0 {
             state.0 -= 1;
             None
         } else {
-            state.1.take()
+            state.1.take().map(source_text)
         }
     }
 }
@@ -234,7 +239,7 @@ async fn first_request_user_texts(api: &MockStreamingApiClient) -> Vec<String> {
                 let joined: String = content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -334,7 +339,7 @@ async fn mid_turn_input_arriving_during_final_response_continues_the_turn() {
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -431,7 +436,7 @@ async fn mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop() {
             ConversationMessage::User { content, .. }
                 if content.iter().any(|block| matches!(
                     block,
-                    ContentBlock::Text { text }
+                    ContentBlock::Text { text, .. }
                         if text.contains("please preserve this message")
                 ))
         )),
@@ -552,7 +557,7 @@ impl CountingSource {
 
 #[async_trait]
 impl MidTurnInputSource for CountingSource {
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         None
     }
@@ -566,10 +571,21 @@ impl Tool for EndTurnTool {
     fn name(&self) -> &str {
         "EndsTurn"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
+            tool_api::tool_trait::generated_builtin_schema(&json!({
+                "type": "object",
+                "properties": {}
+            }))
+        });
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: Some(Default::default()),
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -577,22 +593,15 @@ impl Tool for EndTurnTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
-    }
-    async fn validate_input(
-        &self,
-        _input: &serde_json::Value,
-        _ctx: &tool_api::context::ToolUseContext,
-    ) -> Result<(), ValidationError> {
-        Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -604,7 +613,7 @@ impl Tool for EndTurnTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
         String::new()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
@@ -612,18 +621,17 @@ impl Tool for EndTurnTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
-            data: json!({ "content": "done" }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: Some(json!({"_meta": {"claude/endTurn": true}})),
-        })
+        let mut result = ToolCallResult::from_data(
+            tool_api::tool_trait::generated_builtin_result(&json!({ "content": "done" })),
+        );
+        result.mcp_meta = Some(tool_api::tool_trait::generated_builtin_result(&json!({
+            "_meta": { "claude/endTurn": true }
+        })));
+        Ok(result)
     }
 }
 
@@ -670,17 +678,18 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
         ]));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EndTurnTool));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            api.clone(),
-            Arc::new(registry),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        );
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                api.clone(),
+                Arc::new(registry),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         orch.set_mid_turn_input(forced.clone());
         orch.run_turn_streaming("seed").await.expect("streaming");
         assert_eq!(
@@ -729,6 +738,7 @@ async fn the_batched_path_has_no_late_drain() {
             vec![llm_runtime::ContentBlock::Text {
                 text: "first answer".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -736,6 +746,7 @@ async fn the_batched_path_has_no_late_drain() {
             vec![llm_runtime::ContentBlock::Text {
                 text: "should never be requested".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -810,6 +821,7 @@ async fn only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop() {
                     vec![llm_runtime::ContentBlock::Text {
                         text: "done".into(),
                         cache_control: None,
+                        citations: None,
                     }],
                     Some("end_turn"),
                 ),

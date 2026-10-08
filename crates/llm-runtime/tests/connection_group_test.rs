@@ -239,7 +239,7 @@ fn hidden_connections_are_not_listed() {
 
 // ── Desugaring `settings.providers` into connections ───────────────────────
 
-use llm_runtime::{parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions};
+use llm_runtime::{ProviderCredentialMode, ProviderParseOptions, parse_provider_profiles_lenient};
 use std::collections::BTreeMap;
 
 fn parse(json: serde_json::Value) -> (Vec<ProviderProfile>, Vec<String>) {
@@ -526,9 +526,9 @@ fn failover_never_crosses_billing_modes() {
     use llm_runtime::ModelBillingMode;
 
     let mut subscription = connection("plan", "https://plan.example.com", 0, false);
-    subscription.pricing.billing_mode = ModelBillingMode::Subscription;
+    subscription.pricing.billing_mode = Some(ModelBillingMode::Subscription);
     let mut metered = connection("api", "https://api.example.com", 1, false);
-    metered.pricing.billing_mode = ModelBillingMode::PerToken;
+    metered.pricing.billing_mode = Some(ModelBillingMode::PerToken);
 
     let registry = ModelRegistry::from_config(ClientConfig {
         providers: vec![subscription, metered],

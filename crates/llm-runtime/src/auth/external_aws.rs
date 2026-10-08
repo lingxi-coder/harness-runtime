@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::future::Shared;
 use futures::FutureExt;
+use futures::future::Shared;
 
 use crate::{BoxFuture, LlmError, ProviderId};
 
@@ -206,7 +206,7 @@ impl AwsAuthProcess for ShellAwsAuthProcess {
 
 // ── STS output validation (`Rdi` / `wdi`) ───────────────────────────────────
 
-use lingxi_llm_client::auth::aws::{parse_sts_output, AwsExportedCredentials};
+use lingxi_llm_client::auth::aws::{AwsExportedCredentials, parse_sts_output};
 
 // ── Drive-loop trigger classification (`V_c` / `G_c`) ───────────────────────
 
@@ -233,7 +233,7 @@ pub fn is_aws_auth_error(error: &LlmError, provider_id: &ProviderId) -> bool {
         return false;
     }
     matches!(
-        error,
+        error.classification_source(),
         LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
     )
 }
@@ -778,6 +778,20 @@ mod tests {
         assert!(is_aws_auth_error(
             &LlmError::PermissionDenied {
                 message: String::new()
+            },
+            &ProviderId::BedrockClaude
+        ));
+        assert!(is_aws_auth_error(
+            &LlmError::ProviderErrorText {
+                source: Box::new(LlmError::Authentication {
+                    message: "expired credentials".into(),
+                }),
+                text: lingxi_llm_client::protocol::ProviderErrorText::new(
+                    "401 provider body".into(),
+                    "401 provider body".encode_utf16().collect(),
+                )
+                .unwrap(),
+                native_anthropic_facts: None,
             },
             &ProviderId::BedrockClaude
         ));

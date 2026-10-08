@@ -7,9 +7,8 @@ use lingxi_core::host::mcp::{
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Stub MCP transport.
 #[derive(Default)]
@@ -49,8 +48,8 @@ impl McpTransport for PosixMcp {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: HashMap::new(),
-            extensions: HashMap::new(),
+            experimental: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
+            extensions: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
         })
     }
 
@@ -73,7 +72,7 @@ impl McpTransport for PosixMcp {
         &self,
         _conn: &McpRawConnection,
         tool: &str,
-        _input: Value,
+        _input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         Err(McpError::ToolNotFound(tool.to_string()))
     }
@@ -81,7 +80,7 @@ impl McpTransport for PosixMcp {
     async fn read_resource(
         &self,
         _conn: &McpRawConnection,
-        _uri: &str,
+        _uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal("posix-minimal: stub".into()))
     }

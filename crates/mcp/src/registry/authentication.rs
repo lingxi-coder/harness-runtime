@@ -80,7 +80,8 @@ pub(super) fn error_is_401(e: &McpError) -> bool {
     matches!(e, McpError::HttpResponse { status: 401, .. })
         || matches!(
             e,
-            McpError::Connection(m) | McpError::Handshake(m) if m.contains("401")
+            McpError::Connection(m) | McpError::Handshake(m)
+                if m.string_at("").is_some_and(|message| message.contains("401"))
         )
 }
 
@@ -90,7 +91,7 @@ pub(crate) fn error_is_auth_response(error: &McpError) -> bool {
         || matches!(
             error,
             McpError::Connection(message) | McpError::Handshake(message)
-                if message.contains("403")
+                if message.string_at("").is_some_and(|message| message.contains("403"))
         )
 }
 
@@ -128,10 +129,11 @@ pub(super) fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
     let (McpError::Connection(msg) | McpError::Handshake(msg)) = e else {
         return None;
     };
-    if !(msg.contains("403") && msg.contains("insufficient_scope")) {
+    let message = msg.string_at("")?;
+    if !(message.contains("403") && message.contains("insufficient_scope")) {
         return None;
     }
-    extract_scope_from_www_auth(msg)
+    extract_scope_from_www_auth(message)
 }
 
 /// Extract a `resource_metadata` challenge param (RFC 9728) from a connect
@@ -559,11 +561,14 @@ impl McpRegistry {
         if !lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_ENABLE_XAA").ok().as_deref(),
         ) {
-            return Err(McpError::OAuth(format!(
-                "XAA is not enabled (set LINGXI_ENABLE_XAA=1). Remove 'xaa' from \
+            return Err(McpError::OAuth(
+                format!(
+                    "XAA is not enabled (set LINGXI_ENABLE_XAA=1). Remove 'xaa' from \
                  server '{}' to use the standard consent flow.",
-                config.name
-            )));
+                    config.name
+                )
+                .into(),
+            ));
         }
 
         // Single-flight: serialize concurrent resolves for this server key.
@@ -671,13 +676,16 @@ impl McpRegistry {
         // The IdP-login + AS-secret surface is supplied by the host provider.
         // Absent it, XAA cannot proceed — a clearly-noted residual seam.
         let provider = deps.xaa_config.as_ref().ok_or_else(|| {
-            McpError::OAuth(format!(
-                "XAA: no IdP connection configured for server '{}'. The XAA \
+            McpError::OAuth(
+                format!(
+                    "XAA: no IdP connection configured for server '{}'. The XAA \
                  IdP-login/secret config surface (getXaaIdpSettings / \
                  acquireIdpIdToken / mcpOAuthClientConfig) is not yet wired \
                  (residual).",
-                config.name
-            ))
+                    config.name
+                )
+                .into(),
+            )
         })?;
         let server_url = spec_url(&config.spec);
         // The oracle performs this read before entering the failure-telemetry
@@ -694,10 +702,13 @@ impl McpRegistry {
                     xaa_failure_stage: telemetry::Verified::assert_safe("idp_login".to_string()),
                     id_token_cache_hit,
                 });
-                return Err(McpError::OAuth(format!(
-                    "XAA: server '{}' is not XAA-provisioned (no IdP/AS inputs).",
-                    config.name
-                )));
+                return Err(McpError::OAuth(
+                    format!(
+                        "XAA: server '{}' is not XAA-provisioned (no IdP/AS inputs).",
+                        config.name
+                    )
+                    .into(),
+                ));
             }
             Err(error) => {
                 emit_oauth_flow_failure(&telemetry::tengu::mcp::OAuthFlowFailurePayload {

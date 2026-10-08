@@ -11,7 +11,7 @@
 //! "LingXi"; standalone "Claude" (the agent) is kept, matching LingXi's
 //! convention elsewhere (`init_verifiers`).
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// The frontmatter-stripped skill body (`$g(SKILL_MD).content.trimStart()`),
 /// verbatim from the 2.1.205 binary with the branding substitutions above.
@@ -25,11 +25,15 @@ pub(crate) const RUN_SKILL_GENERATOR_DESCRIPTION: &str = "Author or improve the 
 pub struct RunSkillGeneratorPromptFn;
 
 impl BundledPromptFn for RunSkillGeneratorPromptFn {
-    fn build(&self, args: &str) -> String {
-        if args.is_empty() {
-            RUN_SKILL_GENERATOR_BODY.to_string()
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            RUN_SKILL_GENERATOR_BODY.into()
         } else {
-            format!("{RUN_SKILL_GENERATOR_BODY}\n\n## User Request\n\n{args}")
+            let prefix = format!("{RUN_SKILL_GENERATOR_BODY}\n\n## User Request\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -37,6 +41,7 @@ impl BundledPromptFn for RunSkillGeneratorPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_frontmatter_stripped_and_branded() {
@@ -53,12 +58,16 @@ mod tests {
     #[test]
     fn build_empty_returns_body_and_arg_appends_user_request() {
         assert_eq!(
-            RunSkillGeneratorPromptFn.build(""),
-            RUN_SKILL_GENERATOR_BODY
+            RunSkillGeneratorPromptFn.build(&"".into()).string_at(""),
+            Some(RUN_SKILL_GENERATOR_BODY)
         );
+        let expected =
+            format!("{RUN_SKILL_GENERATOR_BODY}\n\n## User Request\n\nfor the billing app");
         assert_eq!(
-            RunSkillGeneratorPromptFn.build("for the billing app"),
-            format!("{RUN_SKILL_GENERATOR_BODY}\n\n## User Request\n\nfor the billing app")
+            RunSkillGeneratorPromptFn
+                .build(&"for the billing app".into())
+                .string_at(""),
+            Some(expected.as_str())
         );
     }
 }

@@ -1,0 +1,672 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "native visible reason predicate",
+      "start": 188771236,
+      "end": 188771287,
+      "sha256": "50c5e21185656be13a096ff6f12a1f9f6f05ee8cf3b6e72dc7c492a6630b1222"
+    },
+    {
+      "label": "native server fallback control decision",
+      "start": 188776094,
+      "end": 188776673,
+      "sha256": "fe3d984856b29d721998e809a584b364cda4a0c86dc3aed66b3c09ed06f72b34"
+    },
+    {
+      "label": "native context-tag removal",
+      "start": 179326720,
+      "end": 179326771,
+      "sha256": "a4d795f092297c1da48837e8342f8a6b308a4fc1b4cd8b34f2ed7bbcdd775ac3"
+    },
+    {
+      "label": "native received-model alias preference",
+      "start": 188774585,
+      "end": 188774640,
+      "sha256": "b3dcbb17cf27fd634e7eb6986ae5d2b642b492b1d8fa24388017ea6533fea742"
+    },
+    {
+      "label": "native unavailable allowlist response error",
+      "start": 195140694,
+      "end": 195140845,
+      "sha256": "0980bc72c117917631051d34110ae0c3bd63834fc7b8ab8e830399c933a78822"
+    }
+  ],
+  "scope": "Actual native Tle/oHo, Mn/Ucn and the rejected-response error string. Control inputs are supplied facts. Organization availableModels acquisition, allowlist acceptance, loop swaps, query event delivery, and user-visible UI rendering remain outside this pure helper fixture.",
+  "unavailableAllowlistError": "The server routed this response to a model that is not in your organization’s availableModels allowlist; the response was discarded.",
+  "controlCases": [
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": true,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": true,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": true,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": false,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": true,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "sticky",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": true,
+        "tombstonedToolUse": true,
+        "swapSession": true,
+        "showBanner": true,
+        "bannerScope": "session"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "other",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "Refusal",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": false,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": false,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": false,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": true,
+        "isMainThread": false,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": false
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    },
+    {
+      "input": {
+        "reason": "",
+        "discardedHadToolUse": true,
+        "isMainThread": true,
+        "emitsLocalScope": true
+      },
+      "expected": {
+        "userVisible": false,
+        "tombstonedToolUse": true,
+        "swapSession": false,
+        "showBanner": false,
+        "bannerScope": "local"
+      }
+    }
+  ],
+  "receivedModelCases": [
+    {
+      "declared": null,
+      "received": "claude-sonnet-4-6",
+      "expected": "claude-sonnet-4-6"
+    },
+    {
+      "declared": "claude-opus-4-7[1m]",
+      "received": "claude-opus-4-7[1M]",
+      "expected": "claude-opus-4-7[1m]"
+    },
+    {
+      "declared": "Claude-Opus-4-7[1m]",
+      "received": "claude-opus-4-7[1m]",
+      "expected": "claude-opus-4-7[1m]"
+    },
+    {
+      "declared": "a[1m]B[2M]",
+      "received": "aB",
+      "expected": "a[1m]B[2M]"
+    },
+    {
+      "declared": "",
+      "received": "[1m]",
+      "expected": ""
+    },
+    {
+      "declared": "model[2m]",
+      "received": "model-[2m]",
+      "expected": "model-[2m]"
+    }
+  ]
+}

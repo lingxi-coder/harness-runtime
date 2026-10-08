@@ -1,0 +1,3435 @@
+{
+  "version": "2.1.286",
+  "binary_sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sourceByteRanges": [
+    {
+      "signature": "pure helper dependency chunk",
+      "start": 176381936,
+      "end": 176393578
+    },
+    {
+      "signature": "pure helper dependency chunk",
+      "start": 176393579,
+      "end": 176484073
+    },
+    {
+      "signature": "pure helper dependency chunk",
+      "start": 176310967,
+      "end": 176311948
+    },
+    {
+      "signature": "pure helper dependency chunk",
+      "start": 177550468,
+      "end": 177586248
+    },
+    {
+      "signature": "var _Je=",
+      "start": 176211535,
+      "end": 176220740
+    },
+    {
+      "signature": "var H;function j()",
+      "start": 178465194,
+      "end": 178465369
+    },
+    {
+      "signature": "function fJ(",
+      "start": 178480834,
+      "end": 178481309
+    },
+    {
+      "signature": "var c6=",
+      "start": 183860833,
+      "end": 183864925
+    },
+    {
+      "signature": "var HPt=",
+      "start": 186596648,
+      "end": 186596858
+    },
+    {
+      "signature": "var us=",
+      "start": 179392112,
+      "end": 179392909
+    },
+    {
+      "signature": "function as(",
+      "start": 178913515,
+      "end": 178913690
+    },
+    {
+      "signature": "function Gp()",
+      "start": 178810882,
+      "end": 178810986
+    },
+    {
+      "signature": "var i6e=",
+      "start": 183868892,
+      "end": 183870730
+    },
+    {
+      "signature": "function xd(",
+      "start": 191679320,
+      "end": 191681094
+    },
+    {
+      "signature": "async function Jn(",
+      "start": 191681361,
+      "end": 191681699
+    },
+    {
+      "signature": "function Xn(",
+      "start": 191681699,
+      "end": 191683533
+    },
+    {
+      "signature": "var Jx=",
+      "start": 187782865,
+      "end": 187782996
+    },
+    {
+      "signature": "function ol(e){",
+      "start": 187722134,
+      "end": 187722175
+    },
+    {
+      "signature": "function Yi(",
+      "start": 187724701,
+      "end": 187725032
+    },
+    {
+      "signature": "var kO=",
+      "start": 176222855,
+      "end": 176222906
+    },
+    {
+      "signature": "var TKn=",
+      "start": 179804919,
+      "end": 179805226
+    },
+    {
+      "signature": "function zbo(",
+      "start": 184713558,
+      "end": 184713718
+    },
+    {
+      "signature": "session_context:(e)=>",
+      "start": 187748276,
+      "end": 187748476
+    },
+    {
+      "signature": "context_sections:(e)=>",
+      "start": 187748860,
+      "end": 187749083
+    },
+    {
+      "signature": "instructions:(e)=>",
+      "start": 187747433,
+      "end": 187749397
+    },
+    {
+      "signature": "date:(e)=>",
+      "start": 187749397,
+      "end": 187749505
+    }
+  ],
+  "environment": {
+    "querySource": "agent:custom:fixture",
+    "defaultDate": "2026-09-30",
+    "coordinatorEnabled": false,
+    "instructionFileAvailability": "current absent means native undefined",
+    "historyEnvelope": "UUID and timestamps omitted; payload and rendered bytes preserved"
+  },
+  "cases": [
+    {
+      "name": "initial-four-file-kinds",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /managed/LINGXI.md (organization-managed policy instructions):\n\nmanaged policy\n\nContents of /home/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\nuser policy\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nproject policy\n\nContents of /repo/LINGXI.local.md (user's private project instructions, not checked in):\n\nlocal policy\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "initial-js-trim-bom-preserves-nel",
+      "current": [
+        {
+          "path": "/仓库/规则.md",
+          "type": "Project",
+          "content": "﻿ policy ﻿"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/仓库/规则.md",
+            "type": "Project",
+            "content": " policy "
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/仓库/规则.md",
+                "type": "Project",
+                "content": " policy "
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /仓库/规则.md (project instructions, checked into the codebase):\n\n policy \n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "same-files-suppress-reannouncement",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "managed policy"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "project policy"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "changed-body-and-type",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Local",
+          "content": "changed project body"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "reason": "policy_refresh",
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Local",
+            "content": "changed project body"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ],
+        "refreshReason": "policy_refresh",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Local",
+                "content": "changed project body"
+              }
+            ],
+            "changed": true,
+            "reason": "policy_refresh"
+          },
+          "rendered": [
+            "<system-reminder>\nInstruction files were re-read after the organization's managed settings changed; these differ from their earlier copies — each replaces its earlier copy, and the instructions preamble above still applies:\n\nContents of /repo/LINGXI.md (user's private project instructions, not checked in):\n\nchanged project body\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "removed-files",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "reason": "directory_added",
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          }
+        ],
+        "refreshReason": "directory_added",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [],
+            "removed": [
+              "/home/.lingxi/LINGXI.md",
+              "/repo/LINGXI.local.md"
+            ],
+            "changed": true,
+            "reason": "directory_added"
+          },
+          "rendered": [
+            "<system-reminder>\nInstruction files were re-read after a working directory was added.\n\nInstructions no longer present: /home/.lingxi/LINGXI.md\n\nInstructions no longer present: /repo/LINGXI.local.md\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "successful-empty-initial",
+      "current": [],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "successful-empty-removes-prior",
+      "current": [],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "reason": "hooks_invalidate",
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [],
+        "refreshReason": "hooks_invalidate",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [],
+            "removed": [
+              "/managed/LINGXI.md",
+              "/home/.lingxi/LINGXI.md",
+              "/repo/LINGXI.md",
+              "/repo/LINGXI.local.md"
+            ],
+            "changed": true,
+            "reason": "hooks_invalidate"
+          },
+          "rendered": [
+            "<system-reminder>\nInstruction files were re-read after a plugin had the context re-read.\n\nInstructions no longer present: /managed/LINGXI.md\n\nInstructions no longer present: /home/.lingxi/LINGXI.md\n\nInstructions no longer present: /repo/LINGXI.md\n\nInstructions no longer present: /repo/LINGXI.local.md\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "delta-chain-folds-current-baseline",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "changed"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "changed"
+              }
+            ],
+            "removed": [
+              "/home/.lingxi/LINGXI.md",
+              "/repo/LINGXI.local.md"
+            ],
+            "changed": true
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "changed"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "cold-child-resume-rechecks-current-files",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "new disk body"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              },
+              {
+                "path": "/home/.lingxi/LINGXI.md",
+                "type": "User",
+                "content": "user policy"
+              },
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              },
+              {
+                "path": "/repo/LINGXI.local.md",
+                "type": "Local",
+                "content": "local policy"
+              }
+            ]
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "reason": "session_start",
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new disk body"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "new disk body"
+              }
+            ],
+            "removed": [
+              "/home/.lingxi/LINGXI.md",
+              "/repo/LINGXI.local.md"
+            ],
+            "changed": true,
+            "reason": "session_start"
+          },
+          "rendered": [
+            "<system-reminder>\nInstruction files were re-read when this session started; these differ from their earlier copies — each replaces its earlier copy, and the instructions preamble above still applies:\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nnew disk body\n\nInstructions no longer present: /home/.lingxi/LINGXI.md\n\nInstructions no longer present: /repo/LINGXI.local.md\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "only-incomplete-thinking-resume-suppresses",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "resumeActive": true,
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [],
+      "inlinePrefix": []
+    },
+    {
+      "name": "managed-only-selects-managed-files",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "options": {
+        "managedInstructionsOnly": true
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/managed/LINGXI.md",
+                "type": "Managed",
+                "content": "managed policy"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /managed/LINGXI.md (organization-managed policy instructions):\n\nmanaged policy\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "omitted-claude-md-does-not-announce-files",
+      "current": [
+        {
+          "path": "/managed/LINGXI.md",
+          "type": "Managed",
+          "content": "  managed policy  \n"
+        },
+        {
+          "path": "/home/.lingxi/LINGXI.md",
+          "type": "User",
+          "content": "user policy"
+        },
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        },
+        {
+          "path": "/repo/LINGXI.local.md",
+          "type": "Local",
+          "content": "local policy"
+        }
+      ],
+      "userContext": {},
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": false,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "unavailable-file-descriptors-retain-context-section",
+      "userContext": {
+        "claudeMd": "retained scalar context"
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [
+          {
+            "name": "claudeMd",
+            "text": "retained scalar context"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "context_sections",
+            "sections": [
+              {
+                "name": "claudeMd",
+                "text": "retained scalar context"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\n# claudeMd\nretained scalar context\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "empty-scalar-with-unavailable-descriptors",
+      "userContext": {
+        "claudeMd": ""
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "ordinary-announcement-order",
+      "current": [
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "replaced",
+        "Environment": "host environment",
+        "userEmail": "user@example.test",
+        "attachedProject": "repo"
+      },
+      "systemContext": {
+        "gitStatus": "clean",
+        "perforceMode": "disabled",
+        "extra": "system section",
+        "cacheBreaker": "stable suffix"
+      },
+      "routing": {
+        "userContext": {},
+        "systemContext": {
+          "cacheBreaker": "stable suffix"
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "attachedProject": "repo",
+          "gitStatus": "clean",
+          "perforceMode": "disabled"
+        },
+        "sections": [
+          {
+            "name": "Environment",
+            "text": "host environment"
+          },
+          {
+            "name": "extra",
+            "text": "system section"
+          }
+        ],
+        "instructions": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nproject policy\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test",
+              "attachedProject": "repo",
+              "gitStatus": "clean",
+              "perforceMode": "disabled"
+            }
+          },
+          "rendered": [
+            "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# userEmail\nuser@example.test\n# attachedProject\nrepo\n# gitStatus\nclean\n# perforceMode\ndisabled\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "context_sections",
+            "sections": [
+              {
+                "name": "Environment",
+                "text": "host environment"
+              },
+              {
+                "name": "extra",
+                "text": "system section"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\n# Environment\nhost environment\n# extra\nsystem section\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "normal-announced-routing-even-metadata-gate-off",
+      "current": [
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "contextMetadata": false,
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "instructions": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          }
+        ],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "instructions",
+            "files": [
+              {
+                "path": "/repo/LINGXI.md",
+                "type": "Project",
+                "content": "project policy"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nproject policy\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          },
+          "rendered": []
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          },
+          "rendered": [
+            "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    },
+    {
+      "name": "historical-inline-prefix-is-outgoing-only",
+      "current": [
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "inline scalar",
+        "userEmail": "user@example.test"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "fixture system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "routing": {
+        "userContext": {
+          "claudeMd": "inline scalar",
+          "userEmail": "user@example.test"
+        },
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": true,
+        "carriesContext": true,
+        "rendering": "inline"
+      },
+      "expected": [],
+      "inlinePrefix": [
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# claudeMd\ninline scalar\n# userEmail\nuser@example.test\n\n      Claude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>\n"
+      ]
+    },
+    {
+      "name": "historical-inline-empty-instruction-key-elided",
+      "current": [],
+      "userContext": {
+        "claudeMd": "",
+        "Environment": "host environment"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "fixture system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "routing": {
+        "userContext": {
+          "Environment": "host environment"
+        },
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": true,
+        "carriesContext": true,
+        "rendering": "inline"
+      },
+      "expected": [],
+      "inlinePrefix": [
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# Environment\nhost environment\n\n      Claude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>\n"
+      ]
+    },
+    {
+      "name": "explicit-bare-fork-prefix-is-outgoing-only",
+      "current": [
+        {
+          "path": "/repo/LINGXI.md",
+          "type": "Project",
+          "content": "\nproject policy\n"
+        }
+      ],
+      "userContext": {
+        "claudeMd": "scalar replaced by typed files"
+      },
+      "options": {
+        "bareFork": true
+      },
+      "routing": {
+        "userContext": {
+          "claudeMd": "scalar replaced by typed files"
+        },
+        "systemContext": {},
+        "announced": {},
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": true,
+        "carriesContext": true
+      },
+      "expected": [],
+      "inlinePrefix": [
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# claudeMd\nscalar replaced by typed files\n\n      Claude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>\n"
+      ]
+    },
+    {
+      "name": "session-and-date-same-suppressed",
+      "current": [],
+      "userContext": {
+        "userEmail": "user@example.test"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "sections": [],
+        "refreshReason": "session_start",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [],
+      "inlinePrefix": []
+    },
+    {
+      "name": "session-cleared-and-local-date-changed",
+      "current": [],
+      "userContext": {
+        "Environment": "current environment"
+      },
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "old@example.test",
+              "gitStatus": "old status"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "date",
+            "date": "2026-09-30"
+          }
+        }
+      ],
+      "date": "2026-10-01",
+      "reason": "account_change",
+      "routing": {
+        "userContext": {},
+        "systemContext": {},
+        "announced": {},
+        "sections": [
+          {
+            "name": "Environment",
+            "text": "current environment"
+          }
+        ],
+        "refreshReason": "account_change",
+        "bare": false,
+        "carriesContext": true,
+        "rendering": "announced"
+      },
+      "expected": [
+        {
+          "attachment": {
+            "type": "session_context",
+            "context": {},
+            "changed": true,
+            "reason": "account_change"
+          },
+          "rendered": [
+            "<system-reminder>\nThe session context was re-read after the account changed; the values announced earlier (account, project, git status) no longer apply.\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "context_sections",
+            "sections": [
+              {
+                "name": "Environment",
+                "text": "current environment"
+              }
+            ]
+          },
+          "rendered": [
+            "<system-reminder>\n# Environment\ncurrent environment\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+          ]
+        },
+        {
+          "attachment": {
+            "type": "date",
+            "date": "2026-10-01",
+            "changed": true
+          },
+          "rendered": [
+            "<system-reminder>\nThe date has changed. Today's date is now 2026-10-01. No need to announce the new date — the user's own clock shows it.\n</system-reminder>"
+          ]
+        }
+      ],
+      "inlinePrefix": []
+    }
+  ],
+  "renderCases": [
+    {
+      "name": "instructions-first",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /managed/LINGXI.md (organization-managed policy instructions):\n\nmanaged policy\n\nContents of /home/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\nuser policy\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nproject policy\n\nContents of /repo/LINGXI.local.md (user's private project instructions, not checked in):\n\nlocal policy\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-empty-first",
+      "attachment": {
+        "type": "instructions",
+        "files": []
+      },
+      "rendered": []
+    },
+    {
+      "name": "instructions-body-change-without-reason",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new body"
+          }
+        ],
+        "changed": true
+      },
+      "rendered": [
+        "<system-reminder>\nThese instruction files changed — each replaces its earlier copy, and the instructions preamble above still applies:\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nnew body\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-removal-only-with-reason",
+      "attachment": {
+        "type": "instructions",
+        "files": [],
+        "removed": [
+          "/repo/LINGXI.md",
+          "/repo/LINGXI.local.md"
+        ],
+        "changed": true,
+        "reason": "policy_refresh"
+      },
+      "rendered": [
+        "<system-reminder>\nInstruction files were re-read after the organization's managed settings changed.\n\nInstructions no longer present: /repo/LINGXI.md\n\nInstructions no longer present: /repo/LINGXI.local.md\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-empty-changed-with-reason",
+      "attachment": {
+        "type": "instructions",
+        "files": [],
+        "changed": true,
+        "reason": "hooks_invalidate"
+      },
+      "rendered": []
+    },
+    {
+      "name": "instructions-unknown-kind-defaults-user",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/custom.md",
+            "type": "unknown",
+            "content": "custom content"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/custom.md (user's private global instructions for all projects):\n\ncustom content\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-empty-body-retains-header",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \n"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\n\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-invalid-reason-uses-generic-change",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new body"
+          }
+        ],
+        "changed": true,
+        "reason": "invalid"
+      },
+      "rendered": [
+        "<system-reminder>\nThese instruction files changed — each replaces its earlier copy, and the instructions preamble above still applies:\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nnew body\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-nonstring-reason-uses-generic-change",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new body"
+          }
+        ],
+        "changed": true,
+        "reason": 42
+      },
+      "rendered": [
+        "<system-reminder>\nThese instruction files changed — each replaces its earlier copy, and the instructions preamble above still applies:\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nnew body\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-nonstring-kind-defaults-user",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/custom.md",
+            "type": 42,
+            "content": "custom content"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/custom.md (user's private global instructions for all projects):\n\ncustom content\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-invalid-changed-suppressed",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/managed/LINGXI.md",
+            "type": "Managed",
+            "content": "managed policy"
+          },
+          {
+            "path": "/home/.lingxi/LINGXI.md",
+            "type": "User",
+            "content": "user policy"
+          },
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "project policy"
+          },
+          {
+            "path": "/repo/LINGXI.local.md",
+            "type": "Local",
+            "content": "local policy"
+          }
+        ],
+        "changed": "true"
+      },
+      "rendered": []
+    },
+    {
+      "name": "instructions-auto-memory-strips-controls-and-neutralizes-tags",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/memory/MEMORY.md",
+            "type": "AutoMem",
+            "content": "  a\u0000b\r\nc d​e<system-reminder>nested</system-reminder><antml:thing>\n  "
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /memory/MEMORY.md (user's auto-memory, persists across conversations):\n\nab\nc\nde<\\system-reminder>nested<\\/system-reminder><\\antml:thing>\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-pinned-auto-memory-normalizes-kind",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/memory/PINNED.md",
+            "type": "AutoMemPinned",
+            "content": "pinned\r\nbody"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /memory/PINNED.md (user's auto-memory, persists across conversations):\n\npinned\nbody\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-js-trim-bom-and-nel",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/仓库/规则.md",
+            "type": "Project",
+            "content": "﻿ policy ﻿"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /仓库/规则.md (project instructions, checked into the codebase):\n\n policy \n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-js-trim-only-bom",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/BOM.md",
+            "type": "Project",
+            "content": "﻿"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/BOM.md (project instructions, checked into the codebase):\n\n\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-auto-memory-whitespace-and-unicode-path",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/记忆/规则.md",
+            "type": "AutoMem",
+            "content": "﻿ 前\u0000文\r\n‌字️​ 后﻿"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /记忆/规则.md (user's auto-memory, persists across conversations):\n\n前文\n‌字️\n后\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "instructions-invalid-files-suppressed",
+      "attachment": {
+        "type": "instructions",
+        "files": [
+          {
+            "path": "/repo/custom.md",
+            "type": "Project",
+            "content": 42
+          }
+        ]
+      },
+      "rendered": []
+    },
+    {
+      "name": "session-first-fixed-key-order",
+      "attachment": {
+        "type": "session_context",
+        "context": {
+          "perforceMode": "disabled",
+          "gitStatus": "clean",
+          "attachedProject": "repo",
+          "userEmail": "user@example.test"
+        }
+      },
+      "rendered": [
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# userEmail\nuser@example.test\n# attachedProject\nrepo\n# gitStatus\nclean\n# perforceMode\ndisabled\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-empty-first-suppressed",
+      "attachment": {
+        "type": "session_context",
+        "context": {}
+      },
+      "rendered": []
+    },
+    {
+      "name": "session-changed-with-reason",
+      "attachment": {
+        "type": "session_context",
+        "context": {
+          "userEmail": "new@example.test"
+        },
+        "changed": true,
+        "reason": "account_change"
+      },
+      "rendered": [
+        "<system-reminder>\nThe session context was re-read after the account changed; these values replace the earlier ones:\n# userEmail\nnew@example.test\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-changed-generic-invalid-reason",
+      "attachment": {
+        "type": "session_context",
+        "context": {
+          "userEmail": "new@example.test"
+        },
+        "changed": true,
+        "reason": "invalid"
+      },
+      "rendered": [
+        "<system-reminder>\nThe session context has changed; these values replace the earlier ones:\n# userEmail\nnew@example.test\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-empty-changed",
+      "attachment": {
+        "type": "session_context",
+        "context": {},
+        "changed": true
+      },
+      "rendered": [
+        "<system-reminder>\nThe session context was re-read; the values announced earlier (account, project, git status) no longer apply.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-empty-changed-with-reason",
+      "attachment": {
+        "type": "session_context",
+        "context": {},
+        "changed": true,
+        "reason": "settings_sync"
+      },
+      "rendered": [
+        "<system-reminder>\nThe session context was re-read after settings were synced onto this machine; the values announced earlier (account, project, git status) no longer apply.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-nonboolean-changed-is-initial",
+      "attachment": {
+        "type": "session_context",
+        "context": {
+          "userEmail": "new@example.test"
+        },
+        "changed": "true"
+      },
+      "rendered": [
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# userEmail\nnew@example.test\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "session-unknown-context-key-suppressed",
+      "attachment": {
+        "type": "session_context",
+        "context": {
+          "userEmail": "user@example.test",
+          "unknown": "invalid key"
+        }
+      },
+      "rendered": []
+    },
+    {
+      "name": "context-sections-preserve-order-whitespace-duplicates",
+      "attachment": {
+        "type": "context_sections",
+        "sections": [
+          {
+            "name": "Environment",
+            "text": "  host environment\n"
+          },
+          {
+            "name": "claudeMd",
+            "text": "scalar instructions"
+          },
+          {
+            "name": "Environment",
+            "text": "another section"
+          }
+        ]
+      },
+      "rendered": [
+        "<system-reminder>\n# Environment\n  host environment\n\n# claudeMd\nscalar instructions\n# Environment\nanother section\n\nThis is ambient context — do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "context-sections-empty-suppressed",
+      "attachment": {
+        "type": "context_sections",
+        "sections": []
+      },
+      "rendered": []
+    },
+    {
+      "name": "context-sections-invalid-suppressed",
+      "attachment": {
+        "type": "context_sections",
+        "sections": [
+          {
+            "name": "Environment",
+            "text": 42
+          }
+        ]
+      },
+      "rendered": []
+    },
+    {
+      "name": "date-first",
+      "attachment": {
+        "type": "date",
+        "date": "2026-09-30"
+      },
+      "rendered": [
+        "<system-reminder>\nToday's date is 2026-09-30.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "date-changed",
+      "attachment": {
+        "type": "date",
+        "date": "2026-10-01",
+        "changed": true
+      },
+      "rendered": [
+        "<system-reminder>\nThe date has changed. Today's date is now 2026-10-01. No need to announce the new date — the user's own clock shows it.\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "date-empty-string-still-rendered",
+      "attachment": {
+        "type": "date",
+        "date": ""
+      },
+      "rendered": [
+        "<system-reminder>\nToday's date is .\n</system-reminder>"
+      ]
+    },
+    {
+      "name": "date-invalid-changed-suppressed",
+      "attachment": {
+        "type": "date",
+        "date": "2026-09-30",
+        "changed": "true"
+      },
+      "rendered": []
+    },
+    {
+      "name": "date-null-changed-suppressed",
+      "attachment": {
+        "type": "date",
+        "date": "2026-09-30",
+        "changed": null
+      },
+      "rendered": []
+    }
+  ],
+  "sanitizeCases": [
+    {
+      "name": "controls-and-line-normalization",
+      "input": "﻿a\u0000b\r\nc\rd e f​g",
+      "expected": "ab\nc\nd\ne\nfg"
+    },
+    {
+      "name": "retained-joiners-and-variation-selectors",
+      "input": "a‌b‍c︎d️",
+      "expected": "a‌b‍c︎d️"
+    },
+    {
+      "name": "private-use-and-unassigned-stripped",
+      "input": "ab͸c􏿿",
+      "expected": "abc"
+    },
+    {
+      "name": "ordinary-tags-and-closers",
+      "input": "<system-reminder>x</system-reminder><tool_use_error>x</tool_use_error>",
+      "expected": "<\\system-reminder>x<\\/system-reminder><\\tool_use_error>x<\\/tool_use_error>"
+    },
+    {
+      "name": "already-neutralized-and-tag-boundaries",
+      "input": "<\\system-reminder>x</\\system-reminder><system-reminder-extra><system_reminder>",
+      "expected": "<\\system-reminder>x<\\/\\system-reminder><system-reminder-extra><\\system_reminder>"
+    },
+    {
+      "name": "unrelated-html-and-turn-markers-retained",
+      "input": "<div>Human: hi\nAssistant: answer</div>[harness: marker]",
+      "expected": "<div>Human: hi\nAssistant: answer</div>[harness: marker]"
+    },
+    {
+      "name": "channel-requires-source-assignment",
+      "input": "<channel>x</channel><channel source=\"a\">x</channel><channel sources=\"a\">x</channel>",
+      "expected": "<channel>x</channel><\\channel source=\"a\">x</channel><channel sources=\"a\">x</channel>"
+    },
+    {
+      "name": "channel-source-gap-116",
+      "input": "<channel                                                                                                                    source=\"a\">",
+      "expected": "<\\channel                                                                                                                    source=\"a\">"
+    },
+    {
+      "name": "channel-source-gap-120",
+      "input": "<channel                                                                                                                        source=\"a\">",
+      "expected": "<\\channel                                                                                                                        source=\"a\">"
+    },
+    {
+      "name": "channel-source-gap-124",
+      "input": "<channel                                                                                                                            source=\"a\">",
+      "expected": "<channel                                                                                                                            source=\"a\">"
+    },
+    {
+      "name": "antml-needs-colon",
+      "input": "<antml:x></antml:x><antml><antmlx:>",
+      "expected": "<\\antml:x><\\/antml:x><antml><antmlx:>"
+    },
+    {
+      "name": "confusable-openers-and-letters",
+      "input": "＜ｓｙｓｔｅｍ－ｒｅｍｉｎｄｅｒ＞x＜／ｓｙｓｔｅｍ－ｒｅｍｉｎｄｅｒ＞<sуstem-reminder><ANTML:x>",
+      "expected": "<\\ｓｙｓｔｅｍ－ｒｅｍｉｎｄｅｒ＞x<\\／ｓｙｓｔｅｍ－ｒｅｍｉｎｄｅｒ＞<\\sуstem-reminder><\\ANTML:x>"
+    },
+    {
+      "name": "non-ascii-opening-offsets-after-expanded-reading",
+      "input": "😀éß＜channel source=\"x\">尾",
+      "expected": "😀éß<\\channel source=\"x\">尾"
+    },
+    {
+      "name": "retained-invisible-between-tag-letters",
+      "input": "<s‌y️stem-reminder>x</system-reminder>",
+      "expected": "<\\s‌y️stem-reminder>x<\\/system-reminder>"
+    },
+    {
+      "name": "every-native-ordinary-framing-tag",
+      "input": "<bash-input>x</bash-input>\n<bash-stdout>x</bash-stdout>\n<bash-stderr>x</bash-stderr>\n<bash-exit-code>x</bash-exit-code>\n<local-command-stdout>x</local-command-stdout>\n<local-command-stderr>x</local-command-stderr>\n<local-command-caveat>x</local-command-caveat>\n<command-name>x</command-name>\n<command-message>x</command-message>\n<command-args>x</command-args>\n<task-notification>x</task-notification>\n<agent-message>x</agent-message>\n<teammate-message>x</teammate-message>\n<cross-session-message>x</cross-session-message>\n<remote-review>x</remote-review>\n<slack-ping>x</slack-ping>\n<slack-tag-message>x</slack-tag-message>\n<tick>x</tick>\n<fetched-web-content>x</fetched-web-content>\n<coordinator-relay>x</coordinator-relay>\n<artifact-type-instructions>x</artifact-type-instructions>\n<cowritten-artifact-html>x</cowritten-artifact-html>\n<artifact-file-content>x</artifact-file-content>\n<artifact-origin-notes>x</artifact-origin-notes>\n<artifact-stored-declaration>x</artifact-stored-declaration>\n<system-reminder>x</system-reminder>\n<system_reminder>x</system_reminder>\n<function_results>x</function_results>\n<tool_use_error>x</tool_use_error>\n<sandbox_violations>x</sandbox_violations>\n<persisted-output>x</persisted-output>\n<total_tokens>x</total_tokens>\n<user-prompt-submit-hook>x</user-prompt-submit-hook>",
+      "expected": "<\\bash-input>x<\\/bash-input>\n<\\bash-stdout>x<\\/bash-stdout>\n<\\bash-stderr>x<\\/bash-stderr>\n<\\bash-exit-code>x<\\/bash-exit-code>\n<\\local-command-stdout>x<\\/local-command-stdout>\n<\\local-command-stderr>x<\\/local-command-stderr>\n<\\local-command-caveat>x<\\/local-command-caveat>\n<\\command-name>x<\\/command-name>\n<\\command-message>x<\\/command-message>\n<\\command-args>x<\\/command-args>\n<\\task-notification>x<\\/task-notification>\n<\\agent-message>x<\\/agent-message>\n<\\teammate-message>x<\\/teammate-message>\n<\\cross-session-message>x<\\/cross-session-message>\n<\\remote-review>x<\\/remote-review>\n<\\slack-ping>x<\\/slack-ping>\n<\\slack-tag-message>x<\\/slack-tag-message>\n<\\tick>x<\\/tick>\n<\\fetched-web-content>x<\\/fetched-web-content>\n<\\coordinator-relay>x<\\/coordinator-relay>\n<\\artifact-type-instructions>x<\\/artifact-type-instructions>\n<\\cowritten-artifact-html>x<\\/cowritten-artifact-html>\n<\\artifact-file-content>x<\\/artifact-file-content>\n<\\artifact-origin-notes>x<\\/artifact-origin-notes>\n<\\artifact-stored-declaration>x<\\/artifact-stored-declaration>\n<\\system-reminder>x<\\/system-reminder>\n<\\system_reminder>x<\\/system_reminder>\n<\\function_results>x<\\/function_results>\n<\\tool_use_error>x<\\/tool_use_error>\n<\\sandbox_violations>x<\\/sandbox_violations>\n<\\persisted-output>x<\\/persisted-output>\n<\\total_tokens>x<\\/total_tokens>\n<\\user-prompt-submit-hook>x<\\/user-prompt-submit-hook>"
+    }
+  ],
+  "trimCases": [
+    {
+      "name": "bom-and-nel",
+      "input": "﻿ text ﻿",
+      "expected": " text "
+    },
+    {
+      "name": "js-only-whitespace",
+      "input": "﻿    　",
+      "expected": ""
+    },
+    {
+      "name": "rust-only-nel-is-retained",
+      "input": "",
+      "expected": ""
+    }
+  ],
+  "snapshotCases": [
+    {
+      "name": "valid-inline-empty-system-prompt",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "valid-announced-system-prompt",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "announced"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base"
+          ],
+          "contextRendering": "announced"
+        },
+        "snapshotHint": "announced",
+        "hint": "announced",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "missing-system-prompt-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "null-system-prompt-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": null,
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "non-array-system-prompt-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": "base",
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "mixed-system-prompt-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base",
+              42
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "invalid-latest-does-not-fall-back-to-older-inline",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "valid-latest-without-hint-does-not-fall-back",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "new base"
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "new base"
+          ]
+        },
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "invalid-context-rendering-is-caught-undefined",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "unknown"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base"
+          ]
+        },
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "nonstring-context-rendering-is-caught-undefined",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": 42
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base"
+          ]
+        },
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "valid-tools-object-schema-and-server",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "name": "Read",
+                "description": "read file",
+                "schema": {
+                  "type": "object",
+                  "custom": [
+                    1,
+                    "x"
+                  ]
+                },
+                "server": "files"
+              }
+            ],
+            "cliPrefix": "claude"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base"
+          ],
+          "tools": [
+            {
+              "name": "Read",
+              "description": "read file",
+              "schema": {
+                "type": "object",
+                "custom": [
+                  1,
+                  "x"
+                ]
+              },
+              "server": "files"
+            }
+          ],
+          "cliPrefix": "claude",
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "tool-name-required",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "description": "read file"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "tool-description-required",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "name": "Read"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "tool-schema-array-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "name": "Read",
+                "description": "read file",
+                "schema": []
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "tool-schema-number-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "name": "Read",
+                "description": "read file",
+                "schema": 42
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "tool-server-number-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": [
+              {
+                "name": "Read",
+                "description": "read file",
+                "server": 42
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "tools-null-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "tools": null
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "cli-prefix-number-invalidates-latest",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "cliPrefix": 42
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "invalid-optional-booleans-are-caught-undefined",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base"
+            ],
+            "contextRendering": "inline",
+            "reminderFold": 42,
+            "systemTurns": "yes",
+            "toolChangeHeader": null,
+            "inlineTools": [],
+            "keptReminders": {},
+            "echoWireToolInputs": "no"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base"
+          ],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "metadata-flag-false-ignores-valid-inline-hint",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "contextMetadata": false,
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base system"
+          ],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": null,
+        "metadataEnabled": false,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "metadata-flag-nonfalse-value-retains-hint",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "contextMetadata": 0,
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base system"
+          ],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "metadata-reader-error-defaults-enabled",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "readerThrows": true,
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base system"
+          ],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "recording-option-false-does-not-gate-reading-hint",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "options": {
+        "systemPromptSnapshot": false
+      },
+      "expected": {
+        "schemaValid": true,
+        "parsedSnapshot": {
+          "systemPrompt": [
+            "base system"
+          ],
+          "contextRendering": "inline"
+        },
+        "snapshotHint": "inline",
+        "hint": "inline",
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "inline"
+      }
+    },
+    {
+      "name": "legacy-reminder-prose-does-not-establish-hint",
+      "prior": [
+        {
+          "type": "user",
+          "isMeta": true,
+          "message": {
+            "content": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# claudeMd\nold context\n</system-reminder>"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "latest-invalid-snapshot-can-use-session-announced-hint",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "systemPrompt": [
+              "base system"
+            ],
+            "contextRendering": "inline"
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "prompt_snapshot",
+            "contextRendering": "inline"
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": "announced",
+        "selectedRendering": "announced"
+      }
+    },
+    {
+      "name": "latest-invalid-session-does-not-fall-back-to-older-session",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "unknown": "invalid key"
+            }
+          }
+        }
+      ],
+      "expected": {
+        "schemaValid": false,
+        "parsedSnapshot": null,
+        "snapshotHint": null,
+        "hint": null,
+        "metadataEnabled": true,
+        "historyHint": null,
+        "selectedRendering": "announced"
+      }
+    }
+  ],
+  "gitSnapshotCases": [
+    {
+      "name": "valid-empty-session-context-freezes-missing-git",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {}
+          }
+        }
+      ],
+      "announced": {
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {},
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {},
+        "calls": []
+      }
+    },
+    {
+      "name": "valid-email-context-freezes-missing-git",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test"
+            }
+          }
+        }
+      ],
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "valid-latest-missing-git-does-not-use-older-explicit-git",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "gitStatus": "old git"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "userEmail": "user@example.test"
+            }
+          }
+        }
+      ],
+      "announced": {
+        "userEmail": "user@example.test"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "invalid-latest-context-fetches-host-without-older-fallback",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "gitStatus": "old git"
+            }
+          }
+        },
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "unknown": "invalid key"
+            }
+          }
+        }
+      ],
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "fresh host git"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "fresh host git"
+        },
+        "calls": [
+          "fetch"
+        ]
+      }
+    },
+    {
+      "name": "invalid-latest-git-value-fetches-host",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "gitStatus": 42
+            }
+          }
+        }
+      ],
+      "announced": {
+        "userEmail": "user@example.test"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "fresh host git"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "fresh host git"
+        },
+        "calls": [
+          "fetch"
+        ]
+      }
+    },
+    {
+      "name": "valid-explicit-git-is-frozen",
+      "prior": [
+        {
+          "type": "attachment",
+          "attachment": {
+            "type": "session_context",
+            "context": {
+              "gitStatus": "frozen git",
+              "userEmail": "user@example.test"
+            }
+          }
+        }
+      ],
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "frozen git"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "frozen git"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "new-history-fetches-host-git",
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "fresh host git"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "fresh host git"
+        },
+        "calls": [
+          "fetch"
+        ]
+      }
+    },
+    {
+      "name": "new-history-omit-git-does-not-fetch",
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "omitGitStatus": true,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "new-history-ineligible-git-does-not-fetch",
+      "announced": {
+        "userEmail": "user@example.test"
+      },
+      "hostGit": "fresh host git",
+      "canFetchGit": false,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "foreground-consumes-prefetched-git",
+      "announced": {
+        "userEmail": "user@example.test"
+      },
+      "hostGit": "fresh host git",
+      "prefetchedGit": "prefetched git",
+      "foreground": true,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "prefetched git"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "prefetched git"
+        },
+        "calls": [
+          "prefetch"
+        ]
+      }
+    },
+    {
+      "name": "foreground-null-prefetch-does-not-fall-back-to-host",
+      "announced": {
+        "userEmail": "user@example.test"
+      },
+      "hostGit": "fresh host git",
+      "prefetchedGit": null,
+      "foreground": true,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": [
+          "prefetch"
+        ]
+      }
+    },
+    {
+      "name": "host-null-removes-incoming-git",
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": null,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test"
+          },
+          "bare": false,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test"
+        },
+        "calls": [
+          "fetch"
+        ]
+      }
+    },
+    {
+      "name": "bare-routing-keeps-incoming-context",
+      "announced": {
+        "userEmail": "user@example.test",
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "bare": true,
+      "expected": {
+        "routing": {
+          "announced": {
+            "userEmail": "user@example.test",
+            "gitStatus": "stale incoming git"
+          },
+          "bare": true,
+          "carriesContext": true
+        },
+        "announced": {
+          "userEmail": "user@example.test",
+          "gitStatus": "stale incoming git"
+        },
+        "calls": []
+      }
+    },
+    {
+      "name": "no-context-keeps-incoming-context-without-fetch",
+      "announced": {
+        "gitStatus": "stale incoming git"
+      },
+      "hostGit": "fresh host git",
+      "carriesContext": false,
+      "expected": {
+        "routing": {
+          "announced": {
+            "gitStatus": "stale incoming git"
+          },
+          "bare": false,
+          "carriesContext": false
+        },
+        "announced": {
+          "gitStatus": "stale incoming git"
+        },
+        "calls": []
+      }
+    }
+  ]
+}

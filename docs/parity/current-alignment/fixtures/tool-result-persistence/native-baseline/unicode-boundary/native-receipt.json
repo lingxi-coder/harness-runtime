@@ -1,0 +1,137 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "27d6a568c01b6d8d9ea5a84da710a09fd3a8a818707f486aae9f373f2e1abc09",
+  "fixture_sha256": {
+    "cases.json": "e212279b8efa8c582c2607a44f2e272257f0d6661627f48f37930ea62225f09a",
+    "plugin/hooks/register.js": "5f15dbc5ce6165684c235d55fc5b1ff1868a411ac01e5b05f5a0dc2195735574",
+    "plugin/hooks/register-unicode-boundary.js": "d20c2a625a3c4d5a41a6d9f0654864f6a828ee1488260d848c1506281e43f8c7",
+    "plugin/hooks/hooks.json": "b931956e2be9f76c91e4364655b2ab31493908b4920a088282a6c19aa7e8a6dc",
+    "plugin/.claude-plugin/plugin.json": "c7878940e030c4a81c4b88af34e730916035bf4e248281cf061f5b54581b75b4"
+  },
+  "active_plugin_hook": "plugin/hooks/register-unicode-boundary.js",
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002935",
+    "Use the probe tool once, then report the fixed completion."
+  ],
+  "run_output_dir": "run-output/tool-result-native-unicode-boundary-slkzqz1u",
+  "case_name": "unicode-boundary",
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 125290,
+      "request_sha256": "f25772e8d17103d0badbe239e033a58af730b99560ffdc833178f7a0436473a8",
+      "raw_request_path": "run-output/tool-result-native-unicode-boundary-slkzqz1u/requests/request-1.full.raw.json"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 128316,
+      "request_sha256": "a204fea91181f8c7afdd71115eb49f7a56a9e2b07a821068cf51f652533c6afc",
+      "raw_request_path": "run-output/tool-result-native-unicode-boundary-slkzqz1u/requests/request-2.full.raw.json"
+    }
+  ],
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 17,
+    "sha256": "8a1930233c1c3ef60373538de64d4c94b15415cc36fcfbb1fe7f80534771d637"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "tool_result_source": {
+    "utf16_units": 50007,
+    "utf16_units_around_preview_boundary": {
+      "1998": "U+0061",
+      "1999": "U+D83D",
+      "2000": "U+DE00",
+      "2001": "U+0054",
+      "2004": "U+004C",
+      "2005": "U+D83D",
+      "2006": "U+DE00"
+    }
+  },
+  "native_tool_call_meta": {
+    "path": "tool-call-meta.raw.txt",
+    "bytes": 346,
+    "sha256": "2011f87c78d42a9a24cb93d111373d4e16209339cb8b6ec1f93d73eae1dd069a",
+    "observed": {
+      "tool": "mcp__native-tool-result-persist-fixture__probe",
+      "tool_use_id": "toolu_native_tool_result_boundary_fixture",
+      "result_units": 50007,
+      "unit_at_1998": 97,
+      "unit_at_1999": 55357,
+      "unit_at_2000": 56832,
+      "unit_at_2005": 55357,
+      "unit_at_2006": 56832
+    }
+  },
+  "session_preview": {
+    "raw_row_path": "tool-result-session-row.raw.jsonl",
+    "bytes": 53474,
+    "sha256": "3e7f50ef24610a9e59deb95161bc7d32e4590d1367339bee07c4b66ea01a8e73",
+    "utf16_units": 2000,
+    "units_around_preview_boundary": {
+      "1998": "U+0061",
+      "1999": "U+D83D"
+    },
+    "ends_with_high_surrogate": true,
+    "omission_count_marker_present": false
+  },
+  "request_preview": {
+    "raw_content_path": "tool-result-content.raw.json",
+    "bytes": 2737,
+    "sha256": "ad3029d3829b2b0c56e0ecf72ce8ca1788926c43ab9b2e9a6ed69f231e33cd3e",
+    "utf16_units": 2000,
+    "units_around_preview_boundary": {
+      "1998": "U+0061",
+      "1999": "U+FFFD"
+    },
+    "ends_with_high_surrogate": false,
+    "omission_count_marker_present": false
+  },
+  "persisted_file": {
+    "path": "persisted-tool-result.raw",
+    "bytes": 50011,
+    "sha256": "3ccf774df06b26a383ab737e86c5972514e5c04ae51ffe00c4d941f5f14f190a",
+    "utf8_replacement_count": 0
+  },
+  "checks": {
+    "registered_tool_in_first_request": true,
+    "two_fixed_requests": true,
+    "tool_result_envelope_in_request": true,
+    "native_tool_call_hook_executed": true,
+    "native_preview_has_2000_utf16_units": true,
+    "persisted_file_matches_expected_utf8_boundary": true,
+    "source_contains_boundary_and_tail_non_bmp": true
+  },
+  "scope": "Public Native CLI + $.tool.register + tool.call; source preview, Anthropic request serialization, session JSONL, and persisted file are separate surfaces. No Harness comparison."
+}

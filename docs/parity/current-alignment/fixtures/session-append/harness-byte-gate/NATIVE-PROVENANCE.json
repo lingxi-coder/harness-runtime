@@ -1,0 +1,9 @@
+{
+  "native_receipt": "/private/tmp/mods-current-native-293-session-append-v1628/RECEIPT.json",
+  "native_receipt_sha256": "5e1a4d5f798c94362e4069c4aa217469fb7b5aa42f7e0bca05f2a7cb5e1da886",
+  "captured_result_bytes_not_reserialized": true,
+  "actual_production_hooks": true,
+  "same_plugin_file": "/private/tmp/mods-current-native-293-session-append-v1628/hooks/register.js",
+  "case_count": 2,
+  "computer_use_source_omitted_or_mutated": false
+}

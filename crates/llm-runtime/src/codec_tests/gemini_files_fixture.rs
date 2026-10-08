@@ -3,7 +3,10 @@ use crate::{LlmError, ProviderRequest};
 use lingxi_llm_client::providers::google::files_wire as wire;
 pub use wire::GeminiFile;
 fn project(request: lingxi_llm_client::HttpRequest) -> ProviderRequest {
-    let mut host = ProviderRequest::post_json(request.url, serde_json::Value::Null);
+    let mut host = ProviderRequest::post_json(
+        request.url,
+        lingxi_llm_client::protocol::JsonPayload::default(),
+    );
     host.method = request.method;
     host.headers = request.headers.into_iter().collect();
     if host
@@ -11,7 +14,10 @@ fn project(request: lingxi_llm_client::HttpRequest) -> ProviderRequest {
         .get("content-type")
         .is_some_and(|value| value == "application/json")
     {
-        host.body_json = serde_json::from_slice(&request.body).expect("upstream generated JSON");
+        let source = std::str::from_utf8(&request.body).expect("upstream JSON is UTF-8");
+        host.body_json = lingxi_llm_client::protocol::JsonPayload::parse(source)
+            .expect("upstream generated JSON");
+        host.body_bytes = Some(request.body.to_vec());
     } else if !request.body.is_empty() {
         host.body_bytes = Some(request.body.to_vec());
     }

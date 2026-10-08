@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
+lingxi-llm-client.workspace = true
 secret = { path = "../secret" }
 cost = { path = "../cost" }
 # Promoted from dev-dependencies: `cost_translate` reads `ModelBillingMode` at

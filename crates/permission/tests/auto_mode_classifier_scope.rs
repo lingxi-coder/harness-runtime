@@ -9,6 +9,7 @@
 //! commands. These tests pin the scope in both directions.
 
 use lingxi_core::host::{PermissionDecision, PermissionGate};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
 use permission::filesystem::FsRoots;
 use permission::policy::PermissionPolicy;
@@ -17,7 +18,12 @@ use permission::rule::{
     PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
 };
 use permission::PermissionMode;
-use serde_json::{json, Value};
+
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+    };
+}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,9 +37,9 @@ impl LoopPermissionClassifier for Recording {
     async fn classify(
         &self,
         _: &str,
-        _: &Value,
+        _: &Utf16JsonProjection,
         _: &[permission::host_context::HostContextRecord],
-        _: &[String],
+        _: &[Utf16JsonProjection],
     ) -> AutoModeClassifierVerdict {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.verdict.clone()
@@ -43,7 +49,7 @@ impl LoopPermissionClassifier for Recording {
 struct Prompt(AtomicUsize);
 #[async_trait::async_trait]
 impl PermissionGate for Prompt {
-    async fn check(&self, _: &str, _: &Value) -> PermissionDecision {
+    async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
         PermissionDecision::Deny {
             reason: "PROMPTED".into(),
@@ -62,7 +68,7 @@ fn allow_verdict() -> AutoModeClassifierVerdict {
 /// Returns `(decision, classifier_calls, prompt_calls)`.
 async fn auto_call(
     name: &str,
-    input: &Value,
+    input: &Utf16JsonProjection,
     verdict: AutoModeClassifierVerdict,
 ) -> (PermissionDecision, usize, usize) {
     let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
@@ -277,7 +283,7 @@ fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
     PermissionRule {
         value: PermissionRuleValue {
             tool_name: tool.into(),
-            rule_content: content.map(str::to_string),
+            rule_content: content.map(Utf16JsonProjection::from),
         },
         behavior: PermissionBehavior::Allow,
         source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
@@ -287,7 +293,7 @@ fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
 /// Runs one Auto-mode call against a policy with a real workspace root.
 async fn auto_call_in_workspace(
     name: &str,
-    input: &Value,
+    input: &Utf16JsonProjection,
     rules: Vec<PermissionRule>,
     verdict: AutoModeClassifierVerdict,
 ) -> (PermissionDecision, usize, usize) {
@@ -342,11 +348,14 @@ async fn accept_edits_simulation_answers_edits_and_file_shell_commands() {
     ] {
         let (decision, classified, prompted) =
             auto_call_in_workspace(name, &input, Vec::new(), allow_verdict()).await;
-        assert_eq!(classified, 0, "{name} {input}: acceptEdits would allow it");
-        assert_eq!(prompted, 0, "{name} {input}");
+        assert_eq!(
+            classified, 0,
+            "{name} {input:?}: acceptEdits would allow it"
+        );
+        assert_eq!(prompted, 0, "{name} {input:?}");
         assert!(
             matches!(decision, PermissionDecision::Allow),
-            "{name} {input}"
+            "{name} {input:?}"
         );
     }
 }
@@ -595,11 +604,14 @@ async fn a_classifier_that_gives_no_verdict_never_trips_the_denial_breaker() {
     );
     for (index, decision) in decisions.iter().enumerate() {
         match decision {
-            PermissionDecision::Deny { reason } => assert!(
-                reason.contains("is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now.")
-                    && reason.contains("read-only operations do not require the classifier"),
-                "call {index} must carry $7t's retry guidance, not a blocked-action claim: {reason}"
-            ),
+            PermissionDecision::Deny { reason } => {
+                let display = reason.string_at("").unwrap_or_default();
+                assert!(
+                    display.contains("is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now.")
+                        && display.contains("read-only operations do not require the classifier"),
+                    "call {index} must carry $7t's retry guidance, not a blocked-action claim: {display}"
+                );
+            }
             other => panic!("call {index}: expected a fail-closed deny, got {other:?}"),
         }
     }
@@ -628,7 +640,7 @@ async fn a_classifier_that_blocks_does_trip_the_denial_breaker() {
     assert!(
         decisions
             .iter()
-            .any(|decision| matches!(decision, PermissionDecision::Deny { reason } if reason.contains("Unrequested deployment"))),
+            .any(|decision| matches!(decision, PermissionDecision::Deny { reason } if reason.string_at("").is_some_and(|display| display.contains("Unrequested deployment")))),
         "the counted denials must be the classifier's own: {decisions:?}"
     );
 }
@@ -670,10 +682,13 @@ async fn a_hook_ask_floor_does_not_turn_a_classifier_block_into_a_prompt() {
         "the floor must not skip the classifier"
     );
     match outcome {
-        permission::gate::PermissionOutcome::Deny { reason } => assert!(
-            reason.contains("Publishes to production"),
-            "the classifier's own block must survive the floor: {reason}"
-        ),
+        permission::gate::PermissionOutcome::Deny { reason } => {
+            let display = reason.string_at("").unwrap_or_default();
+            assert!(
+                display.contains("Publishes to production"),
+                "the classifier's own block must survive the floor: {display}"
+            );
+        }
         other => panic!("expected the classifier's deny, got {other:?}"),
     }
     assert_eq!(
@@ -718,7 +733,7 @@ async fn a_hook_ask_floor_still_discards_a_classifier_allow() {
         "the hook's ask must still reach the prompt"
     );
     assert!(
-        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason == "PROMPTED"),
+        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason.string_at("") == Some("PROMPTED")),
         "{outcome:?}"
     );
 }
@@ -766,7 +781,7 @@ async fn an_over_long_transcript_falls_back_to_the_prompt_not_a_deny() {
         "the call must reach the normal permission path"
     );
     assert!(
-        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason == "PROMPTED"),
+        matches!(outcome, permission::gate::PermissionOutcome::Deny { ref reason } if reason.string_at("") == Some("PROMPTED")),
         "the prompt decides, not the classifier: {outcome:?}"
     );
 }
@@ -804,8 +819,8 @@ async fn an_over_long_transcript_aborts_a_session_that_cannot_prompt() {
         .await;
     match outcome {
         permission::gate::PermissionOutcome::Deny { reason } => assert_eq!(
-            reason,
-            permission::loop_llm::TRANSCRIPT_TOO_LONG_HEADLESS_ABORT
+            reason.string_at(""),
+            Some(permission::loop_llm::TRANSCRIPT_TOO_LONG_HEADLESS_ABORT)
         ),
         other => panic!("expected the headless abort, got {other:?}"),
     }
@@ -822,16 +837,16 @@ impl LoopPermissionClassifier for HandoffOnly {
     async fn classify(
         &self,
         _: &str,
-        _: &Value,
+        _: &Utf16JsonProjection,
         _: &[permission::host_context::HostContextRecord],
-        _: &[String],
+        _: &[Utf16JsonProjection],
     ) -> AutoModeClassifierVerdict {
         unreachable!("the handoff tests never take the tool path")
     }
     async fn classify_handoff(
         &self,
         _: Option<&std::path::Path>,
-        _: &str,
+        _: &Utf16JsonProjection,
     ) -> AutoModeClassifierVerdict {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.verdict.clone()
@@ -856,7 +871,8 @@ async fn handoff(
         .loop_classifier_handle()
         .set(classifier.clone())
         .is_ok());
-    let outcome = gate.review_subagent_handoff(None, final_text).await;
+    let final_text = Utf16JsonProjection::from(final_text);
+    let outcome = gate.review_subagent_handoff(None, &final_text).await;
     (outcome, classifier.calls.load(Ordering::SeqCst))
 }
 

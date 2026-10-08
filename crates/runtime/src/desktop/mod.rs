@@ -76,6 +76,7 @@ use command_api::builtins::{
 };
 
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
 
@@ -134,24 +135,28 @@ fn hook_mcp_full_name(server: &str, tool: &str) -> String {
     }
 }
 
-fn mcp_hook_text_content(value: &serde_json::Value) -> Vec<String> {
-    match value {
-        serde_json::Value::String(text) => vec![text.clone()],
-        serde_json::Value::Array(items) => items
-            .iter()
-            .flat_map(mcp_hook_text_content)
-            .collect::<Vec<_>>(),
-        serde_json::Value::Object(object)
-            if object.get("type").and_then(serde_json::Value::as_str) == Some("text") =>
-        {
-            object
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(|text| vec![text.to_string()])
-                .unwrap_or_default()
-        }
-        _ => Vec::new(),
+fn mcp_hook_text_content(value: &Utf16JsonProjection) -> Vec<hooks::ExactHookText> {
+    if value.string_units("").is_some() {
+        return hooks::ExactHookText::from_json_projection(value, "")
+            .into_iter()
+            .collect();
     }
+    if let Some(len) = value.array_len("") {
+        return (0..len)
+            .flat_map(|index| {
+                value
+                    .subprojection(&format!("/{index}"))
+                    .map(|item| mcp_hook_text_content(&item))
+                    .unwrap_or_default()
+            })
+            .collect();
+    }
+    if value.string_at("/type") == Some("text") {
+        return hooks::ExactHookText::from_json_projection(value, "/text")
+            .into_iter()
+            .collect();
+    }
+    Vec::new()
 }
 
 fn map_hook_mcp_tool_result(
@@ -162,7 +167,7 @@ fn map_hook_mcp_tool_result(
         hooks::HookMcpInvocationResult::Error {
             message: text_content
                 .first()
-                .cloned()
+                .map(|text| text.display.clone())
                 .unwrap_or_else(|| "MCP tool returned isError".to_string()),
             text_content,
         }
@@ -200,9 +205,8 @@ impl hooks::HookMcpInvoker for DesktopHookMcpInvoker {
         };
 
         let full_name = hook_mcp_full_name(&request.server, &request.tool);
-        let input = serde_json::Value::Object(request.input.into_iter().collect());
         match client
-            .call_tool_with_timeout(&full_name, input, request.timeout)
+            .call_tool_with_timeout(&full_name, request.input, request.timeout)
             .await
         {
             Ok(result) => map_hook_mcp_tool_result(result),
@@ -303,8 +307,8 @@ async fn emit_mcp_tools_commands_loaded(
         .await;
 }
 
-fn utf16_code_units_len(value: &str) -> u32 {
-    u32::try_from(value.encode_utf16().count()).unwrap_or(u32::MAX)
+fn utf16_code_units_len(value: &Utf16JsonProjection) -> u32 {
+    u32::try_from(value.string_units("").map_or(0, |units| units.len())).unwrap_or(u32::MAX)
 }
 
 fn registered_mcp_tool_count(
@@ -376,7 +380,7 @@ fn mcp_tools_commands_loaded_payload(
             .saturating_add(
                 command
                     .argument_hint
-                    .as_deref()
+                    .as_ref()
                     .map_or(0, utf16_code_units_len),
             )
     });
@@ -468,10 +472,61 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(inner) => {
+                inner
+                    .cleanup_computer_inputs(agent_id, origin_session_id)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.permission_mode())
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Utf16JsonProjection) -> Option<bool> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.tool_is_concurrency_safe(name, input))
+    }
+
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .await
+            }
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .into(),
+            )),
+        }
+    }
+
     async fn invoke_detailed(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<
@@ -486,7 +541,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .to_string(),
+                    .into(),
             )),
         }
     }
@@ -494,14 +549,14 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .to_string(),
+                    .into(),
             )),
         }
     }
@@ -517,10 +572,10 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_with_workspace_lease(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
@@ -529,27 +584,13 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .to_string(),
+                    .into(),
             )),
         }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(inner) => {
-                inner
-                    .cleanup_computer_inputs(agent_id, origin_session_id)
-                    .await
-            }
-            None => Ok(()),
-        }
     }
 }
 
@@ -603,10 +644,12 @@ impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefiniti
 
 #[async_trait::async_trait]
 impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
-    async fn render_default_system_prompt(&self) -> String {
+    async fn render_default_system_prompt(
+        &self,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         match self.orchestrator.upgrade() {
             Some(orchestrator) => orchestrator.assemble_default_system_prompt_preview().await,
-            None => String::new(),
+            None => lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
         }
     }
 }
@@ -622,6 +665,25 @@ struct TeammateStatusFanout {
 
 #[async_trait::async_trait]
 impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
+    fn task_registry(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>> {
+        tasks::handlers::TaskStatusSink::task_registry(self.task_registry.as_ref())
+    }
+
+    async fn bind_agent_id(
+        &self,
+        task_id: &str,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Result<(), String> {
+        tasks::handlers::TaskStatusSink::bind_agent_id(
+            self.task_registry.as_ref(),
+            task_id,
+            agent_id,
+        )
+        .await
+    }
+
     fn requires_explicit_activation(&self) -> bool {
         tasks::handlers::TaskStatusSink::requires_explicit_activation(self.task_registry.as_ref())
     }
@@ -688,19 +750,15 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         .await;
     }
 
-    async fn set_pid(&self, task_id: &str, pid: u32) {
-        tasks::handlers::TaskStatusSink::set_pid(self.task_registry.as_ref(), task_id, pid).await;
-        tasks::handlers::TaskStatusSink::set_pid(self.coordinator.as_ref(), task_id, pid).await;
-    }
-
     async fn notify_rest(
         &self,
         task_id: &str,
-        result: Option<String>,
+        result: Option<Utf16JsonProjection>,
         usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
         agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
     ) {
         tasks::handlers::TaskStatusSink::notify_rest(
             self.task_registry.as_ref(),
@@ -710,6 +768,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             agent_id,
             agent_name.clone(),
             team_name.clone(),
+            run,
         )
         .await;
         tasks::handlers::TaskStatusSink::notify_rest(
@@ -720,6 +779,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             agent_id,
             agent_name,
             team_name,
+            run,
         )
         .await;
     }
@@ -743,11 +803,16 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         .await;
     }
 
-    async fn notify_monitor_event(&self, task_id: &str, event: &str, housekeeping: bool) {
+    async fn notify_monitor_event(
+        &self,
+        task_id: &str,
+        event: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        housekeeping: bool,
+    ) {
         tasks::handlers::TaskStatusSink::notify_monitor_event(
             self.task_registry.as_ref(),
             task_id,
-            event,
+            event.clone(),
             housekeeping,
         )
         .await;
@@ -768,6 +833,10 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         tasks::handlers::TaskStatusSink::is_terminal(self.task_registry.as_ref(), task_id).await
     }
 }
+
+#[cfg(test)]
+#[path = "tests/teammate_status_fanout_test.rs"]
+mod teammate_status_fanout_test;
 
 /// Session-owned routing for teammate messages. Team creation is implicit;
 /// the tool registry exposes only SendMessage alongside Agent.
@@ -1245,7 +1314,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         // where it went should find this.
                         scope: None,
                     },
-                    task_description,
+                    task_description.into(),
                 )
                 .await
                 .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
@@ -2080,7 +2149,7 @@ impl DesktopBashRunner {
         let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
         match tool
             .call(
-                serde_json::json!({ "command": command }),
+                source_object([("command", command.into())]),
                 use_ctx,
                 progress_tx,
             )
@@ -2090,8 +2159,7 @@ impl DesktopBashRunner {
                 let field = |key: &str| {
                     result
                         .data
-                        .get(key)
-                        .and_then(serde_json::Value::as_str)
+                        .string_at(&format!("/{key}"))
                         .unwrap_or_default()
                         .to_string()
                 };
@@ -2100,9 +2168,10 @@ impl DesktopBashRunner {
                     stderr: field("stderr"),
                     exit_code: result
                         .data
-                        .get("exit_code")
-                        .and_then(serde_json::Value::as_i64)
-                        .and_then(|c| i32::try_from(c).ok())
+                        .at_pointer("/exit_code")
+                        .and_then(|value| value.as_number())
+                        .filter(|value| value.is_finite() && value.fract() == 0.0)
+                        .and_then(|value| i32::try_from(value as i64).ok())
                         .unwrap_or_default(),
                 }
             }
@@ -2129,8 +2198,8 @@ mod typed_bash_cancellation_tests;
 /// this desktop-only convenience handler at composition time instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WorktreeSlashAction {
-    Create(Option<String>),
-    Enter(String),
+    Create(Option<Utf16JsonProjection>),
+    Enter(Utf16JsonProjection),
     Status,
     Keep,
     Remove { discard_changes: bool },
@@ -2147,13 +2216,15 @@ fn parse_worktree_slash_action(
         return Ok(WorktreeSlashAction::Create(None));
     }
 
-    match tokens[0].as_str() {
+    match tokens[0].string_at("").unwrap_or_default() {
         "status" if tokens.len() == 1 => Ok(WorktreeSlashAction::Status),
         "create" if tokens.len() == 1 => Ok(WorktreeSlashAction::Create(None)),
         "create" if tokens.len() == 2 => Ok(WorktreeSlashAction::Create(Some(tokens[1].clone()))),
         // Joining the remaining quote-aware tokens accepts both
         // `enter "/path with spaces"` and the forgiving unquoted form.
-        "enter" if tokens.len() >= 2 => Ok(WorktreeSlashAction::Enter(tokens[1..].join(" "))),
+        "enter" if tokens.len() >= 2 => {
+            Ok(WorktreeSlashAction::Enter(join_source_text(&tokens[1..])))
+        }
         // Do not let a missing path fall through to the `<name>` shorthand and
         // accidentally create a worktree literally named `enter`.
         "enter" => Err(WORKTREE_SLASH_USAGE),
@@ -2161,7 +2232,7 @@ fn parse_worktree_slash_action(
         "remove" if tokens.len() == 1 => Ok(WorktreeSlashAction::Remove {
             discard_changes: false,
         }),
-        "remove" if tokens.len() == 2 && tokens[1] == "--discard" => {
+        "remove" if tokens.len() == 2 && tokens[1].string_at("") == Some("--discard") => {
             Ok(WorktreeSlashAction::Remove {
                 discard_changes: true,
             })
@@ -2170,6 +2241,30 @@ fn parse_worktree_slash_action(
         _ if tokens.len() == 1 => Ok(WorktreeSlashAction::Create(Some(tokens[0].clone()))),
         _ => Err(WORKTREE_SLASH_USAGE),
     }
+}
+
+fn join_source_text(parts: &[Utf16JsonProjection]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            units.push(u16::from(b' '));
+        }
+        units.extend(part.string_units("").unwrap_or_default());
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("joined source units have a display form")
+}
+
+fn source_object(
+    fields: impl IntoIterator<Item = (&'static str, Utf16JsonProjection)>,
+) -> Utf16JsonProjection {
+    let mut object = Utf16JsonProjection::parse("{}").expect("empty object is valid JSON");
+    for (name, value) in fields {
+        object
+            .set_field(name, value)
+            .expect("generated object field insertion is valid");
+    }
+    object
 }
 
 /// Desktop slash handler backed by the exact same tools as model-issued
@@ -2243,8 +2338,8 @@ impl DesktopWorktreeCommandHandler {
     async fn call_tool<T: tool_api::Tool + Sync>(
         &self,
         tool: &T,
-        input: serde_json::Value,
-    ) -> String {
+        input: Utf16JsonProjection,
+    ) -> Utf16JsonProjection {
         let (progress_tx, _progress_rx) = tool_api::progress_channel();
         let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
         match tool.call(input, use_ctx, progress_tx).await {
@@ -2253,12 +2348,18 @@ impl DesktopWorktreeCommandHandler {
                 .or_else(|| {
                     result
                         .data
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
+                        .subprojection("/message")
+                        .ok()
+                        .filter(|message| message.string_units("").is_some())
                 })
-                .unwrap_or_else(|| result.data.to_string()),
-            Err(error) => error.to_string(),
+                .unwrap_or_else(|| {
+                    result
+                        .data
+                        .to_json_string()
+                        .expect("tool result is valid JSON")
+                        .into()
+                }),
+            Err(error) => error.model_facing_message(),
         }
     }
 }
@@ -2270,32 +2371,38 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
 
         let display = match parse_worktree_slash_action(args) {
             Ok(Create(name)) => {
-                let input = name.map_or_else(
-                    || serde_json::json!({}),
-                    |name| serde_json::json!({ "name": name }),
-                );
+                let input = source_object(name.into_iter().map(|name| ("name", name)));
                 self.call_tool(&self.enter_tool(), input).await
             }
             Ok(Enter(path)) => {
-                self.call_tool(&self.enter_tool(), serde_json::json!({ "path": path }))
+                self.call_tool(&self.enter_tool(), source_object([("path", path)]))
                     .await
             }
-            Ok(Status) => self.status(),
+            Ok(Status) => self.status().into(),
             Ok(Keep) => {
-                self.call_tool(&self.exit_tool(), serde_json::json!({ "action": "keep" }))
-                    .await
+                self.call_tool(
+                    &self.exit_tool(),
+                    source_object([("action", "keep".into())]),
+                )
+                .await
             }
             Ok(Remove { discard_changes }) => {
                 self.call_tool(
                     &self.exit_tool(),
-                    serde_json::json!({
-                        "action": "remove",
-                        "discard_changes": discard_changes,
-                    }),
+                    source_object([
+                        ("action", "remove".into()),
+                        (
+                            "discard_changes",
+                            Utf16JsonProjection::from_serde_value(&serde_json::Value::Bool(
+                                discard_changes,
+                            ))
+                            .expect("generated boolean is valid JSON"),
+                        ),
+                    ]),
                 )
                 .await
             }
-            Err(usage) => usage.to_string(),
+            Err(usage) => usage.to_string().into(),
         };
         CommandResult::Done {
             display: Some(display),
@@ -2348,6 +2455,11 @@ pub struct DesktopRuntime {
     /// the dispatcher and skill/plugin loaders. Surfaced so non-TUI hosts can
     /// snapshot the live catalog and detect command-set mutations.
     pub shared_command_registry: Arc<RwLock<CommandRegistry>>,
+    /// Live Mod command catalog; the product host binds its queue after the
+    /// queue consumer exists, so plugin-origin runs preserve input ordering.
+    pub mod_command_catalog: Arc<command_api::RegistryModCommandCatalog>,
+    /// Dynamic UI attachment roster shared with the current orchestrator.
+    pub mod_surface_roster: Arc<orchestrator::mod_surface_roster::ModSurfaceRoster>,
     /// Slash-command dispatcher seeded with the builtin handlers + wired core
     /// handlers (the `register_all_builtin_commands` → `register_core_batch_1`
     /// → `register_core_batch_2` sequence).
@@ -2479,8 +2591,9 @@ pub struct DesktopRuntime {
     pub http: Arc<dyn lingxi_core::host::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
-    /// the model's result here; the print path reads it after each turn to
-    /// validate against the schema and retry. `None` for every normal run.
+    /// validated source output here; the print path reads it after each turn
+    /// and retries only when the model did not capture a result. `None` for
+    /// every normal run.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
     /// `/loop` dynamic-mode (Phase 2): the set-once cell for the registered
     /// `ScheduleWakeup` tool. Empty at build time (the per-connection queue +
@@ -2562,7 +2675,6 @@ pub struct DesktopRuntime {
 impl DesktopRuntime {
     /// The names of every tool this build registered, by value.
     ///
-
     /// The honest observation point for a capability-gated tool: the tool
     /// context itself is consumed by [`build`], so "did the capability reach
     /// the engine" can only be asked of what the registry ended up holding.
@@ -2576,7 +2688,6 @@ impl DesktopRuntime {
     /// Whether this runtime was built with a device-audio capability
     /// ([`DesktopConfig::audio`]).
     ///
-
     /// Read from the capability itself, not from the tool list, so the two
     /// together distinguish "the config never reached the runtime" from "it
     /// reached the runtime but not the tool context".
@@ -2695,10 +2806,11 @@ fn sandbox_network_ask_callback(permission_gate: Arc<dyn PermissionGate>) -> san
             {
                 return Ok(false);
             }
-            let input = serde_json::json!({
+            let input = Utf16JsonProjection::from_serde_value(&serde_json::json!({
                 "host": host,
                 "port": port,
-            });
+            }))
+            .expect("generated sandbox permission input is valid JSON");
             let allow = matches!(
                 permission_gate.check(SANDBOX_NETWORK_TOOL, &input).await,
                 lingxi_core::host::PermissionDecision::Allow
@@ -2740,6 +2852,11 @@ pub enum BuildError {
     /// Orchestrator construction failed.
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+    /// Structured-output schema compilation failed before tool registration.
+    /// Invalid-schema diagnostics retain their exact source projection here;
+    /// only this error's Display implementation renders it for a host surface.
+    #[error("structured output JSON Schema compilation failed: {0}")]
+    StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
     /// Durable session claim/hydration/composition failed before activation.
     #[error("durable session state failed: {0}")]
     DurableSession(String),
@@ -3314,6 +3431,18 @@ fn load_effective_settings_for_config(
     .ok()
 }
 
+/// Sample the current merged main/subagent prompt-cache settings for an API
+/// request. This uses the same user, project, local, flag and managed layers
+/// as the other desktop settings consumers.
+pub(super) fn prompt_cache_ttl_settings_for_config(
+    cfg: &DesktopConfig,
+) -> lingxi_core::settings::schema::PromptCacheTtlSettings {
+    let managed = credentials::managed_settings_raw_tiers_sync();
+    load_effective_settings_for_config(cfg, &managed)
+        .map(|settings| settings.settings.prompt_cache_ttl_settings())
+        .unwrap_or_default()
+}
+
 /// `Bk("bashEditDiffEnabled")[0]` — the value as the USER / flag / policy tiers
 /// alone see it, ignoring project and project-local settings.
 ///
@@ -3473,7 +3602,11 @@ fn load_merged_bash_output_max_chars(project_dir: &std::path::Path) -> Option<u3
 /// attribution trailer overrides, resolved the same way as the caps above.
 fn load_merged_attribution(
     project_dir: &std::path::Path,
-) -> (Option<String>, Option<String>, Option<bool>) {
+) -> (
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    Option<bool>,
+) {
     let Some(eff) = load_merged_settings(project_dir) else {
         return (None, None, None);
     };
@@ -3541,6 +3674,12 @@ fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
 fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
     load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.disable_all_hooks)
+        .unwrap_or(false)
+}
+
+fn load_merged_allow_managed_hooks_only(project_dir: &std::path::Path) -> bool {
+    load_merged_settings(project_dir)
+        .and_then(|eff| eff.settings.allow_managed_hooks_only)
         .unwrap_or(false)
 }
 
@@ -3974,6 +4113,15 @@ async fn build_agent_mcp_tool_set(
             } else {
                 tool
             };
+            let tool = if let Some(ceiling) =
+                tool_mcp::mcp_tool::configured_organization_max_permission(
+                    &entry_config,
+                    &dto.tool_name,
+                ) {
+                tool.with_organization_max_permission(ceiling)
+            } else {
+                tool
+            };
             let tool = match &bound_key {
                 Some(key) => tool.with_bound_server_key(key.clone()),
                 None => tool,
@@ -4079,29 +4227,43 @@ async fn load_plugin_configs(
     if !restricted {
         let user = lingxi_home.join("settings.json");
         if let Ok(raw) = tokio::fs::read_to_string(&user).await {
-            if let Ok(serde_json::Value::Object(map)) =
-                serde_json::from_str::<serde_json::Value>(&raw)
-            {
-                for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
-                    merged.insert(plugin, cfg);
+            if let (Ok(typed), Ok(source)) = (
+                serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw),
+                Utf16JsonProjection::parse(&raw),
+            ) {
+                if typed.validate().is_ok() {
+                    if let Ok(configs) = source.subprojection("/pluginConfigs") {
+                        for (plugin, cfg) in
+                            plugin::PluginUserConfig::from_plugin_configs_source(&configs)
+                        {
+                            merged.insert(plugin, cfg);
+                        }
+                    }
                 }
             }
         }
     }
-    if let Some(settings) = flag_settings.and_then(|settings| serde_json::to_value(settings).ok()) {
-        if let serde_json::Value::Object(map) = settings {
-            for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
+    if let Some(settings) = flag_settings {
+        if let Some(configs) = settings.plugin_configs.as_ref() {
+            for (plugin, cfg) in plugin::PluginUserConfig::from_plugin_configs_source(configs) {
                 merged.insert(plugin, cfg);
             }
         }
     }
     for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
-        else {
+        let (Ok(typed), Ok(source)) = (
+            serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw),
+            Utf16JsonProjection::parse(&raw),
+        ) else {
             continue;
         };
-        for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
-            merged.insert(plugin, cfg);
+        if typed.validate().is_ok() {
+            if let Ok(configs) = source.subprojection("/pluginConfigs") {
+                for (plugin, cfg) in plugin::PluginUserConfig::from_plugin_configs_source(&configs)
+                {
+                    merged.insert(plugin, cfg);
+                }
+            }
         }
     }
     merged
@@ -4129,6 +4291,127 @@ async fn load_managed_plugin_names() -> std::collections::HashSet<String> {
         }
     }
     managed
+}
+
+/// The upstream security default is outermost on machines with managed
+/// settings, unless policy explicitly supplies `prependPlugins`. In that
+/// case the organization must name the built-in in the list. The 2.1.288
+/// initializer accepts both its stable settings identity and the bundled ID.
+fn sec_default_order_from_raw_tiers(raw_tiers: &[String]) -> Option<i64> {
+    if raw_tiers.is_empty() {
+        return None;
+    }
+    let mut explicit_prepend = None;
+    for raw in raw_tiers {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(raw) else {
+            continue;
+        };
+        if let Some(ids) = map
+            .get("prependPlugins")
+            .and_then(serde_json::Value::as_array)
+        {
+            if let Some(ids) = ids
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+            {
+                explicit_prepend = Some(
+                    ids.iter()
+                        .position(|id| {
+                            matches!(*id, "sec-default@builtin" | "cc-plugin-sec-default@builtin")
+                        })
+                        .and_then(|index| i64::try_from(index).ok()),
+                );
+            }
+        }
+    }
+    explicit_prepend.unwrap_or(Some(-1))
+}
+
+/// Exact managed `plugin@marketplace` Mod identities and tier order. A false
+/// `enabledPlugins` value in a higher-priority managed tier removes that ID.
+fn managed_mod_seats_from_raw_tiers(
+    raw_tiers: impl IntoIterator<Item = String>,
+) -> plugin::manager::ManagedModSeats {
+    let mut seats = plugin::manager::ManagedModSeats::default();
+    let mut enabled = std::collections::HashMap::new();
+    for raw in raw_tiers {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&raw) else {
+            continue;
+        };
+        if let Some(entries) = map
+            .get("enabledPlugins")
+            .and_then(|value| value.as_object())
+        {
+            for (identity, value) in entries {
+                if let Some(active) = value.as_bool() {
+                    enabled.insert(identity.clone(), active);
+                }
+            }
+        }
+        for (key, destination) in [
+            ("prependPlugins", &mut seats.prepend),
+            ("appendPlugins", &mut seats.append),
+        ] {
+            if let Some(ids) = map.get(key).and_then(|value| value.as_array()) {
+                if let Some(ids) = ids
+                    .iter()
+                    .map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                {
+                    *destination = ids;
+                }
+            }
+        }
+    }
+    seats.enabled = enabled
+        .into_iter()
+        .filter_map(|(identity, active)| active.then_some(identity))
+        .collect();
+    seats
+}
+
+#[cfg(test)]
+mod managed_mod_seat_tests {
+    use super::{managed_mod_seats_from_raw_tiers, sec_default_order_from_raw_tiers};
+
+    #[test]
+    fn later_managed_tiers_override_enabled_state_and_seat_lists() {
+        let seats = managed_mod_seats_from_raw_tiers([
+            r#"{"enabledPlugins":{"guard@org":true,"audit@org":true},"prependPlugins":["guard@org"]}"#.to_string(),
+            r#"{"enabledPlugins":{"guard@org":false},"prependPlugins":[],"appendPlugins":["audit@org"]}"#.to_string(),
+        ]);
+        assert!(!seats.enabled.contains("guard@org"));
+        assert!(seats.enabled.contains("audit@org"));
+        assert!(seats.prepend.is_empty());
+        assert_eq!(seats.append, ["audit@org"]);
+    }
+
+    #[test]
+    fn security_default_follows_explicit_managed_prepend_list() {
+        let managed = r#"{"enabledPlugins":{"guard@org":true}}"#.to_string();
+        let raw = [managed.clone()];
+        assert_eq!(
+            sec_default_order_from_raw_tiers(&raw),
+            Some(-1),
+            "managed settings without an explicit list keep the default outermost placement"
+        );
+        assert_eq!(sec_default_order_from_raw_tiers(&[]), None);
+        let explicit_empty = [managed.clone(), r#"{"prependPlugins":[]}"#.to_string()];
+        assert_eq!(sec_default_order_from_raw_tiers(&explicit_empty), None);
+
+        for id in ["sec-default@builtin", "cc-plugin-sec-default@builtin"] {
+            let explicit = [
+                managed.clone(),
+                format!(r#"{{"prependPlugins":["guard@org","{id}"]}}"#),
+            ];
+            assert_eq!(
+                sec_default_order_from_raw_tiers(&explicit),
+                Some(1),
+                "the 2.1.288 initializer recognizes {id}"
+            );
+        }
+    }
 }
 
 /// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
@@ -4306,7 +4589,7 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
                 additional_skill_dirs,
                 self.safe_mode,
             );
-            match parse_slash_command("/reload-skills") {
+            match parse_slash_command(&"/reload-skills".into()) {
                 Some(parsed) => match handler.handle(&parsed).await {
                     CommandResult::Done { .. } => outcome.skills_reloaded = true,
                     _ => outcome
@@ -4377,16 +4660,19 @@ impl PluginRuntime {
     /// targets so ownership does not overlap or partially duplicate.
     pub async fn refresh(&self) -> PluginRefreshCounts {
         let _refresh_guard = self.refresh_lock.lock().await;
+        let plugin_configs =
+            load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await;
+        let blocked_marketplaces = load_blocked_marketplaces().await;
+        let managed_plugin_names = load_managed_plugin_names().await;
+        let managed_tiers = settings_watch::managed_settings_raw_tiers().await;
         self.manager
-            .replace_plugin_configs(
-                load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await,
+            .replace_runtime_refresh_state(
+                plugin_configs,
+                blocked_marketplaces,
+                managed_plugin_names,
+                sec_default_order_from_raw_tiers(&managed_tiers),
+                managed_mod_seats_from_raw_tiers(managed_tiers),
             )
-            .await;
-        self.manager
-            .replace_blocked_marketplaces(load_blocked_marketplaces().await)
-            .await;
-        self.manager
-            .replace_managed_plugin_names(load_managed_plugin_names().await)
             .await;
         // (1) The fresh target set from disk + settings.
         let additional_project_roots = self.additional_project_roots.read().await.clone();
@@ -4512,16 +4798,33 @@ fn spawn_cli_plugin_dir_collection_watch(runtime: Arc<PluginRuntime>) {
 /// [`AsyncHookResponseProvider::take_pending_responses`] drains the buffer
 /// (mirrors TS `removeDeliveredAsyncHooks`). A plain `std::sync::Mutex` — every
 /// critical section is a brief push / `mem::take`, never held across an `await`.
+struct PendingAsyncHookResponse {
+    response: orchestrator::prompt::async_hook_response::AsyncHookResponse,
+    publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+}
+
 #[derive(Clone, Default)]
 struct AsyncHookResponseBuffer {
-    responses: Arc<std::sync::Mutex<Vec<String>>>,
+    responses: Arc<std::sync::Mutex<Vec<PendingAsyncHookResponse>>>,
     rewake_target: Arc<std::sync::OnceLock<std::sync::Weak<dyn OrchestratorHandle>>>,
 }
 
 impl AsyncHookResponseBuffer {
-    fn push(&self, text: String) {
+    fn push(
+        &self,
+        text: hooks::ExactHookText,
+        hook_event: Option<String>,
+        publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+    ) {
         if let Ok(mut v) = self.responses.lock() {
-            v.push(text);
+            v.push(PendingAsyncHookResponse {
+                response: orchestrator::prompt::async_hook_response::AsyncHookResponse {
+                    text,
+                    hook_event,
+                    publication_guard: None,
+                },
+                publication_guard,
+            });
         }
     }
 
@@ -4530,13 +4833,15 @@ impl AsyncHookResponseBuffer {
         let _ = self.rewake_target.set(Arc::downgrade(&target));
     }
 
-    async fn rewake(&self) {
+    fn schedule_rewake(&self, generation_cancel: Option<lingxi_core::host::CancellationToken>) {
         let Some(target) = self.rewake_target.get().and_then(std::sync::Weak::upgrade) else {
             return;
         };
-        if let Err(error) = target.run_async_hook_rewake().await {
-            tracing::warn!(error = %error, "async hook re-wake turn failed");
-        }
+        tokio::spawn(async move {
+            if let Err(error) = target.run_async_hook_rewake(generation_cancel).await {
+                tracing::warn!(error = %error, "async hook re-wake turn failed");
+            }
+        });
     }
 }
 
@@ -4544,22 +4849,132 @@ impl AsyncHookResponseBuffer {
 impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
     for AsyncHookResponseBuffer
 {
-    async fn take_pending_responses(&self) -> Vec<String> {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
         self.responses
             .lock()
             .map(|mut v| std::mem::take(&mut *v))
             .unwrap_or_default()
+            .into_iter()
+            .filter(|pending| {
+                pending
+                    .publication_guard
+                    .as_ref()
+                    .is_none_or(|guard| guard.is_current())
+            })
+            .map(|pending| pending.response.text)
+            .collect()
+    }
+
+    async fn take_pending_with_events(
+        &self,
+    ) -> Vec<orchestrator::prompt::async_hook_response::AsyncHookResponse> {
+        self.responses
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pending| {
+                pending
+                    .publication_guard
+                    .as_ref()
+                    .is_none_or(|guard| guard.is_current())
+            })
+            .map(
+                |pending| orchestrator::prompt::async_hook_response::AsyncHookResponse {
+                    text: pending.response.text,
+                    hook_event: pending.response.hook_event,
+                    publication_guard: pending.publication_guard,
+                },
+            )
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod async_hook_response_buffer_tests {
+    use super::*;
+    use orchestrator::prompt::async_hook_response::AsyncHookResponseProvider;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct TestPublicationGuard(lingxi_core::host::CancellationToken);
+
+    impl hooks::attachment::HookPublicationGuard for TestPublicationGuard {
+        fn is_current(&self) -> bool {
+            !self.0.is_cancelled()
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.0.clone())
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let root = self.0.clone();
+            Box::pin(async move {
+                if root.is_cancelled() {
+                    return false;
+                }
+                publication.await;
+                true
+            })
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.publish_if_current(mutation)
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_completion_is_rejected_after_reset_with_live_control() {
+        let buffer = AsyncHookResponseBuffer::default();
+        let stale_root = lingxi_core::host::CancellationToken::new();
+        let stale_guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+            Arc::new(TestPublicationGuard(stale_root.clone()));
+        buffer.push(
+            "old generation".into(),
+            Some("PostToolUse".into()),
+            Some(stale_guard),
+        );
+
+        // Reset happens after the result entered the process buffer but before
+        // the next prompt consumes it.
+        stale_root.cancel();
+        assert!(
+            buffer.take_pending_with_events().await.is_empty(),
+            "a buffered old-generation hook result must not reach a new prompt"
+        );
+
+        let live_guard: Arc<dyn hooks::attachment::HookPublicationGuard> = Arc::new(
+            TestPublicationGuard(lingxi_core::host::CancellationToken::new()),
+        );
+        buffer.push(
+            "current generation".into(),
+            Some("PostToolUse".into()),
+            Some(live_guard),
+        );
+        let live = buffer.take_pending_with_events().await;
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].text.display, "current generation");
+        assert_eq!(live[0].hook_event.as_deref(), Some("PostToolUse"));
     }
 }
 
 fn registry_skill_listing_provider(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
+    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Conditional-skill activation is SESSION state, not per-listing: once a
     // touched file has revealed a skill, a later turn whose touched set no
     // longer names that file must not hide it again.
     let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
+    let precommit_registry = registry.clone();
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
@@ -4591,8 +5006,6 @@ fn registry_skill_listing_provider(
                                 | SlashCommandKind::Bundled { .. }
                         )
                     })
-                    // TS `cmd.source !== 'builtin'`.
-                    .filter(|c| c.source != CommandSource::Builtin)
                     // A CONDITIONAL skill (`paths:`) stays out of the listing
                     // until the session has touched a matching file (claude-code
                     // `lhr`). `read_file_state` is this port's record of what the
@@ -4604,28 +5017,61 @@ fn registry_skill_listing_provider(
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .is_available_named(&c.name, patterns, &touched, &root),
                     })
-                    // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
-                    //    hasUserSpecifiedDescription || whenToUse.
+                    // 2.1.286 Gee: builtin prompt or a recognized skill origin,
+                    // otherwise explicit description/whenToUse is required.
                     .filter(|c| {
-                        matches!(
-                            c.loaded_from.as_deref(),
-                            Some("bundled" | "skills" | "commands_DEPRECATED")
-                        ) || c.has_user_specified_description
+                        c.source == CommandSource::Builtin
+                            || matches!(
+                                c.loaded_from.as_deref(),
+                                Some("bundled" | "skills" | "syncedSkills" | "commands_DEPRECATED")
+                            )
+                            || c.has_user_specified_description
                             || c.when_to_use.is_some()
                     })
                     .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
                         name: c.name.clone(),
                         description: c.description.clone(),
-                        when_to_use: c.when_to_use.clone(),
+                        when_to_use: c.when_to_use.clone().map(Into::into),
                         // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
                         // skills are never truncated; mirror via loadedFrom.
                         is_bundled: c.loaded_from.as_deref() == Some("bundled"),
                     })
                     .collect()
             }
+        })
+        .with_bash_precommit_skills(move |entries| {
+            let registry = precommit_registry.clone();
+            let include_code_review_suggestion = include_code_review_suggestion();
+            async move {
+                let registry = registry.read().await;
+                crate::skill_prompt::bash_precommit_skills(
+                    &registry,
+                    &entries,
+                    include_code_review_suggestion,
+                )
+            }
         }),
     )
 }
+
+fn code_review_suggestion_provider(
+    cfg: DesktopConfig,
+    session_cwd: Arc<SessionCwd>,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    Arc::new(move || {
+        let mut current_cfg = cfg.clone();
+        current_cfg.cwd = session_cwd.cwd();
+        load_effective_settings_for_config(
+            &current_cfg,
+            &credentials::managed_settings_raw_tiers_sync(),
+        )
+        .is_some_and(|effective| effective.settings.include_code_review_suggestion == Some(true))
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/bash_precommit_skill_wiring_tests.rs"]
+mod bash_precommit_skill_wiring_tests;
 
 /// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
 /// remote MCP servers. The MCP OAuth flow ([`mcp::McpRegistry::connect`]) fires
@@ -4955,6 +5401,10 @@ mod legacy_opening_balance_test;
 mod tests;
 
 #[cfg(test)]
+#[path = "tests/environment_oauth_tests.rs"]
+mod environment_oauth_tests;
+
+#[cfg(test)]
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
 
@@ -4986,10 +5436,17 @@ mod bash_edit_diff_wiring_tests;
 #[path = "tests/read_auto_allow_wiring_tests.rs"]
 mod read_auto_allow_wiring_tests;
 
+#[cfg(test)]
+#[path = "tests/server_fallback_model_policy_tests.rs"]
+mod server_fallback_model_policy_tests;
+
 mod assembly;
 mod configuration;
 mod credentials;
 mod fusion_services;
+mod mod_commands;
+mod mod_settings;
+mod mod_tool_invoker;
 mod permission_config;
 mod platform;
 mod shutdown;
@@ -5041,6 +5498,7 @@ use fusion_services::FusionCatalogRefreshingCopilotConnect;
 use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
+pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;
 use permission_config::apple_events_override;

@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -66,8 +67,9 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 /// Tool name byte-lock.
@@ -112,12 +114,12 @@ fn parse_declared_effort(raw: &str) -> Option<session::forked_skill::Effort> {
 #[derive(Debug, Clone)]
 pub struct SkillDescriptor {
     /// Canonical name (matches the normalized input field).
-    pub name: String,
+    pub name: Utf16JsonProjection,
     /// Short description (capped at [`MAX_SKILL_DESCRIPTOR_LEN`]).
-    pub description: String,
+    pub description: Utf16JsonProjection,
     /// Body content (markdown sans frontmatter). Rides along as an extra
     /// output field — Rust's stand-in for forked execution.
-    pub body: String,
+    pub body: Utf16JsonProjection,
     /// Whether model invocation is disabled (TS `disableModelInvocation`).
     /// `true` → rejected with the locked "disable-model-invocation" error.
     pub disable_model_invocation: bool,
@@ -139,11 +141,11 @@ pub struct SkillDescriptor {
     /// exists to narrow.
     pub disallowed_tools: Vec<String>,
     /// Declared positional argument names (markdown frontmatter `arguments`).
-    /// Threaded into [`command_api::substitute_arguments_faithful`] so a named
+    /// Threaded into [`command_api::substitute_arguments_source`] so a named
     /// placeholder like `$ticket` in the skill body resolves to the matching
     /// positional argument. Empty → only `$ARGUMENTS` / `$N` placeholders expand
     /// (TS `processPromptSlashCommand` passes the command's `argNames`).
-    pub argument_names: Vec<String>,
+    pub argument_names: Vec<Utf16JsonProjection>,
     /// Shell to route embedded `!command` expansion through (the markdown
     /// frontmatter `shell` selector). `None` -> bash (the TS default). Forwarded
     /// to [`command_api::execute_shell_commands_in_prompt`] as the `shell` arg —
@@ -180,8 +182,8 @@ pub struct SkillDescriptor {
     pub session_id: Option<String>,
     /// Dynamic prompt builder for bundled skills (port of the reference
     /// `getPromptForCommand`, `loop.ts:84`). When `Some`, [`SkillTool::call`]
-    /// calls it with the raw args to produce the prompt INSTEAD of
-    /// `substitute_arguments_faithful` over `body` — letting a bundled skill
+    /// calls it with the raw args to produce the prompt INSTEAD of source
+    /// argument substitution over `body` — letting a bundled skill
     /// branch on empty vs non-empty args. `None` for all file/MCP skills (the
     /// byte-identical static path).
     pub dynamic_body: Option<std::sync::Arc<dyn command_api::BundledPromptFn>>,
@@ -190,9 +192,9 @@ pub struct SkillDescriptor {
 impl Default for SkillDescriptor {
     fn default() -> Self {
         Self {
-            name: String::new(),
-            description: String::new(),
-            body: String::new(),
+            name: String::new().into(),
+            description: String::new().into(),
+            body: String::new().into(),
             disable_model_invocation: false,
             command_type: SkillCommandType::Prompt,
             model: None,
@@ -218,17 +220,17 @@ impl Default for SkillDescriptor {
 pub trait SkillLoader: Send + Sync {
     /// Load a skill by its normalized name (leading slash already stripped).
     /// Returns `None` if no such skill is registered → `Unknown skill:`.
-    async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError>;
+    async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError>;
 
     /// Notify the host that a validated prompt skill is about to run. Default
     /// loaders have no lifecycle side effects.
-    async fn skill_invoked(&self, _name: &str) {}
+    async fn skill_invoked(&self, _name: &Utf16JsonProjection) {}
 
     /// Every registered skill name, used only to suggest a full name after a
     /// lookup miss. Defaulted to EMPTY so no implementor breaks and, more
     /// importantly, so a loader that cannot enumerate simply offers no
     /// suggestion — the miss still reports `Unknown skill:` exactly as before.
-    async fn list_names(&self) -> Vec<String> {
+    async fn list_names(&self) -> Vec<Utf16JsonProjection> {
         Vec::new()
     }
 }
@@ -241,12 +243,41 @@ pub trait SkillLoader: Send + Sync {
 /// input. Upstream refuses to quote an unsafe one rather than sanitising it,
 /// and so does this: an unsuggestable name simply yields no suggestion.
 #[must_use]
-pub fn skill_name_is_displayable(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().count() <= 256
-        && !name.chars().any(|c| {
-            matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '<' | '>')
-        })
+pub fn skill_name_is_displayable(name: &Utf16JsonProjection) -> bool {
+    let Some(units) = name.string_units("") else {
+        return false;
+    };
+    if units.is_empty() || utf16_char_count(&units) > 256 {
+        return false;
+    }
+    let mut index = 0;
+    while index < units.len() {
+        let first = units[index];
+        let (code_point, width) = if (0xd800..=0xdbff).contains(&first)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let second = units[index + 1];
+            (
+                0x10000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00),
+                2,
+            )
+        } else {
+            // An unpaired surrogate is still a legal JavaScript string unit.
+            // Keep it displayable as source; only reject the same unsafe scalar
+            // values the UTF-8 path rejects.
+            (u32::from(first), 1)
+        };
+        if code_point <= 0x1f
+            || (0x7f..=0x9f).contains(&code_point)
+            || matches!(code_point, 0x2028 | 0x2029 | 0x3c | 0x3e)
+        {
+            return false;
+        }
+        index += width;
+    }
+    true
 }
 
 /// The suffix-match half of oracle `gqe` — what to append to `Unknown skill:`.
@@ -260,36 +291,50 @@ pub fn skill_name_is_displayable(name: &str) -> bool {
 /// Returns `None` (plain `Unknown skill:`) when nothing matches, or when ANY
 /// name involved fails [`skill_name_is_displayable`].
 #[must_use]
-pub fn unknown_skill_suffix_hint(requested: &str, names: &[String]) -> Option<String> {
-    if requested.is_empty() {
+pub fn unknown_skill_suffix_hint(
+    requested: &Utf16JsonProjection,
+    names: &[Utf16JsonProjection],
+) -> Option<Utf16JsonProjection> {
+    let requested_units = requested.string_units("")?;
+    if requested_units.is_empty() {
         return None;
     }
-    let suffix = format!(":{requested}");
-    let mut matches: Vec<&String> = names
+    let mut suffix = vec![u16::from(b':')];
+    suffix.extend_from_slice(&requested_units);
+    let mut matches: Vec<(Vec<u16>, &Utf16JsonProjection)> = names
         .iter()
-        .filter(|n| n.ends_with(&suffix) && n.as_str() != requested)
+        .filter_map(|name| {
+            let units = name.string_units("")?;
+            (units != requested_units && units.ends_with(&suffix)).then_some((units, name))
+        })
         .collect();
-    matches.sort();
-    matches.dedup();
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    matches.dedup_by(|left, right| left.0 == right.0);
     if matches.is_empty() {
         return None;
     }
-    if !matches.iter().all(|n| skill_name_is_displayable(n)) {
+    if !matches
+        .iter()
+        .all(|(_, name)| skill_name_is_displayable(name))
+    {
         return None;
     }
     if let [only] = matches.as_slice() {
-        return Some(format!(
-            " Did you mean {only}? Invoke it by that full name."
-        ));
+        return Some(join_source_parts(&[
+            " Did you mean ".into(),
+            only.1.clone(),
+            "? Invoke it by that full name.".into(),
+        ]));
     }
-    let listed = matches
-        .iter()
-        .map(|n| n.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        " Several skills match that name: {listed} \u{2014} invoke one by its full name."
-    ))
+    let mut parts = vec![" Several skills match that name: ".into()];
+    for (index, (_, name)) in matches.iter().enumerate() {
+        if index > 0 {
+            parts.push(", ".into());
+        }
+        parts.push((*name).clone());
+    }
+    parts.push(" \u{2014} invoke one by its full name.".into());
+    Some(join_source_parts(&parts))
 }
 
 /// Default hermetic loader — always reports "not found" (→ `Unknown skill:`).
@@ -297,7 +342,10 @@ pub struct EmptySkillLoader;
 
 #[async_trait]
 impl SkillLoader for EmptySkillLoader {
-    async fn load(&self, _name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+    async fn load(
+        &self,
+        _name: &Utf16JsonProjection,
+    ) -> Result<Option<SkillDescriptor>, ToolError> {
         Ok(None)
     }
 }
@@ -368,9 +416,10 @@ impl SkillTool {
         bus: &Arc<AnalyticsBus>,
         ctx: &ToolUseContext,
         desc: &SkillDescriptor,
-        command_name: &str,
-        prompt: &str,
+        command_name: &Utf16JsonProjection,
+        prompt: &Utf16JsonProjection,
     ) -> Result<Option<ToolCallResult>, ToolError> {
+        let command_name_text = source_display_string(command_name);
         let (Some(spawner), Some(registry)) = (
             self.ctx.subagent_spawner.as_ref(),
             self.ctx.task_registry.as_ref(),
@@ -396,8 +445,8 @@ impl SkillTool {
         let frozen_command_denies = frozen_command_denies(&self.ctx.permission_policy);
         let spawn_cap = max_subagents_per_session();
         let inputs = crate::fork::ForkLaunchInputs {
-            skill_name: command_name,
-            attribution_name: command_name,
+            skill_name: command_name.clone(),
+            attribution_name: command_name.clone(),
             // The skill's declared `effort`, if it declared a usable one.
             // Upstream spreads it conditionally into the scoping record
             // (`…n.effort !== void 0 && { effort: n.effort }`), and its parse
@@ -426,7 +475,7 @@ impl SkillTool {
             crate::fork::ForkDecision::DepthChainCap { spawned, cap } => {
                 emit_failed(bus, "forked_skill_depth_chain_cap", 0).await;
                 return Err(ToolError::InvalidInput(
-                    crate::fork::depth_chain_cap_message(spawned, cap),
+                    crate::fork::depth_chain_cap_message(spawned, cap).into(),
                 ));
             }
         };
@@ -437,20 +486,22 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
             teammate_color: None,
+            parent_native_query_depth: None,
             subagent_type: desc
                 .agent
                 .clone()
                 .unwrap_or_else(|| "general-purpose".to_string()),
-            prompt: prompt.to_string(),
+            prompt: prompt.clone(),
             observer: None,
-            description: Some(format!("/{command_name}")),
+            description: Some(format!("/{command_name_text}").into()),
             model: desc.model.clone(),
             run_in_background: true,
             // The `SendMessage` handle AND the fork identity: the launch is
             // announced as `@<skill>`, and the identity is what the resume gate
             // corroborates against the scoping record on disk.
-            name: Some(command_name.to_string()),
+            name: Some(command_name_text.clone()),
             forked_skill_name: Some(scoping.skill_name.clone()),
             forked_skill_attribution: Some(scoping.attribution_name.clone()),
             forked_skill_effort: None,
@@ -468,6 +519,7 @@ impl SkillTool {
             cwd: None,
             worktree: None,
             fork_context_messages: None,
+            instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -488,6 +540,13 @@ impl SkillTool {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
         };
         let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
             ctx.subagent_registry.clone().ok_or_else(|| {
@@ -577,8 +636,8 @@ impl SkillTool {
                     let text = crate::fork::final_text(&content);
                     (
                         agent_id,
-                        if text.is_empty() {
-                            crate::fork::SYNC_FORK_EMPTY_RESULT.to_string()
+                        if text.string_units("").is_some_and(|units| units.is_empty()) {
+                            crate::fork::SYNC_FORK_EMPTY_RESULT.into()
                         } else {
                             text
                         },
@@ -592,12 +651,12 @@ impl SkillTool {
                     // The spawn HAPPENED, so the reservation is correctly
                     // consumed — only a fork that never launched releases it.
                     return Err(ToolError::Internal(format!(
-                        "Skill {command_name} (forked execution) failed: {reason}"
+                        "Skill {command_name_text} (forked execution) failed: {reason}"
                     )));
                 }
                 Ok(lingxi_core::host::subagent_spawn::SubagentResult::Killed { .. }) => {
                     return Err(ToolError::Internal(format!(
-                        "Skill {command_name} (forked execution) was stopped"
+                        "Skill {command_name_text} (forked execution) was stopped"
                     )));
                 }
                 // An unwired spawner falls back to inline — the skill still
@@ -618,6 +677,7 @@ impl SkillTool {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             }));
         }
 
@@ -638,7 +698,7 @@ impl SkillTool {
             }
         };
 
-        let result_line = crate::fork::running_in_background_line(command_name);
+        let result_line = crate::fork::running_in_background_line(&command_name_text);
         Ok(Some(ToolCallResult {
             data: crate::fork::fork_result(
                 command_name,
@@ -658,6 +718,7 @@ impl SkillTool {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         }))
     }
 }
@@ -678,6 +739,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["skill"]
     })
 });
+static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
 
 /// Snapshot the COMMAND deny rules currently in force, as canonical rule
 /// strings (claude `freezeCommandDenies` — `getAppState().toolPermissionContext
@@ -752,13 +814,308 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 /// invocation syntax cannot turn an otherwise registered skill into an
 /// `Unknown skill` lookup.
 /// Returns the normalized command name (may be empty if input was blank).
-fn normalize_skill_name(skill: &str) -> String {
-    let trimmed = skill.trim();
-    trimmed
-        .strip_prefix('/')
-        .or_else(|| trimmed.strip_prefix('$'))
-        .unwrap_or(trimmed)
-        .to_string()
+fn normalize_skill_name(skill: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = skill
+        .string_units("")
+        .expect("Skill input name is a root string");
+    let trimmed = trim_skill_name_units(&units);
+    let normalized = trimmed
+        .strip_prefix(&[u16::from(b'/')])
+        .or_else(|| trimmed.strip_prefix(&[u16::from(b'$')]))
+        .unwrap_or(trimmed);
+    source_from_units(normalized.to_vec())
+}
+
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text derives from exact UTF-16 units")
+}
+
+fn source_string_at(input: &Utf16JsonProjection, pointer: &str) -> Option<Utf16JsonProjection> {
+    Some(source_from_units(input.string_units(pointer)?))
+}
+
+fn join_source_parts(parts: &[Utf16JsonProjection]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for part in parts {
+        units.extend(
+            part.string_units("")
+                .expect("skill text composition uses root strings"),
+        );
+    }
+    source_from_units(units)
+}
+
+fn source_parser_text(
+    source: &Utf16JsonProjection,
+    avoid: &Utf16JsonProjection,
+) -> (String, std::collections::HashMap<char, u16>) {
+    let units = source
+        .string_units("")
+        .expect("parser input is a root string");
+    let avoid_units = avoid.string_units("").expect("skill body is a root string");
+    let mut unavailable = std::collections::HashSet::new();
+    for decoded in std::char::decode_utf16(avoid_units.iter().copied()) {
+        if let Ok(character) = decoded {
+            unavailable.insert(u32::from(character));
+        }
+    }
+    let mut index = 0;
+    while index < units.len() {
+        if (0xd800..=0xdbff).contains(&units[index])
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000
+                + (((u32::from(units[index]) - 0xd800) << 10)
+                    | (u32::from(units[index + 1]) - 0xdc00));
+            unavailable.insert(scalar);
+            index += 2;
+        } else if (0xd800..=0xdfff).contains(&units[index]) {
+            index += 1;
+        } else {
+            unavailable.insert(u32::from(units[index]));
+            index += 1;
+        }
+    }
+
+    let mut markers = std::collections::HashMap::new();
+    let mut by_unit = std::collections::HashMap::<u16, char>::new();
+    let mut output = String::new();
+    let mut next_marker = 0xf0000_u32;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000
+                + (((u32::from(unit) - 0xd800) << 10) | (u32::from(units[index + 1]) - 0xdc00));
+            output.push(char::from_u32(scalar).expect("valid surrogate pair"));
+            index += 2;
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            let marker = *by_unit.entry(unit).or_insert_with(|| {
+                while unavailable.contains(&next_marker) || char::from_u32(next_marker).is_none() {
+                    next_marker += 1;
+                    assert!(next_marker < 0x10fffe, "no source marker scalar available");
+                }
+                let marker = char::from_u32(next_marker).expect("available marker scalar");
+                unavailable.insert(next_marker);
+                next_marker += 1;
+                markers.insert(marker, unit);
+                marker
+            });
+            output.push(marker);
+            index += 1;
+        } else {
+            output.push(char::from_u32(u32::from(unit)).expect("non-surrogate BMP unit"));
+            index += 1;
+        }
+    }
+    (output, markers)
+}
+
+fn restore_parser_text(
+    source: Utf16JsonProjection,
+    markers: &std::collections::HashMap<char, u16>,
+) -> Utf16JsonProjection {
+    if markers.is_empty() {
+        return source;
+    }
+    let source_units = source
+        .string_units("")
+        .expect("dynamic skill prompt is a root string");
+    let mut units = Vec::with_capacity(source_units.len());
+    let mut index = 0;
+    while index < source_units.len() {
+        let unit = source_units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && source_units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = source_units[index + 1];
+            let scalar = 0x10000 + (((u32::from(unit) - 0xd800) << 10) | (u32::from(low) - 0xdc00));
+            let character = char::from_u32(scalar).expect("valid UTF-16 surrogate pair");
+            if let Some(original_unit) = markers.get(&character) {
+                units.push(*original_unit);
+            } else {
+                units.extend_from_slice(&[unit, low]);
+            }
+            index += 2;
+        } else {
+            // Preserve any unpaired unit supplied by a source-backed dynamic
+            // prompt instead of converting it through a Rust String.
+            units.push(unit);
+            index += 1;
+        }
+    }
+    source_from_units(units)
+}
+
+fn replace_source_units(
+    source: &Utf16JsonProjection,
+    needle: &[u16],
+    replacement: &[u16],
+) -> Utf16JsonProjection {
+    if needle.is_empty() {
+        return source.clone();
+    }
+    let units = source
+        .string_units("")
+        .expect("source replacement uses a root string");
+    let mut output = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        if units[index..].starts_with(needle) {
+            output.extend_from_slice(replacement);
+            index += needle.len();
+        } else {
+            output.push(units[index]);
+            index += 1;
+        }
+    }
+    source_from_units(output)
+}
+
+fn replace_source_text(
+    source: &Utf16JsonProjection,
+    needle: &str,
+    replacement: &str,
+) -> Utf16JsonProjection {
+    replace_source_units(
+        source,
+        &needle.encode_utf16().collect::<Vec<_>>(),
+        &replacement.encode_utf16().collect::<Vec<_>>(),
+    )
+}
+
+fn truncate_source_string(source: &Utf16JsonProjection, limit: usize) -> Utf16JsonProjection {
+    let units = source
+        .string_units("")
+        .expect("descriptor description is a root string");
+    if utf16_char_count(&units) <= limit {
+        return source.clone();
+    }
+    let mut end = 0;
+    let mut count = 0;
+    while end < units.len() && count < limit {
+        if (0xd800..=0xdbff).contains(&units[end])
+            && units
+                .get(end + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            end += 2;
+        } else {
+            end += 1;
+        }
+        count += 1;
+    }
+    source_from_units(units[..end].to_vec())
+}
+
+fn user_message_from_source(
+    source: &Utf16JsonProjection,
+) -> lingxi_core::types::ConversationMessage {
+    let units = source
+        .string_units("")
+        .expect("skill prompt message is a root string");
+    lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text: String::from_utf16_lossy(&units),
+            utf16_code_units: units,
+            citations: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+    }
+}
+
+fn generated_projection(value: &Value) -> Utf16JsonProjection {
+    generated_builtin_result(value)
+}
+
+fn projection_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("Skill result object is valid JSON")
+}
+
+fn projection_array(values: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(values).expect("Skill result array is valid JSON")
+}
+
+fn trim_skill_name_units(units: &[u16]) -> &[u16] {
+    fn is_whitespace(unit: u16) -> bool {
+        matches!(
+            unit,
+            0x0009..=0x000d
+                | 0x0020
+                | 0x00a0
+                | 0x1680
+                | 0x2000..=0x200a
+                | 0x2028..=0x2029
+                | 0x202f
+                | 0x205f
+                | 0x3000
+                | 0xfeff
+        )
+    }
+    let start = units
+        .iter()
+        .position(|unit| !is_whitespace(*unit))
+        .unwrap_or(units.len());
+    let end = units
+        .iter()
+        .rposition(|unit| !is_whitespace(*unit))
+        .map_or(start, |index| index + 1);
+    &units[start..end]
+}
+
+fn utf16_char_count(units: &[u16]) -> usize {
+    let mut index = 0;
+    let mut count = 0;
+    while index < units.len() {
+        if (0xd800..=0xdbff).contains(&units[index])
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            index += 2;
+        } else {
+            index += 1;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn exact_string(projection: &Utf16JsonProjection) -> Option<String> {
+    String::from_utf16(&projection.string_units("")?).ok()
+}
+
+fn source_display_string(projection: &Utf16JsonProjection) -> String {
+    projection
+        .string_units("")
+        .map(|units| String::from_utf16_lossy(&units))
+        .unwrap_or_default()
+}
+
+fn substitute_skill_prompt(
+    body: &Utf16JsonProjection,
+    args: Option<&Utf16JsonProjection>,
+    argument_names: &[Utf16JsonProjection],
+) -> Result<Utf16JsonProjection, command_api::SubstitutionError> {
+    let empty_args = Utf16JsonProjection::from("");
+    let args = args.unwrap_or(&empty_args);
+    command_api::substitute_arguments_source(body, args, true, argument_names)
 }
 
 /// Sanitize a normalized skill name for the `SKILL_INVOKED` telemetry
@@ -782,11 +1139,18 @@ impl Tool for SkillTool {
         SKILL_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("invoke a slash-command skill")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("invoke a slash-command skill".into())
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -794,23 +1158,27 @@ impl Tool for SkillTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "Skill loads a registered skill descriptor (read-only)".into(),
@@ -821,15 +1189,15 @@ impl Tool for SkillTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // TS `:342`: `Execute skill: ${skill}`.
-        match input.get("skill").and_then(Value::as_str) {
+        match input.string_at("/skill") {
             Some(s) => format!("Execute skill: {s}"),
             None => "Execute a slash-command skill.".into(),
         }
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // Binary-grounded text (cc 2.1.220 `Xh_`, bytes 231510981; verified
         // against the live-captured 2.1.220 request body — INCLUDING the
         // trailing newline the template literal ends with). The background-
@@ -863,37 +1231,44 @@ present this turn, the skill is loaded — follow it directly rather than callin
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let skill = input
-            .get("skill")
-            .and_then(Value::as_str)
+        let skill = source_string_at(input, "/skill")
             .ok_or_else(|| ValidationError("Skill: missing or non-string skill".into()))?;
 
         // Trim; reject blank (TS `:356-363` → "Invalid skill format").
-        let trimmed = skill.trim();
-        if trimmed.is_empty() {
-            return Err(ValidationError(format!("Invalid skill format: {skill}")));
+        let skill_units = skill.string_units("").expect("root string");
+        if trim_skill_name_units(&skill_units).is_empty() {
+            return Err(ValidationError(join_source_parts(&[
+                "Invalid skill format: ".into(),
+                skill,
+            ])));
         }
 
         // Strip a single leading slash (TS `:366-372`).
-        let normalized = normalize_skill_name(skill);
-        if normalized.chars().count() > MAX_SKILL_NAME_LEN {
-            return Err(ValidationError(format!(
-                "Skill: name length {} exceeds max {}",
-                normalized.chars().count(),
-                MAX_SKILL_NAME_LEN
-            )));
+        let normalized = normalize_skill_name(&skill);
+        let normalized_units = normalized.string_units("").expect("root string");
+        let normalized_len = utf16_char_count(&normalized_units);
+        if normalized_len > MAX_SKILL_NAME_LEN {
+            return Err(ValidationError(
+                format!("Skill: name length {normalized_len} exceeds max {MAX_SKILL_NAME_LEN}")
+                    .into(),
+            ));
         }
 
         // Resolve + apply the three locked rejections (TS `:399-427`).
         match self.loader.load(&normalized).await {
             Ok(Some(desc)) => {
                 if desc.disable_model_invocation {
-                    return Err(ValidationError(format!(
-                        "Skill {normalized} cannot be used with {SKILL_TOOL_NAME} tool due to disable-model-invocation"
-                    )));
+                    return Err(ValidationError(join_source_parts(&[
+                        "Skill ".into(),
+                        normalized.clone(),
+                        format!(
+                            " cannot be used with {SKILL_TOOL_NAME} tool due to disable-model-invocation"
+                        )
+                        .into(),
+                    ])));
                 }
                 if desc.command_type != SkillCommandType::Prompt {
                     // Binary `skill_invoke_not_prompt_type`: `${name} is a ${u}
@@ -902,33 +1277,41 @@ present this turn, the skill is loaded — follow it directly rather than callin
                     // where `u = type==="local-jsx" ? "UI" : "built-in CLI"`. The
                     // port collapses non-prompt to `Other` (it does not surface
                     // local-jsx commands as skills), so `u` = "built-in CLI".
-                    return Err(ValidationError(format!(
-                        "{normalized} is a built-in CLI command, not a skill. Ask the user to run /{normalized} themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
-                    )));
+                    return Err(ValidationError(join_source_parts(&[
+                        normalized.clone(),
+                        format!(" is a built-in CLI command, not a skill. Ask the user to run /")
+                            .into(),
+                        normalized,
+                        format!(
+                            " themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
+                        )
+                        .into(),
+                    ])));
                 }
                 Ok(())
             }
             Ok(None) => {
                 // A bare name can be the tail of a plugin-qualified one, so the
                 // miss says which full name to use rather than just refusing.
-                let hint = unknown_skill_suffix_hint(&normalized, &self.loader.list_names().await)
-                    .unwrap_or_default();
-                Err(ValidationError(format!(
-                    "Unknown skill: {normalized}{hint}"
-                )))
+                let hint = unknown_skill_suffix_hint(&normalized, &self.loader.list_names().await);
+                let mut parts = vec!["Unknown skill: ".into(), normalized];
+                if let Some(hint) = hint {
+                    parts.push(hint);
+                }
+                Err(ValidationError(join_source_parts(&parts)))
             }
             // Loader I/O failure — surface verbatim; not one of the locked
             // contract strings.
-            Err(e) => {
+            Err(error) => {
                 let _ = ctx;
-                Err(ValidationError(format!("{e}")))
+                Err(ValidationError(error.model_facing_message()))
             }
         }
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -946,41 +1329,42 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 )
                 .await;
                 return Err(ToolError::InvalidInput(
-                    lingxi_core::host::agent_processes::stop_pending_refusal("launch skills."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("launch skills.")
+                        .into(),
                 ));
             }
         }
 
-        let skill = match input.get("skill").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(&bus, "missing_skill", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "Skill: missing or non-string skill".into(),
-                ));
-            }
+        let Some(skill) = source_string_at(&input, "/skill") else {
+            emit_failed(&bus, "missing_skill", started.elapsed().as_millis() as u64).await;
+            return Err(ToolError::InvalidInput(
+                "Skill: missing or non-string skill".into(),
+            ));
         };
 
         // `args` is accepted and echoed, never expanded into a prompt
         // (substrate gap — see module doc).
-        let args = input
-            .get("args")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let args = source_string_at(&input, "/args");
 
         // Trim; reject blank (TS `:356-363`).
-        if skill.trim().is_empty() {
+        let skill_units = skill.string_units("").expect("root string");
+        if trim_skill_name_units(&skill_units).is_empty() {
             emit_failed(&bus, "empty_skill", started.elapsed().as_millis() as u64).await;
-            return Err(ToolError::InvalidInput(format!(
-                "Invalid skill format: {skill}"
-            )));
+            return Err(ToolError::InvalidInput(join_source_parts(&[
+                "Invalid skill format: ".into(),
+                skill,
+            ])));
         }
 
         // Strip a single leading slash (TS `:597-598`).
         let command_name = normalize_skill_name(&skill);
 
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("_PROTO_skill_name".into(), pii_str(&command_name));
+        let command_name_display = exact_string(&command_name);
+        md.insert(
+            "_PROTO_skill_name".into(),
+            pii_str(command_name_display.as_deref().unwrap_or("custom")),
+        );
         bus.log_event(SKILL_STARTED, md).await;
 
         let loaded = match self.loader.load(&command_name).await {
@@ -997,11 +1381,12 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 // Locked string (TS `:406`), plus the suffix hint when a
                 // plugin-qualified name ends with the bare one.
                 let hint =
-                    unknown_skill_suffix_hint(&command_name, &self.loader.list_names().await)
-                        .unwrap_or_default();
-                return Err(ToolError::InvalidInput(format!(
-                    "Unknown skill: {command_name}{hint}"
-                )));
+                    unknown_skill_suffix_hint(&command_name, &self.loader.list_names().await);
+                let mut parts = vec!["Unknown skill: ".into(), command_name.clone()];
+                if let Some(hint) = hint {
+                    parts.push(hint);
+                }
+                return Err(ToolError::InvalidInput(join_source_parts(&parts)));
             }
         };
 
@@ -1013,18 +1398,27 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
-                "Skill {command_name} cannot be used with {SKILL_TOOL_NAME} tool due to disable-model-invocation"
-            )));
+            return Err(ToolError::InvalidInput(join_source_parts(&[
+                "Skill ".into(),
+                command_name.clone(),
+                format!(
+                    " cannot be used with {SKILL_TOOL_NAME} tool due to disable-model-invocation"
+                )
+                .into(),
+            ])));
         }
 
         // Locked rejection: non-prompt skill (TS `:421-427`).
         if desc.command_type != SkillCommandType::Prompt {
             emit_failed(&bus, "not_prompt", started.elapsed().as_millis() as u64).await;
             // Binary `skill_invoke_not_prompt_type` reject (see validate_input).
-            return Err(ToolError::InvalidInput(format!(
-                "{command_name} is a built-in CLI command, not a skill. Ask the user to run /{command_name} themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
-            )));
+            return Err(ToolError::InvalidInput(join_source_parts(&[
+                command_name.clone(),
+                " is a built-in CLI command, not a skill. Ask the user to run /".into(),
+                command_name.clone(),
+                format!(" themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool.")
+                    .into(),
+            ])));
         }
 
         self.loader.skill_invoked(&command_name).await;
@@ -1038,7 +1432,10 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // `builtInCommandNames`, `commands.ts:350-353`). The `SkillDescriptor`
         // carries no bundled/official-source flag, so every non-builtin collapses
         // to `"custom"` — faithful for the hermetic substrate.
-        let skill_name_dim = skill_name_dimension(&command_name);
+        let skill_name_dim = command_name_display
+            .as_deref()
+            .map(skill_name_dimension)
+            .unwrap_or_else(|| "custom".to_string());
         let mut inv_md: LogEventMetadata = HashMap::new();
         inv_md.insert(
             "invocation_id".into(),
@@ -1048,17 +1445,15 @@ present this turn, the skill is loaded — follow it directly rather than callin
         bus.log_event(SKILL_INVOKED, inv_md).await;
 
         // Enforce descriptor cap byte-lock.
-        let truncated = if desc.description.chars().count() > MAX_SKILL_DESCRIPTOR_LEN {
-            let s: String = desc
-                .description
-                .chars()
-                .take(MAX_SKILL_DESCRIPTOR_LEN)
-                .collect();
-            desc.description = s;
-            true
-        } else {
-            false
-        };
+        let description_units = desc
+            .description
+            .string_units("")
+            .expect("SkillDescriptor description is a root string");
+        let descriptor_len = utf16_char_count(&description_units);
+        let truncated = descriptor_len > MAX_SKILL_DESCRIPTOR_LEN;
+        if truncated {
+            desc.description = truncate_source_string(&desc.description, MAX_SKILL_DESCRIPTOR_LEN);
+        }
 
         // SKILLEXEC.3: expand the skill body into the prompt the model must
         // process. Faithful to TS `processPromptSlashCommand`
@@ -1077,7 +1472,10 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // enters as a plain user message. The adjacent TS `${LINGXI_SKILL_DIR}` /
         // `${LINGXI_SESSION_ID}` token replacements (steps 2-3) run between
         // argument substitution and shell expansion — see just below.
-        let args_for_expansion = args.as_deref().unwrap_or("");
+        let (args_for_expansion, argument_markers) = match args.as_ref() {
+            Some(args) => source_parser_text(args, &desc.body),
+            None => (String::new(), std::collections::HashMap::new()),
+        };
         let expanded_prompt = if let Some(builder) = desc.dynamic_body.as_ref() {
             // SKILLEXEC.3 (bundled): the dynamic builder replaces static
             // templating — mirrors the reference `getPromptForCommand(args)`
@@ -1085,13 +1483,17 @@ present this turn, the skill is loaded — follow it directly rather than callin
             // (empty→usage, else→buildPrompt(trimmed)), so `$ARGUMENTS`/`$N`
             // substitution is bypassed entirely.
             let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
+            let args_for_builder = Utf16JsonProjection::from(args_for_expansion.as_str());
             match builder.try_build_at(
-                args_for_expansion,
-                &self.ctx.session_cwd.project_root(),
-                &cwd,
-                false,
+                &args_for_builder,
+                command_api::BundledPromptContext {
+                    project_root: &self.ctx.session_cwd.project_root(),
+                    cwd: &cwd,
+                    is_preload: false,
+                    main_loop_model: Some(ctx.options.main_loop_model.as_str()),
+                },
             ) {
-                Ok(prompt) => prompt,
+                Ok(prompt) => restore_parser_text(prompt, &argument_markers),
                 Err(error) => {
                     emit_failed(
                         &bus,
@@ -1100,17 +1502,12 @@ present this turn, the skill is loaded — follow it directly rather than callin
                     )
                     .await;
                     return Err(ToolError::Internal(format!(
-                        "Skill {command_name} expansion failed: {error}"
+                        "Skill expansion failed: {error}"
                     )));
                 }
             }
         } else {
-            match command_api::substitute_arguments_faithful(
-                &desc.body,
-                Some(args_for_expansion),
-                true,
-                &desc.argument_names,
-            ) {
+            match substitute_skill_prompt(&desc.body, args.as_ref(), &desc.argument_names) {
                 Ok(p) => p,
                 Err(e) => {
                     emit_failed(
@@ -1119,9 +1516,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
-                    return Err(ToolError::Internal(format!(
-                        "Skill {command_name} expansion failed: {e}"
-                    )));
+                    return Err(ToolError::Internal(format!("Skill expansion failed: {e}")));
                 }
             }
         };
@@ -1150,13 +1545,15 @@ present this turn, the skill is loaded — follow it directly rather than callin
             } else {
                 skill_dir.into_owned()
             };
-            expanded_prompt = expanded_prompt.replace("${LINGXI_SKILL_DIR}", &skill_dir);
+            expanded_prompt =
+                replace_source_text(&expanded_prompt, "${LINGXI_SKILL_DIR}", &skill_dir);
         }
         // Step 3: `${LINGXI_SESSION_ID}` — always replaced (TS calls
         // `getSessionId()` unconditionally). `None` (hermetic/loaderless) leaves
         // the token untouched rather than substituting an empty string.
         if let Some(session_id) = desc.session_id.as_ref() {
-            expanded_prompt = expanded_prompt.replace("${LINGXI_SESSION_ID}", session_id);
+            expanded_prompt =
+                replace_source_text(&expanded_prompt, "${LINGXI_SESSION_ID}", session_id);
         }
 
         // SKILLEXEC.6: embedded `!command` shell expansion over the substituted
@@ -1183,10 +1580,11 @@ present this turn, the skill is loaded — follow it directly rather than callin
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
             let shell_ctx = self.prompt_shell.build(&desc.allowed_tools, desc.shell);
+            let slash_command_name = join_source_parts(&["/".into(), command_name.clone()]);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,
                 &shell_ctx,
-                &format!("/{command_name}"),
+                &slash_command_name,
                 desc.shell,
             )
             .await
@@ -1199,9 +1597,12 @@ present this turn, the skill is loaded — follow it directly rather than callin
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
-                    return Err(ToolError::Internal(format!(
-                        "Skill {command_name} shell expansion failed: {e}"
-                    )));
+                    return Err(ToolError::InvalidInput(join_source_parts(&[
+                        "Skill ".into(),
+                        command_name.clone(),
+                        " shell expansion failed: ".into(),
+                        e.source_message(),
+                    ])));
                 }
             }
         };
@@ -1212,8 +1613,10 @@ present this turn, the skill is loaded — follow it directly rather than callin
             } else {
                 skill_dir.into_owned()
             };
-            expanded_prompt =
-                format!("Base directory for this skill: {skill_dir}\n\n{expanded_prompt}");
+            expanded_prompt = join_source_parts(&[
+                format!("Base directory for this skill: {skill_dir}\n\n").into(),
+                expanded_prompt,
+            ]);
         }
 
         // ── `context: fork` ─────────────────────────────────────────────────
@@ -1251,7 +1654,17 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // plain prompt), which is the whole reason the lifetime is bounded.
         if !desc.disallowed_tools.is_empty() {
             if let Some(gate) = self.ctx.permission_gate.as_ref() {
-                gate.set_command_input_denies(&desc.disallowed_tools, true);
+                // Skill frontmatter was parsed from UTF-8 text. Project it
+                // once at this producer boundary and keep the source shape
+                // through PermissionGate and rule parsing.
+                let disallowed_tools = desc
+                    .disallowed_tools
+                    .iter()
+                    .map(|spec| {
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(spec.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                gate.set_command_input_denies(&disallowed_tools, true);
             }
         }
 
@@ -1281,10 +1694,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
             ),
         );
 
-        let new_messages = vec![lingxi_core::types::ConversationMessage::user(
-            lingxi_core::types::MessageId::new(),
-            expanded_prompt,
-        )];
+        let new_messages = vec![user_message_from_source(&expanded_prompt)];
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -1293,7 +1703,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
         );
         md.insert(
             "descriptor_len".into(),
-            AnalyticsValue::Int(desc.description.chars().count() as i64),
+            AnalyticsValue::Int(descriptor_len as i64),
         );
         md.insert(
             "descriptor_truncated".into(),
@@ -1315,31 +1725,40 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // This tool only produces the inline path (TS `status:'inline'` default
         // → `Launching skill: ${commandName}`); the forked branch has no Rust
         // substrate (see module doc), so only the inline string is emitted.
-        let mut data = json!({
-            "success": true,
-            "commandName": command_name,
-            "status": "inline",
-            "body": desc.body,
-            "descriptor_truncated": truncated,
-            "model_content": format!("Launching skill: {command_name}"),
-        });
+        let model_text = join_source_parts(&["Launching skill: ".into(), command_name.clone()]);
+        let mut fields = vec![
+            ("success".to_string(), generated_projection(&json!(true))),
+            ("commandName".to_string(), command_name.clone()),
+            ("status".to_string(), "inline".into()),
+            ("body".to_string(), desc.body.clone()),
+            (
+                "descriptor_truncated".to_string(),
+                generated_projection(&json!(truncated)),
+            ),
+            ("model_content".to_string(), model_text),
+        ];
         // Capture the model override BEFORE `desc.model` is moved into the
         // result JSON below — it feeds the SKILLEXEC.3 `context_modifier`.
         let model_override = desc.model.clone();
 
-        let obj = data.as_object_mut().expect("json object");
         if !desc.allowed_tools.is_empty() {
-            obj.insert(
-                "allowedTools".into(),
-                Value::Array(desc.allowed_tools.into_iter().map(Value::String).collect()),
-            );
+            fields.push((
+                "allowedTools".to_string(),
+                projection_array(
+                    desc.allowed_tools
+                        .into_iter()
+                        .map(Utf16JsonProjection::from)
+                        .collect(),
+                ),
+            ));
         }
         if let Some(model) = desc.model {
-            obj.insert("model".into(), Value::String(model));
+            fields.push(("model".to_string(), model.into()));
         }
         if let Some(args) = args {
-            obj.insert("args".into(), Value::String(args));
+            fields.push(("args".to_string(), args));
         }
+        let data = projection_object(fields);
 
         // SKILLEXEC.3 (model scope): when the skill declares `model:` in its
         // frontmatter, return a `context_modifier` that switches the session's
@@ -1367,6 +1786,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
             context_modifier,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

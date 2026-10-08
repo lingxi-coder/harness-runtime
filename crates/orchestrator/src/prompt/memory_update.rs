@@ -60,6 +60,8 @@
 //! * `paths` — recomputed by listing the user memdir for files whose mtime is
 //!   newer than the previous scan, instead of being reported by the writer.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 /// `F5T` @296741219 — the only `source` the oracle's label table defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryUpdateSource {
@@ -95,7 +97,7 @@ pub struct PendingMemoryUpdate {
     /// `e.source`.
     pub source: MemoryUpdateSource,
     /// `e.summary`.
-    pub summary: String,
+    pub summary: Utf16JsonProjection,
 }
 
 /// One drained `pendingMemoryUpdates` entry.
@@ -104,7 +106,7 @@ pub struct MemoryUpdate {
     /// `e.source`.
     pub source: MemoryUpdateSource,
     /// `e.summary` — the consolidator's own one-line description.
-    pub summary: String,
+    pub summary: Utf16JsonProjection,
     /// `e.paths` — every memory file the background pass rewrote.
     pub paths: Vec<String>,
     /// `e.inContextPaths` — the subset of `paths` the model is currently
@@ -141,7 +143,7 @@ where
 /// a memory filename containing `<`, `>` or a control character cannot forge
 /// markup — or a closing `</system-reminder>` — inside the envelope.
 #[must_use]
-pub fn render_memory_update(update: &MemoryUpdate) -> String {
+pub fn render_memory_update(update: &MemoryUpdate) -> Utf16JsonProjection {
     let escape_join = |paths: &[String]| {
         paths
             .iter()
@@ -149,22 +151,30 @@ pub fn render_memory_update(update: &MemoryUpdate) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut lines = vec![format!(
-        "{} updated your memory directory: {}",
-        update.source.label(),
-        update.summary
-    )];
+    let summary_units = update
+        .summary
+        .string_units("")
+        .expect("memory update summary is a JSON string");
+    let mut units = format!("{} updated your memory directory: ", update.source.label())
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(summary_units);
     if !update.paths.is_empty() {
-        lines.push(format!("Files changed: {}", escape_join(&update.paths)));
+        units.extend("\nFiles changed: ".encode_utf16());
+        units.extend(escape_join(&update.paths).encode_utf16());
     }
     if !update.in_context_paths.is_empty() {
-        lines.push(format!(
-            "Your loaded copy of {} is now stale relative to disk \u{2014} Read it again if you need current contents.",
-            escape_join(&update.in_context_paths)
-        ));
+        units.extend("\nYour loaded copy of ".encode_utf16());
+        units.extend(escape_join(&update.in_context_paths).encode_utf16());
+        units.extend(
+            " is now stale relative to disk \u{2014} Read it again if you need current contents."
+                .encode_utf16(),
+        );
     }
-    lines.push(AMBIENT_CONTEXT_TRAILER.to_string());
-    lines.join("\n")
+    units.extend("\n".encode_utf16());
+    units.extend(AMBIENT_CONTEXT_TRAILER.encode_utf16());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("memory update body is a root string")
 }
 
 #[cfg(test)]
@@ -183,7 +193,9 @@ mod tests {
     #[test]
     fn full_body_is_byte_exact_against_2_1_238() {
         assert_eq!(
-            render_memory_update(&update(&["a.md", "b.md"], &["a.md"])),
+            render_memory_update(&update(&["a.md", "b.md"], &["a.md"]))
+                .string_at("")
+                .unwrap(),
             "Background memory consolidation updated your memory directory: merged 3 notes\n\
 Files changed: a.md, b.md\n\
 Your loaded copy of a.md is now stale relative to disk \u{2014} Read it again if you need current contents.\n\
@@ -196,7 +208,7 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
     #[test]
     fn empty_lists_drop_their_lines_but_keep_the_trailer() {
         assert_eq!(
-            render_memory_update(&update(&[], &[])),
+            render_memory_update(&update(&[], &[])).string_at("").unwrap(),
             format!(
                 "Background memory consolidation updated your memory directory: merged 3 notes\n{AMBIENT_CONTEXT_TRAILER}"
             )
@@ -205,7 +217,9 @@ This is ambient context \u{2014} do not narrate it to the user unless they ask o
 
     #[test]
     fn nothing_in_context_keeps_only_the_files_changed_line() {
-        let out = render_memory_update(&update(&["a.md"], &[]));
+        let out = render_memory_update(&update(&["a.md"], &[]))
+            .string_at("")
+            .unwrap();
         assert!(out.contains("Files changed: a.md"));
         assert!(!out.contains("Your loaded copy of"));
     }

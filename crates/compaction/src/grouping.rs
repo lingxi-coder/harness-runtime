@@ -13,8 +13,8 @@
 //! so PTL head-truncation drops the correct round boundaries.
 
 use crate::post_compact::estimate_content_tokens;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
-use serde_json::Value;
 
 /// A contiguous range of messages forming one API round.
 #[derive(Debug, Clone)]
@@ -85,7 +85,7 @@ pub fn estimate_tokens_for_range(msgs: &[ConversationMessage]) -> u64 {
 
 fn estimate_block_tokens(block: &ContentBlock) -> u64 {
     match block {
-        ContentBlock::Text { text } => estimate_content_tokens(text),
+        ContentBlock::Text { text, .. } => estimate_content_tokens(text),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..
         } => {
@@ -100,8 +100,8 @@ fn estimate_block_tokens(block: &ContentBlock) -> u64 {
             content_blocks,
             ..
         } => content_blocks.as_ref().map_or_else(
-            || estimate_content_tokens(content),
-            |blocks| blocks.iter().map(estimate_json_block_tokens).sum(),
+            || estimate_source_string_tokens(content, ""),
+            estimate_json_content_tokens,
         ),
         ContentBlock::Thinking { thinking, .. } => estimate_content_tokens(thinking),
         ContentBlock::RedactedThinking { data } => estimate_content_tokens(data),
@@ -113,47 +113,67 @@ fn estimate_block_tokens(block: &ContentBlock) -> u64 {
     }
 }
 
-fn estimate_tool_use_tokens(name: &str, input: &Value) -> u64 {
-    let input = if input.is_null() {
+fn units_to_tokens(units: usize) -> u64 {
+    u64::try_from(units).unwrap_or(u64::MAX).saturating_add(2) / 4
+}
+
+fn estimate_source_string_tokens(source: &Source, pointer: &str) -> u64 {
+    source
+        .string_units(pointer)
+        .map_or(0, |units| units_to_tokens(units.len()))
+}
+
+fn estimate_tool_use_tokens(name: &str, input: &Source) -> u64 {
+    estimate_tool_use_units(name.encode_utf16().count(), input)
+}
+
+fn estimate_tool_use_units(name_units: usize, input: &Source) -> u64 {
+    let input = if input.at_pointer("").is_some_and(|value| value.is_null()) {
         "{}".into()
     } else {
-        input.to_string()
+        input
+            .to_json_string()
+            .expect("tool input source serializes")
     };
-    estimate_content_tokens(&format!("{name}{input}"))
+    units_to_tokens(name_units.saturating_add(input.encode_utf16().count()))
 }
 
-fn estimate_json_content_tokens(content: &Value) -> u64 {
-    match content {
-        Value::String(text) => estimate_content_tokens(text),
-        Value::Array(blocks) => blocks.iter().map(estimate_json_block_tokens).sum(),
-        _ => 0,
+fn estimate_json_content_tokens(content: &Source) -> u64 {
+    if let Some(units) = content.string_units("") {
+        return units_to_tokens(units.len());
     }
+    (0..content.array_len("").unwrap_or(0))
+        .map(|index| {
+            estimate_json_block_tokens(&content.subprojection(&format!("/{index}")).unwrap())
+        })
+        .sum()
 }
 
-fn estimate_json_block_tokens(block: &Value) -> u64 {
-    if let Some(text) = block.as_str() {
-        return estimate_content_tokens(text);
+fn estimate_json_block_tokens(block: &Source) -> u64 {
+    if let Some(units) = block.string_units("") {
+        return units_to_tokens(units.len());
     }
-    match block.get("type").and_then(Value::as_str) {
-        Some("text") => block
-            .get("text")
-            .and_then(Value::as_str)
-            .map_or(0, estimate_content_tokens),
+    match block.string_at("/type") {
+        Some("text") => estimate_source_string_tokens(block, "/text"),
         Some("image" | "document") => 2_000,
-        Some("tool_result") => block.get("content").map_or(0, estimate_json_content_tokens),
-        Some("tool_use") => estimate_tool_use_tokens(
-            block.get("name").and_then(Value::as_str).unwrap_or(""),
-            block.get("input").unwrap_or(&Value::Null),
+        Some("tool_result") => block
+            .subprojection("/content")
+            .ok()
+            .as_ref()
+            .map_or(0, estimate_json_content_tokens),
+        Some("tool_use") => estimate_tool_use_units(
+            block.string_units("/name").map_or(0, |units| units.len()),
+            &block
+                .subprojection("/input")
+                .unwrap_or_else(|_| Source::parse("null").unwrap()),
         ),
-        Some("thinking") => block
-            .get("thinking")
-            .and_then(Value::as_str)
-            .map_or(0, estimate_content_tokens),
-        Some("redacted_thinking") => block
-            .get("data")
-            .and_then(Value::as_str)
-            .map_or(0, estimate_content_tokens),
-        _ => estimate_content_tokens(&block.to_string()),
+        Some("thinking") => estimate_source_string_tokens(block, "/thinking"),
+        Some("redacted_thinking") => estimate_source_string_tokens(block, "/data"),
+        _ => estimate_content_tokens(
+            &block
+                .to_json_string()
+                .expect("content block source serializes"),
+        ),
     }
 }
 
@@ -163,6 +183,10 @@ mod tests {
     use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
 
+    fn source(value: &serde_json::Value) -> Source {
+        Source::from_serde_value(value).expect("test value is valid JSON")
+    }
+
     #[test]
     fn oracle_261_estimates_each_wire_block_with_utf16_rounding() {
         let message = ConversationMessage::Assistant {
@@ -170,14 +194,16 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "你好".into(),
+                    citations: None,
                 },
                 ContentBlock::Text {
-                    text: "😀".into()
+                    text: "😀".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: "Read".into(),
-                    input: json!({}),
+                    input: source(&json!({})),
                     provider_id: None,
                 },
                 ContentBlock::Thinking {
@@ -187,6 +213,7 @@ mod tests {
                 ContentBlock::RedactedThinking { data: "abc".into() },
             ],
             stop_reason: None,
+            resumable: None,
         };
         // vc: round(2/4) + round(2/4) + round(6/4) + round(6/4) + round(3/4).
         assert_eq!(estimate_tokens_for_range(&[message]), 7);
@@ -198,18 +225,22 @@ mod tests {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
-                content: "display".repeat(1000),
-                is_error: false,
+                content: "display".repeat(1000).into(),
+                is_error: Some(false),
                 provider_tool_use_id: None,
-                content_blocks: Some(vec![
+                content_blocks: Some(source(&json!([
                     json!({"type":"text", "text":"你好😀"}),
                     json!({"type":"image", "source":{}}),
                     json!({"type":"document", "source":{}}),
-                ]),
+                ]))),
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         assert_eq!(estimate_tokens_for_range(&[message]), 4_001);
     }
@@ -220,10 +251,11 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: tool.into(),
-                input: json!({}),
+                input: source(&json!({})),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -233,13 +265,17 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 

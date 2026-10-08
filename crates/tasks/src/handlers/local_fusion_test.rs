@@ -26,10 +26,10 @@ impl ToolInvoker for MockInvoker {
     async fn invoke(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
-        Ok(json!(null))
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap())
     }
 
     fn as_any(&self) -> &dyn Any {

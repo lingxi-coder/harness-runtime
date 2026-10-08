@@ -60,4 +60,8 @@ pub enum StreamingError {
         /// The partial-JSON buffer that failed to parse.
         buffer: String,
     },
+    /// A source-backed provider payload could not be updated without leaving
+    /// its validated JSON representation.
+    #[error("streaming: invalid provider JSON source: {0}")]
+    JsonPayload(String),
 }

@@ -18,30 +18,30 @@
 //! [`crate::McpRegistry`].
 
 use async_trait::async_trait;
-use serde_json::Value;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Byte-faithful inputs for the `Elicitation` hook, mirroring the fields
 /// `runElicitationHooks` forwards to `executeElicitationHooks`
 /// (`elicitationHandler.ts:227-239`). Optional fields are `None` when the
 /// server omitted them; the orchestrator threads each into the wire payload
 /// (`hooks::ElicitationPayload`) exactly as claude-code does.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ElicitationHookRequest {
     /// Logical MCP server name (wire `mcp_server_name`).
     pub server_name: String,
-    /// Human-readable prompt shown to the user (wire `message`, required).
-    pub message: String,
-    /// Presentation mode string (`"form"` / `"url"`), if the server set it.
-    /// Kept as a raw string here so the mcp crate need not depend on the
-    /// hooks `ElicitationMode` enum; the orchestrator maps it.
-    pub mode: Option<String>,
-    /// URL to open when `mode == "url"`, if specified.
-    pub url: Option<String>,
-    /// Server-assigned elicitation ID, if specified.
-    pub elicitation_id: Option<String>,
-    /// JSON Schema describing the requested form fields (wire
-    /// `requested_schema`), if specified.
-    pub requested_schema: Option<Value>,
+    /// Complete server request parameters as a source projection. The
+    /// orchestrator selects the known hook fields without lowering arbitrary
+    /// schema members or JavaScript strings through Value.
+    pub params: Utf16JsonProjection,
+}
+
+impl Default for ElicitationHookRequest {
+    fn default() -> Self {
+        Self {
+            server_name: String::new(),
+            params: Utf16JsonProjection::parse("{}").expect("empty object JSON"),
+        }
+    }
 }
 
 /// Outcome of firing the `Elicitation` hook, mapped 1:1 onto the three
@@ -58,10 +58,10 @@ pub struct ElicitationHookRequest {
 pub enum ElicitationHookOutcome {
     /// No hook provided a response or block — use the default behavior.
     Pass,
-    /// A hook provided the elicitation answer. `answer` is the full JSON object
-    /// the handler returns to the server (e.g. `{"action":"accept",
-    /// "content":{...}}`), already shaped so it can be returned verbatim.
-    Respond(Value),
+    /// A hook provided the elicitation answer. `answer` is the exact flat JSON
+    /// object the handler returns to the server (e.g. `{"action":"accept",
+    /// "content":{...}}`), already shaped for raw JSON serialization.
+    Respond(Utf16JsonProjection),
     /// A hook denied the elicitation. Equivalent to `{ action: 'decline' }`.
     Deny,
 }

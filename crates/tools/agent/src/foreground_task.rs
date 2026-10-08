@@ -8,8 +8,14 @@ use lingxi_core::host::task_registry::{
 use lingxi_core::host::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
+
+/// The real child identity and selected wire model, sent only after the
+/// spawner released its startup gate. `agent.spawn` resolves at this boundary
+/// while the foreground Agent tool continues to own the terminal result.
+pub(super) type StartReceipt = (lingxi_core::types::AgentId, String);
 
 pub(super) enum ForegroundResult {
     Finished(
@@ -28,9 +34,11 @@ struct Control {
     abort: Mutex<Option<tokio::task::AbortHandle>>,
     stop_requested: Arc<std::sync::atomic::AtomicBool>,
     allocated_agent_id: Mutex<Option<lingxi_core::types::AgentId>>,
+    allocated_agent_type: Mutex<Option<String>>,
     signal: watch::Sender<bool>,
     hint_progress: tool_api::ToolProgressSender,
     tool_use_id: Option<lingxi_core::types::ToolUseId>,
+    start_receipt: Mutex<Option<oneshot::Sender<StartReceipt>>>,
 }
 
 struct TaskControl(std::sync::Weak<Control>);
@@ -57,9 +65,50 @@ impl TaskKiller for TaskControl {
 }
 #[async_trait]
 impl lingxi_core::host::task_registry::TaskMessageReceiver for TaskControl {
+    async fn send_peer(
+        &self,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+        use lingxi_core::host::handback::HandbackRecipient;
+        use lingxi_core::host::task_registry::TaskRegistryError;
+        let control = self
+            .0
+            .upgrade()
+            .ok_or_else(|| TaskRegistryError::Internal("agent loop ended".into()))?;
+        let id = (*control.allocated_agent_id.lock().unwrap())
+            .ok_or_else(|| TaskRegistryError::Internal("agent not allocated".into()))?;
+        if !envelope.validate()
+            || !matches!(envelope.receipt.recipient, HandbackRecipient::Agent { agent_id, .. } if agent_id == id)
+        {
+            return Err(TaskRegistryError::Internal(
+                "peer report recipient does not match this agent".into(),
+            ));
+        }
+        let task_id = control
+            .handle
+            .lock()
+            .await
+            .as_ref()
+            .map(|handle| handle.task_id.clone())
+            .ok_or_else(|| TaskRegistryError::Internal("agent task not registered".into()))?;
+        let record = control
+            .registry
+            .get(&task_id)
+            .await?
+            .ok_or_else(|| TaskRegistryError::NotFound(task_id.clone()))?;
+        if record.status != "running" && !(record.status == "completed" && record.is_parked) {
+            return Err(TaskRegistryError::NotFound(task_id));
+        }
+        control
+            .spawner
+            .resume_foreground_peer(&id, envelope)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
     async fn send(
         &self,
-        message: String,
+        message: Utf16JsonProjection,
     ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
         let control = self.0.upgrade().ok_or_else(|| {
             lingxi_core::host::task_registry::TaskRegistryError::Internal("agent loop ended".into())
@@ -108,6 +157,17 @@ impl lingxi_core::host::task_registry::TaskMessageReceiver for TaskControl {
 struct Observer(Arc<Control>);
 #[async_trait]
 impl SubagentSpawnObserver for Observer {
+    fn on_started(&self, event: &SubagentObservation) {
+        if let SubagentObservation::Allocated {
+            agent_id, model, ..
+        } = event
+        {
+            if let Some(sender) = self.0.start_receipt.lock().unwrap().take() {
+                let _ = sender.send((*agent_id, model.clone()));
+            }
+        }
+    }
+
     async fn on_model_selected(&self, event: &SubagentObservation, effort: Option<&str>) {
         if let SubagentObservation::Allocated { model, .. } = event {
             if let Some(handle) = self.0.handle.lock().await.as_ref() {
@@ -128,15 +188,20 @@ impl SubagentSpawnObserver for Observer {
         } = event.clone()
         {
             let request = &self.0.request;
+            *self.0.allocated_agent_type.lock().unwrap() = Some(agent_type.clone());
             let registration = ForegroundAgentRegistration {
                 agent_id,
                 agent_type,
-                description: request.description.clone().unwrap_or_default(),
+                description: request
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| Utf16JsonProjection::from("")),
                 prompt: request.prompt.clone(),
                 tool_use_id: request.tool_use_id.clone(),
                 creator_agent_id: request.creator_agent_id,
                 creator_teammate_name: request.creator_teammate_name.clone(),
                 creator_team_name: request.creator_team_name.clone(),
+                agent_spawn_provenance: request.agent_spawn_provenance.clone(),
             };
             *self.0.allocated_agent_id.lock().unwrap() = Some(agent_id);
             match self
@@ -206,7 +271,33 @@ impl SubagentSpawnObserver for Observer {
                                     .as_ref()
                                     .is_some_and(|handle| !handle.is_finished());
                                 if active && !*control.signal.borrow() {
-                                    let _ = control.hint_progress.send(tool_api::ToolProgress {tool_use_id: tool_use_id.clone(), data: serde_json::json!({"kind": "background_hint", "toolUseId": tool_use_id})}).await;
+                                    let progress_tool_use_id = tool_use_id.to_string();
+                                    let data = Utf16JsonProjection::object(vec![
+                                        (
+                                            "kind".to_owned(),
+                                            Utf16JsonProjection::root_string(
+                                                "background_hint".to_owned(),
+                                                "background_hint".encode_utf16().collect(),
+                                            )
+                                            .expect("static progress string is valid"),
+                                        ),
+                                        (
+                                            "toolUseId".to_owned(),
+                                            Utf16JsonProjection::root_string(
+                                                progress_tool_use_id.clone(),
+                                                progress_tool_use_id.encode_utf16().collect(),
+                                            )
+                                            .expect("tool use id is a valid Rust string"),
+                                        ),
+                                    ])
+                                    .expect("generated progress object is valid");
+                                    let _ = control
+                                        .hint_progress
+                                        .send(tool_api::ToolProgress {
+                                            tool_use_id: tool_use_id.clone(),
+                                            data,
+                                        })
+                                        .await;
                                 }
                             }
                         });
@@ -215,7 +306,7 @@ impl SubagentSpawnObserver for Observer {
                 Err(error) => {
                     return Err(SubagentSpawnError::Internal(format!(
                         "foreground agent registration failed: {error}"
-                    )))
+                    )));
                 }
             }
         }
@@ -248,6 +339,7 @@ pub(super) async fn run(
     tool_use_id: Option<lingxi_core::types::ToolUseId>,
     registry: Arc<dyn TaskRegistryHandle>,
     ctx: tool_api::BuiltinToolContext,
+    start_receipt: Option<oneshot::Sender<StartReceipt>>,
 ) -> ForegroundResult {
     let worktree = request.worktree.clone();
     let (signal, mut changed) = watch::channel(false);
@@ -260,9 +352,11 @@ pub(super) async fn run(
         abort: Default::default(),
         stop_requested: Default::default(),
         allocated_agent_id: Default::default(),
+        allocated_agent_type: Default::default(),
         signal,
         hint_progress,
         tool_use_id,
+        start_receipt: Mutex::new(start_receipt),
     });
     let observer = Arc::new(Observer(control.clone()));
     let (release_worker, worker_start) = tokio::sync::oneshot::channel();
@@ -293,12 +387,20 @@ pub(super) async fn run(
                 "foreground agent worker: {error}"
             )))
         });
-        let worktree_result = match worktree {
-            Some(handle) => {
+        let retains_owned_work = match &outcome {
+            Ok(SubagentResult::Completed {
+                agent_id,
+                handback: Some(state),
+                ..
+            }) if state.active => registry.agent_waiting_on_owned_work(*agent_id).await,
+            _ => false,
+        };
+        let worktree_result = match (worktree, retains_owned_work) {
+            (Some(handle), false) => {
                 lingxi_core::host::worktree::agent_worktree_result(ctx.worktree.as_ref(), &handle)
                     .await
             }
-            None => None,
+            _ => None,
         };
         if let Some(handle) = completion_control.handle.lock().await.as_ref() {
             // Removal and a Ctrl+B request serialize at the registry write
@@ -314,13 +416,47 @@ pub(super) async fn run(
                 let mut terminal = AgentTerminalOutcome::default();
                 let status = match &outcome {
                     Ok(SubagentResult::Completed {
+                        handback,
                         content,
                         total_tokens,
                         total_tool_use_count,
                         total_duration_ms,
                         ..
                     }) => {
-                        terminal.result = Some(super::extract_content_texts(content).join("\n"));
+                        terminal.handback = handback.clone();
+                        let sender_name = completion_control
+                            .request
+                            .name
+                            .clone()
+                            .or_else(|| {
+                                completion_control
+                                    .allocated_agent_type
+                                    .lock()
+                                    .unwrap()
+                                    .clone()
+                            })
+                            .unwrap_or_else(|| completion_control.request.subagent_type.clone());
+                        let lines = super::handback_completion_texts(
+                            handback.as_ref(),
+                            content,
+                            &sender_name,
+                            retains_owned_work,
+                            true,
+                        );
+                        let mut units = Vec::new();
+                        for (index, line) in lines.iter().enumerate() {
+                            if index > 0 {
+                                units.push(b'\n' as u16);
+                            }
+                            units.extend_from_slice(line);
+                        }
+                        terminal.result = Some(
+                            Utf16JsonProjection::root_string(
+                                String::from_utf16_lossy(&units),
+                                units,
+                            )
+                            .expect("joined foreground result is valid UTF-16 source"),
+                        );
                         terminal.max_turns_reached = super::max_turns_reached_from_result(content);
                         terminal.usage = Some(AgentRunUsage {
                             subagent_tokens: *total_tokens,
@@ -378,7 +514,7 @@ mod tests {
     use super::*;
     use lingxi_core::host::task_registry::TaskListFilter;
     struct ControlledSpawner {
-        messages: Mutex<Vec<String>>,
+        messages: Mutex<Vec<Utf16JsonProjection>>,
         id: lingxi_core::types::AgentId,
         ready: tokio::sync::Notify,
         release: tokio::sync::Notify,
@@ -388,7 +524,7 @@ mod tests {
         async fn resume_foreground(
             &self,
             id: &lingxi_core::types::AgentId,
-            message: String,
+            message: Utf16JsonProjection,
         ) -> Result<(), SubagentSpawnError> {
             assert_eq!(*id, self.id);
             self.messages.lock().unwrap().push(message);
@@ -409,19 +545,19 @@ mod tests {
             _: Option<mpsc::Sender<String>>,
             observer: Option<Arc<dyn SubagentSpawnObserver>>,
         ) -> Result<SubagentResult, SubagentSpawnError> {
-            observer
-                .unwrap()
-                .before_start(&SubagentObservation::Allocated {
-                    agent_id: self.id,
-                    agent_type: "general-purpose".into(),
-                    name: None,
-                    model: "test".into(),
-                    model_profile: None,
-                    persistent: false,
-                    initial_message_index: 0,
-                    origin_session_id: None,
-                })
-                .await?;
+            let observer = observer.unwrap();
+            let allocation = SubagentObservation::Allocated {
+                agent_id: self.id,
+                agent_type: "general-purpose".into(),
+                name: None,
+                model: "test".into(),
+                model_profile: None,
+                persistent: false,
+                initial_message_index: 0,
+                origin_session_id: None,
+            };
+            observer.before_start(&allocation).await?;
+            observer.on_started(&allocation);
             self.ready.notify_one();
             self.release.notified().await;
             Ok(SubagentResult::Failed {
@@ -469,6 +605,7 @@ mod tests {
             cwd: Some("/tmp/original-worktree".into()),
             context_paths: vec![std::path::PathBuf::from("/tmp/original-context")],
             fork_context_messages: Some(vec![]),
+            instruction_context: None,
             fork_parent_system_prompt: Some("original inherited system prompt".into()),
             creator_agent_id: Some(lingxi_core::types::AgentId::new()),
             effort: Some(serde_json::json!("high")),
@@ -484,6 +621,7 @@ mod tests {
             None,
             registry.clone(),
             ctx,
+            None,
         ));
         tokio::time::timeout(std::time::Duration::from_secs(5), spawner.ready.notified())
             .await
@@ -508,6 +646,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_receipt_precedes_foreground_terminal_result() {
+        let (spawner, registry, ctx, inherit) = setup();
+        let (progress, _rx) = mpsc::channel(8);
+        let (started, receipt) = oneshot::channel();
+        let call = tokio::spawn(run(
+            spawner.clone(),
+            SubagentSpawnRequest::default(),
+            inherit,
+            progress,
+            tool_api::test_support::fresh_tx(),
+            None,
+            registry,
+            ctx,
+            Some(started),
+        ));
+        let (agent_id, model) = tokio::time::timeout(std::time::Duration::from_secs(5), receipt)
+            .await
+            .expect("start receipt arrives before terminal")
+            .expect("startup gate opened");
+        assert_eq!(agent_id, spawner.id);
+        assert_eq!(model, "test");
+        assert!(
+            !call.is_finished(),
+            "the terminal result is still owned by Agent"
+        );
+        spawner.release.notify_one();
+        assert!(matches!(
+            call.await.unwrap(),
+            ForegroundResult::Finished(..)
+        ));
+    }
+
+    #[tokio::test]
     async fn foreground_resume_recipe_failure_keeps_startup_gate_closed() {
         let (spawner, registry, ctx, inherit) = setup();
         registry.reject_resume_recipe_registration();
@@ -515,6 +686,7 @@ mod tests {
         // assertion distinguishes the failure from an ordinary agent result.
         spawner.release.notify_one();
         let (progress, _rx) = mpsc::channel(8);
+        let (started, receipt) = oneshot::channel();
         let result = run(
             spawner,
             SubagentSpawnRequest::default(),
@@ -524,8 +696,13 @@ mod tests {
             None,
             registry.clone(),
             ctx,
+            Some(started),
         )
         .await;
+        assert!(
+            receipt.await.is_err(),
+            "a rejected startup has no start receipt"
+        );
         match result {
             ForegroundResult::Finished(Err(SubagentSpawnError::Internal(reason)), _) => {
                 assert!(reason.contains("resume recipe rejected"))
@@ -552,6 +729,7 @@ mod tests {
             None,
             registry.clone(),
             ctx,
+            None,
         ));
         spawner.ready.notified().await;
         let rows = registry.list(TaskListFilter::default()).await.unwrap();
@@ -583,7 +761,10 @@ mod tests {
             .send_foreground_message(&rows[0].task_id, "follow-up".into())
             .await
             .unwrap();
-        assert_eq!(*spawner.messages.lock().unwrap(), ["follow-up"]);
+        assert_eq!(
+            spawner.messages.lock().unwrap()[0].string_at(""),
+            Some("follow-up")
+        );
         spawner.release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -616,6 +797,7 @@ mod tests {
             None,
             registry.clone(),
             ctx,
+            None,
         ));
         spawner.ready.notified().await;
         let id = registry.list(TaskListFilter::default()).await.unwrap()[0]
@@ -657,6 +839,7 @@ mod tests {
             None,
             registry.clone(),
             ctx,
+            None,
         ));
         spawner.ready.notified().await;
         spawner.release.notify_one();

@@ -11,6 +11,7 @@ mod bundled;
 use crate::model::{LoadedFrom, SkillSource};
 use crate::{parse_skill_markdown, Skill, SkillRegistry};
 use bundled::{BundledSkill, BUILTIN_DESKTOP, BUILTIN_MOBILE};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Register the desktop builtin skill set into `reg`.
 pub fn register_desktop(reg: &mut SkillRegistry) {
@@ -45,13 +46,23 @@ fn parse_builtin(entry: &BundledSkill) -> Skill {
         .map(|trigger| (*trigger).into())
         .collect();
     for reference in entry.references {
-        skill.content.push_str("\n\n---\n\n");
-        skill
-            .content
-            .push_str(&format!("## Bundled resource: `{}`\n\n", reference.path));
-        skill.content.push_str(reference.content);
+        append_utf8(&mut skill.content, "\n\n---\n\n");
+        append_utf8(
+            &mut skill.content,
+            &format!("## Bundled resource: `{}`\n\n", reference.path),
+        );
+        append_utf8(&mut skill.content, reference.content);
     }
     skill
+}
+
+fn append_utf8(target: &mut Utf16JsonProjection, text: &str) {
+    let mut units = target
+        .string_units("")
+        .expect("skill body is a root string");
+    units.extend(text.encode_utf16());
+    *target = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("UTF-8 resource text preserves the skill source string");
 }
 
 #[cfg(test)]
@@ -70,9 +81,18 @@ mod tests {
         assert_eq!(skill.source, SkillSource::Bundled);
         assert_eq!(skill.loaded_from, LoadedFrom::Bundled);
         assert_eq!(skill.frontmatter.name, "claude-api");
-        assert!(skill.description.contains("Anthropic SDKs"));
-        assert!(skill.content.contains("/claude-api upgrade python"));
-        assert!(skill.content.contains("anthropic.Timeout"));
+        assert!(skill
+            .description
+            .string_at("")
+            .is_some_and(|description| description.contains("Anthropic SDKs")));
+        assert!(skill
+            .content
+            .string_at("")
+            .is_some_and(|content| content.contains("/claude-api upgrade python")));
+        assert!(skill
+            .content
+            .string_at("")
+            .is_some_and(|content| content.contains("anthropic.Timeout")));
     }
 
     #[test]

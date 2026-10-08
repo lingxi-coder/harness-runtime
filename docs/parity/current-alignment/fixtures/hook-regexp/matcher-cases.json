@@ -1,0 +1,86 @@
+{
+  "native_comparable": [
+    {
+      "id": "lookbehind",
+      "pattern_json": "\"(?<=sta)rtup$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "lookahead",
+      "pattern_json": "\"^sta(?=rtup$)rtup$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "backreference",
+      "pattern_json": "\"^(s)(t)(a)(.)\\\\2up$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "cross-ascii-to-pua-range",
+      "pattern_json": "\"^[A-\\uE000]+$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "unpaired-pattern-unit-alternative",
+      "pattern_json": "\"^\\ud800$|^startup$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "feff-in-pattern",
+      "pattern_json": "\"^\\ufeff?startup$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "nel-in-pattern",
+      "pattern_json": "\"^\\u0085?startup$\"",
+      "query_json": "\"startup\"",
+      "expected": true
+    },
+    {
+      "id": "valid-nonmatch",
+      "pattern_json": "\"^shutdown$\"",
+      "query_json": "\"startup\"",
+      "expected": false
+    }
+  ],
+  "source_projection_only": [
+    {
+      "id": "lone-surrogate-query-dot-one",
+      "event": "UserPromptExpansion",
+      "pattern_json": "\"^.$\"",
+      "query_json": "\"\\ud800\"",
+      "expected": true,
+      "native_plugin_fixture": false
+    },
+    {
+      "id": "paired-surrogate-query-dot-one",
+      "event": "UserPromptExpansion",
+      "pattern_json": "\"^.$\"",
+      "query_json": "\"\ud83d\ude00\"",
+      "expected": false,
+      "native_plugin_fixture": false
+    },
+    {
+      "id": "paired-surrogate-query-dot-two",
+      "event": "UserPromptExpansion",
+      "pattern_json": "\"^..$\"",
+      "query_json": "\"\ud83d\ude00\"",
+      "expected": true,
+      "native_plugin_fixture": false
+    },
+    {
+      "id": "pua-exact-query",
+      "event": "UserPromptExpansion",
+      "pattern_json": "\"^\\ue000$\"",
+      "query_json": "\"\\ue000\"",
+      "expected": true,
+      "native_plugin_fixture": false
+    }
+  ]
+}

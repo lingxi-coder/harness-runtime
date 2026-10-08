@@ -533,6 +533,7 @@ use lingxi_core::host::{
     PanelClaim, PanelEvidence, PanelPosition, PanelReport, PanelRunStatus, RiskSeverity,
     WorkflowQueryWatchdog, DEFAULT_FUSION_DIMENSIONS,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 use serde_json::{json, Value};
 use sidequery::{
@@ -553,10 +554,10 @@ impl ToolInvoker for InertInvoker {
     async fn invoke(
         &self,
         _: &str,
-        _: Value,
+        _: Utf16JsonProjection,
         _: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        Ok(Value::Null)
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+        Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -779,6 +780,12 @@ fn report(answer: &str) -> PanelReport {
         risks: vec![],
         unresolved_questions: vec![],
     }
+}
+
+/// Import a bounded test fixture into the runtime's source-preserving carrier.
+fn source_fixture(value: Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value)
+        .expect("test fixture is representable as source JSON")
 }
 
 fn catalog() -> Vec<CatalogModel> {
@@ -1338,8 +1345,9 @@ impl FakeSpawner {
                 },
             }),
             Some(FakePanel::SalvagedIncomplete(report)) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
-                content: serde_json::to_value(&report).unwrap(),
+                content: source_fixture(serde_json::to_value(&report).unwrap()),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,
@@ -1367,11 +1375,12 @@ impl FakeSpawner {
                 usage_complete: false,
             }),
             Some(FakePanel::MaxTurnsExhausted) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
-                content: serde_json::json!({
+                content: source_fixture(serde_json::json!({
                     "reason": "max_turns_exhausted",
                     "max_turns": 12,
-                }),
+                })),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 1,
@@ -1383,8 +1392,9 @@ impl FakeSpawner {
                 usage_complete: true,
             }),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
-                content: serde_json::to_value(&report).unwrap(),
+                content: source_fixture(serde_json::to_value(&report).unwrap()),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,
@@ -1411,8 +1421,9 @@ impl FakeSpawner {
             }),
             Some(FakePanel::ReportWithReasoning(report, reasoning)) => {
                 Ok(SubagentResult::Completed {
+                    handback: None,
                     agent_id: AgentId::new(),
-                    content: serde_json::to_value(&report).unwrap(),
+                    content: source_fixture(serde_json::to_value(&report).unwrap()),
                     usage: SubagentUsage {
                         total_tokens: 12 + reasoning,
                         input_tokens: 8,
@@ -1448,8 +1459,9 @@ impl FakeSpawner {
                     reasoning_output_tokens: 0,
                 };
                 Ok(SubagentResult::Completed {
+                    handback: None,
                     agent_id: AgentId::new(),
-                    content: value,
+                    content: source_fixture(value),
                     usage: usage.clone(),
                     total_tool_use_count: turns.saturating_sub(1),
                     total_duration_ms: 1,
@@ -1462,8 +1474,9 @@ impl FakeSpawner {
                 })
             }
             Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
-                content: json!({"not": "a valid panel report"}),
+                content: source_fixture(json!({"not": "a valid panel report"})),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,
@@ -1781,7 +1794,7 @@ impl SideQueryClient for ScriptedAnalyst {
                     flag.store(true, Ordering::SeqCst);
                 }
                 Ok(SideQueryResponse {
-                    text: Some(text),
+                    text: Some(text.into()),
                     structured: None,
                     tool_calls: Vec::new(),
                     usage: cost::Usage {
@@ -2550,8 +2563,9 @@ impl SubagentSpawner for WatchdogSpawner {
         // healthy response may therefore outlive one idle interval in total.
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
-            content: serde_json::to_value(report("heartbeat")).unwrap(),
+            content: source_fixture(serde_json::to_value(report("heartbeat")).unwrap()),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 60,
@@ -6226,8 +6240,9 @@ impl SubagentSpawner for MessageCountSpawner {
         _inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
-            content: serde_json::to_value(report("ANSWER")).unwrap(),
+            content: source_fixture(serde_json::to_value(report("ANSWER")).unwrap()),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 1,
@@ -6273,6 +6288,14 @@ async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one(
 
 #[tokio::test]
 async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
+    // PoolFull's error detail uses the shared output guard before the panel
+    // completion reaches the abort bar. Initialize its regex table before
+    // timing cancellation so cold sanitizer startup is not charged to it.
+    let warmup = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        &serde_json::to_string(&report("WARMUP")).unwrap(),
+    )
+    .unwrap();
+    crate::panel::parse_and_sanitize(&warmup).expect("initialize the panel output guard");
     let mut config = test_config();
     config.min_successful_panels = 2;
     config.panel_total_timeout_ms = 5_000;

@@ -23,6 +23,7 @@
 //! in claude-code, but the Rust seam degrades to "no intervention" so a
 //! misbehaving hook never breaks the status transition.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,9 +39,9 @@ pub struct TaskCompletedFire {
     /// Terminal status string (`"completed"` / `"failed"`). Routing only.
     pub status: String,
     /// Task subject/title (wire `task_subject`, required).
-    pub task_subject: String,
+    pub task_subject: Utf16JsonProjection,
     /// Task description (wire `task_description`, optional).
-    pub task_description: Option<String>,
+    pub task_description: Option<Utf16JsonProjection>,
     /// Name of the teammate completing the task (wire `teammate_name`,
     /// optional).
     pub teammate_name: Option<String>,

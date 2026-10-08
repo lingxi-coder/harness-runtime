@@ -109,6 +109,7 @@
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use lingxi_core::host::process::ProcessOutputFile;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::result::{PermissionPrompt, SandboxOverrideReason};
@@ -125,8 +126,8 @@ use telemetry::tengu::tool::{
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
@@ -180,6 +181,54 @@ pub fn resolve_max_timeout_ms(raw: Option<&str>, default: u64) -> u64 {
         .map(|n| (n as u64).max(default))
         .unwrap_or_else(|| BASH_MAX_TIMEOUT_MS.max(default))
 }
+/// 2.1.286 `I5e`: background shells default to thirty minutes after handoff.
+pub const BASH_BACKGROUND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
+/// 2.1.286 `tne()`: two-hour floor, bounded by JavaScript's timer limit.
+#[must_use]
+pub fn bash_background_max_timeout_ms() -> u64 {
+    resolve_background_max_timeout_ms(bash_max_timeout_ms())
+}
+
+/// Clamp the configured foreground maximum to the background timer bounds.
+#[must_use]
+pub fn resolve_background_max_timeout_ms(foreground_max: u64) -> u64 {
+    foreground_max.clamp(7_200_000, 2_147_483_647)
+}
+
+/// The runtime budget is independent of the foreground wait. An explicit
+/// positive `timeout` is forwarded only for an explicit background launch
+/// (`Cdn`); automatic/on-demand handoff starts a fresh default budget (`UWn`).
+#[must_use]
+pub fn resolve_background_timeout_ms(input: &Utf16JsonProjection, explicit: bool) -> Option<u64> {
+    if !telemetry::flag_bool("tengu_cosmic_shore", true) {
+        return None;
+    }
+    let requested = explicit.then(|| input_timeout_ms(input)).flatten();
+    Some(background_timeout_budget(
+        requested,
+        bash_default_timeout_ms(),
+        bash_max_timeout_ms(),
+    ))
+}
+
+fn background_timeout_budget(
+    requested: Option<u64>,
+    foreground_default: u64,
+    foreground_max: u64,
+) -> u64 {
+    requested
+        .unwrap_or_else(|| BASH_BACKGROUND_DEFAULT_TIMEOUT_MS.max(foreground_default))
+        .min(resolve_background_max_timeout_ms(foreground_max))
+}
+
+/// 2.1.286 `Hin()` — model-visible lifetime for an explicit background run.
+fn background_parameter_description() -> String {
+    format!(
+        "Set to true to run this command in the background. With it, `timeout` limits how long the command may run in the background before it is stopped (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS} ms, max {} ms).",
+        bash_background_max_timeout_ms()
+    )
+}
+
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Bash";
 
@@ -317,30 +366,30 @@ fn is_vf_numeric_string(s: &str) -> bool {
     i == b.len()
 }
 
-/// Resolve the `timeout` input to milliseconds — 1:1 with claude-code's `VF`
-/// preprocess (numeric-string coercion) followed by `H5a` (`typeof n==="number"
-/// && n>0 ? n : default`). A string matching [`is_vf_numeric_string`] is coerced
-/// to a number; the value is used iff it is a finite number > 0, else the
-/// default. There is NO upper clamp/rejection (the `max` in the schema's
-/// `describe` text is advisory only — claude-code's schema has no `.max()`).
-#[must_use]
-pub fn resolve_timeout_ms(input: &Value) -> u64 {
-    let as_num: Option<f64> = match input.get("timeout") {
-        Some(Value::String(s)) => {
-            let t = s.trim();
-            if is_vf_numeric_string(t) {
-                t.parse::<f64>().ok().filter(|n| n.is_finite())
-            } else {
-                None
-            }
+/// Parse the native numeric/string input before applying execution limits.
+fn input_timeout_ms(input: &Utf16JsonProjection) -> Option<u64> {
+    let as_num = match input.at_pointer("/timeout") {
+        Some(value) if value.as_str().is_some() => {
+            let s = value.as_str()?.trim();
+            is_vf_numeric_string(s)
+                .then(|| s.parse::<f64>().ok())
+                .flatten()
         }
-        Some(v) => v.as_f64(),
+        Some(value) => value.as_number(),
         None => None,
     };
-    match as_num {
-        Some(n) if n > 0.0 => n as u64,
-        _ => bash_default_timeout_ms(),
-    }
+    as_num
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(|n| n as u64)
+}
+
+/// Resolve the foreground budget (`gt` in 2.1.286): schema coercion has no
+/// numeric maximum, but execution clamps to the configured foreground maximum.
+#[must_use]
+pub fn resolve_timeout_ms(input: &Utf16JsonProjection) -> u64 {
+    input_timeout_ms(input)
+        .unwrap_or_else(bash_default_timeout_ms)
+        .min(bash_max_timeout_ms())
 }
 
 // Shared with Monitor; reexport preserves the established shell-tool API.
@@ -594,6 +643,136 @@ fn bash_model_content(
     parts.join("\n")
 }
 
+fn map_bash_mod_result_text(result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    // A replacement object has no core WeakMap state for background/spilled
+    // output. Those branches need their own mapper before they can be exact.
+    if result
+        .at_pointer("/isImage")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+        && tool_api::tool_result_media::bash_image_content_blocks(result).is_some()
+    {
+        return Some("[Image content provided in tool result.]".into());
+    }
+    if result.contains_property("backgroundTaskId")
+        || result.contains_property("persistedOutputPath")
+    {
+        return None;
+    }
+    let stdout = result.string_units("/stdout")?;
+    let stderr = result.string_units("/stderr")?;
+    let interrupted = result.at_pointer("/interrupted")?.as_bool()?;
+    Some(bash_model_content_source(
+        &stdout,
+        &stderr,
+        interrupted,
+        None,
+    ))
+}
+
+fn background_description_source(input: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    input.string_units("/description")?;
+    input.subprojection("/description").ok()
+}
+
+fn registered_background_description(
+    command: &str,
+    description: Option<Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    description
+        .filter(|description| {
+            description
+                .string_units("")
+                .is_some_and(|units| !units.is_empty())
+        })
+        .unwrap_or_else(|| command.into())
+}
+
+/// Apply Bash's trim/blank-line mapper to source strings without rebuilding
+/// them from their lossy display form. Rust-owned process output can still use
+/// the string mapper above; this path handles Mod-replaced source projections.
+fn bash_model_content_source(
+    stdout: &[u16],
+    stderr: &[u16],
+    interrupted: bool,
+    trailing_note: Option<&str>,
+) -> Utf16JsonProjection {
+    fn trim_units(units: &[u16]) -> &[u16] {
+        let display = String::from_utf16_lossy(units);
+        let mut start = 0usize;
+        let mut end = units.len();
+        for character in display.chars() {
+            if !character.is_whitespace() {
+                break;
+            }
+            start += character.len_utf16();
+        }
+        for character in display.chars().rev() {
+            if !character.is_whitespace() {
+                break;
+            }
+            end -= character.len_utf16();
+        }
+        &units[start.min(end)..end]
+    }
+
+    fn normalized_stdout(units: &[u16]) -> &[u16] {
+        let display = String::from_utf16_lossy(units);
+        let mut prefix_is_whitespace = true;
+        let mut cut_units = 0usize;
+        for character in display.chars() {
+            if character == '\n' {
+                cut_units += 1;
+            } else if character.is_whitespace() && prefix_is_whitespace {
+                cut_units += character.len_utf16();
+            } else {
+                prefix_is_whitespace = false;
+                break;
+            }
+        }
+        let remaining = &units[cut_units..];
+        let trimmed = trim_units(remaining);
+        // `trimEnd`, not `trim`, after the leading-newline pass.
+        let display = String::from_utf16_lossy(remaining);
+        let mut end = remaining.len();
+        for character in display.chars().rev() {
+            if !character.is_whitespace() {
+                break;
+            }
+            end -= character.len_utf16();
+        }
+        let _ = trimmed;
+        &remaining[..end]
+    }
+
+    let mut parts: Vec<Vec<u16>> = Vec::new();
+    let command_output = normalized_stdout(stdout);
+    if !command_output.is_empty() {
+        parts.push(command_output.to_vec());
+    }
+    let mut error_output = trim_units(stderr).to_vec();
+    if interrupted {
+        if !stderr.is_empty() {
+            error_output.push(b'\n' as u16);
+        }
+        error_output.extend(ABORT_MARKER.encode_utf16());
+    }
+    if !error_output.is_empty() {
+        parts.push(error_output);
+    }
+    if let Some(note) = trailing_note.filter(|note| !note.is_empty()) {
+        parts.push(note.encode_utf16().collect());
+    }
+    let mut joined = Vec::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            joined.push(b'\n' as u16);
+        }
+        joined.extend(part);
+    }
+    tool_api::tool_trait::source_text_projection_units(&joined)
+}
+
 /// Build the BashTool result `data` — claude-code 2.1.263 `BashTool` outputSchema
 /// (pure metadata; the model-facing render rides on `ToolCallResult.model_content`,
 /// NOT inside `data`). Field order mirrors the binary's `return{data:{…}}`
@@ -627,7 +806,7 @@ fn bash_result_data(
     output_file: Option<&ProcessOutputFile>,
     timed_out_after_ms: Option<u64>,
     background_ends_with_final_response: bool,
-) -> serde_json::Value {
+) -> Utf16JsonProjection {
     let mut m = serde_json::Map::new();
     m.insert(
         "stdout".into(),
@@ -682,7 +861,7 @@ fn bash_result_data(
             serde_json::Value::Bool(true),
         );
     }
-    serde_json::Value::Object(m)
+    tool_api::tool_trait::generated_builtin_result(&serde_json::Value::Object(m))
 }
 
 /// Port of claude-code 2.1.263 `$2t` (`src_160988549.js` @1886651) — the
@@ -729,22 +908,26 @@ fn background_note_for_reason(
 ) -> String {
     use lingxi_core::host::task_registry::TaskBackgroundReason;
     let head = if reason == TaskBackgroundReason::User as u8 {
-        format!("Command was manually backgrounded by user with ID: {background_task_id}. Output is being written to: {output_path}.")
+        format!(
+            "Command was manually backgrounded by user with ID: {background_task_id}. Output is being written to: {output_path}."
+        )
     } else if reason == TaskBackgroundReason::DeliverMessage as u8 {
-        format!("Command was moved to the background (ID: {background_task_id}) so that a message that arrived while it was running can reach you; it was not interrupted. Output is being written to: {output_path}.")
+        format!(
+            "Command was moved to the background (ID: {background_task_id}) so that a message that arrived while it was running can reach you; it was not interrupted. Output is being written to: {output_path}."
+        )
     } else {
         match timed_out_after_ms {
-        // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`.
-        Some(ms) => {
-            let secs = (((ms as f64) / 1000.0).round() as i64).max(1);
-            format!(
-                "Command did not complete within its {secs}s timeout and was moved to the background (ID: {background_task_id}). Output is being written to: {output_path}."
-            )
+            // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`.
+            Some(ms) => {
+                let secs = (((ms as f64) / 1000.0).round() as i64).max(1);
+                format!(
+                    "Command did not complete within its {secs}s timeout and was moved to the background (ID: {background_task_id}). Output is being written to: {output_path}."
+                )
+            }
+            None => format!(
+                "Command running in background with ID: {background_task_id}. Output is being written to: {output_path}."
+            ),
         }
-        None => format!(
-            "Command running in background with ID: {background_task_id}. Output is being written to: {output_path}."
-        ),
-    }
     };
     // NOTE the U+2014 EM DASH in the reaped sentence (oracle stores it as the
     // JS escape `—`).
@@ -924,11 +1107,12 @@ fn build_interrupted_result(
             None,
             false,
         ),
-        model_content: Some(model_content),
+        model_content: Some(model_content.into()),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -1728,6 +1912,20 @@ impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
         self.registry.claim_bash_memory_pressure_stop(task_id).await
     }
 
+    async fn on_background_deadline_exit(&self, task_id: &str, exit_code: Option<i32>) {
+        let _ = self
+            .registry
+            .settle_background_bash_deadline(task_id, exit_code)
+            .await;
+    }
+
+    async fn on_exit_with_status(&self, task_id: &str, exit_code: Option<i32>, killed: bool) {
+        let _ = self
+            .registry
+            .settle_background_bash(task_id, exit_code, killed)
+            .await;
+    }
+
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
         // Best-effort: a settle for a since-evicted task is a benign NotFound.
         let _ = self
@@ -1878,6 +2076,10 @@ pub struct BashTool {
     /// root wires it over the shared `Arc<HookExecutorImpl>`; every other caller
     /// (mobile, tests) leaves it `None` and the fire is a no-op.
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
+    /// Oracle `ko().bashPromptCarriesPreShip ??=`: clones share the session's
+    /// first Git-enabled prompt decision. The registry generation changes when
+    /// clear/resume activates a session while keeping the same tool instance.
+    precommit_guidance_enabled: tool_api::bash_precommit::BashPrecommitLatch,
 }
 
 impl BashTool {
@@ -1935,7 +2137,7 @@ impl BashTool {
         ctx: &ToolUseContext,
         bound: Option<&(String, String)>,
         command: &str,
-        description: Option<&str>,
+        description: Option<Utf16JsonProjection>,
         cwd: &std::path::Path,
     ) -> Result<(), ToolError> {
         let (Some((task_id, _)), Some(registry)) = (bound, self.ctx.task_registry.as_ref()) else {
@@ -1946,10 +2148,7 @@ impl BashTool {
             // claude-code stores `description || command` on the record
             // (`Xne`'s `description: Me || ve`); the completion summary renders
             // it as `Background command "{description}" completed (exit code N)`.
-            description: description
-                .filter(|d| !d.is_empty())
-                .unwrap_or(command)
-                .to_string(),
+            description: registered_background_description(command, description),
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             // The directory the child is actually spawned in — NOT a fresh read
             // of `shell_cwd`, which ignores a subagent's per-call `ctx.cwd` and
@@ -1962,7 +2161,9 @@ impl BashTool {
         registry
             .register_background_bash(task_id, registration)
             .await
-            .map_err(|error| ToolError::Io(format!("could not register background shell: {error}")))
+            .map_err(|error| {
+                ToolError::Io(format!("could not register background shell: {error}").into())
+            })
     }
 
     /// Arm the 2 s foreground record (claude-code `U6t`, fired once the poll
@@ -1978,7 +2179,7 @@ impl BashTool {
         ctx: &ToolUseContext,
         task_id: &str,
         command: &str,
-        description: Option<&str>,
+        description: Option<Utf16JsonProjection>,
         notify: std::sync::Arc<tokio::sync::Notify>,
         reason: std::sync::Arc<std::sync::atomic::AtomicU8>,
         settled: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
@@ -1987,10 +2188,7 @@ impl BashTool {
         let registry = self.ctx.task_registry.clone()?;
         let registration = lingxi_core::host::task_registry::BackgroundBashRegistration {
             command: command.to_string(),
-            description: description
-                .filter(|d| !d.is_empty())
-                .unwrap_or(command)
-                .to_string(),
+            description: registered_background_description(command, description),
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
             creator_agent_id: ctx.agent_id,
@@ -2029,7 +2227,10 @@ impl BashTool {
             if hint_enabled {
                 if let Some(tool_use_id) = tool_use_id {
                     let _ = progress.try_send(tool_api::progress::ToolProgress {
-                        data: serde_json::json!({"kind":"background_hint", "toolUseId":tool_use_id.to_string()}),
+                        data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({
+                            "kind": "background_hint",
+                            "toolUseId": tool_use_id.to_string(),
+                        })),
                         tool_use_id,
                     });
                 }
@@ -2091,7 +2292,9 @@ impl BashTool {
         registry
             .bind_background_process(task_id, handle.pid, killer)
             .await
-            .map_err(|error| ToolError::Io(format!("could not bind background shell: {error}")))
+            .map_err(|error| {
+                ToolError::Io(format!("could not bind background shell: {error}").into())
+            })
     }
 
     /// Registration is the receipt that permits a supervisor to outlive this host.
@@ -2101,7 +2304,7 @@ impl BashTool {
         ctx: &ToolUseContext,
         bound: Option<&(String, String)>,
         command: &str,
-        description: Option<&str>,
+        description: Option<Utf16JsonProjection>,
         cwd: &std::path::Path,
         handle: &lingxi_core::host::ProcessHandle,
     ) -> Result<String, ToolError> {
@@ -2117,7 +2320,7 @@ impl BashTool {
                 .acknowledge_shell(handle)
                 .await
                 .map_err(|error| {
-                    ToolError::Io(format!("could not acknowledge background shell: {error}"))
+                    ToolError::Io(format!("could not acknowledge background shell: {error}").into())
                 })
         }
         .await;
@@ -2149,6 +2352,7 @@ impl BashTool {
             shell_cwd,
             synced_session_cwd,
             cwd_changed_firer: None,
+            precommit_guidance_enabled: Default::default(),
         }
     }
 
@@ -2198,8 +2402,8 @@ impl BashTool {
     /// letting BASH-10 run the oracle's two probes
     /// (`BY(e)` and `BY({...e, dangerouslyDisableSandbox:!1})`) over one config
     /// snapshot each.
-    fn sandbox_wraps(&self, input: &Value, override_flag: bool) -> bool {
-        let Some(command) = input.get("command").and_then(Value::as_str) else {
+    fn sandbox_wraps(&self, input: &Utf16JsonProjection, override_flag: bool) -> bool {
+        let Some(command) = input.string_at("/command") else {
             // `if(!e.command) return !1`.
             return false;
         };
@@ -2218,18 +2422,18 @@ impl BashTool {
     }
 
     /// `BY(e)` — honours the input's own `dangerouslyDisableSandbox`.
-    fn will_sandbox(&self, input: &Value) -> bool {
+    fn will_sandbox(&self, input: &Utf16JsonProjection) -> bool {
         self.sandbox_wraps(
             input,
             input
-                .get("dangerouslyDisableSandbox")
-                .and_then(Value::as_bool)
+                .at_pointer("/dangerouslyDisableSandbox")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false),
         )
     }
 
     /// `BY({...e, dangerouslyDisableSandbox:!1})` — the counterfactual probe.
-    fn will_sandbox_ignoring_override(&self, input: &Value) -> bool {
+    fn will_sandbox_ignoring_override(&self, input: &Utf16JsonProjection) -> bool {
         self.sandbox_wraps(input, false)
     }
 }
@@ -2247,8 +2451,8 @@ fn bash_sandbox_show_indicator() -> bool {
     std::env::var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR").is_ok_and(|v| !v.is_empty())
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "command":           { "type": "string", "description": "The command to execute" },
@@ -2259,15 +2463,15 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             // dynamic `Wdt()`=`j3n()` value, env-overridable via BASH_MAX_TIMEOUT_MS.
             "timeout":           {
                 "type": "number",
-                "description": format!("Optional timeout in milliseconds (max {})", bash_max_timeout_ms())
+                "description": format!("Optional timeout in milliseconds (max {} for a foreground command)", bash_max_timeout_ms())
             },
             // Property ORDER is byte-significant: `serde_json` is built with
             // `preserve_order`, so this insertion order is what serialises into
             // the tool definition. claude-code 2.1.238 `Qhm` orders
             // `command, timeout, description, run_in_background,
             // dangerouslyDisableSandbox`.
-            "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
-            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
+            "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
+            "run_in_background": { "type": "boolean", "description": background_parameter_description() },
             // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
             // `dangerouslyDisableSandbox: z.boolean().optional().describe(...)`.
             "dangerouslyDisableSandbox": {
@@ -2279,7 +2483,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         // R-MINOR: claude-code's Bash input schema is `E.strictObject(...)`
         // (additionalProperties:false) — unknown keys are rejected.
         "additionalProperties": false
-    })
+    }))
 });
 
 /// The Bash input schema with `run_in_background` OMITTED — claude-code 2.1.263
@@ -2296,11 +2500,19 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// on the same switch). Derived from [`INPUT_SCHEMA`] so the two can never drift
 /// in contents or KEY ORDER (`serde_json` is built with `preserve_order`, and
 /// removing one key leaves the rest in their original insertion order).
-static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
+static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     let mut schema = INPUT_SCHEMA.clone();
-    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        props.remove("run_in_background");
-    }
+    // The projection's field removal operates on the root. Replace the
+    // properties subtree after removing the optional background field.
+    let mut properties = schema
+        .subprojection("/properties")
+        .expect("generated Bash schema has properties");
+    properties
+        .remove_field("run_in_background")
+        .expect("generated Bash properties are an object");
+    schema
+        .replace_pointer_projection("/properties", properties)
+        .expect("generated Bash schema has a properties object");
     schema
 });
 
@@ -2310,8 +2522,8 @@ impl Tool for BashTool {
         TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("execute shell commands")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("execute shell commands".into())
     }
 
     /// claude-code 2.1.263 `gnr` selects between the full schema and one with
@@ -2319,12 +2531,54 @@ impl Tool for BashTool {
     /// Evaluated per call — like the oracle's `we(...)` memo, which re-reads the
     /// same switch — so a session that flips the env var sees a consistent
     /// prompt + schema pair.
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         if crate::prompt::background_tasks_disabled() {
             &INPUT_SCHEMA_NO_BACKGROUND
         } else {
             &INPUT_SCHEMA
         }
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    /// Claude Code 2.1.291 `TNr` refines the first `command` field with `hH`
+    /// before `validateInput`. Native `Ha` permits TAB/LF and rejects the other
+    /// C0 and C1 control characters; preserve its custom schema issue so the
+    /// dispatcher emits the standard `InputValidationError` before hooks or
+    /// permission checks.
+    fn input_validation_issues(&self, input: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
+        let Some(command) = input.string_at("/command") else {
+            return Vec::new();
+        };
+        let contains_hidden_control = command.chars().any(|character| {
+            let code = u32::from(character);
+            (code < 32 && code != 9 && code != 10) || (127..=159).contains(&code)
+        });
+        if contains_hidden_control {
+            vec![tool_api::tool_trait::generated_builtin_result(&json!({
+                "code": "custom",
+                "path": ["command"],
+                "message": "command contains control characters that would be hidden in the approval dialog",
+            }))]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        map_bash_mod_result_text(result)
+    }
+
+    fn map_result_is_error(&self, result: &Utf16JsonProjection) -> Option<bool> {
+        result
+            .at_pointer("/interrupted")
+            .and_then(|value| value.as_bool())
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -2349,24 +2603,24 @@ impl Tool for BashTool {
         Some(MAX_TOOL_OUTPUT_LENGTH)
     }
 
-    fn is_concurrency_safe(&self, input: &Value) -> bool {
+    fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
         // claude-code `BashTool.tsx:434-436`: `isConcurrencySafe` delegates to
         // `isReadOnly`.
         self.is_read_only(input)
     }
 
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         // claude-code `BashTool.tsx:437-441`: derive from
         // `checkReadOnlyConstraints(input, commandHasAnyCd(input.command))`,
         // read-only iff `result.behavior === 'allow'`.
-        let Some(command) = input.get("command").and_then(Value::as_str) else {
+        let Some(command) = input.string_at("/command") else {
             return false;
         };
         let compound_has_cd = crate::read_only::command_has_any_cd(command);
         crate::read_only::check_read_only(command, compound_has_cd).is_read_only()
     }
 
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
@@ -2405,10 +2659,10 @@ impl Tool for BashTool {
     /// prompt with it (the same role the oracle's prompt renderer gives
     /// `userFacingName`), so it is reachable from the turn loop's permission
     /// gate.
-    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
+    fn user_facing_name_for_input(&self, input: &Utf16JsonProjection) -> Option<String> {
         // `if(!e) return "Bash"` — JS falsy input (undefined/null). A non-object
         // is likewise nothing this tool can reason about.
-        if !input.is_object() {
+        if input.object_entries().is_none() {
             return Some(TOOL_NAME.to_string());
         }
         if bash_sandbox_show_indicator() && self.will_sandbox(input) {
@@ -2452,10 +2706,14 @@ impl Tool for BashTool {
     /// `will_sandbox` is false for both probes and this never fires. It becomes
     /// live the moment sandboxing is enabled AND unsandboxed commands are
     /// allowed — which is precisely the configuration the oracle guards.
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         let dangerously_disable_sandbox = input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
+            .at_pointer("/dangerouslyDisableSandbox")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
         // `!BY(e) && BY({...e, dangerouslyDisableSandbox:!1})`: with the flag the
         // command escapes the sandbox, without it the command would have been
@@ -2476,7 +2734,7 @@ impl Tool for BashTool {
                         .user_facing_name_for_input(input)
                         .unwrap_or_else(|| TOOL_NAME.to_string()),
                     // Byte-locked `message:"Run outside of the sandbox"`.
-                    message: SANDBOX_OVERRIDE_ASK_MESSAGE.to_string(),
+                    message: SANDBOX_OVERRIDE_ASK_MESSAGE.into(),
                     options: Vec::new(),
                 },
                 pending_classifier_check: None,
@@ -2520,21 +2778,26 @@ impl Tool for BashTool {
     /// CALL SITE: `orchestrator::turn_loop::dispatch_tool_uses_tracked`, between
     /// the unknown-tool arm and `validate_tool_input_schema` — the same slot the
     /// oracle occupies in `checkPermissionsAndCallTool` (BIN off 294282716).
-    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+    fn coerce_input(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Option<tool_api::tool_trait::CoercedInput> {
         // `ni(e)` — plain-object guard.
-        let obj = input.as_object()?;
-        if !obj.contains_key("timeout_ms") {
+        input.object_entries()?;
+        if !input.contains_property("timeout_ms") {
             return None;
         }
-        if obj.contains_key("timeout") {
+        if input.contains_property("timeout") {
             // The oracle never enters the branch, so `timeout_ms` is NOT deleted
             // and no coercion is reported.
             return None;
         }
-        let raw = obj.get("timeout_ms").expect("checked above");
-        let coercible = match raw {
-            Value::Number(_) => true,
-            Value::String(s) => !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()),
+        let raw = input.subprojection("/timeout_ms").ok()?;
+        let coercible = match input.at_pointer("/timeout_ms")? {
+            value if value.as_number().is_some() => true,
+            value if value.as_str().is_some() => value
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
             _ => false,
         };
         if !coercible {
@@ -2547,30 +2810,29 @@ impl Tool for BashTool {
         // drops that key in place. `serde_json` is built with `preserve_order`,
         // so a `remove` + `insert` on a clone would be at the mercy of the map's
         // removal strategy — rebuild explicitly instead.
-        let mut coerced = serde_json::Map::with_capacity(obj.len());
-        for (k, v) in obj {
-            if k != "timeout_ms" {
-                coerced.insert(k.clone(), v.clone());
-            }
-        }
-        coerced.insert("timeout".to_string(), raw.clone());
+        let mut coerced = input.clone();
+        coerced.remove_field("timeout_ms").ok()?;
+        coerced.set_field("timeout", raw).ok()?;
         Some(tool_api::tool_trait::CoercedInput {
-            input: Value::Object(coerced),
+            input: coerced,
             shape_class: "timeout_ms".to_string(),
         })
     }
 
-    async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(&self, input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
         // claude-code `BashTool.tsx:426-429`: `return description || 'Run shell
         // command'`. A present-but-empty `description` falls through to the
         // default (JS `||` is falsy on `''`); the command is NOT used.
-        match input.get("description").and_then(Value::as_str) {
+        match input.string_at("/description") {
             Some(d) if !d.is_empty() => d.to_string(),
             _ => "Run shell command".into(),
         }
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(
+        &self,
+        opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         // BASH.6/BASH.7 — 1:1 with claude-code
         // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
         // The `Dh(model)` "simple system prompt" gate (binary @~195159752)
@@ -2582,21 +2844,27 @@ impl Tool for BashTool {
         // (/sandbox) Use the effective config so the prompt reflects the live
         // toggle (the frozen config until `/sandbox` flips the shared cell).
         let sandbox_runtime = self.ctx.effective_sandbox_runtime();
+        let precommit_suggestion = self.precommit_guidance_enabled.suggestion(
+            opts.bash_precommit_skills,
+            opts.bash_precommit_session_generation,
+        );
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            crate::prompt::simple_prompt_concise(&sandbox_runtime, opts.model.as_deref())
+            crate::prompt::simple_prompt_concise_with_precommit(
+                &sandbox_runtime,
+                &precommit_suggestion,
+            )
         } else {
-            crate::prompt::simple_prompt(&sandbox_runtime)
+            crate::prompt::simple_prompt_with_precommit(&sandbox_runtime, &precommit_suggestion)
         }
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let cmd = input
-            .get("command")
-            .and_then(Value::as_str)
+            .string_at("/command")
             .ok_or_else(|| ValidationError("missing `command`".into()))?;
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
@@ -2612,8 +2880,8 @@ impl Tool for BashTool {
         // The message is byte-identical to the binary; `errorCode: 10` has no
         // Rust surface and is dropped.
         let run_bg = input
-            .get("run_in_background")
-            .and_then(Value::as_bool)
+            .at_pointer("/run_in_background")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
         // BASH-17 — the oracle's gate is `HSe() && !WA() && !e.run_in_background`
         // (2.1.238 and 2.1.220 alike). The `!WA()` conjunct was missing here:
@@ -2624,7 +2892,7 @@ impl Tool for BashTool {
             if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
                 return Err(ValidationError(format!(
                     "Blocked: {pattern}. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
-                )));
+                ).into()));
             }
         }
         Ok(())
@@ -2632,7 +2900,7 @@ impl Tool for BashTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -2650,8 +2918,7 @@ impl Tool for BashTool {
         let cancel = ctx.cancel.clone();
 
         let cmd_str = input
-            .get("command")
-            .and_then(Value::as_str)
+            .string_at("/command")
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
         // CLI-5: snapshot the worktree BEFORE the command runs, when the
@@ -2672,8 +2939,8 @@ impl Tool for BashTool {
         // Every failure answers `None` and the command proceeds: a diff is a
         // convenience, and a shell command must never fail because git did.
         let edit_diff_eligible = !input
-            .get("run_in_background")
-            .and_then(Value::as_bool)
+            .at_pointer("/run_in_background")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false)
             && !self.is_read_only(&input)
             && !crate::bash_edit_diff::is_branch_moving_git(&cmd_str);
@@ -2707,15 +2974,15 @@ impl Tool for BashTool {
         }
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
-        // finite number > 0, else default) logic — no upper clamp/rejection (#4/#5).
+        // finite number > 0, else default), then clamp the execution budget.
         let timeout_ms = resolve_timeout_ms(&input);
         // claude-code gates the explicit-background branch on the same
         // background-tasks-disabled flag that removes the parameter from the
         // schema (`if (Oe === !0 && !It)`), so a call that carries the
         // parameter anyway still runs in the foreground.
         let run_bg = input
-            .get("run_in_background")
-            .and_then(Value::as_bool)
+            .at_pointer("/run_in_background")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false)
             && !crate::prompt::background_tasks_disabled();
         // Whether exceeding the timeout may move this command to the background
@@ -2726,8 +2993,8 @@ impl Tool for BashTool {
             !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
         let dangerously_disable_sandbox = input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
+            .at_pointer("/dangerouslyDisableSandbox")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
         if cfg!(target_os = "windows") {
             return Err(ToolError::InvalidInput(
@@ -2915,7 +3182,7 @@ impl Tool for BashTool {
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at)
                             .await;
-                        return Err(ToolError::InvalidInput(s));
+                        return Err(ToolError::InvalidInput(s.into()));
                     }
                     Err(sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
                         emit_failed(
@@ -2925,7 +3192,7 @@ impl Tool for BashTool {
                             started_at,
                         )
                         .await;
-                        return Err(ToolError::Io(s));
+                        return Err(ToolError::Io(s.into()));
                     }
                 }
             }
@@ -2968,7 +3235,13 @@ impl Tool for BashTool {
                 timeout: Some(Duration::from_millis(timeout_ms)),
                 stdin: None,
             };
-            let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+            let sandboxed = self
+                .ctx
+                .sandbox
+                .bypass_with_audit(pcmd, "bash_tool_call")
+                .with_background_timeout(
+                    resolve_background_timeout_ms(&input, true).map(Duration::from_millis),
+                );
             // Mint the task identity BEFORE spawning, so the id handed to the
             // model, the record the registry keeps and the file the child
             // writes to are one identity (claude-code `vV` mints it in the one
@@ -2990,7 +3263,7 @@ impl Tool for BashTool {
                             &ctx,
                             bound.as_ref(),
                             &cmd_str,
-                            input.get("description").and_then(Value::as_str),
+                            background_description_source(&input),
                             &cwd,
                             &handle,
                         )
@@ -3034,11 +3307,12 @@ impl Tool for BashTool {
                             None,
                             reaped,
                         ),
-                        model_content: Some(model_content),
+                        model_content: Some(model_content.into()),
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
+                        subagent_hooks_fired: false,
                     })
                 }
                 Err(e) => {
@@ -3051,7 +3325,7 @@ impl Tool for BashTool {
                         registry.discard_bash_output(task_id).await;
                     }
                     emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
-                    Err(ToolError::Io(format!("{e}")))
+                    Err(ToolError::Io(format!("{e}").into()))
                 }
             };
         }
@@ -3089,6 +3363,9 @@ impl Tool for BashTool {
             .sandbox
             .bypass_with_audit(pcmd, "bash_tool_call")
             .with_auto_background_on_timeout(can_auto_background)
+            .with_background_timeout(
+                resolve_background_timeout_ms(&input, false).map(Duration::from_millis),
+            )
             .with_process_owner(ctx.agent_id.map(|id| id.to_string()));
         // A foreground command can still be moved to the background when it
         // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
@@ -3119,7 +3396,7 @@ impl Tool for BashTool {
                 &ctx,
                 task_id,
                 &cmd_str,
-                input.get("description").and_then(Value::as_str),
+                background_description_source(&input),
                 notify.clone(),
                 background_reason.clone(),
                 settled,
@@ -3268,7 +3545,7 @@ impl Tool for BashTool {
                         &ctx,
                         fg_bound.as_ref(),
                         &cmd_str,
-                        input.get("description").and_then(Value::as_str),
+                        background_description_source(&input),
                         &cwd,
                         &handle,
                     )
@@ -3313,27 +3590,40 @@ impl Tool for BashTool {
                         if reason
                             == lingxi_core::host::task_registry::TaskBackgroundReason::User as u8
                         {
-                            data["backgroundedByUser"] = json!(true);
+                            data.set_field(
+                                "backgroundedByUser",
+                                tool_api::tool_trait::generated_builtin_result(&json!(true)),
+                            )
+                            .expect("Bash result data is an object");
                         }
                         if reason
                             == lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage
                                 as u8
                         {
-                            data["backgroundedToDeliverMessage"] = json!(true);
+                        data.set_field(
+                            "backgroundedToDeliverMessage",
+                            tool_api::tool_trait::generated_builtin_result(&json!(true)),
+                        )
+                        .expect("Bash result data is an object");
                         }
                         if reason
                             == lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort
                                 as u8
                         {
-                            data["backgroundedByTurnAbort"] = json!(true);
+                            data.set_field(
+                                "backgroundedByTurnAbort",
+                                tool_api::tool_trait::generated_builtin_result(&json!(true)),
+                            )
+                            .expect("Bash result data is an object");
                         }
                         data
                     },
-                    model_content: Some(model_content),
+                    model_content: Some(model_content.into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Ok(lingxi_core::host::ForegroundRunResult {
@@ -3585,13 +3875,12 @@ impl Tool for BashTool {
                             ),
                             // Display-only (egress ignores it when content_blocks
                             // is Some); claude's wire form has no text.
-                            model_content: Some(
-                                "[Image content provided in tool result.]".to_string(),
-                            ),
+                            model_content: Some("[Image content provided in tool result.]".into()),
                             new_messages: vec![],
                             context_modifier: None,
                             is_error: false,
                             mcp_meta: None,
+                            subagent_hooks_fired: false,
                         });
                     }
                 }
@@ -3717,11 +4006,12 @@ impl Tool for BashTool {
                         None,
                         false,
                     ),
-                    model_content: Some(model_content),
+                    model_content: Some(model_content.into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(mobile_linux_api::ProcessError::Timeout) => {
@@ -3747,7 +4037,7 @@ impl Tool for BashTool {
             }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
-                Err(ToolError::Io(format!("{e}")))
+                Err(ToolError::Io(format!("{e}").into()))
             }
         }
     }
@@ -3755,6 +4045,25 @@ impl Tool for BashTool {
 
 #[cfg(test)]
 mod tests {
+    fn source_json_value(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
+    }
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            source_json_value(json!($($tokens)*))
+        };
+    }
+
+    fn data_value(value: &Utf16JsonProjection) -> serde_json::Value {
+        serde_json::from_str(&value.to_json_string().expect("test data serializes"))
+            .expect("test data is JSON")
+    }
+
+    fn model_text(value: &Option<Utf16JsonProjection>) -> Option<&str> {
+        value.as_ref()?.string_at("")
+    }
+
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_tx, shell_test_ctx};
@@ -3839,7 +4148,7 @@ mod tests {
     #[test]
     fn timeout_result_prepends_duration_annotation_to_stderr() {
         let r = build_interrupted_result("out", "boom", "sleep 200", Some(120_000), &[]);
-        let mc = r.model_content.unwrap();
+        let mc = model_text(&r.model_content).unwrap();
         // claude `uqh`: annotation, space, partial stderr — then the abort marker.
         assert!(
             mc.contains("Command timed out after 2m 0s boom"),
@@ -3851,8 +4160,7 @@ mod tests {
         );
         // A plain interrupt (no timeout) carries NO duration annotation.
         let plain = build_interrupted_result("out", "boom", "cmd", None, &[]);
-        assert!(!plain
-            .model_content
+        assert!(!model_text(&plain.model_content)
             .unwrap()
             .contains("Command timed out after"));
     }
@@ -3905,6 +4213,43 @@ mod tests {
                 Some("Command running in background with ID: 7. Output is being written to: /p.")
             ),
             "Command running in background with ID: 7. Output is being written to: /p."
+        );
+    }
+
+    #[test]
+    fn mod_replacement_uses_bash_model_text_mapper() {
+        let data = source_json!({
+            "stdout":"\nready\n", "stderr":"warn\n", "interrupted":false,
+            "isImage":false
+        });
+        assert_eq!(
+            map_bash_mod_result_text(&data).and_then(|text| text.string_at("").map(str::to_owned)),
+            Some("ready\nwarn".to_string())
+        );
+        let interrupted = source_json!({
+            "stdout":"partial", "stderr":"", "interrupted":true,
+            "isImage":false
+        });
+        assert_eq!(
+            map_bash_mod_result_text(&interrupted)
+                .and_then(|text| text.string_at("").map(str::to_owned)),
+            Some(format!("partial\n{ABORT_MARKER}"))
+        );
+        assert_eq!(
+            map_bash_mod_result_text(&source_json!({
+                "stdout":"data:image/png;base64,AAAA", "stderr":"",
+                "interrupted":false, "isImage":true
+            }))
+            .and_then(|text| text.string_at("").map(str::to_owned)),
+            Some("data:image/png;base64,AAAA".into())
+        );
+        assert_eq!(
+            map_bash_mod_result_text(&source_json!({
+                "stdout":"data:image/jpeg;base64,iVBORw0KGgo=", "stderr":"",
+                "interrupted":false, "isImage":true
+            }))
+            .and_then(|text| text.string_at("").map(str::to_owned)),
+            Some("[Image content provided in tool result.]".into())
         );
     }
 
@@ -4238,20 +4583,26 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo hello"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("call should succeed");
         // claude-code normalizes model-facing stdout (trimEnd + stripEmptyLines),
         // so the trailing newline is dropped.
-        assert_eq!(res.data["stdout"], "hello");
-        assert_eq!(res.data["interrupted"], false);
-        assert_eq!(res.data["isImage"], false);
+        assert_eq!(data_value(&res.data)["stdout"], "hello");
+        assert_eq!(data_value(&res.data)["interrupted"], false);
+        assert_eq!(data_value(&res.data)["isImage"], false);
         // `exit_code`/`is_error`/`timed_out` are telemetry-only — NOT result data.
-        assert!(res.data.get("exit_code").is_none());
-        assert!(res.data.get("is_error").is_none());
-        assert!(res.data.get("timed_out").is_none());
+        assert!(data_value(&res.data).get("exit_code").is_none());
+        assert!(data_value(&res.data).get("is_error").is_none());
+        assert!(data_value(&res.data).get("timed_out").is_none());
         // exit 0 → no semantic interpretation → field omitted (binary `p?.message`).
-        assert!(res.data.get("returnCodeInterpretation").is_none());
+        assert!(data_value(&res.data)
+            .get("returnCodeInterpretation")
+            .is_none());
     }
 
     /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
@@ -4278,11 +4629,15 @@ mod tests {
 
         let tool = BashTool::new(ctx);
         let res = tool
-            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo hello"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("call should succeed");
-        assert_eq!(res.data["stdout"], "hello");
-        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(data_value(&res.data)["stdout"], "hello");
+        assert_eq!(data_value(&res.data)["interrupted"], false);
     }
 
     /// A `ProcessRunner` stub that records the `cwd` field of every spawned
@@ -4345,7 +4700,7 @@ mod tests {
         let tool = BashTool::new(ctx);
 
         // Boot: no swap yet — the command spawns in the origin.
-        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "pwd"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
         assert_eq!(last_cwd.lock().unwrap().clone(), Some(origin_path.clone()));
@@ -4353,7 +4708,7 @@ mod tests {
         // `EnterWorktree` swaps the session cwd — the persistent shell must
         // follow on the very next call, with no intervening `cd`.
         session_cwd.swap(worktree_path.clone(), vec![worktree_path.clone()]);
-        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "pwd"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
         assert_eq!(
@@ -4364,7 +4719,7 @@ mod tests {
 
         // `ExitWorktree` swaps back — the persistent shell must restore.
         session_cwd.swap(origin_path.clone(), vec![origin_path.clone()]);
-        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "pwd"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
         assert_eq!(
@@ -4397,7 +4752,7 @@ mod tests {
         let tool = BashTool::new(ctx);
 
         // First call spawns in the boot cwd.
-        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "pwd"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
         assert_eq!(last_cwd.lock().unwrap().clone(), Some(base_path.clone()));
@@ -4410,7 +4765,7 @@ mod tests {
         // (No `session_cwd.swap` is called anywhere in this test.)
         *tool.shell_cwd.lock().unwrap() = sub.clone();
 
-        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "pwd"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
         assert_eq!(
@@ -4444,7 +4799,7 @@ mod tests {
         let mut ctx = use_ctx();
         ctx.cancel = Some(token);
         let err = tool
-            .call(json!({"command": "sleep 100"}), ctx, fresh_tx())
+            .call(source_json!({"command": "sleep 100"}), ctx, fresh_tx())
             .await
             .expect_err("a fired cancel token must abort the run");
         assert!(
@@ -4477,7 +4832,7 @@ mod tests {
             lingxi_core::host::agent_processes::mark_stop_pending(&agent_id.to_string());
 
         let err = tool
-            .call(json!({"command": "echo hi"}), ctx, fresh_tx())
+            .call(source_json!({"command": "echo hi"}), ctx, fresh_tx())
             .await
             .expect_err("an agent whose stop is still completing must not exec");
         assert!(
@@ -4499,7 +4854,7 @@ mod tests {
         let tool = BashTool::new(shell_test_ctx(out));
         let mut ctx = use_ctx();
         ctx.agent_id = Some(lingxi_core::types::AgentId::new());
-        tool.call(json!({"command": "echo hi"}), ctx, fresh_tx())
+        tool.call(source_json!({"command": "echo hi"}), ctx, fresh_tx())
             .await
             .expect("no stop pending ⇒ the command runs");
     }
@@ -4517,11 +4872,15 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo hello"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("no token → normal completion");
-        assert_eq!(res.data["stdout"], "hello");
-        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(data_value(&res.data)["stdout"], "hello");
+        assert_eq!(data_value(&res.data)["interrupted"], false);
     }
 
     #[tokio::test]
@@ -4534,21 +4893,24 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "exit 7"}), use_ctx(), fresh_tx())
+            .call(source_json!({"command": "exit 7"}), use_ctx(), fresh_tx())
             .await
             .expect("non-zero exit is data, not Err");
         // A non-zero exit is a SUCCESSFUL result (Ok data), not a hard error.
         // claude-code surfaces no `exit_code`/`is_error` in result data — the
         // failure rides via stderr, the model render, and the non-zero default
         // `returnCodeInterpretation` ("Command failed with exit code N").
-        assert!(res.data["stderr"].as_str().unwrap().contains("boom"));
-        assert_eq!(res.data["interrupted"], false);
+        assert!(data_value(&res.data)["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("boom"));
+        assert_eq!(data_value(&res.data)["interrupted"], false);
         assert_eq!(
-            res.data["returnCodeInterpretation"],
+            data_value(&res.data)["returnCodeInterpretation"],
             "Command failed with exit code 7"
         );
-        assert!(res.data.get("exit_code").is_none());
-        assert!(res.data.get("is_error").is_none());
+        assert!(data_value(&res.data).get("exit_code").is_none());
+        assert!(data_value(&res.data).get("is_error").is_none());
     }
 
     #[tokio::test]
@@ -4565,16 +4927,19 @@ mod tests {
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
             .call(
-                json!({"command": "grep needle file"}),
+                source_json!({"command": "grep needle file"}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("grep no-match is Ok data");
-        assert_eq!(res.data["returnCodeInterpretation"], "No matches found");
-        assert_eq!(res.data["interrupted"], false);
-        assert!(res.data.get("is_error").is_none());
-        assert!(res.data.get("exit_code").is_none());
+        assert_eq!(
+            data_value(&res.data)["returnCodeInterpretation"],
+            "No matches found"
+        );
+        assert_eq!(data_value(&res.data)["interrupted"], false);
+        assert!(data_value(&res.data).get("is_error").is_none());
+        assert!(data_value(&res.data).get("exit_code").is_none());
     }
 
     #[tokio::test]
@@ -4590,23 +4955,23 @@ mod tests {
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
             .call(
-                json!({"command": "do-work", "timeout": 200}),
+                source_json!({"command": "do-work", "timeout": 200}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("timeout should be Ok(interrupted)");
-        assert_eq!(res.data["interrupted"], true);
-        assert_eq!(res.data["stdout"], "partial-out");
-        assert!(res.data.get("timed_out").is_none());
-        assert!(res.data.get("is_error").is_none());
+        assert_eq!(data_value(&res.data)["interrupted"], true);
+        assert_eq!(data_value(&res.data)["stdout"], "partial-out");
+        assert!(data_value(&res.data).get("timed_out").is_none());
+        assert!(data_value(&res.data).get("is_error").is_none());
         assert!(
-            res.data["stderr"]
+            data_value(&res.data)["stderr"]
                 .as_str()
                 .unwrap()
                 .contains("<error>Command was aborted before completion</error>"),
             "expected abort marker in stderr, got: {:?}",
-            res.data["stderr"]
+            data_value(&res.data)["stderr"]
         );
     }
 
@@ -4650,16 +5015,16 @@ mod tests {
         let tool = BashTool::new(ctx);
         let res = tool
             .call(
-                json!({"command": "do-work", "timeout": 200}),
+                source_json!({"command": "do-work", "timeout": 200}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("process-timeout should be Ok(interrupted)");
-        assert_eq!(res.data["interrupted"], true);
-        assert_eq!(res.data["stdout"], "");
-        assert!(res.data.get("timed_out").is_none());
-        assert!(res.data.get("is_error").is_none());
+        assert_eq!(data_value(&res.data)["interrupted"], true);
+        assert_eq!(data_value(&res.data)["stdout"], "");
+        assert!(data_value(&res.data).get("timed_out").is_none());
+        assert!(data_value(&res.data).get("is_error").is_none());
     }
 
     #[tokio::test]
@@ -4717,7 +5082,7 @@ mod tests {
         let tool = BashTool::new(ctx);
         let res = tool
             .call(
-                json!({"command": "do-work", "timeout": 5000}),
+                source_json!({"command": "do-work", "timeout": 5000}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -4725,15 +5090,15 @@ mod tests {
             .expect("moved-to-background is an Ok result");
         // Result data: empty output, not interrupted, carries the task id +
         // the exceeded timeout in ms (`timedOutAfterMs`).
-        assert_eq!(res.data["interrupted"], false);
-        assert_eq!(res.data["stdout"], "");
-        assert_eq!(res.data["stderr"], "");
-        assert_eq!(res.data["backgroundTaskId"], "local_bash_dead");
-        assert_eq!(res.data["timedOutAfterMs"], 5000);
-        assert!(res.data.get("timed_out").is_none());
+        assert_eq!(data_value(&res.data)["interrupted"], false);
+        assert_eq!(data_value(&res.data)["stdout"], "");
+        assert_eq!(data_value(&res.data)["stderr"], "");
+        assert_eq!(data_value(&res.data)["backgroundTaskId"], "local_bash_dead");
+        assert_eq!(data_value(&res.data)["timedOutAfterMs"], 5000);
+        assert!(data_value(&res.data).get("timed_out").is_none());
         // Model note: the distinct timeout→background message (seconds =
         // round(5000/1000) = 5), NOT the abort marker.
-        let mc = res.model_content.expect("model content present");
+        let mc = model_text(&res.model_content).expect("model content present");
         assert!(
             mc.contains(
                 "Command did not complete within its 5s timeout and was moved to the background (ID: local_bash_dead)."
@@ -4771,13 +5136,13 @@ mod tests {
         // Gate ON + duration >= 25 (G2n) → blocked with the byte-exact message.
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
-            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .validate_input(&source_json!({"command": "sleep 30"}), &use_ctx())
             .await;
         std::env::remove_var("tengu_amber_sentinel");
         let err = result.expect_err("sleep 30 must be blocked when the gate is on");
         assert_eq!(
-            err.0,
-            "Blocked: standalone sleep 30. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
+            err.0.string_at(""),
+            Some("Blocked: standalone sleep 30. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.")
         );
     }
 
@@ -4787,15 +5152,17 @@ mod tests {
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
-            .validate_input(&json!({"command": "sleep 30 && echo done"}), &use_ctx())
+            .validate_input(
+                &source_json!({"command": "sleep 30 && echo done"}),
+                &use_ctx(),
+            )
             .await;
         std::env::remove_var("tengu_amber_sentinel");
         let err = result.expect_err("sleep 30 && ... must be blocked when the gate is on");
+        let message = err.0.string_at("").unwrap();
         assert!(
-            err.0
-                .starts_with("Blocked: sleep 30 followed by: echo done. To wait"),
-            "got: {}",
-            err.0
+            message.starts_with("Blocked: sleep 30 followed by: echo done. To wait"),
+            "got: {message}"
         );
     }
 
@@ -4806,7 +5173,7 @@ mod tests {
         // No gate env set (default) → even a long sleep is allowed (1:1 with
         // stock claude-code, whose `sq()` defaults false).
         std::env::remove_var("tengu_amber_sentinel");
-        tool.validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+        tool.validate_input(&source_json!({"command": "sleep 30"}), &use_ctx())
             .await
             .expect("sleep 30 must be ALLOWED by default (gate off)");
     }
@@ -4827,13 +5194,18 @@ mod tests {
         ] {
             results.push((
                 ok,
-                tool.validate_input(&json!({ "command": ok }), &use_ctx())
+                tool.validate_input(&source_json!({ "command": ok }), &use_ctx())
                     .await,
             ));
         }
         std::env::remove_var("tengu_amber_sentinel");
         for (ok, r) in results {
-            r.unwrap_or_else(|e| panic!("{ok:?} should be allowed, got: {}", e.0));
+            r.unwrap_or_else(|e| {
+                panic!(
+                    "{ok:?} should be allowed, got: {}",
+                    e.0.string_at("").unwrap_or_default()
+                )
+            });
         }
     }
 
@@ -4844,7 +5216,7 @@ mod tests {
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
             .validate_input(
-                &json!({"command": "sleep 30", "run_in_background": true}),
+                &source_json!({"command": "sleep 30", "run_in_background": true}),
                 &use_ctx(),
             )
             .await;
@@ -4863,13 +5235,13 @@ mod tests {
         std::env::set_var("tengu_amber_sentinel", "1");
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let disabled = tool
-            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .validate_input(&source_json!({"command": "sleep 30"}), &use_ctx())
             .await;
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         // Same input, background tasks back on → still blocked, so the new
         // conjunct is the only thing that changed the verdict.
         let enabled = tool
-            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .validate_input(&source_json!({"command": "sleep 30"}), &use_ctx())
             .await;
         std::env::remove_var("tengu_amber_sentinel");
         disabled.expect("sleep 30 must be ALLOWED when background tasks are disabled");
@@ -4932,27 +5304,98 @@ mod tests {
     }
 
     #[test]
+    fn background_timeout_matches_native_286_fixture() {
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/background_timeout_2_1_286.json"
+        ))
+        .unwrap();
+        for case in oracle["cases"].as_array().unwrap() {
+            let default =
+                resolve_default_timeout_ms(case["env"]["BASH_DEFAULT_TIMEOUT_MS"].as_str());
+            let maximum =
+                resolve_max_timeout_ms(case["env"]["BASH_MAX_TIMEOUT_MS"].as_str(), default);
+            assert_eq!(
+                resolve_background_max_timeout_ms(maximum),
+                case["max"].as_u64().unwrap()
+            );
+            assert_eq!(
+                background_timeout_budget(case["requested"].as_u64(), default, maximum),
+                case["background"].as_u64().unwrap(),
+                "{case}"
+            );
+        }
+        let schema = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        assert_eq!(
+            schema
+                .input_schema()
+                .string_at("/properties/description/description"),
+            oracle["commandDescription"].as_str()
+        );
+        assert_eq!(
+            schema
+                .input_schema()
+                .string_at("/properties/timeout/description"),
+            oracle["timeoutDescription"].as_str()
+        );
+        assert_eq!(
+            background_parameter_description(),
+            oracle["parameterDescription"].as_str().unwrap()
+        );
+        let prompt =
+            crate::prompt::simple_prompt(&sandbox::runtime_config::SandboxRuntimeConfig::default());
+        assert!(prompt
+            .string_at("")
+            .unwrap()
+            .contains(oracle["verboseTimeoutSuffix"].as_str().unwrap()));
+        assert_eq!(
+            resolve_background_timeout_ms(&source_json!({"timeout": 1000}), false),
+            Some(1_800_000)
+        );
+        assert_eq!(
+            resolve_background_timeout_ms(&source_json!({"timeout": 1000}), true),
+            Some(1000)
+        );
+    }
+
+    #[test]
     fn resolve_timeout_ms_vf_h5a_semantics() {
         // Plain number > 0 honored, even over the advisory 600000 "max" (#4).
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": 200})), 200);
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": 700_000})), 700_000);
+        assert_eq!(resolve_timeout_ms(&source_json!({"timeout": 200})), 200);
+        assert_eq!(
+            resolve_timeout_ms(&source_json!({"timeout": 700_000})),
+            BASH_MAX_TIMEOUT_MS
+        );
         // Numeric STRING coerced (VF): "30000" → 30000 (#5).
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": "30000"})), 30_000);
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": " 5000 "})), 5_000);
+        assert_eq!(
+            resolve_timeout_ms(&source_json!({"timeout": "30000"})),
+            30_000
+        );
+        assert_eq!(
+            resolve_timeout_ms(&source_json!({"timeout": " 5000 "})),
+            5_000
+        );
         // 0 / negative / non-numeric string / absent → default (H5a).
         assert_eq!(
-            resolve_timeout_ms(&json!({"timeout": 0})),
+            resolve_timeout_ms(&source_json!({"timeout": 0})),
             BASH_DEFAULT_TIMEOUT_MS
         );
         assert_eq!(
-            resolve_timeout_ms(&json!({"timeout": -5})),
+            resolve_timeout_ms(&source_json!({"timeout": -5})),
             BASH_DEFAULT_TIMEOUT_MS
         );
         assert_eq!(
-            resolve_timeout_ms(&json!({"timeout": "abc"})),
+            resolve_timeout_ms(&source_json!({"timeout": "abc"})),
             BASH_DEFAULT_TIMEOUT_MS
         );
-        assert_eq!(resolve_timeout_ms(&json!({})), BASH_DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            resolve_timeout_ms(&source_json!({})),
+            BASH_DEFAULT_TIMEOUT_MS
+        );
     }
 
     #[tokio::test]
@@ -4960,7 +5403,7 @@ mod tests {
         // #4: an over-600000 timeout is accepted (no schema/runtime max).
         let tool = bash_tool_noop();
         tool.validate_input(
-            &json!({"command": "echo hi", "timeout": 900_000}),
+            &source_json!({"command": "echo hi", "timeout": 900_000}),
             &use_ctx(),
         )
         .await
@@ -4977,11 +5420,15 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "printf-red"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "printf-red"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         // ANSI stripped → "red\n", then normalized (trimEnd) → "red".
-        assert_eq!(res.data["stdout"], "red");
+        assert_eq!(data_value(&res.data)["stdout"], "red");
     }
 
     #[tokio::test]
@@ -4994,11 +5441,15 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "cat thing"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "cat thing"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         // Leading blank lines stripped, trailing whitespace trimmed, inner kept.
-        assert_eq!(res.data["stdout"], "hello\nworld");
+        assert_eq!(data_value(&res.data)["stdout"], "hello\nworld");
     }
 
     #[tokio::test]
@@ -5011,10 +5462,14 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "mkdir foo"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "mkdir foo"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(res.data["noOutputExpected"], true);
+        assert_eq!(data_value(&res.data)["noOutputExpected"], true);
     }
 
     #[tokio::test]
@@ -5027,10 +5482,10 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "ls -la"}), use_ctx(), fresh_tx())
+            .call(source_json!({"command": "ls -la"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(res.data["noOutputExpected"], false);
+        assert_eq!(data_value(&res.data)["noOutputExpected"], false);
     }
 
     // `BACKGROUND_TASKS_ENV_LOCK` lived here. `input_schema()` selects between
@@ -5042,6 +5497,46 @@ mod tests {
     // `crate::prompt::background_env_lock()` now.
 
     #[test]
+    fn native_291_command_control_refinement_vectors() {
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let rejected_issue = json!({
+            "code": "custom",
+            "path": ["command"],
+            "message": "command contains control characters that would be hidden in the approval dialog",
+        });
+        for (label, command, should_reject) in [
+            ("empty", "", false),
+            ("CR", "\r", true),
+            ("TAB", "\t", false),
+            ("LF", "\n", false),
+            ("ESC", "\u{1b}", true),
+            ("NUL", "\u{0}", true),
+            ("C1 NEL", "\u{85}", true),
+            ("C1 final control", "\u{9f}", true),
+            ("ordinary Unicode", "café", false),
+            ("bidi override", "\u{202e}", false),
+            ("line separator", "\u{2028}", false),
+            ("paragraph separator", "\u{2029}", false),
+        ] {
+            let issues = tool.input_validation_issues(&source_json!({"command": command}));
+            if should_reject {
+                assert_eq!(
+                    issues,
+                    vec![source_json_value(rejected_issue.clone())],
+                    "{label}"
+                );
+            } else {
+                assert!(issues.is_empty(), "{label}: {issues:?}");
+            }
+        }
+    }
+
+    #[test]
     fn input_schema_uses_timeout_not_timeout_ms() {
         let _g = crate::prompt::background_env_lock();
         // claude-code `BashTool.tsx:229` names the param `timeout` (ms).
@@ -5051,18 +5546,19 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }));
-        let props = &tool.input_schema()["properties"];
+        let props = tool.input_schema().get_property("properties").unwrap();
         assert!(
-            props.get("timeout").is_some(),
+            props.get_property("timeout").is_some(),
             "schema must expose `timeout`"
         );
         assert!(
-            props.get("timeout_ms").is_none(),
+            props.get_property("timeout_ms").is_none(),
             "schema must NOT expose the old `timeout_ms`"
         );
         assert_eq!(
-            props["timeout"]["description"],
-            "Optional timeout in milliseconds (max 600000)"
+            tool.input_schema()
+                .string_at("/properties/timeout/description"),
+            Some("Optional timeout in milliseconds (max 600000 for a foreground command)")
         );
     }
 
@@ -5078,11 +5574,13 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }));
-        let props = tool.input_schema()["properties"]
-            .as_object()
+        let props = tool
+            .input_schema()
+            .at_pointer("/properties")
+            .and_then(|value| value.object_entries())
             .expect("properties object")
-            .keys()
-            .cloned()
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
             .collect::<Vec<_>>();
         assert_eq!(
             props,
@@ -5117,11 +5615,13 @@ mod tests {
             timed_out: false,
         }));
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
-        let keys = tool.input_schema()["properties"]
-            .as_object()
+        let keys = tool
+            .input_schema()
+            .at_pointer("/properties")
+            .and_then(|value| value.object_entries())
             .expect("properties object")
-            .keys()
-            .cloned()
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
             .collect::<Vec<_>>();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         // Every OTHER key keeps its oracle order and contents.
@@ -5135,8 +5635,9 @@ mod tests {
             ]
         );
         // And it comes back when the gate is off.
-        assert!(tool.input_schema()["properties"]
-            .get("run_in_background")
+        assert!(tool
+            .input_schema()
+            .at_pointer("/properties/run_in_background")
             .is_some());
     }
 
@@ -5197,12 +5698,17 @@ mod tests {
             Some(5000),
             true,
         );
-        assert_eq!(reaped["backgroundEndsWithFinalResponse"], true);
+        assert_eq!(
+            reaped
+                .at_pointer("/backgroundEndsWithFinalResponse")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         let keys = reaped
-            .as_object()
+            .object_entries()
             .expect("object")
-            .keys()
-            .cloned()
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
             .collect::<Vec<_>>();
         let idx = |k: &str| keys.iter().position(|x| x == k).expect(k);
         assert!(idx("backgroundEndsWithFinalResponse") > idx("timedOutAfterMs"));
@@ -5219,7 +5725,7 @@ mod tests {
             false,
         );
         assert!(
-            survives.get("backgroundEndsWithFinalResponse").is_none(),
+            !survives.contains_property("backgroundEndsWithFinalResponse"),
             "`false` must be OMITTED, not serialised"
         );
     }
@@ -5487,13 +5993,15 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }));
-        let timeout = &tool.input_schema()["properties"]["timeout"];
         assert_eq!(
-            timeout["type"], "number",
+            tool.input_schema().string_at("/properties/timeout/type"),
+            Some("number"),
             "timeout type must be number not integer"
         );
         assert!(
-            timeout.get("minimum").is_none(),
+            tool.input_schema()
+                .at_pointer("/properties/timeout/minimum")
+                .is_none(),
             "timeout must have no minimum constraint"
         );
     }
@@ -5510,10 +6018,14 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "echo done"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo done"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(data_value(&res.data)["interrupted"], false);
     }
 
     /// A1/STEP-4 — 2.1.220 does NOT truncate the model-facing Bash output.
@@ -5542,10 +6054,10 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "yes"}), use_ctx(), fresh_tx())
+            .call(source_json!({"command": "yes"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let s = res.data["stdout"].as_str().unwrap();
+        let s = data_value(&res.data)["stdout"].as_str().unwrap().to_owned();
         assert!(
             !s.contains("lines truncated] ..."),
             "2.1.220 has no shell output truncator; got tail: {:?}",
@@ -5556,9 +6068,9 @@ mod tests {
             format!("{head}{}tail", "\n".repeat(5)),
             "stdout must reach the result mapper verbatim"
         );
-        assert!(res.data.get("outputTaskId").is_none());
-        assert!(res.data.get("outputFilePath").is_none());
-        assert!(res.data.get("persistedOutputPath").is_none());
+        assert!(data_value(&res.data).get("outputTaskId").is_none());
+        assert!(data_value(&res.data).get("outputFilePath").is_none());
+        assert!(data_value(&res.data).get("persistedOutputPath").is_none());
     }
 
     /// A completed task that was auto-backgrounded briefly retains its rooted
@@ -5616,20 +6128,23 @@ mod tests {
         });
         ctx.process = Arc::new(SpilledStub);
         let result = BashTool::new(ctx)
-            .call(json!({"command": "printf output"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "printf output"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("spilled completion");
 
-        assert!(result.data.get("backgroundTaskId").is_none());
-        assert!(result.data.get("outputTaskId").is_none());
-        assert!(result.data.get("outputFilePath").is_none());
+        assert!(data_value(&result.data).get("backgroundTaskId").is_none());
+        assert!(data_value(&result.data).get("outputTaskId").is_none());
+        assert!(data_value(&result.data).get("outputFilePath").is_none());
         assert_eq!(
-            result.data["persistedOutputPath"],
+            data_value(&result.data)["persistedOutputPath"],
             "/tmp/lingxi-task-output/local_bash_spilled.out"
         );
-        assert_eq!(result.data["persistedOutputSize"], 30_001);
-        let keys = result
-            .data
+        assert_eq!(data_value(&result.data)["persistedOutputSize"], 30_001);
+        let keys = data_value(&result.data)
             .as_object()
             .expect("object")
             .keys()
@@ -5713,7 +6228,7 @@ mod tests {
         ctx.bus.attach_sink(sink.clone()).await;
         BashTool::new(ctx)
             .call(
-                json!({"command": "cd repo && cargo build", "run_in_background": true}),
+                source_json!({"command": "cd repo && cargo build", "run_in_background": true}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -5751,7 +6266,7 @@ mod tests {
         let tool = BashTool::new(ctx);
         let res = tool
             .call(
-                json!({"command": "sleep 5", "run_in_background": true}),
+                source_json!({"command": "sleep 5", "run_in_background": true}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -5760,12 +6275,12 @@ mod tests {
         // claude-code backgrounded result: the main shape with `backgroundTaskId`
         // + empty stdout/stderr. No `pid`/`task_output_path` in `data` — the ID
         // and output path ride in the model note (`model_content`).
-        assert_eq!(res.data["backgroundTaskId"], "task-abc123");
-        assert_eq!(res.data["stdout"], "");
-        assert_eq!(res.data["interrupted"], false);
-        assert!(res.data.get("pid").is_none());
-        assert!(res.data.get("task_output_path").is_none());
-        let note = res.model_content.as_deref().expect("background model note");
+        assert_eq!(data_value(&res.data)["backgroundTaskId"], "task-abc123");
+        assert_eq!(data_value(&res.data)["stdout"], "");
+        assert_eq!(data_value(&res.data)["interrupted"], false);
+        assert!(data_value(&res.data).get("pid").is_none());
+        assert!(data_value(&res.data).get("task_output_path").is_none());
+        let note = model_text(&res.model_content).expect("background model note");
         assert!(
             note.contains("task-abc123") && note.contains("Command running in background"),
             "note must carry the task id + path, got: {note}",
@@ -6103,7 +6618,7 @@ mod tests {
             ctx.process = runner.clone();
             let tool = BashTool::new(ctx);
             let mut call =
-                Box::pin(tool.call(json!({"command":"sleep 10"}), use_ctx(), fresh_tx()));
+                Box::pin(tool.call(source_json!({"command":"sleep 10"}), use_ctx(), fresh_tx()));
             tokio::select! {
                 result = &mut call => panic!("pending runner unexpectedly returned {result:?}"),
                 () = entered.notified() => {},
@@ -6220,7 +6735,7 @@ mod tests {
             ctx.task_registry = Some(registry);
             let result = BashTool::new(ctx)
                 .call(
-                    json!({"command":"sleep 5", "run_in_background":true}),
+                    source_json!({"command":"sleep 5", "run_in_background":true}),
                     use_ctx(),
                     fresh_tx(),
                 )
@@ -6258,7 +6773,7 @@ mod tests {
         let tool = BashTool::new(ctx);
         let res = tool
             .call(
-                json!({"command": "sleep 5", "description": "wait a bit", "run_in_background": true}),
+                source_json!({"command": "sleep 5", "description": "wait a bit", "run_in_background": true}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -6266,7 +6781,7 @@ mod tests {
             .expect("ok");
 
         // The id the model sees is the registry's, NOT the runner stub's.
-        assert_eq!(res.data["backgroundTaskId"], "b1a2b3c4d");
+        assert_eq!(data_value(&res.data)["backgroundTaskId"], "b1a2b3c4d");
         assert_eq!(registry.allocated.lock().unwrap().len(), 1);
 
         // …and a record exists for exactly that id, carrying the command and
@@ -6275,7 +6790,10 @@ mod tests {
         assert_eq!(registered.len(), 1, "exactly one record for one command");
         assert_eq!(registered[0].0, "b1a2b3c4d");
         assert_eq!(registered[0].1.command, "sleep 5");
-        assert_eq!(registered[0].1.description, "wait a bit");
+        assert_eq!(
+            registered[0].1.description.string_at(""),
+            Some("wait a bit")
+        );
 
         // The killer is bound so TaskStop can reach the child.
         assert_eq!(registry.bound.lock().unwrap().as_slice(), ["b1a2b3c4d"]);
@@ -6284,7 +6802,7 @@ mod tests {
 
         // The note points at the registry's output file, which is the file the
         // registry can actually read back through TaskOutput.
-        let note = res.model_content.as_deref().expect("background model note");
+        let note = model_text(&res.model_content).expect("background model note");
         assert!(
             note.contains("b1a2b3c4d") && note.contains("/session/tasks/b1a2b3c4d.output"),
             "note must carry the registry id and its output path, got: {note}",
@@ -6307,11 +6825,15 @@ mod tests {
         ctx.task_registry = Some(registry.clone());
         let tool = BashTool::new(ctx);
         let res = tool
-            .call(json!({"command": "echo done"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo done"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
 
-        assert!(res.data.get("backgroundTaskId").is_none());
+        assert!(data_value(&res.data).get("backgroundTaskId").is_none());
         assert!(
             registry.registered.lock().unwrap().is_empty(),
             "a foreground command must not become a task record",
@@ -6383,15 +6905,18 @@ mod tests {
         let (progress, mut progress_rx) = tool_api::progress::progress_channel();
         let mut use_context = use_ctx();
         use_context.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
-        tool.call(json!({"command": "sleep 3"}), use_context, progress)
+        tool.call(source_json!({"command": "sleep 3"}), use_context, progress)
             .await
             .expect("ok");
 
         let hint = progress_rx
             .try_recv()
             .expect("foreground arming must publish background_hint");
-        assert_eq!(hint.data["kind"], "background_hint");
-        assert_eq!(hint.data["toolUseId"], hint.tool_use_id.to_string());
+        assert_eq!(data_value(&hint.data)["kind"], "background_hint");
+        assert_eq!(
+            data_value(&hint.data)["toolUseId"],
+            hint.tool_use_id.to_string()
+        );
         assert_eq!(
             registry.armed.lock().unwrap().as_slice(),
             ["b1a2b3c4d"],
@@ -6489,12 +7014,16 @@ mod tests {
             seen: recorded.clone(),
         });
         let tool = BashTool::new(sleep_ctx.clone());
-        tool.call(json!({"command": "sleep 30"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "sleep 30"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        tool.call(json!({"command": "cargo build"}), use_ctx(), fresh_tx())
-            .await
-            .expect("ok");
+        tool.call(
+            source_json!({"command": "cargo build"}),
+            use_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
 
         assert_eq!(
             recorded.lock().unwrap().as_slice(),
@@ -6518,13 +7047,13 @@ mod tests {
         let tool = BashTool::new(ctx);
         let res = tool
             .call(
-                json!({"command": "cd /tmp && sleep 5", "run_in_background": true}),
+                source_json!({"command": "cd /tmp && sleep 5", "run_in_background": true}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let note = res.model_content.as_deref().expect("background model note");
+        let note = model_text(&res.model_content).expect("background model note");
         assert!(
             note.contains("Command running in background"),
             "base bg note missing, got: {note}",
@@ -6694,7 +7223,7 @@ mod tests {
             last_args: last.clone(),
         });
         let tool = BashTool::new(ctx);
-        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
         let args = last.lock().unwrap().clone();
@@ -6729,7 +7258,7 @@ mod tests {
         let tool = BashTool::new(ctx);
 
         // Baseline (no flag): the command is sandbox-wrapped.
-        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
         let wrapped = last.lock().unwrap()[2].clone();
@@ -6741,7 +7270,7 @@ mod tests {
         // With the flag AND a policy that allows unsandboxed commands, the
         // sandbox is bypassed — no wrapper appears in the spawned command.
         tool.call(
-            json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+            source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
             use_ctx(),
             fresh_tx(),
         )
@@ -6760,22 +7289,27 @@ mod tests {
     fn coerce_input_moves_numeric_timeout_ms_into_timeout() {
         let tool = BashTool::new(shell_test_ctx(ok_output()));
         let c = tool
-            .coerce_input(&json!({"command": "echo hi", "timeout_ms": 5000}))
+            .coerce_input(&source_json!({"command": "echo hi", "timeout_ms": 5000}))
             .expect("timeout_ms is coercible");
         assert_eq!(c.shape_class, "timeout_ms");
-        assert_eq!(c.input["timeout"], json!(5000));
+        assert_eq!(
+            c.input
+                .at_pointer("/timeout")
+                .and_then(|value| value.as_number()),
+            Some(5000.0)
+        );
         assert!(
-            c.input.get("timeout_ms").is_none(),
+            !c.input.contains_property("timeout_ms"),
             "the alias key must be dropped"
         );
         // `{...e}` order, then `timeout` appended last (`t.timeout = n`).
-        let keys: Vec<&str> = c
+        let keys = c
             .input
-            .as_object()
+            .object_entries()
             .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
+            .into_iter()
+            .map(|entry| entry.display_key.to_owned())
+            .collect::<Vec<_>>();
         assert_eq!(keys, vec!["command", "timeout"]);
     }
 
@@ -6783,10 +7317,10 @@ mod tests {
     fn coerce_input_accepts_a_digits_only_string_verbatim() {
         let tool = BashTool::new(shell_test_ctx(ok_output()));
         let c = tool
-            .coerce_input(&json!({"command": "echo hi", "timeout_ms": "5000"}))
+            .coerce_input(&source_json!({"command": "echo hi", "timeout_ms": "5000"}))
             .expect("digit string is coercible");
         // `t.timeout = n` moves the value ACROSS AS-IS — it stays a STRING.
-        assert_eq!(c.input["timeout"], json!("5000"));
+        assert_eq!(c.input.string_at("/timeout"), Some("5000"));
     }
 
     #[test]
@@ -6795,7 +7329,7 @@ mod tests {
         // The oracle never enters the branch, so `timeout_ms` SURVIVES into
         // `safeParse` (and legitimately fails `additionalProperties:false`).
         assert!(tool
-            .coerce_input(&json!({"command": "x", "timeout": 1, "timeout_ms": 2}))
+            .coerce_input(&source_json!({"command": "x", "timeout": 1, "timeout_ms": 2}))
             .is_none());
     }
 
@@ -6806,7 +7340,7 @@ mod tests {
         // input (with the stray key) is what the schema sees.
         for bad in [json!("5s"), json!("5.5"), json!(true), json!({})] {
             assert!(
-                tool.coerce_input(&json!({"command": "x", "timeout_ms": bad}))
+                tool.coerce_input(&source_json!({"command": "x", "timeout_ms": bad}))
                     .is_none(),
                 "non-coercible timeout_ms must not produce a rewrite: {bad}"
             );
@@ -6817,10 +7351,10 @@ mod tests {
     fn coerce_input_is_none_without_the_alias_key() {
         let tool = BashTool::new(shell_test_ctx(ok_output()));
         assert!(tool
-            .coerce_input(&json!({"command": "x", "timeout": 1}))
+            .coerce_input(&source_json!({"command": "x", "timeout": 1}))
             .is_none());
         // `ni(e)` plain-object guard.
-        assert!(tool.coerce_input(&json!("not an object")).is_none());
+        assert!(tool.coerce_input(&source_json!("not an object")).is_none());
     }
 
     // ===== BASH-10 sandbox-override ask (oracle BIN off 294577064) ==========
@@ -6838,7 +7372,7 @@ mod tests {
         let tool = BashTool::new(sandboxing_on_ctx());
         let result = tool
             .check_permissions(
-                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
                 &use_ctx(),
             )
             .await;
@@ -6854,7 +7388,10 @@ mod tests {
                     "decisionReason must be {{type:'sandboxOverride',reason:'dangerouslyDisableSandbox'}}"
                 );
                 // Byte-locked oracle copy.
-                assert_eq!(prompt.message, "Run outside of the sandbox");
+                assert_eq!(
+                    prompt.message.string_at(""),
+                    Some("Run outside of the sandbox")
+                );
                 // BASH-19's hook is what titles the prompt.
                 assert_eq!(prompt.title, "Bash");
             }
@@ -6866,7 +7403,7 @@ mod tests {
     async fn check_permissions_allows_without_the_flag() {
         let tool = BashTool::new(sandboxing_on_ctx());
         assert!(matches!(
-            tool.check_permissions(&json!({"command": "echo hi"}), &use_ctx())
+            tool.check_permissions(&source_json!({"command": "echo hi"}), &use_ctx())
                 .await,
             PermissionResult::Allow { .. }
         ));
@@ -6879,7 +7416,7 @@ mod tests {
         let tool = BashTool::new(shell_test_ctx(ok_output()));
         assert!(matches!(
             tool.check_permissions(
-                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
                 &use_ctx()
             )
             .await,
@@ -6896,7 +7433,7 @@ mod tests {
         let tool = BashTool::new(ctx);
         assert!(matches!(
             tool.check_permissions(
-                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
                 &use_ctx()
             )
             .await,
@@ -6913,9 +7450,10 @@ mod tests {
         std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
         let tool = BashTool::new(sandboxing_on_ctx());
         // `if(!e) return "Bash"`.
-        let empty_input = tool.user_facing_name_for_input(&Value::Null);
+        let empty_input = tool.user_facing_name_for_input(&source_json!(null));
         // Indicator unset ⇒ "Bash" even for a command that WILL be wrapped.
-        let sandboxed_input = tool.user_facing_name_for_input(&json!({"command": "echo hi"}));
+        let sandboxed_input =
+            tool.user_facing_name_for_input(&source_json!({"command": "echo hi"}));
         match previous {
             Some(value) => std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", value),
             None => std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR"),
@@ -6932,10 +7470,10 @@ mod tests {
         // JS truthiness, NOT `isEnvTruthy`: `"0"` is a non-empty string and so
         // ENABLES the indicator.
         std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", "0");
-        let sandboxed = tool.user_facing_name_for_input(&json!({"command": "echo hi"}));
+        let sandboxed = tool.user_facing_name_for_input(&source_json!({"command": "echo hi"}));
         // A `dangerouslyDisableSandbox` call is NOT wrapped ⇒ plain "Bash".
         let unwrapped = tool.user_facing_name_for_input(
-            &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+            &source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
         );
         match previous {
             Some(value) => std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", value),
@@ -7013,7 +7551,7 @@ mod tests {
             last_args: last.clone(),
         });
         let tool = BashTool::new(ctx);
-        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+        tool.call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
 
@@ -7067,7 +7605,7 @@ mod tests {
             let tool = BashTool::new(ctx);
             let mut call_ctx = use_ctx();
             call_ctx.cwd = agent_cwd.clone();
-            tool.call(json!({"command": "echo hi"}), call_ctx, fresh_tx())
+            tool.call(source_json!({"command": "echo hi"}), call_ctx, fresh_tx())
                 .await
                 .expect("ok");
 
@@ -7097,17 +7635,15 @@ mod tests {
         ctx.sandbox_runner = runner;
         let tool = BashTool::new(ctx);
         let res = tool
-            .call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        let stderr = res.data["stderr"].as_str().unwrap();
+        let stderr = data_value(&res.data)["stderr"].as_str().unwrap().to_owned();
         assert_eq!(
             stderr,
             "<sandbox_violations>\ndeny network-outbound denied.example:443 (host is not on the allow list)\n</sandbox_violations>"
         );
-        assert!(res
-            .model_content
-            .as_deref()
+        assert!(model_text(&res.model_content)
             .unwrap()
             .contains("<sandbox_violations>"));
     }
@@ -7127,7 +7663,7 @@ mod tests {
         });
         let tool = BashTool::new(ctx);
         tool.call(
-            json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+            source_json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
             use_ctx(),
             fresh_tx(),
         )
@@ -7198,25 +7734,29 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "python plot.py"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "python plot.py"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
 
         // `data` is the main result shape with `isImage: true`; no LingXi-only
         // `type`/`media_type`/`truncated` keys, and the display placeholder rides
         // on `model_content`, not inside `data`.
-        assert_eq!(res.data["isImage"], true);
-        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(data_value(&res.data)["isImage"], true);
+        assert_eq!(data_value(&res.data)["interrupted"], false);
         assert_eq!(
-            res.model_content.as_deref(),
+            model_text(&res.model_content),
             Some("[Image content provided in tool result.]")
         );
-        assert!(res.data.get("type").is_none());
-        assert!(res.data.get("media_type").is_none());
-        assert!(res.data.get("truncated").is_none());
+        assert!(data_value(&res.data).get("type").is_none());
+        assert!(data_value(&res.data).get("media_type").is_none());
+        assert!(data_value(&res.data).get("truncated").is_none());
         // `isImage` flags that `stdout` CONTAINS the image: the (untruncated)
         // data-URI rides in `stdout` for the mapper to derive the block from.
-        assert_eq!(res.data["stdout"], uri);
+        assert_eq!(data_value(&res.data)["stdout"], uri);
         // NO injected message — the image reaches the model inside the
         // tool_result content array, byte-faithful to the binary's `hKn`.
         assert!(res.new_messages.is_empty());
@@ -7234,11 +7774,18 @@ mod tests {
         }));
 
         let result = tool
-            .call(json!({"command": "python plot.py"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "python plot.py"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("image result");
 
-        let resized = result.data["stdout"].as_str().unwrap();
+        let resized = data_value(&result.data)["stdout"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_ne!(resized, original);
         assert!(resized.starts_with("data:image/jpeg;base64,"));
     }
@@ -7256,10 +7803,18 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "echo fake"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo fake"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(res.data["isImage"], false, "unsniffable payload is TEXT");
+        assert_eq!(
+            data_value(&res.data)["isImage"],
+            false,
+            "unsniffable payload is TEXT"
+        );
         assert!(res.new_messages.is_empty());
     }
 
@@ -7275,11 +7830,15 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "echo hello"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(res.data["isImage"], false);
-        assert_eq!(res.data["stdout"], "hello");
+        assert_eq!(data_value(&res.data)["isImage"], false);
+        assert_eq!(data_value(&res.data)["stdout"], "hello");
         assert!(
             res.new_messages.is_empty(),
             "no image message for plain text"
@@ -7299,11 +7858,15 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let res = tool
-            .call(json!({"command": "cat weird.txt"}), use_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "cat weird.txt"}),
+                use_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(res.data["isImage"], false);
-        assert_eq!(res.data["stdout"], bad);
+        assert_eq!(data_value(&res.data)["isImage"], false);
+        assert_eq!(data_value(&res.data)["stdout"], bad);
         assert!(res.new_messages.is_empty());
     }
 
@@ -7313,6 +7876,95 @@ mod tests {
     // classification) is unit-tested in `tool-api`'s `model_prompt_gate`; here
     // we lock the Bash tool's observable behavior — that `prompt()` routes the
     // gate to the correct SHORT/LONG variant per `PromptOptions::model`.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prompt_precommit_guidance_matches_native_286_fixtures() {
+        let _guard = crate::prompt::background_env_lock();
+        struct RestorePrecommitInputs(Option<std::ffi::OsString>);
+        impl Drop for RestorePrecommitInputs {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("LINGXI_DISABLE_GIT_INSTRUCTIONS", value),
+                    None => std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
+                }
+                telemetry::test_clear_flag("tengu_polished_tulip");
+            }
+        }
+        let _restore = RestorePrecommitInputs(std::env::var_os("LINGXI_DISABLE_GIT_INSTRUCTIONS"));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/bash_precommit_286.json"))
+                .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let tool = bash_tool_noop();
+            let clone = tool.clone();
+            let mut generation = 0;
+            for (input, expected) in case["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(case["outputs"].as_array().unwrap())
+            {
+                if input["new_session"].as_bool() == Some(true) {
+                    generation += 1;
+                }
+                telemetry::test_set_flag(
+                    "tengu_polished_tulip",
+                    input["flag"].as_bool().unwrap_or(true),
+                );
+                std::env::set_var(
+                    "LINGXI_DISABLE_GIT_INSTRUCTIONS",
+                    if input["git"].as_bool().unwrap_or(true) {
+                        "0"
+                    } else {
+                        "1"
+                    },
+                );
+                let opts = PromptOptions {
+                    bash_precommit_session_generation: generation,
+                    bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
+                        custom_verify: expected["skills"]["verify"].as_bool().unwrap(),
+                        custom_simplify: expected["skills"]["simplify"].as_bool().unwrap(),
+                        code_review: expected["skills"]["codeReview"].as_bool().unwrap()
+                            && input["include_code_review_suggestion"].as_bool() == Some(true),
+                    },
+                    ..Default::default()
+                };
+                let verbose = tool.prompt(&opts).await.string_at("").unwrap().to_owned();
+                let concise = clone
+                    .prompt(&PromptOptions {
+                        model: Some("claude-opus-4-8".into()),
+                        ..opts
+                    })
+                    .await
+                    .string_at("")
+                    .unwrap()
+                    .to_owned();
+                assert_eq!(
+                    serde_json::to_value(tool.precommit_guidance_enabled.latched_value()).unwrap(),
+                    expected["latched"],
+                    "{} session latch",
+                    case["name"]
+                );
+                for (prompt, boundary) in
+                    [(verbose, "verbose_boundary"), (concise, "concise_boundary")]
+                {
+                    if let Some(boundary) = expected[boundary].as_str() {
+                        assert!(
+                            prompt.contains(boundary),
+                            "{} missing native injection boundary: {boundary}",
+                            case["name"]
+                        );
+                    } else {
+                        assert!(
+                            !prompt.contains("Always run `/"),
+                            "{} unexpected precommit guidance",
+                            case["name"]
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn prompt_default_model_none_returns_long_variant() {
@@ -7326,7 +7978,12 @@ mod tests {
             timed_out: false,
         };
         let tool = BashTool::new(shell_test_ctx(out));
-        let p = tool.prompt(&PromptOptions::default()).await;
+        let p = tool
+            .prompt(&PromptOptions::default())
+            .await
+            .string_at("")
+            .unwrap()
+            .to_owned();
         assert!(
             p.starts_with("Executes a given bash command and returns its output."),
             "LONG prompt opening missing; got:\n{p}"
@@ -7371,7 +8028,7 @@ mod tests {
             model: Some("claude-opus-4-8".into()),
             ..Default::default()
         };
-        let p = tool.prompt(&opts).await;
+        let p = tool.prompt(&opts).await.string_at("").unwrap().to_owned();
 
         // Opening — SHORT ("a bash command", NOT "a given bash command").
         assert!(
@@ -7409,7 +8066,7 @@ mod tests {
         // Detached run_in_background bullet (background note enabled by default,
         // no Monitor clause since the amber-sentinel gate is default-false).
         assert!(
-            p.contains("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed."),
+            p.contains("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default 1800000, max 7200000); at that limit it is stopped and you are re-invoked. No `&` needed."),
             "SHORT run_in_background bullet missing; got:\n{p}"
         );
         assert!(
@@ -7565,8 +8222,12 @@ mod tests {
             let mut use_context = use_ctx();
             use_context.cancel = Some(cancel.clone());
             let run = tokio::spawn(async move {
-                tool.call(json!({"command":"sleep 10"}), use_context, fresh_tx())
-                    .await
+                tool.call(
+                    source_json!({"command":"sleep 10"}),
+                    use_context,
+                    fresh_tx(),
+                )
+                .await
             });
             started.notified().await;
             cancel.cancel();
@@ -7579,9 +8240,9 @@ mod tests {
                 continue;
             }
             let result = outcome.expect("detached result");
-            assert_eq!(result.data["backgroundedByTurnAbort"], true);
-            assert!(result.data.get("timedOutAfterMs").is_none());
-            assert_eq!(result.data["backgroundTaskId"], "b1a2b3c4d");
+            assert_eq!(data_value(&result.data)["backgroundedByTurnAbort"], true);
+            assert!(data_value(&result.data).get("timedOutAfterMs").is_none());
+            assert_eq!(data_value(&result.data)["backgroundTaskId"], "b1a2b3c4d");
             assert!(
                 registry.armed.lock().unwrap().is_empty(),
                 "test must exercise the pre-2s path"
@@ -7690,7 +8351,7 @@ mod tests {
     /// The MODEL-facing render, which is where the diff lands — not `data`,
     /// which is the TUI / `PostToolUse` metadata object.
     fn rendered(res: &ToolCallResult) -> String {
-        format!("{:?} {:?}", res.model_content, res.data)
+        format!("{:?} {:?}", res.model_content, data_value(&res.data))
     }
 
     /// 🚨 HP-6: `sandbox.credentials` must hold on the UNSANDBOXED path.
@@ -7717,7 +8378,7 @@ mod tests {
         let tool = BashTool::new(bctx);
         let _ = tool
             .call(
-                json!({"command": "printenv AWS_SECRET_ACCESS_KEY"}),
+                source_json!({"command": "printenv AWS_SECRET_ACCESS_KEY"}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -7778,7 +8439,7 @@ mod tests {
         let (_path, _tmp, tool, ctx) = edit_diff_fixture();
         let res = tool
             .call(
-                json!({"command": "sh -c 'touch touched.txt'"}),
+                source_json!({"command": "sh -c 'touch touched.txt'"}),
                 ctx,
                 fresh_tx(),
             )
@@ -7820,7 +8481,7 @@ mod tests {
         let shadow = shadow_of(&tool);
         let _ = tool
             .call(
-                json!({"command": "sh -c 'touch touched.txt'", "run_in_background": true}),
+                source_json!({"command": "sh -c 'touch touched.txt'", "run_in_background": true}),
                 ctx,
                 fresh_tx(),
             )
@@ -7834,7 +8495,7 @@ mod tests {
         let shadow2 = shadow_of(&tool2);
         let _ = tool2
             .call(
-                json!({"command": "sh -c 'touch touched.txt'"}),
+                source_json!({"command": "sh -c 'touch touched.txt'"}),
                 ctx2,
                 fresh_tx(),
             )
@@ -7855,11 +8516,11 @@ mod tests {
     async fn a_read_only_command_is_never_diffed() {
         let (_path, _tmp, tool, ctx) = edit_diff_fixture();
         assert!(
-            tool.is_read_only(&json!({"command": "ls"})),
+            tool.is_read_only(&source_json!({"command": "ls"})),
             "`ls` must classify as read-only, or this test proves nothing"
         );
         let res = tool
-            .call(json!({"command": "ls"}), ctx, fresh_tx())
+            .call(source_json!({"command": "ls"}), ctx, fresh_tx())
             .await
             .expect("call");
         assert!(
@@ -7875,7 +8536,11 @@ mod tests {
     async fn a_branch_moving_git_command_is_never_diffed() {
         let (_path, _tmp, tool, ctx) = edit_diff_fixture();
         let res = tool
-            .call(json!({"command": "git checkout main"}), ctx, fresh_tx())
+            .call(
+                source_json!({"command": "git checkout main"}),
+                ctx,
+                fresh_tx(),
+            )
             .await
             .expect("call");
         assert!(
@@ -7893,7 +8558,7 @@ mod tests {
         tool.ctx.bash_edit_diff = None;
         let res = tool
             .call(
-                json!({"command": "sh -c 'touch touched.txt'"}),
+                source_json!({"command": "sh -c 'touch touched.txt'"}),
                 ctx,
                 fresh_tx(),
             )

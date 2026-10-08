@@ -1,0 +1,1 @@
+{"id":3,"kind":"result","result":{"message":{"type":"system","content":[{"type":"text","text":"system-prefix:system-before-\ud800-after"}]},"uuid":"00000000-0000-4000-8000-000000000015"},"allHookedBuiltin":false}

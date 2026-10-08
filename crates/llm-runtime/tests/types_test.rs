@@ -2,6 +2,11 @@
 
 use llm_runtime::{CostEstimate, ExecutionUsage, PricingModelRef, ProviderId};
 
+fn json_payload(value: serde_json::Value) -> lingxi_llm_client::protocol::JsonPayload {
+    lingxi_llm_client::protocol::JsonPayload::from_generated_value(&value)
+        .expect("test fixture is valid JSON")
+}
+
 #[test]
 fn provider_id_serializes_first_class_variants() {
     let provider = ProviderId::OpenAICompatible {
@@ -64,8 +69,10 @@ fn cost_estimate_can_mark_unknown_pricing_without_dropping_usage() {
 #[test]
 fn missing_usage_stays_unknown_until_a_partial_counter_is_observed() {
     let mut usage = ExecutionUsage::default();
-    usage.provider_metadata =
-        serde_json::json!({"input_tokens": 999, "upstreamUsageState":"complete"});
+    usage.provider_metadata = lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+        &serde_json::json!({"input_tokens": 999, "upstreamUsageState":"complete"}),
+    )
+    .unwrap();
     assert_eq!(usage.context_tokens(), None);
     assert!(usage.report.complete().is_none());
     assert_eq!(usage.counts().input_tokens, 0);
@@ -169,7 +176,9 @@ fn persisted_extension_round_trips_sdk_only_usage_and_inference() {
                 raw_service_tier: Some("priority".into()),
                 ..Default::default()
             },
-            provider_metadata: serde_json::json!({"llm_client":{"history_usage":{"schema":0,"report":{"state":"complete"}}}}),
+            provider_metadata: json_payload(
+                serde_json::json!({"llm_client":{"history_usage":{"schema":0,"report":{"state":"complete"}}}}),
+            ),
             cost_estimate: Some(CostEstimate::unestimated(PricingModelRef {
                 pricing_provider_id: ProviderId::OpenAI,
                 billing_model: "m".into(),
@@ -194,9 +203,9 @@ fn persisted_zero_cache_snapshot_clears_stale_legacy_ttl_metadata() {
             lingxi_llm_client::protocol::Usage::default(),
             lingxi_llm_client::protocol::UsageState::Complete,
         ),
-        provider_metadata: serde_json::json!({
+        provider_metadata: json_payload(serde_json::json!({
             "cache_creation": {"ephemeral_1h_input_tokens": 18}
-        }),
+        })),
         ..Default::default()
     };
     let serialized = serde_json::to_value(&usage).unwrap();

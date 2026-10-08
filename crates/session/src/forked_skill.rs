@@ -30,6 +30,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 
 /// Maximum on-disk size of either sidecar (claude `Udd = 524288`). A larger
@@ -87,12 +88,18 @@ impl Effort {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkedSkillScoping {
     /// The forked skill's name — the identity every resume check corroborates.
-    #[serde(rename = "skillName")]
-    pub skill_name: String,
+    #[serde(
+        rename = "skillName",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    pub skill_name: Utf16JsonProjection,
     /// The display name the fork was attributed to (claude `attributionName`,
     /// sourced from the launch's `spawnedBySkill`).
-    #[serde(rename = "attributionName")]
-    pub attribution_name: String,
+    #[serde(
+        rename = "attributionName",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    pub attribution_name: Utf16JsonProjection,
     /// The skill's declared effort, when it declared one. Omitted otherwise —
     /// claude spreads it conditionally (`...t.effort!==undefined && {effort}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,7 +124,9 @@ impl ForkedSkillScoping {
     /// record as a refusal, not as "no scoping".
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        if !is_valid_skill_name(&self.skill_name) || !is_valid_skill_name(&self.attribution_name) {
+        if !is_valid_skill_name_source(&self.skill_name)
+            || !is_valid_skill_name_source(&self.attribution_name)
+        {
             return false;
         }
         if let Some(effort) = &self.effort {
@@ -145,8 +154,14 @@ pub struct ForkedSkillMarker {
     #[serde(rename = "forkedSkill")]
     pub forked_skill: bool,
     /// The skill's name, when the launch knew it.
-    #[serde(rename = "skillName", default, skip_serializing_if = "Option::is_none")]
-    pub skill_name: Option<String>,
+    #[serde(
+        rename = "skillName",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub skill_name: Option<Utf16JsonProjection>,
 }
 
 /// Whether `name` satisfies claude's skill-name schema (`UCo`): 1..=256 chars,
@@ -163,6 +178,24 @@ pub fn is_valid_skill_name(name: &str) -> bool {
     // rejects, letting an over-long name reach the sidecar.
     let len = name.encode_utf16().count();
     (1..=SKILL_NAME_MAX_LEN).contains(&len) && !name.contains(['\r', '\n'])
+}
+
+/// Source-preserving version of [`is_valid_skill_name`] for identities that
+/// may contain unpaired JavaScript UTF-16 code units.
+#[must_use]
+pub fn is_valid_skill_name_source(name: &Utf16JsonProjection) -> bool {
+    let Some(units) = name.string_units("") else {
+        return false;
+    };
+    (1..=SKILL_NAME_MAX_LEN).contains(&units.len())
+        && !units.contains(&u16::from(b'\r'))
+        && !units.contains(&u16::from(b'\n'))
+}
+
+fn display_skill_name(name: &Utf16JsonProjection) -> String {
+    name.string_units("")
+        .map(|units| String::from_utf16_lossy(&units))
+        .unwrap_or_default()
 }
 
 /// The two sidecar paths for a session transcript (claude `qon`).
@@ -308,7 +341,7 @@ async fn read_marker_presence(marker: &Path) -> ScopingStatus {
 /// unparseable, or failing the schema. The cold-resume check compares this
 /// against the scoping record's `skillName`, and a `None` never matches a valid
 /// name, so every failure is a refusal there.
-pub async fn read_marker_skill_name(session_jsonl: &Path) -> Option<String> {
+pub async fn read_marker_skill_name(session_jsonl: &Path) -> Option<Utf16JsonProjection> {
     let paths = forked_skill_paths(session_jsonl);
     let meta = tokio::fs::symlink_metadata(&paths.provenance_marker)
         .await
@@ -326,7 +359,7 @@ pub async fn read_marker_skill_name(session_jsonl: &Path) -> Option<String> {
         return None;
     }
     match marker.skill_name {
-        Some(name) if is_valid_skill_name(&name) => Some(name),
+        Some(name) if is_valid_skill_name_source(&name) => Some(name),
         _ => None,
     }
 }
@@ -369,8 +402,8 @@ pub struct ResumeRefusal {
 pub fn check_scoping_provenance(
     agent_label: &str,
     status: &ScopingStatus,
-    task_forked_skill_name: Option<&str>,
-    marker_witness: Option<&str>,
+    task_forked_skill_name: Option<&Utf16JsonProjection>,
+    marker_witness: Option<&Utf16JsonProjection>,
 ) -> Result<Option<ForkedSkillScoping>, ResumeRefusal> {
     match status {
         ScopingStatus::Malformed => Err(ResumeRefusal {
@@ -404,7 +437,7 @@ pub fn check_scoping_provenance(
                 // HOT: a live task record must name the SAME skill. A mismatch
                 // means the record on disk belongs to a different fork.
                 Some(name) => {
-                    if name != scoping.skill_name {
+                    if name != &scoping.skill_name {
                         return Err(ResumeRefusal {
                             reason: "forked_skill_resume_scoping_mismatch",
                             message: format!(
@@ -417,7 +450,7 @@ pub fn check_scoping_provenance(
                 // provenance marker is the only witness. A scoping record
                 // without a matching witness could have been planted.
                 None => {
-                    if marker_witness != Some(scoping.skill_name.as_str()) {
+                    if marker_witness != Some(&scoping.skill_name) {
                         return Err(ResumeRefusal {
                             reason: "forked_skill_resume_cold_witness_mismatch",
                             message: format!(
@@ -443,7 +476,7 @@ pub fn check_scoping_provenance(
 /// Returns the refusal when `fork_capable` is false.
 pub fn check_fork_capable(
     agent_label: &str,
-    skill_name: &str,
+    skill_name: &Utf16JsonProjection,
     fork_capable: bool,
 ) -> Result<(), ResumeRefusal> {
     if fork_capable {
@@ -452,7 +485,8 @@ pub fn check_fork_capable(
     Err(ResumeRefusal {
         reason: "forked_skill_resume_skill_unresolved",
         message: format!(
-            "Agent {agent_label} ran as forked skill {skill_name}, which no longer resolves to a fork-capable skill; refusing to resume it without its permission scoping."
+            "Agent {agent_label} ran as forked skill {}, which no longer resolves to a fork-capable skill; refusing to resume it without its permission scoping.",
+            display_skill_name(skill_name)
         ),
     })
 }
@@ -505,6 +539,17 @@ pub fn union_frozen_command_denies(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn source_name(name: &str) -> Utf16JsonProjection {
+        name.into()
+    }
+
+    fn unpaired_skill_name() -> Utf16JsonProjection {
+        let mut units = "skill-".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend("-probe".encode_utf16());
+        Utf16JsonProjection::root_string("skill-�-probe".into(), units).unwrap()
+    }
 
     fn scoping(skill: &str) -> ForkedSkillScoping {
         ForkedSkillScoping {
@@ -567,9 +612,41 @@ mod tests {
             other => panic!("expected Valid, got {other:?}"),
         }
         assert_eq!(
-            read_marker_skill_name(&jsonl).await.as_deref(),
-            Some("code-review")
+            read_marker_skill_name(&jsonl).await,
+            Some(source_name("code-review"))
         );
+    }
+
+    #[tokio::test]
+    async fn unpaired_skill_identity_survives_sidecar_cold_recovery() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("surrogate.jsonl");
+        let exact_name = unpaired_skill_name();
+        let mut record = scoping("placeholder");
+        record.skill_name = exact_name.clone();
+        record.attribution_name = exact_name.clone();
+
+        write_fork_records(&jsonl, &record).await.unwrap();
+        let paths = forked_skill_paths(&jsonl);
+        let scoping_json = tokio::fs::read_to_string(&paths.scoping).await.unwrap();
+        let marker_json = tokio::fs::read_to_string(&paths.provenance_marker)
+            .await
+            .unwrap();
+        assert!(scoping_json.contains(r#"\ud800"#), "{scoping_json}");
+        assert!(marker_json.contains(r#"\ud800"#), "{marker_json}");
+
+        let status = read_scoping(&jsonl).await;
+        let ScopingStatus::Valid(read_back) = &status else {
+            panic!("cold sidecar read should recover the fork record: {status:?}");
+        };
+        assert_eq!(read_back.skill_name, exact_name);
+        assert_eq!(read_back.attribution_name, exact_name);
+        let witness = read_marker_skill_name(&jsonl).await;
+        assert_eq!(witness.as_ref(), Some(&exact_name));
+        let recovered = check_scoping_provenance("agent-1", &status, None, witness.as_ref())
+            .expect("matching source-preserving marker corroborates cold resume")
+            .expect("fork scoping is restored");
+        assert_eq!(recovered.skill_name, exact_name);
     }
 
     /// The wire shape is claude's: camelCase keys, and the two optional keys
@@ -740,9 +817,14 @@ mod tests {
         );
         // Even with a task record naming a skill, `Malformed` wins.
         assert_eq!(
-            check_scoping_provenance("a1", &ScopingStatus::Malformed, Some("s"), None)
-                .unwrap_err()
-                .reason,
+            check_scoping_provenance(
+                "a1",
+                &ScopingStatus::Malformed,
+                Some(&source_name("s")),
+                None
+            )
+            .unwrap_err()
+            .reason,
             "forked_skill_resume_scoping_invalid"
         );
     }
@@ -752,7 +834,8 @@ mod tests {
     #[test]
     fn a_task_record_naming_a_skill_with_no_scoping_refuses_as_missing() {
         for status in [ScopingStatus::Absent, ScopingStatus::AbsentButMarked] {
-            let err = check_scoping_provenance("a1", &status, Some("review"), None).unwrap_err();
+            let err = check_scoping_provenance("a1", &status, Some(&source_name("review")), None)
+                .unwrap_err();
             assert_eq!(
                 err.reason, "forked_skill_resume_scoping_missing",
                 "{status:?}"
@@ -792,7 +875,8 @@ mod tests {
     #[test]
     fn a_task_record_naming_a_different_skill_refuses_as_mismatch() {
         let err =
-            check_scoping_provenance("a1", &valid("review"), Some("deploy"), None).unwrap_err();
+            check_scoping_provenance("a1", &valid("review"), Some(&source_name("deploy")), None)
+                .unwrap_err();
         assert_eq!(err.reason, "forked_skill_resume_scoping_mismatch");
         assert_eq!(
             err.message,
@@ -802,8 +886,10 @@ mod tests {
 
     #[test]
     fn a_matching_task_record_yields_the_scoping() {
-        let got = check_scoping_provenance("a1", &valid("review"), Some("review"), None).unwrap();
-        assert_eq!(got.map(|s| s.skill_name), Some("review".to_string()));
+        let got =
+            check_scoping_provenance("a1", &valid("review"), Some(&source_name("review")), None)
+                .unwrap();
+        assert_eq!(got.map(|s| s.skill_name), Some(source_name("review")));
     }
 
     /// COLD path: with no live task record, the provenance marker is the only
@@ -811,8 +897,9 @@ mod tests {
     /// could have been planted, so it refuses.
     #[test]
     fn a_cold_resume_requires_a_matching_marker_witness() {
-        for witness in [None, Some("deploy")] {
-            let err = check_scoping_provenance("a1", &valid("review"), None, witness).unwrap_err();
+        for witness in [None, Some(source_name("deploy"))] {
+            let err = check_scoping_provenance("a1", &valid("review"), None, witness.as_ref())
+                .unwrap_err();
             assert_eq!(
                 err.reason, "forked_skill_resume_cold_witness_mismatch",
                 "{witness:?}"
@@ -823,16 +910,17 @@ mod tests {
             );
         }
         // A witness that agrees corroborates the identity.
-        let got = check_scoping_provenance("a1", &valid("review"), None, Some("review")).unwrap();
-        assert_eq!(got.map(|s| s.skill_name), Some("review".to_string()));
+        let witness = source_name("review");
+        let got = check_scoping_provenance("a1", &valid("review"), None, Some(&witness)).unwrap();
+        assert_eq!(got.map(|s| s.skill_name), Some(source_name("review")));
     }
 
     /// A skill deleted, or edited to drop `context: fork`, no longer supplies
     /// the lists the fork ran under, so there is nothing to re-establish.
     #[test]
     fn a_skill_that_is_no_longer_fork_capable_refuses() {
-        assert!(check_fork_capable("a1", "review", true).is_ok());
-        let err = check_fork_capable("a1", "review", false).unwrap_err();
+        assert!(check_fork_capable("a1", &source_name("review"), true).is_ok());
+        let err = check_fork_capable("a1", &source_name("review"), false).unwrap_err();
         assert_eq!(err.reason, "forked_skill_resume_skill_unresolved");
         assert_eq!(
             err.message,

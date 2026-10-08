@@ -26,6 +26,7 @@
 pub mod blocklist;
 pub mod cache;
 mod markdown;
+mod source;
 pub mod persist;
 #[cfg(test)]
 mod testsupport;

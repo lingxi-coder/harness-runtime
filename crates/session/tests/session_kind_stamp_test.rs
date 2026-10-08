@@ -15,6 +15,7 @@
 //! sequential test function for the same reason.
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::{JsonlMessage, SESSION_KIND_ENV};
@@ -33,7 +34,8 @@ fn make_msg(uuid: &str, extra: Map<String, serde_json::Value>) -> JsonlMessage {
         timestamp: "2026-05-25T14:30:00.000Z".into(),
         cwd: "/tmp/proj".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":"hi"}),
+        message: Utf16JsonProjection::from_serde_value(&json!({"role":"user","content":"hi"}))
+            .unwrap(),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -41,7 +43,15 @@ fn make_msg(uuid: &str, extra: Map<String, serde_json::Value>) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(extra)).unwrap(),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     }
 }
 

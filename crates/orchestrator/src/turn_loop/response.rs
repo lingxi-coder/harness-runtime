@@ -6,8 +6,22 @@ use super::{
 };
 use crate::conversation::{ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::ContentBlock as LlmContentBlock;
+
+fn core_projection_from_payload(
+    payload: &lingxi_llm_client::protocol::JsonPayload,
+) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(payload.as_json_source())
+        .expect("SDK response payload is valid JSON source")
+}
+
+fn citations_to_core(
+    citations: Option<Option<lingxi_llm_client::protocol::JsonPayload>>,
+) -> Option<Option<Utf16JsonProjection>> {
+    citations.map(|citation| citation.map(|payload| core_projection_from_payload(&payload)))
+}
 
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).
 ///
@@ -30,7 +44,7 @@ pub(super) async fn handle_max_output_tokens(
     // `tengu_otk_slot_v1` (here `escalate_max_output_tokens`) and "not already
     // escalated". We arm `max_output_tokens_override` — which the next
     // `execute_one_turn_with_recovery_tracked` TAKEs and passes to
-    // `messages_create_with_opts` — and return `Continue` so the same step
+    // `messages_create` — and return `Continue` so the same step
     // re-issues at 64k with NO nudge injected. The override is taken per call,
     // so a separate `max_output_tokens_escalated` flag (reset alongside the
     // recovery count) gates this to once per episode and prevents an
@@ -38,7 +52,9 @@ pub(super) async fn handle_max_output_tokens(
     if orch.config.escalate_max_output_tokens && !state.max_output_tokens_escalated {
         state.max_output_tokens_override = Some(ESCALATED_MAX_TOKENS);
         state.max_output_tokens_escalated = true;
-        return Ok(TurnStepOutcome::Continue);
+        return Ok(TurnStepOutcome::Continue(
+            super::NativeQueryTransition::InPlaceRetry,
+        ));
     }
 
     if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
@@ -61,12 +77,14 @@ pub(super) async fn handle_max_output_tokens(
         // A clean nudge retry never carries an escalated override forward
         // (TS sets `maxOutputTokensOverride: undefined` here).
         state.max_output_tokens_override = None;
-        return Ok(TurnStepOutcome::Continue);
+        return Ok(TurnStepOutcome::Continue(
+            super::NativeQueryTransition::InPlaceRetry,
+        ));
     }
 
     // Recovery exhausted — surface the byte-locked `API Error: …` cap message
     // (the streaming twin does this in its terminal arm), then end the turn.
-    let surfaced_id = surface_terminal_api_error(orch, "max_tokens", None).await;
+    let surfaced_id = surface_terminal_api_error(orch, "max_tokens", None, None).await;
     Ok(TurnStepOutcome::Ended {
         final_message_id: surfaced_id.unwrap_or(assistant_id),
         stop_reason: "max_tokens".to_string(),
@@ -79,9 +97,11 @@ pub(super) async fn handle_max_output_tokens(
 /// — the #78 "visible output" predicate (claude-code `bin/claude.exe` offset
 /// ~202946760). `false` = a thinking-only / text-empty response.
 pub(super) fn has_visible_text(blocks: &[ContentBlock]) -> bool {
-    blocks
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
+    blocks.iter().any(|block| {
+        block
+            .visible_text()
+            .is_some_and(|text| !text.trim().is_empty())
+    })
 }
 
 /// Port of claude-code's `Pt(ce)` (query module, `bin/claude.exe` offset
@@ -151,13 +171,18 @@ pub(super) async fn handle_malformed_tool_use(
         // assistant response — two assistant messages in a row, matching the
         // binary. (The port previously persisted a USER message here.) Shape
         // mirrors `surface_model_error`'s assistant-api-error message.
-        orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
+        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            MALFORMED_TOOL_USE_RETRY_FAILED,
+        );
+        orch.output.emit_text(&message).await;
         let failed_msg = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+                citations: None,
             }],
             stop_reason: Some("stop_sequence".to_string()),
+            resumable: None,
         };
         {
             let mut s = orch.session.lock().await;
@@ -188,7 +213,9 @@ pub(super) async fn handle_malformed_tool_use(
     // TS resets the recovery counters on the retry transition.
     state.reset_max_output_tokens_recovery();
     state.malformed_tool_use_retried = true;
-    Ok(TurnStepOutcome::Continue)
+    Ok(TurnStepOutcome::Continue(
+        super::NativeQueryTransition::InPlaceRetry,
+    ))
 }
 
 /// #78 (batched twin, claude-code `bin/claude.exe` offset ~202946760): inject the
@@ -208,7 +235,9 @@ pub(super) async fn handle_thinking_only(
     }
     orch.persist_message_to_jsonl(&nudge_msg).await;
     state.thinking_only_nudged = true;
-    Ok(TurnStepOutcome::Continue)
+    Ok(TurnStepOutcome::Continue(
+        super::NativeQueryTransition::InPlaceRetry,
+    ))
 }
 
 /// Translate llm-runtime content blocks into protocol content blocks.
@@ -225,11 +254,26 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
     content
         .iter()
         .filter_map(|b| match b {
-            LlmContentBlock::ProviderContent { protocol, value } => Some(ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
-            LlmContentBlock::Text { text, .. }
-            | LlmContentBlock::TextJsUtf16 { text, .. } => {
-                Some(ContentBlock::Text { text: text.clone() })
+            LlmContentBlock::ProviderContent { protocol, value } => {
+                Some(ContentBlock::ProviderContent {
+                    protocol: protocol.clone(),
+                    value: core_projection_from_payload(value),
+                })
             }
+            LlmContentBlock::Text { text, citations, .. } => Some(ContentBlock::Text {
+                text: text.clone(),
+                citations: citations_to_core(citations.clone()),
+            }),
+            LlmContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+                ..
+            } => Some(ContentBlock::TextJsUtf16 {
+                text: text.clone(),
+                utf16_code_units: utf16_code_units.clone(),
+                citations: citations_to_core(citations.clone()),
+            }),
             LlmContentBlock::ToolCall { id, name, input } => {
                 // The provider-issued id (e.g. Anthropic `toolu_…`, OpenAI
                 // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes
@@ -241,8 +285,9 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 // or dispatched — otherwise `Edit.old_string` never matches and
                 // paths don't resolve. Windows paths and genuinely-escaped
                 // sequences are left verbatim; `Workflow.script` is restored.
+                let source_input = core_projection_from_payload(input);
                 let (input, _stats) =
-                    llm_runtime::unicode_repair::repair_tool_input(name, input);
+                    llm_runtime::unicode_repair::repair_tool_input(name, &source_input);
                 Some(ContentBlock::ToolUse {
                     id: ToolUseId::from(id.clone()),
                     name: name.clone(),
@@ -266,7 +311,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 Some(ContentBlock::ServerToolUse {
                     id: id.clone(),
                     name: name.clone(),
-                    input: input.clone(),
+                    input: core_projection_from_payload(input),
                 })
             }
             LlmContentBlock::ConnectorText {
@@ -282,7 +327,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 is_error,
             } => Some(ContentBlock::AdvisorToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: content.clone(),
+                content: core_projection_from_payload(content),
                 is_error: *is_error,
             }),
             // Input-only / non-output variants remain dropped on the response path.

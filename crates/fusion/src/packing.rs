@@ -877,7 +877,13 @@ impl OmissionCounts {
 }
 
 fn sanitize_text(value: &str) -> String {
-    sanitize_blocks(&[value.replace('\0', "")]).content.join("")
+    let input = value.replace('\0', "");
+    let sanitized = sanitize_blocks(&[input.encode_utf16().collect()])
+        .content
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    String::from_utf16(&sanitized).expect("Rust-owned packing text remains scalar")
 }
 
 fn truncate_bytes(value: &str, cap: usize) -> String {
@@ -979,7 +985,7 @@ mod tests {
         content
             .iter()
             .find_map(|block| match block {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .expect("user text")

@@ -1,6 +1,128 @@
 //! Conversation lifecycle hooks, goal checks, and session events.
 
+use super::mod_session_measure_sampler::{
+    ModSessionMeasureReason, ModSessionMeasureRequest, ModSessionMeasureSampler,
+};
 use super::*;
+
+use hooks::ExactHookText;
+
+fn source_string_projection(value: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        value.to_owned(),
+        value.encode_utf16().collect(),
+    )
+    .expect("Rust strings are valid UTF-16 projections")
+}
+
+fn source_text_with(
+    prefix: &str,
+    middle: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    suffix: &str,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        middle
+            .string_units("")
+            .expect("hook source text is a root string projection"),
+    );
+    units.extend(suffix.encode_utf16());
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("source display is derived from exact UTF-16 units")
+}
+
+fn user_meta_from_source(
+    id: MessageId,
+    source: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> ConversationMessage {
+    ConversationMessage::user_meta_js_utf16(
+        id,
+        source
+            .string_at("")
+            .expect("meta message source is a root string projection")
+            .to_owned(),
+        source
+            .string_units("")
+            .expect("meta message source is a root string projection"),
+    )
+}
+
+fn generated_json_projection(
+    value: &serde_json::Value,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+        .expect("generated hook event fields are JSON")
+}
+
+fn assistant_visible_text_projection(
+    content: &[lingxi_core::types::ContentBlock],
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::ContentBlock;
+
+    let mut units = Vec::new();
+    let mut found = false;
+    for block in content {
+        let text_units = match block {
+            ContentBlock::Text { text, .. } => Some(text.encode_utf16().collect::<Vec<_>>()),
+            ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } => Some(utf16_code_units.clone()),
+            ContentBlock::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages" && value.string_at("/type") == Some("text") =>
+            {
+                value.string_units("/text")
+            }
+            _ => None,
+        };
+        let Some(text_units) = text_units else {
+            continue;
+        };
+        if found {
+            units.push(b'\n' as u16);
+        }
+        units.extend(text_units);
+        found = true;
+    }
+
+    let display = String::from_utf16_lossy(&units);
+    let leading_units = display[..display.len() - display.trim_start().len()]
+        .encode_utf16()
+        .count();
+    let trailing_start = display.trim_end().len();
+    let trailing_units = display[trailing_start..].encode_utf16().count();
+    let end = units.len().saturating_sub(trailing_units);
+    let units = units.get(leading_units..end).unwrap_or_default().to_vec();
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("visible assistant text is a valid root-string projection")
+}
+
+async fn commit_peer_queue(
+    commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    text: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> bool {
+    tokio::task::spawn_blocking(move || commit(text))
+        .await
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+#[path = "hooks/idle_measure_tests.rs"]
+mod idle_measure_tests;
+
+/// The Mod's prompt admission decision before the user row is committed.
+pub(super) enum ModPromptScreen {
+    Admit {
+        text: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        context: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    },
+    Drop(lingxi_core::types::utf16_json::Utf16JsonProjection),
+}
 
 /// `tengu_goal_evaluated`'s `outcome`, and the `iterations` rule that rides
 /// on it.
@@ -39,11 +161,940 @@ impl GoalEvalOutcome {
     }
 }
 
+fn accumulate_mod_turn_usage(
+    facts: &mut ModTurnFacts,
+    usage: &llm_runtime::ExecutionUsage,
+    model: &str,
+) {
+    let counts = usage.counts();
+    let total = facts.usage.get_or_insert_with(|| ModTurnUsage {
+        tokens: lingxi_core::token::Usage::default(),
+        model: model.to_owned(),
+    });
+    total.tokens.input_tokens = total
+        .tokens
+        .input_tokens
+        .saturating_add(counts.input_tokens);
+    total.tokens.output_tokens = total
+        .tokens
+        .output_tokens
+        .saturating_add(counts.output_tokens);
+    total.tokens.cache_read_input_tokens = total
+        .tokens
+        .cache_read_input_tokens
+        .saturating_add(counts.cache_read_tokens);
+    total.tokens.cache_creation_input_tokens = total
+        .tokens
+        .cache_creation_input_tokens
+        .saturating_add(counts.cache_write_tokens);
+    total.model = model.to_owned();
+}
+
+async fn dispatch_queued_mod_session_event(work: ModSessionEventWork) {
+    match work {
+        ModSessionEventWork::TurnComplete {
+            context,
+            input,
+            original_answer,
+        } => {
+            dispatch_mod_turn_complete(
+                context.host,
+                context.session.as_ref(),
+                context.output,
+                input,
+                original_answer,
+            )
+            .await;
+        }
+        ModSessionEventWork::Measure {
+            context,
+            sampler,
+            request,
+        } => {
+            dispatch_mod_session_measure(context, sampler, request).await;
+        }
+        ModSessionEventWork::MeasureRequest {
+            context,
+            sampler,
+            reason,
+            snapshot,
+        } => {
+            if let Some(request) = sampler.enqueue(reason, snapshot) {
+                dispatch_mod_session_measure(context, sampler, request).await;
+            }
+        }
+    }
+}
+
+async fn dispatch_mod_turn_complete(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    original_answer: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) {
+    let turn_id = input.string_at("/turnId").unwrap_or_default().to_owned();
+    let log_output = output.clone();
+    let toast_output = output.clone();
+    let status_output = output.clone();
+    match host
+        .dispatch_with_ui_meta_at_session(
+            "turn.complete",
+            input,
+            session,
+            |event| async move {
+                let Some(event) = event else {
+                    return Ok(None);
+                };
+                let mut fields = vec![(
+                    "text".into(),
+                    event
+                        .subprojection("/answer")
+                        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?,
+                )];
+                if event.get_property("usage").is_some() {
+                    fields.push((
+                        "usage".into(),
+                        event
+                            .subprojection("/usage")
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?,
+                    ));
+                }
+                lingxi_core::types::utf16_json::Utf16JsonProjection::object(fields)
+                    .map(Some)
+                    .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+            },
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+            move |plugin, text| {
+                let output = status_output.clone();
+                async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+            },
+        )
+        .await
+    {
+        Ok(outcome) => {
+            if let Ok(text) = outcome.result_projection.subprojection("/text") {
+                if text.string_units("") != original_answer.string_units("")
+                    && text
+                        .string_at("")
+                        .is_some_and(|text| !text.trim().is_empty())
+                {
+                    let notice = if outcome.hooked.is_empty() {
+                        text
+                    } else {
+                        let mut units = outcome.hooked.join("+").encode_utf16().collect::<Vec<_>>();
+                        units.extend(": ".encode_utf16());
+                        units.extend(text.string_units("").unwrap_or_default());
+                        let display = String::from_utf16_lossy(&units);
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                            display, units,
+                        )
+                        .expect("notice is composed from valid UTF-16 strings")
+                    };
+                    output.emit_system_notice(&notice, false).await;
+                }
+            }
+        }
+        Err(error) => tracing::warn!(turn_id, %error, "turn.complete Mod dispatch failed"),
+    }
+}
+
+async fn dispatch_mod_session_measure(
+    context: ModSessionEventContext,
+    sampler: Arc<ModSessionMeasureSampler>,
+    mut request: ModSessionMeasureRequest,
+) {
+    loop {
+        if let Some(input) = sampler.prepare(&request) {
+            dispatch_mod_session_measure_once(
+                context.host.clone(),
+                context.session.as_ref(),
+                context.output.clone(),
+                input,
+            )
+            .await;
+        }
+        let Some(next) = sampler.finish_one() else {
+            return;
+        };
+        request = next;
+    }
+}
+
+async fn dispatch_mod_session_measure_inline(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    sampler: Arc<ModSessionMeasureSampler>,
+    mut request: ModSessionMeasureRequest,
+) {
+    loop {
+        if let Some(input) = sampler.prepare(&request) {
+            dispatch_mod_session_measure_once(host.clone(), session, output.clone(), input).await;
+        }
+        let Some(next) = sampler.finish_one() else {
+            return;
+        };
+        request = next;
+    }
+}
+
+async fn dispatch_mod_session_measure_once(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    input: serde_json::Value,
+) {
+    let session_id = session.id().await;
+    let input = generated_json_projection(&input);
+    let log_output = output.clone();
+    let toast_output = output.clone();
+    let status_output = output.clone();
+    if let Err(error) = host
+        .dispatch_with_ui_meta_at_session(
+            "session.measure",
+            input,
+            session,
+            |event| async move {
+                let Some(event) = event else {
+                    return Ok(None);
+                };
+                let changed = event.subprojection("/changed").map_err(|_| {
+                    hooks::mods::ModError::Hook("session.measure needs changed units".into())
+                })?;
+                lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![(
+                    "changed".into(),
+                    changed,
+                )])
+                .map(Some)
+                .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+            },
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+            move |plugin, text| {
+                let output = status_output.clone();
+                async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+            },
+        )
+        .await
+    {
+        tracing::warn!(%session_id, %error, "session.measure Mod dispatch failed");
+    }
+}
+
+fn start_mod_session_event_worker() -> tokio::sync::mpsc::UnboundedSender<ModSessionEventWork> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(work) = receiver.recv().await {
+            dispatch_queued_mod_session_event(work).await;
+        }
+    });
+    sender
+}
+
 impl ConversationOrchestrator {
+    fn enqueue_mod_session_events(&self, work: Vec<ModSessionEventWork>) {
+        if work.is_empty() {
+            return;
+        }
+        let mut slot = self
+            .mod_session_event_sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sender = slot
+            .as_ref()
+            .filter(|sender| !sender.is_closed())
+            .cloned()
+            .unwrap_or_else(start_mod_session_event_worker);
+        let mut pending = std::collections::VecDeque::from(work);
+        while let Some(item) = pending.pop_front() {
+            if let Err(error) = sender.send(item) {
+                tracing::warn!("Mod session-event queue stopped; restarting FIFO worker");
+                sender = start_mod_session_event_worker();
+                if let Err(restarted) = sender.send(error.0) {
+                    tracing::error!(
+                        "replacement Mod session-event worker stopped before accepting work"
+                    );
+                    pending.push_front(restarted.0);
+                }
+            }
+        }
+        *slot = Some(sender);
+    }
+
+    /// Observe a main-loop turn immediately before its first model request.
+    /// Mods may inspect this event, but their answer cannot change the turn.
+    pub(super) async fn fire_mod_turn_start(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        turn_id: &str,
+    ) {
+        *self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ModTurnFacts {
+            id: turn_id.to_owned(),
+            started_at: std::time::Instant::now(),
+            answer: source_string_projection(""),
+            usage: None,
+            refusal: None,
+            error: false,
+        });
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"turnId":turn_id}),
+        )
+        .expect("generated turn.start fields are JSON");
+        input
+            .set_field("text", text.clone())
+            .expect("turn.start input is an object");
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let turn_id = turn_id.to_owned();
+        if let Err(error) = host
+            .dispatch_with_ui_at_session(
+                "turn.start",
+                input,
+                self,
+                move |_| {
+                    let turn_id = turn_id.clone();
+                    async move {
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"turnId":turn_id}),
+                        )
+                        .map(Some)
+                        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await
+        {
+            tracing::warn!(%error, "turn.start Mod dispatch failed");
+        }
+    }
+
+    /// Accumulate one provider response for the eventual `turn.complete`.
+    pub(crate) fn record_mod_turn_response(
+        &self,
+        message: &ConversationMessage,
+        usage: Option<&llm_runtime::ExecutionUsage>,
+        model: &str,
+        stop_reason: Option<&str>,
+        stop_details: Option<&llm_runtime::HistoryStopDetails>,
+    ) {
+        let ConversationMessage::Assistant { content, .. } = message else {
+            return;
+        };
+        let answer = assistant_visible_text_projection(content);
+        let mut held = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(facts) = held.as_mut() else { return };
+        facts.answer = answer;
+        facts.error = false;
+        facts.refusal = (stop_reason == Some("refusal")).then(|| {
+            let null = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                .expect("null is valid JSON");
+            let category = stop_details
+                .and_then(|details| details.category.clone())
+                .map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
+                .unwrap_or_else(|| null.clone());
+            let explanation = stop_details
+                .and_then(|details| details.explanation.clone())
+                .unwrap_or(null);
+            lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+                ("category".to_string(), category),
+                ("explanation".to_string(), explanation),
+            ])
+            .expect("refusal payload is an object")
+        });
+        if let Some(usage) = usage {
+            accumulate_mod_turn_usage(facts, usage, model);
+        }
+    }
+
+    /// Count a completed physical Mod request immediately, even if the outer
+    /// stream later fails before producing an assistant message.
+    pub(crate) fn record_mod_turn_provider_usage(
+        &self,
+        usage: &llm_runtime::ExecutionUsage,
+        model: &str,
+    ) {
+        if let Some(facts) = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            accumulate_mod_turn_usage(facts, usage, model);
+        }
+    }
+
+    pub(crate) fn mark_mod_turn_error(&self) {
+        if let Some(facts) = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            facts.error = true;
+        }
+    }
+
+    /// Sample `session.measure` after this process observes a rate-limit state
+    /// or raw utilization snapshot change. There is no polling fallback: API
+    /// adapters without an update simply leave the turn-settled path intact.
+    pub(crate) async fn notify_mod_session_measure_rate_limits_changed(&self) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        if !host.has_event("session.measure") {
+            return;
+        }
+
+        let snapshot = self.mod_session_measure_snapshot().await;
+        let sampler = self.mod_session_measure_sampler.clone();
+        let Some(request) = sampler.enqueue(ModSessionMeasureReason::Limits, snapshot) else {
+            return;
+        };
+        if let Some(session) = host.bound_session() {
+            self.enqueue_mod_session_events(vec![ModSessionEventWork::Measure {
+                context: ModSessionEventContext {
+                    host,
+                    session,
+                    output: self.output.clone(),
+                },
+                sampler,
+                request,
+            }]);
+        } else {
+            dispatch_mod_session_measure_inline(host, self, self.output.clone(), sampler, request)
+                .await;
+        }
+    }
+
+    /// Deliver the settled main-loop turn to Mods. A changed nonblank result
+    /// becomes a UI notice while the recorded assistant answer stays intact.
+    pub(super) async fn fire_mod_turn_complete(&self, is_aborted: bool, has_error: bool) {
+        // Resolve the host before consuming the lifecycle record so canceling
+        // this future while it waits for the registry cannot lose a settled
+        // turn.
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let session = host.as_ref().and_then(|host| host.bound_session());
+        let facts = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(facts) = facts else { return };
+        let Some(host) = host else { return };
+        let reason = if is_aborted {
+            "aborted"
+        } else if facts.refusal.is_some() {
+            "refusal"
+        } else if has_error || facts.error {
+            "error"
+        } else {
+            "answer"
+        };
+        let duration = u64::try_from(facts.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+            ("answer".into(), facts.answer.clone()),
+            (
+                "durationMs".into(),
+                generated_json_projection(&serde_json::json!(duration)),
+            ),
+            (
+                "isAborted".into(),
+                generated_json_projection(&serde_json::json!(is_aborted)),
+            ),
+            ("turnId".into(), source_string_projection(&facts.id)),
+            ("reason".into(), source_string_projection(reason)),
+        ])
+        .expect("generated turn.complete fields are a JSON object");
+        if let Some(refusal) = facts.refusal {
+            input
+                .set_field("refusal", refusal)
+                .expect("turn.complete input is an object");
+        }
+        if let Some(usage) = facts.usage {
+            let usage = generated_json_projection(&serde_json::json!({
+                "input_tokens":usage.tokens.input_tokens,
+                "output_tokens":usage.tokens.output_tokens,
+                "cache_read_input_tokens":usage.tokens.cache_read_input_tokens,
+                "cache_creation_input_tokens":usage.tokens.cache_creation_input_tokens,
+                "model":usage.model,
+            }));
+            input
+                .set_field("usage", usage)
+                .expect("turn.complete input is an object");
+        }
+        let original = input
+            .subprojection("/answer")
+            .expect("turn.complete answer exists");
+        let measure_snapshot = if host.has_event("session.measure") {
+            Some(self.mod_session_measure_snapshot().await)
+        } else {
+            None
+        };
+        let sampler = self.mod_session_measure_sampler.clone();
+        if let Some(session) = session {
+            let context = ModSessionEventContext {
+                host,
+                session,
+                output: self.output.clone(),
+            };
+            let mut work = vec![ModSessionEventWork::TurnComplete {
+                context: context.clone(),
+                input,
+                original_answer: original,
+            }];
+            if let Some(snapshot) = measure_snapshot {
+                work.push(ModSessionEventWork::MeasureRequest {
+                    context,
+                    sampler,
+                    reason: ModSessionMeasureReason::Turn,
+                    snapshot,
+                });
+            }
+            self.enqueue_mod_session_events(work);
+        } else {
+            // Embedded callers may not have an owning session Arc. Preserve
+            // their request-scoped dispatch behavior in that case.
+            let measure_host = host.clone();
+            dispatch_mod_turn_complete(host, self, self.output.clone(), input, original).await;
+            if let Some(snapshot) = measure_snapshot {
+                if let Some(request) = sampler.enqueue(ModSessionMeasureReason::Turn, snapshot) {
+                    dispatch_mod_session_measure_inline(
+                        measure_host,
+                        self,
+                        self.output.clone(),
+                        sampler,
+                        request,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    pub(super) async fn screen_mod_prompt_submit(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: &[lingxi_core::types::ImageSource],
+        origin_override: Option<serde_json::Value>,
+    ) -> ModPromptScreen {
+        let origin = origin_override.unwrap_or_else(crate::mod_prompt_origin::current);
+        let attachments: Vec<_> = images
+            .iter()
+            .map(|image| match image {
+                lingxi_core::types::ImageSource::Base64 { media_type, .. } => {
+                    serde_json::json!({"type":"image","mediaType":media_type})
+                }
+                lingxi_core::types::ImageSource::Url { .. } => {
+                    serde_json::json!({"type":"image"})
+                }
+            })
+            .collect();
+        let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"text":"","wait":false,"origin":origin}),
+        )
+        .expect("generated prompt.submit fields are JSON");
+        input
+            .set_field("text", text.clone())
+            .expect("prompt.submit input is an object");
+        if !attachments.is_empty() {
+            input
+                .set_field(
+                    "attachments",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::Value::Array(attachments),
+                    )
+                    .expect("generated prompt.submit attachments are JSON"),
+                )
+                .expect("prompt.submit input is an object");
+        }
+        let result = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            if let Some(host) = registry.read().await.mod_host() {
+                let log_output = self.output.clone();
+                let toast_output = self.output.clone();
+                let status_output = self.output.clone();
+                host.dispatch_with_ui_at_session(
+                    "prompt.submit",
+                    input.clone(),
+                    self,
+                    |event| async move {
+                        let Some(event) = event else {
+                            return Ok(None);
+                        };
+                        let text = event
+                            .subprojection("/text")
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        let origin = event
+                            .subprojection("/origin")
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        let mut answer =
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+                                ("text".into(), text),
+                                ("origin".into(), origin),
+                            ])
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        if let Ok(context) = event.subprojection("/context") {
+                            answer.set_field("context", context).map_err(|error| {
+                                hooks::mods::ModError::Protocol(error.to_string())
+                            })?;
+                        }
+                        Ok(Some(answer))
+                    },
+                    move |plugin, text| {
+                        let output = log_output.clone();
+                        async move { output.emit_mod_log(&plugin, &text).await }
+                    },
+                    move |plugin, text, timeout_ms| {
+                        let output = toast_output.clone();
+                        async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                    },
+                    move |plugin, text| {
+                        let output = status_output.clone();
+                        async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "prompt.submit Mod dispatch failed");
+                    input.clone()
+                })
+            } else {
+                input.clone()
+            }
+        } else {
+            input.clone()
+        };
+        if result.string_units("/drop").is_some() {
+            if let Ok(reason) = result.subprojection("/drop") {
+                return ModPromptScreen::Drop(reason);
+            }
+        }
+        let text = result
+            .subprojection("/text")
+            .ok()
+            .filter(|value| value.string_units("").is_some())
+            .unwrap_or_else(|| text.clone());
+        let context = result
+            .subprojection("/context")
+            .ok()
+            .filter(|value| {
+                value
+                    .at_pointer("")
+                    .and_then(|root| root.array_len())
+                    .is_some()
+            })
+            .unwrap_or_else(|| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse("[]")
+                    .expect("empty JSON array is valid")
+            });
+        ModPromptScreen::Admit { text, context }
+    }
+
+    pub(super) async fn screen_mod_session_receive_source(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        origin_kind: &str,
+    ) -> bool {
+        self.resolve_mod_session_receive_source(text, origin_kind, true, None)
+            .await
+            .is_some()
+    }
+
+    pub(super) async fn screen_mod_uds_receive_source(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    ) {
+        let _ = self
+            .resolve_mod_session_receive_source(text, "peer", false, Some(commit))
+            .await;
+    }
+
+    /// Screen a host-stamped source prompt while it is still in the input
+    /// queue. The queue and transcript retain the exact root-string projection.
+    pub(super) async fn screen_mod_queued_receive_source(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        origin_kind: &str,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        self.resolve_mod_session_receive_source(text, origin_kind, false, None)
+            .await
+    }
+
+    async fn resolve_mod_session_receive_source(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        origin_kind: &str,
+        persist_at_core: bool,
+        queue_commit: Option<lingxi_core::host::uds_inbox::PeerQueueCommit>,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        if text.string_units("").is_none() {
+            return None;
+        }
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let Some(host) = host.filter(|host| host.has_event("session.receive")) else {
+            if let Some(commit) = queue_commit {
+                let _ = commit_peer_queue(commit, text.clone()).await;
+            } else if persist_at_core {
+                self.inject_user_projection(text, true).await;
+            }
+            return Some(text.clone());
+        };
+        let origin = Utf16JsonProjection::object(vec![(
+            "kind".into(),
+            source_string_projection(origin_kind),
+        )])
+        .ok()?;
+        let input = Utf16JsonProjection::object(vec![
+            ("origin".into(), origin.clone()),
+            ("text".into(), text.clone()),
+        ])
+        .ok()?;
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let state_for_core = state.clone();
+        let admitted = std::sync::Arc::new(std::sync::Mutex::new(None::<Utf16JsonProjection>));
+        let admitted_for_core = admitted.clone();
+        let commit_for_core = queue_commit.clone();
+        let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+        let pinned_origin = origin.clone();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let result = host
+            .dispatch_with_ui_at_session(
+                "session.receive",
+                input,
+                self,
+                move |forwarded| {
+                    let pinned_origin = pinned_origin.clone();
+                    let state = state_for_core.clone();
+                    let admitted = admitted_for_core.clone();
+                    let commit = commit_for_core.clone();
+                    let done_tx = done_tx.clone();
+                    async move {
+                        let forwarded = forwarded.ok_or_else(|| {
+                            hooks::mods::ModError::Hook(
+                                "session.receive event input is missing".into(),
+                            )
+                        })?;
+                        if forwarded.subprojection("/origin").ok().as_ref() != Some(&pinned_origin)
+                            || forwarded.get_property("event").is_some()
+                            || forwarded.get_property("agentId").is_some()
+                        {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.receive origin and event are pinned".into(),
+                            ));
+                        }
+                        let rewritten = forwarded
+                            .subprojection("/text")
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        if rewritten.string_units("").is_none() {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.receive text must be a string".into(),
+                            ));
+                        }
+                        if state
+                            .compare_exchange(
+                                0,
+                                1,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            *admitted
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(rewritten.clone());
+                            let queued = if let Some(commit) = commit {
+                                commit_peer_queue(commit, rewritten.clone()).await
+                            } else {
+                                true
+                            };
+                            if persist_at_core && queued {
+                                self.inject_user_projection(&rewritten, true).await;
+                            }
+                            done_tx.send_replace(true);
+                            if !queued {
+                                return Err(hooks::mods::ModError::Hook(
+                                    "session.receive delivery was not queued by inbound policy"
+                                        .into(),
+                                ));
+                            }
+                        } else if state.load(std::sync::atomic::Ordering::Acquire) == 2 {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.receive delivery was consumed before next(e)".into(),
+                            ));
+                        }
+                        Utf16JsonProjection::object(vec![("text".into(), rewritten)])
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+                            .map(Some)
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await;
+        let reached_core = state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err();
+        if !reached_core {
+            if let Err(error) = result {
+                tracing::warn!(%error, "session.receive Mod dispatch failed");
+                if persist_at_core {
+                    self.inject_user_projection(text, true).await;
+                } else if let Some(commit) = queue_commit {
+                    let _ = commit_peer_queue(commit, text.clone()).await;
+                }
+                return Some(text.clone());
+            }
+            return None;
+        }
+        if !*done_rx.borrow() && done_rx.changed().await.is_err() {
+            tracing::warn!(
+                "session.receive core ended before confirming source transcript persistence"
+            );
+        }
+        if let Err(error) = result {
+            tracing::warn!(%error, "session.receive Mod dispatch failed after core arrival");
+        }
+        let admitted = admitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        admitted
+    }
+
+    pub(super) async fn append_mod_prompt_context(
+        &self,
+        context: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let count = context
+            .at_pointer("")
+            .and_then(|root| root.array_len())
+            .unwrap_or_default();
+        if count == 0 {
+            return;
+        }
+        let exact_context: Vec<_> = (0..count)
+            .filter_map(|index| ExactHookText::from_json_projection(context, &format!("/{index}")))
+            .collect();
+        let tool_use_id = format!("hook-{}", lingxi_core::types::HookId::new().as_uuid());
+        let attachment = hooks::additional_context_attachment(
+            "prompt.submit",
+            &tool_use_id,
+            "UserPromptSubmit",
+            &exact_context,
+        );
+        self.persist_exact_hook_attachment(attachment).await;
+        let body = hooks::ExactHookText::join(&exact_context, "\n");
+        let message = hooks::ExactHookText::wrapped(
+            "<system-reminder>\nprompt.submit hook additional context: ",
+            &body,
+            "\n</system-reminder>",
+        )
+        .to_conversation_message(MessageId::new(), true);
+        self.register_mod_persisted_attachment(
+            &message,
+            "hook_additional_context",
+            serde_json::json!({"kind":"plugin","event":"prompt.submit"}),
+        )
+        .await;
+        self.session.lock().await.history.push(message);
+    }
+
+    async fn persist_exact_hook_attachment(
+        &self,
+        projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        self.persist_hook_attachment_to_jsonl(projection).await;
+    }
+
+    pub(super) async fn emit_mod_prompt_drop(
+        &self,
+        reason: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let mut units = "Prompt dropped by a hook: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        units.extend(reason.string_units("").unwrap_or_default());
+        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units,
+        )
+        .expect("prompt drop notice is a valid UTF-16 root string");
+        self.output.emit_text(&message).await;
+    }
     pub(crate) async fn upsert_active_goal_stop_hook_for_session(
         &self,
         session_id: SessionId,
-        condition: &str,
+        condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
         let hook = hooks::HookDefinition {
             id: lingxi_core::types::HookId::new(),
@@ -51,7 +1102,7 @@ impl ConversationOrchestrator {
             events: vec![hooks::HookEventType::Stop],
             if_condition: None,
             executor: hooks::HookExecutor::Prompt {
-                prompt: condition.to_string(),
+                prompt: condition.clone(),
                 model: None,
                 continue_on_block: true,
             },
@@ -129,9 +1180,9 @@ impl ConversationOrchestrator {
             let cleared = goal
                 .as_ref()
                 .map(|goal| lingxi_core::host::ActiveGoalSnapshot {
-                    condition: goal.condition.clone(),
+                    condition: goal.condition.clone().into(),
                     set_at: goal.set_at,
-                    last_reason: goal.last_reason.clone(),
+                    last_reason: goal.last_reason.clone().map(Into::into),
                     iterations: goal.iterations,
                     tokens_at_start: goal.tokens_at_start,
                 });
@@ -251,10 +1302,7 @@ impl ConversationOrchestrator {
         })?;
         let joined = assistant
             .iter()
-            .filter_map(|block| match block {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
+            .filter_map(lingxi_core::types::ContentBlock::visible_text)
             .collect::<Vec<_>>()
             .join("\n");
         let trimmed = joined.trim();
@@ -317,9 +1365,10 @@ impl ConversationOrchestrator {
     ///   (isMeta warning) — the turn still aborts (`shouldQuery:!1`).
     pub(super) async fn fire_user_prompt_submit(
         &self,
-        prompt: &str,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         message_id: MessageId,
     ) -> bool {
+        let prompt_display = prompt.string_at("").unwrap_or_default();
         // The JSONL append immediately before this seam minted the stable
         // per-turn prompt id. Emit once for all batched/streaming/cancelable
         // prompt paths before hooks can block the API call.
@@ -331,17 +1380,17 @@ impl ConversationOrchestrator {
             .clone()
             .unwrap_or_else(|| message_id.as_uuid().to_string());
         telemetry::otel::emit_user_prompt_log(
-            prompt,
+            prompt_display,
             &prompt_id,
             &message_id.as_uuid().to_string(),
         );
-        self.append_ultracode_attachments(prompt).await;
+        self.append_ultracode_attachments(prompt_display).await;
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
             .execute(
                 HookEvent::UserPromptSubmit {
-                    prompt: prompt.to_string(),
+                    prompt: prompt.clone(),
                 },
                 ctx,
             )
@@ -351,12 +1400,15 @@ impl ConversationOrchestrator {
         // applies it regardless of the block outcome). Best-effort: no writer
         // wired (library/test callers) ⇒ silent no-op, an empty title is
         // ignored.
-        if let Some(title) = agg.session_title.as_deref() {
+        if let Some(title) = agg.session_title.as_ref().filter(|title| !title.is_empty()) {
             if !title.is_empty() {
                 if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
                     let session_id = self.session.lock().await.session_id;
                     if let Err(error) = writer
-                        .append_custom_title(&session_id.as_uuid().to_string(), title)
+                        .append_custom_title(
+                            &session_id.as_uuid().to_string(),
+                            title.clone().into_projection(),
+                        )
                         .await
                     {
                         self.record_transcript_append_failure(
@@ -372,17 +1424,21 @@ impl ConversationOrchestrator {
 
         let blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block));
         if blocked {
-            let reason = agg
-                .reason
-                .clone()
-                .unwrap_or_else(|| "Blocked by hook".to_string());
-            let base = format!("UserPromptSubmit operation blocked by hook:\n{reason}");
-            let warning = if agg.suppress_original_prompt {
-                base
+            let mut warning =
+                ExactHookText::from_text("UserPromptSubmit operation blocked by hook:\n");
+            if let Some(reason) = agg.reason.as_ref() {
+                warning.push(reason);
             } else {
-                format!("{base}\n\nOriginal prompt: {prompt}")
-            };
-            self.output.emit_text(&warning).await;
+                warning.push_text("Blocked by hook");
+            }
+            if !agg.suppress_original_prompt {
+                warning.push_text("\n\nOriginal prompt: ");
+                warning.push(
+                    &ExactHookText::from_json_projection(prompt, "")
+                        .expect("user prompt source is a root string"),
+                );
+            }
+            self.output.emit_text(&warning.into_projection()).await;
         }
         blocked
     }
@@ -420,7 +1476,7 @@ impl ConversationOrchestrator {
                     message_id: assistant_id.as_uuid().to_string(),
                     index: 0,
                     is_final: false,
-                    delta: String::new(),
+                    delta: source_string_projection(""),
                 },
                 ctx,
             )
@@ -446,8 +1502,8 @@ impl ConversationOrchestrator {
     pub(super) async fn fire_message_display_completed(
         &self,
         turn_id: &str,
-        text: &str,
-    ) -> Option<String> {
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<ExactHookText> {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
@@ -457,7 +1513,7 @@ impl ConversationOrchestrator {
                     message_id: uuid::Uuid::new_v4().to_string(),
                     index: 0,
                     is_final: true,
-                    delta: text.to_string(),
+                    delta: text.clone(),
                 },
                 ctx,
             )
@@ -475,7 +1531,8 @@ impl ConversationOrchestrator {
             })
         {
             tracing::warn!(
-                "MessageDisplay hook failed for completed message; emitting original text: {text}"
+                "MessageDisplay hook failed for completed message; emitting original text: {}",
+                text.string_at("").unwrap_or_default()
             );
         }
         agg.display_content
@@ -532,7 +1589,8 @@ impl ConversationOrchestrator {
             .await;
         let (goal_disposition, goal_outcome) = if goal_deferred {
             (
-                checkin_emitted.then(|| StopHookDisposition::Continue(String::new())),
+                checkin_emitted
+                    .then(|| StopHookDisposition::Continue(source_string_projection(""))),
                 GoalEvalOutcome::Deferred,
             )
         } else {
@@ -566,8 +1624,9 @@ impl ConversationOrchestrator {
             // continuation'`).
             let reason = agg
                 .reason
-                .clone()
-                .unwrap_or_else(|| "Stop hook prevented continuation".to_string());
+                .as_ref()
+                .map(|reason| reason.clone().into_projection())
+                .unwrap_or_else(|| source_string_projection("Stop hook prevented continuation"));
             StopHookDisposition::Prevent(reason)
         } else if let Some(disposition) = goal_disposition {
             disposition
@@ -588,8 +1647,9 @@ impl ConversationOrchestrator {
             // `json.reason || 'Blocked by hook'`).
             let reason = agg
                 .reason
-                .clone()
-                .unwrap_or_else(|| "Blocked by hook".to_string());
+                .as_ref()
+                .map(|reason| reason.clone().into_projection())
+                .unwrap_or_else(|| source_string_projection("Blocked by hook"));
             StopHookDisposition::Continue(reason)
         } else {
             StopHookDisposition::Pass
@@ -643,7 +1703,11 @@ impl ConversationOrchestrator {
                 detail: t
                     .command
                     .clone()
-                    .filter(|c| !c.is_empty())
+                    .filter(|command| {
+                        command
+                            .string_units("")
+                            .is_some_and(|units| !units.is_empty())
+                    })
                     .unwrap_or_else(|| t.description.clone()),
             })
             .collect()
@@ -720,7 +1784,7 @@ impl ConversationOrchestrator {
                 idle_checkin_count,
             )
             .await;
-            let msg = ConversationMessage::user_meta(MessageId::new(), body);
+            let msg = user_meta_from_source(MessageId::new(), body);
             {
                 let mut session = self.session.lock().await;
                 session.history.push(msg.clone());
@@ -773,7 +1837,7 @@ impl ConversationOrchestrator {
             ),
             // `Set` never tears a goal down, and `NotMet` leaves it running.
             lingxi_core::host::GoalStatusKind::Set | lingxi_core::host::GoalStatusKind::NotMet => {
-                return
+                return;
             }
         };
         let duration_ms = std::time::SystemTime::now()
@@ -790,7 +1854,11 @@ impl ConversationOrchestrator {
         } else {
             metadata.insert(
                 "promptLength".into(),
-                telemetry::AnalyticsValue::Int(goal.condition.encode_utf16().count() as i64),
+                telemetry::AnalyticsValue::Int(
+                    goal.condition
+                        .string_units("")
+                        .map_or(0, |units| units.len()) as i64,
+                ),
             );
             let tokens = self
                 .snapshot_cost_real()
@@ -804,12 +1872,9 @@ impl ConversationOrchestrator {
             if event == "tengu_goal_failed" {
                 metadata.insert(
                     "reasonLength".into(),
-                    telemetry::AnalyticsValue::Int(
-                        goal.last_reason
-                            .as_ref()
-                            .map_or(0, |reason| reason.encode_utf16().count())
-                            as i64,
-                    ),
+                    telemetry::AnalyticsValue::Int(goal.last_reason.as_ref().map_or(0, |reason| {
+                        reason.string_units("").map_or(0, |units| units.len()) as i64
+                    })),
                 );
             }
         }
@@ -970,10 +2035,10 @@ impl ConversationOrchestrator {
 
     fn advance_goal_checkin_state(
         goal_checkin: &Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
-        condition: &str,
+        condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         deferring: &[crate::prompt::goal_checkin::DeferringTask],
         interval_ms: i64,
-    ) -> Option<String> {
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
         goal_checkin
             .lock()
@@ -1235,20 +2300,34 @@ impl ConversationOrchestrator {
                     if matches!(response.decision, Some(hooks::HookDecision::Block)) {
                         let reason = response
                             .reason
-                            .as_deref()
-                            .map(|reason| {
-                                reason
-                                    .strip_prefix(&format!("[{}]: ", goal.condition))
-                                    .unwrap_or(reason)
-                                    .to_string()
+                            .as_ref()
+                            .and_then(|reason| {
+                                let mut prefix = vec![u16::from(b'[')];
+                                prefix.extend(goal.condition.string_units("")?);
+                                prefix.extend("]: ".encode_utf16());
+                                let units = reason
+                                    .utf16_code_units
+                                    .as_slice()
+                                    .strip_prefix(prefix.as_slice())
+                                    .unwrap_or(&reason.utf16_code_units);
+                                (!units.is_empty()).then(|| {
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                                        String::from_utf16_lossy(units),
+                                        units.to_vec(),
+                                    )
+                                    .expect("goal reason preserves UTF-16 units")
+                                })
                             })
-                            .filter(|reason| !reason.is_empty())
-                            .unwrap_or_else(|| "Goal not met yet".to_string());
+                            .unwrap_or_else(|| "Goal not met yet".into());
                         self.record_goal_evaluation(Some(reason.clone()), true)
                             .await;
                         return (
                             Some(StopHookDisposition::GoalContinue(
-                                response.reason.clone().unwrap_or(reason),
+                                response
+                                    .reason
+                                    .as_ref()
+                                    .map(|reason| reason.clone().into_projection())
+                                    .unwrap_or_else(|| reason.clone()),
                             )),
                             GoalEvalOutcome::NotMet,
                         );
@@ -1257,8 +2336,14 @@ impl ConversationOrchestrator {
                 if let Some(response) = result.response.as_ref().filter(|r| r.impossible) {
                     // 2.1.263 `xY`: an impossible prompt condition clears the
                     // matching session goal as failed, never as achieved.
-                    self.record_goal_evaluation(response.reason.clone(), false)
-                        .await;
+                    self.record_goal_evaluation(
+                        response
+                            .reason
+                            .as_ref()
+                            .map(|reason| reason.clone().into_projection()),
+                        false,
+                    )
+                    .await;
                     let _ = self
                         .finish_active_goal_state_and_hook(
                             lingxi_core::host::GoalStatusKind::Failed,
@@ -1272,14 +2357,12 @@ impl ConversationOrchestrator {
                 // `set` attachment for the same successful evaluation.
                 // Successful prompt hooks do not contribute a generic hook
                 // decision/reason. Keep the evaluator's evidence on the goal only.
-                let reason = serde_json::from_str::<serde_json::Value>(&result.stdout)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("reason")
-                            .and_then(|r| r.as_str())
-                            .map(str::to_string)
-                    });
+                let reason = lingxi_core::types::utf16_json::Utf16JsonProjection::parse_utf16_json(
+                    &result.stdout.utf16_code_units,
+                )
+                .ok()
+                .and_then(|value| value.subprojection("/reason").ok())
+                .filter(|reason| reason.string_units("").is_some());
                 self.record_goal_evaluation(reason, false).await;
                 let _ = self
                     .finish_active_goal_state_and_hook(
@@ -1314,7 +2397,11 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn record_goal_evaluation(&self, last_reason: Option<String>, persist_active: bool) {
+    async fn record_goal_evaluation(
+        &self,
+        last_reason: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        persist_active: bool,
+    ) {
         let snapshot = {
             let mut session = self.session.lock().await;
             let Some(goal) = session.active_goal.as_mut() else {
@@ -1472,6 +2559,7 @@ impl ConversationOrchestrator {
                     let warning = format!(
                         "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."
                     );
+                    let warning = source_string_projection(&warning);
                     self.output.emit_text(&warning).await;
                     if goal_blocked {
                         self.handle_goal_interruption(
@@ -1484,7 +2572,10 @@ impl ConversationOrchestrator {
                     return StopHookFlow::FallThrough;
                 }
                 // Empty feedback means the goal check-in was already appended.
-                if !reason.is_empty() {
+                if reason
+                    .string_units("")
+                    .is_some_and(|units| !units.is_empty())
+                {
                     self.append_stop_hook_feedback(&reason).await;
                 }
                 *stop_hook_active = true;
@@ -1607,30 +2698,20 @@ impl ConversationOrchestrator {
                     .last_response_output_tokens
                     .load(std::sync::atomic::Ordering::Relaxed),
             );
-        let ttl_1h = lingxi_core::host::env::is_env_truthy(
+        let fallback_ttl = if lingxi_core::host::env::is_env_truthy(
             std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref(),
-        );
-        let cache_ttl = if ttl_1h { "1h" } else { "5m" };
-        let ttl_ms = if ttl_1h {
-            60 * 60 * 1_000
+        ) {
+            cost::prompt_cache_ledger::CacheTtl::OneHour
         } else {
-            5 * 60 * 1_000
+            cost::prompt_cache_ledger::CacheTtl::FiveMinutes
         };
-        let last_call_ms = self
-            .model_runtime
-            .last_api_call_at_ms
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let now_ms = i64::try_from(
-            self.model_runtime
-                .session_started_at
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .elapsed()
-                .as_millis(),
-        )
-        .unwrap_or(i64::MAX);
-        let prompt_cache_warm =
-            last_call_ms >= 0 && now_ms.saturating_sub(last_call_ms) <= i64::from(ttl_ms);
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let (prompt_cache_warm, ttl) = self
+            .current_prompt_cache_ledger()
+            .await
+            .model_switch_cache_state(now_ms, fallback_ttl);
+        let ttl_1h = ttl == cost::prompt_cache_ledger::CacheTtl::OneHour;
+        let cache_ttl = ttl.as_str();
         let (estimated_cache_write_usd, pricing) =
             self.model_switch_cache_write_estimate(to_model, to_profile, context_tokens, ttl_1h);
         (
@@ -1831,20 +2912,27 @@ impl ConversationOrchestrator {
 
         if !aggregate.additional_contexts.is_empty() {
             let tool_use_id = format!("hook-{}", lingxi_core::types::HookId::new().as_uuid());
-            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+            let attachment = hooks::additional_context_attachment(
                 "PostModelSwitch",
                 &tool_use_id,
                 "PostModelSwitch",
                 &aggregate.additional_contexts,
-            ))
+            );
+            self.persist_exact_hook_attachment(attachment).await;
+            let body = ExactHookText::join(&aggregate.additional_contexts, "\n");
+            let message_text = ExactHookText::wrapped(
+                "<system-reminder>\nPostModelSwitch hook additional context: ",
+                &body,
+                "\n</system-reminder>",
+            );
+            let message = message_text.to_conversation_message(MessageId::new(), true);
+            self.register_mod_persisted_attachment(
+                &message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"PostModelSwitch"}),
+            )
             .await;
-            let body = aggregate.additional_contexts.join("\n");
-            self.session.lock().await.history.push(ConversationMessage::user_meta(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nPostModelSwitch hook additional context: {body}\n</system-reminder>"
-                ),
-            ));
+            self.session.lock().await.history.push(message);
         }
         aggregate
     }
@@ -1854,7 +2942,16 @@ impl ConversationOrchestrator {
         source: &str,
     ) -> Vec<ConversationMessage> {
         let agg = self.run_session_start_hooks(source).await;
-        Self::session_start_context_messages(&agg)
+        let messages = Self::session_start_context_messages(&agg);
+        for message in &messages {
+            self.register_mod_persisted_attachment(
+                message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"SessionStart"}),
+            )
+            .await;
+        }
+        messages
     }
 
     /// Build the model-facing `hook_additional_context` meta message(s) from a
@@ -1889,13 +2986,13 @@ impl ConversationOrchestrator {
         if agg.additional_contexts.is_empty() {
             return Vec::new();
         }
-        let body = agg.additional_contexts.join("\n");
-        vec![ConversationMessage::user_meta(
-            MessageId::new(),
-            format!(
-                "<system-reminder>\nSessionStart hook additional context: {body}\n</system-reminder>"
-            ),
-        )]
+        let body = ExactHookText::join(&agg.additional_contexts, "\n");
+        vec![ExactHookText::wrapped(
+            "<system-reminder>\nSessionStart hook additional context: ",
+            &body,
+            "\n</system-reminder>",
+        )
+        .to_conversation_message(MessageId::new(), true)]
     }
 
     /// Fire SessionStart and append its model-facing additional context, then
@@ -1903,10 +3000,80 @@ impl ConversationOrchestrator {
     /// user prompt — claude-code `if(p.initialUserMessage)$os=p.initialUserMessage`)
     /// and return the folded hook aggregate so the composition root can apply
     /// host-owned follow-up actions such as `reloadSkills`.
+    async fn fire_mod_session_start(&self) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        let interactive = self.prompt_is_interactive();
+        let surface = if interactive
+            && self
+                .config
+                .query_source
+                .starts_with(crate::config::QUERY_SOURCE_REPL_MAIN_THREAD)
+        {
+            Some("terminal")
+        } else {
+            None
+        };
+        let input = generated_json_projection(&serde_json::json!({
+            "cwd":self.current_cwd().to_string_lossy(),
+            "surface":surface,
+            "isInteractive":interactive,
+        }));
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let _ = host
+            .dispatch_with_ui_at_session(
+                "session.start",
+                input,
+                self,
+                |event| async move {
+                    let Some(event) = event else {
+                        return Ok(None);
+                    };
+                    let cwd = event.string_at("/cwd").ok_or_else(|| {
+                        hooks::mods::ModError::Hook("session.start needs cwd".into())
+                    })?;
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![(
+                        "cwd".into(),
+                        source_string_projection(cwd),
+                    )])
+                    .map(Some)
+                    .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await;
+    }
+
     pub async fn fire_session_start(&self, source: &str) -> hooks::response::AggregateHookResult {
+        self.fire_mod_session_start().await;
         let agg = self.run_session_start_hooks(source).await;
         let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
+            for message in &messages {
+                self.register_mod_persisted_attachment(
+                    message,
+                    "hook_additional_context",
+                    serde_json::json!({"kind":"hook","event":"SessionStart"}),
+                )
+                .await;
+            }
             // O3: the PERSISTED record is a `hook_additional_context`
             // ATTACHMENT line (2.1.220 BIN off 232675554). Note the three
             // LITERALS at that site — `hookName:"SessionStart"` (BARE, NOT
@@ -1918,18 +3085,18 @@ impl ConversationOrchestrator {
             // (`zr({content: Ww(…), isMeta:true})`, renderer BIN off
             // 238107100); it only enters `history` and is never persisted from
             // here, so this attachment is the sole on-disk record.
-            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+            let attachment = hooks::additional_context_attachment(
                 "SessionStart",
                 "SessionStart",
                 "SessionStart",
                 &agg.additional_contexts,
-            ))
-            .await;
+            );
+            self.persist_exact_hook_attachment(attachment).await;
             self.session.lock().await.history.extend(messages);
         }
         // `initialUserMessage` → seed the initial user prompt (claude-code `$os`).
         if let Some(initial) = &agg.initial_user_message {
-            self.inject_user_message(initial).await;
+            self.inject_user_text_exact(initial, false).await;
         }
         agg
     }
@@ -1949,14 +3116,10 @@ impl ConversationOrchestrator {
     /// [`memory::lingxi_md::LingxiMdTier`]; `memory_type` is taken directly from
     /// that tier (so an enterprise-`Managed` file is reported as `Managed`).
     ///
-    /// Conditional (`paths:`-gated) rules are filtered out of the eager set by
-    /// the provider, so every file fired here is unconditional and top-level ⇒
-    /// `load_reason = session_start` with `globs = None`.
-    ///
-    /// `trigger_file_path` / `parent_file_path` are omitted — the eager pass
-    /// carries no lazy-trigger or `@include`-parent metadata (those wire fields
-    /// are `.optional()` and elided when absent, matching the TS session-start
-    /// fire).
+    /// Conditional rule-directory projections are filtered at acquisition.
+    /// Named files retain globs, and all retained imports carry their direct
+    /// parent path and report `load_reason = include`. The eager pass omits the
+    /// lazy trigger path.
     ///
     /// The orchestrator already owns the memory provider AND the hook registry, so
     /// it loads memory ONCE here (the same `memory.load(&cwd)` the system-prompt
@@ -1977,29 +3140,29 @@ impl ConversationOrchestrator {
         &self,
         load_reason: hooks::events::InstructionsLoadReason,
     ) {
-        let cwd = self.cwd.clone();
-        let memory_files = self.memory.load(&cwd).await;
+        let memory_files = match self.instruction_file_snapshot().await {
+            Ok(files) => files,
+            Err(error) => {
+                tracing::warn!(%error, "eager instruction reload failed");
+                return;
+            }
+        };
+        if self
+            .prompt_runtime
+            .instruction_cache
+            .consume_eager_load_reason()
+            .is_none()
+        {
+            return;
+        }
         if memory_files.is_empty() {
             return;
         }
-        // Seed the read-state registry BEFORE (and OUTSIDE) the hook loop.
-        // Outside is load-bearing: the loop's `if file.globs.is_some() {
-        // continue; }` skips conditional rules for the InstructionsLoaded fire,
-        // but the oracle's `xCt` seeds them too — with `seededFromContext:
-        // false` — so folding this into the loop would silently drop them.
-        // Re-entry with `load_reason = Compact` is safe: `seed_memory_read_state`
-        // skips every path already present.
+        // The eager acquisition already filtered conditional rule-directory
+        // projections. Named files and their imports keep glob/parent metadata
+        // and participate in both eager seeding and InstructionsLoaded.
         self.seed_memory_read_state(&memory_files).await;
-        for file in memory_files {
-            // §F: `load()` now also returns conditional (`paths:`-gated) rules.
-            // Those are NOT eagerly loaded, so they must not fire a
-            // `session_start` `InstructionsLoaded` event here — claude-code fires
-            // them at lazy-activation time with `load_reason: 'path_glob_match'`
-            // (`memoryFilesToAttachments`, attachments.ts:1754-1769). Skip them
-            // so the eager fire stays unconditional-only.
-            if file.globs.is_some() {
-                continue;
-            }
+        for file in memory_files.iter().cloned() {
             // `memory_type` is taken straight from the file's tier (claude-code
             // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
             // reported faithfully rather than misclassified as Project. The
@@ -2016,16 +3179,14 @@ impl ConversationOrchestrator {
                     HookEvent::InstructionsLoaded {
                         file_path: file.path,
                         memory_type,
-                        // Top-level eager load (no `@include` parent). Session
-                        // boot uses `session_start`; post-compact reload uses
-                        // `compact`, matching Claude's memory-cache reload cause.
-                        load_reason,
-                        // Always `None` here — conditional (`globs.is_some()`)
-                        // rules were skipped above; only unconditional files reach
-                        // this fire.
+                        load_reason: if file.parent.is_some() {
+                            hooks::events::InstructionsLoadReason::Include
+                        } else {
+                            load_reason
+                        },
                         globs: file.globs,
                         trigger_file_path: None,
-                        parent_file_path: None,
+                        parent_file_path: file.parent,
                     },
                     ctx,
                 )
@@ -2042,8 +3203,69 @@ impl ConversationOrchestrator {
     /// seam when one exists. Best-effort like [`Self::fire_session_start`] — a
     /// failing hook never breaks teardown, and it is a strict no-op when no
     /// `SessionEnd` hook is registered.
+    async fn fire_mod_session_end(&self, reason: &str, session_id: &str) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        struct ResetModStateOnDrop(std::sync::Arc<hooks::mods::ModHost>);
+        impl Drop for ResetModStateOnDrop {
+            fn drop(&mut self) {
+                self.0.reset_session_state();
+            }
+        }
+        let _reset_state = ResetModStateOnDrop(host.clone());
+        let input = generated_json_projection(&serde_json::json!({
+            "reason": reason,
+            "sessionId": session_id,
+            "resume": { "id": session_id },
+        }));
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let pinned_session_id = session_id.to_owned();
+        let _ = host
+            .dispatch_with_ui_at_session(
+                "session.end",
+                input,
+                self,
+                move |_| {
+                    let session_id = pinned_session_id.clone();
+                    async move {
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![(
+                            "sessionId".into(),
+                            source_string_projection(&session_id),
+                        )])
+                        .map(Some)
+                        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await;
+    }
+
     pub async fn fire_session_end(&self, reason: &str) {
         let session_id = { self.session.lock().await.session_id };
+        let mut ended = self.session_end_fired.lock().await;
+        let session_id_text = session_id.to_string();
+        if ended.contains(&session_id_text) {
+            return;
+        }
+        self.fire_mod_session_end(reason, &session_id_text).await;
         let ctx = self.lifecycle_hook_ctx(false).await;
         // Route through the SessionEnd *batch-deadline* path (claude-code `lje`
         // → `cH({signal: AbortSignal.timeout(Wqt())})`): the whole SessionEnd
@@ -2062,6 +3284,7 @@ impl ConversationOrchestrator {
             )
             .await;
         compaction::invoked_skills::clear_session(&session_id.to_string());
+        ended.insert(session_id_text);
     }
 
     /// Fire the `Notification` lifecycle hooks (hooks runtime lifecycle, TS
@@ -2148,6 +3371,9 @@ impl ConversationOrchestrator {
         directory: &str,
         source: &str,
     ) -> lingxi_core::host::DirectoryAddedHookSummary {
+        self.refresh_instruction_context(
+            lingxi_core::host::instructions::InstructionRefreshReason::DirectoryAdded,
+        );
         let ctx = self.lifecycle_hook_ctx(false).await;
         let aggregate = self
             .hooks
@@ -2167,8 +3393,8 @@ impl ConversationOrchestrator {
                 tracing::error!(
                     hook_id = %hook_id,
                     outcome = ?result.outcome,
-                    stdout = %result.stdout,
-                    stderr = %result.stderr,
+                    stdout = %result.stdout.display,
+                    stderr = %result.stderr.display,
                     "DirectoryAdded hook failed"
                 );
             }
@@ -2178,6 +3404,7 @@ impl ConversationOrchestrator {
         const TOTAL_LIMIT: usize = 16 * 1024;
         let mut remaining = TOTAL_LIMIT;
         let mut context_messages = Vec::new();
+        let mut exact_context_messages = Vec::new();
         for message in aggregate
             .system_messages
             .iter()
@@ -2187,40 +3414,30 @@ impl ConversationOrchestrator {
                 break;
             }
             let cap = PER_MESSAGE_LIMIT.min(remaining);
-            let mut used = 0usize;
-            let bounded: String = message
-                .chars()
-                .take_while(|ch| {
-                    let width = ch.len_utf8();
-                    if used.saturating_add(width) > cap {
-                        false
-                    } else {
-                        used += width;
-                        true
-                    }
-                })
-                .collect();
-            remaining = remaining.saturating_sub(bounded.len());
+            let bounded = message.truncate_utf8_bytes(cap);
+            remaining = remaining.saturating_sub(bounded.encoded_utf8_len());
             if !bounded.is_empty() {
-                context_messages.push(bounded);
+                context_messages.push(bounded.display.clone());
+                exact_context_messages.push(bounded);
             }
         }
         if failure_count > 0 {
-            context_messages.push(format!(
+            let failure = format!(
                 "{failure_count} DirectoryAdded hook(s) failed; output is in the debug log, not shown here"
-            ));
+            );
+            context_messages.push(failure.clone());
+            exact_context_messages.push(failure.into());
         }
 
-        if !context_messages.is_empty() {
-            let body = context_messages
+        if !exact_context_messages.is_empty() {
+            let body = exact_context_messages
                 .iter()
-                .map(|message| format!("DirectoryAdded hook: {message}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let message = ConversationMessage::user_meta(
-                MessageId::new(),
-                format!("<system-reminder>\n{body}\n</system-reminder>"),
-            );
+                .map(|message| ExactHookText::wrapped("DirectoryAdded hook: ", message, ""))
+                .collect::<Vec<_>>();
+            let body = ExactHookText::join(&body, "\n");
+            let message =
+                ExactHookText::wrapped("<system-reminder>\n", &body, "\n</system-reminder>")
+                    .to_conversation_message(MessageId::new(), true);
             self.session.lock().await.history.push(message.clone());
             self.persist_message_to_jsonl(&message).await;
         }
@@ -2292,10 +3509,9 @@ impl ConversationOrchestrator {
             .await;
 
         if request.reload_claude_md {
-            self.fire_instructions_loaded_with_reason(
-                hooks::events::InstructionsLoadReason::NestedTraversal,
-            )
-            .await;
+            // Native register_repo_root clears the eager cache; it does not
+            // synthesize a nested traversal InstructionsLoaded event.
+            self.clear_instruction_files();
         }
         let reload = if request.reload_skills || request.reload_plugins {
             if let Some(reloader) = &self.repo_root_reloader {
@@ -2340,9 +3556,12 @@ impl ConversationOrchestrator {
     /// (`utils/hooks.ts:1895`). The `isMeta` flag hides it from the user-facing
     /// UI while keeping it in the API stream. Best-effort persist, like the
     /// other meta appends.
-    async fn append_stop_hook_feedback(&self, reason: &str) {
-        let content = format!("Stop hook feedback:\n{reason}");
-        let msg = ConversationMessage::user_meta(MessageId::new(), content);
+    async fn append_stop_hook_feedback(
+        &self,
+        reason: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let content = source_text_with("Stop hook feedback:\n", reason, "");
+        let msg = user_meta_from_source(MessageId::new(), content);
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -2357,7 +3576,10 @@ impl ConversationOrchestrator {
     /// `<system-reminder>\nStop hook stopped continuation: {stopReason}\n</system-reminder>`
     /// (isMeta, `utils/messages.ts:4130-4137`). Best-effort persist, exactly like
     /// [`Self::append_stop_hook_feedback`].
-    async fn append_stop_hook_stopped_continuation(&self, reason: &str) {
+    async fn append_stop_hook_stopped_continuation(
+        &self,
+        reason: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         // O2: the PERSISTED record is a `hook_stopped_continuation` attachment
         // (BIN off 233101239): `Va({type:"hook_stopped_continuation",
         // message:N, hookName:"Stop", toolUseID:H, hookEvent:"Stop"})`, where
@@ -2377,14 +3599,39 @@ impl ConversationOrchestrator {
             reason,
         ))
         .await;
-        let content = format!(
-            "<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>"
+        let content = source_text_with(
+            "<system-reminder>\nStop hook stopped continuation: ",
+            reason,
+            "\n</system-reminder>",
         );
-        let msg = ConversationMessage::user_meta(MessageId::new(), content);
+        let msg = user_meta_from_source(MessageId::new(), content);
+        self.register_mod_persisted_attachment(
+            &msg,
+            "hook_stopped_continuation",
+            serde_json::json!({"kind":"hook","event":"Stop"}),
+        )
+        .await;
         {
             let mut s = self.session.lock().await;
             s.history.push(msg);
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::uds_inbox::PeerReceiveGate for ConversationOrchestrator {
+    async fn receive(
+        &self,
+        destination_session_id: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    ) -> bool {
+        let current = lingxi_core::host::OrchestratorHandle::current_session_id(self).await;
+        if lingxi_core::types::SessionId::parse_prefixed(destination_session_id) != Some(current) {
+            return false;
+        }
+        self.screen_mod_uds_receive_source(text, commit).await;
+        true
     }
 }
 

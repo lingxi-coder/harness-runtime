@@ -4,6 +4,7 @@
 //! are NOT accepted.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -13,8 +14,9 @@ use serde_json::{json, Value};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -264,10 +266,16 @@ pub fn select_todo_write_prompt(model: Option<&str>) -> &'static str {
 /// Returns a human-readable error string on the first rule violation.
 pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     for t in todos {
-        if t.content.is_empty() {
+        if t.content
+            .string_units("")
+            .map_or(true, |units| units.is_empty())
+        {
             return Err("Content cannot be empty".into());
         }
-        if t.active_form.is_empty() {
+        if t.active_form
+            .string_units("")
+            .map_or(true, |units| units.is_empty())
+        {
             return Err("Active form cannot be empty".into());
         }
     }
@@ -316,6 +324,111 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static SOURCE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&INPUT_SCHEMA));
+
+fn parse_todos(input: &Utf16JsonProjection) -> Result<Vec<TodoItem>, ToolError> {
+    let todos = input
+        .get_property("todos")
+        .and_then(JsonValueView::array_len)
+        .ok_or_else(|| invalid_tool_input("TodoWrite: missing or invalid 'todos' field"))?;
+    let mut parsed = Vec::with_capacity(todos);
+    for index in 0..todos {
+        let item = input
+            .at_pointer(&format!("/todos/{index}"))
+            .filter(|item| item.object_entries().is_some())
+            .ok_or_else(|| {
+                invalid_tool_input(format!("TodoWrite: todos[{index}] must be an object"))
+            })?;
+        if item
+            .get_property("content")
+            .and_then(JsonValueView::code_units)
+            .is_none()
+        {
+            return Err(invalid_tool_input(format!(
+                "TodoWrite: todos[{index}].content must be a string"
+            )));
+        }
+        if item
+            .get_property("activeForm")
+            .and_then(JsonValueView::code_units)
+            .is_none()
+        {
+            return Err(invalid_tool_input(format!(
+                "TodoWrite: todos[{index}].activeForm must be a string"
+            )));
+        }
+        let content = input
+            .subprojection(&format!("/todos/{index}/content"))
+            .expect("string content subtree is present");
+        let active_form = input
+            .subprojection(&format!("/todos/{index}/activeForm"))
+            .expect("string activeForm subtree is present");
+        let status = item
+            .get_property("status")
+            .and_then(JsonValueView::as_str)
+            .ok_or_else(|| {
+                invalid_tool_input(format!("TodoWrite: todos[{index}].status must be a string"))
+            })?;
+        let status = match status {
+            TODO_STATE_PENDING => TodoState::Pending,
+            TODO_STATE_IN_PROGRESS => TodoState::InProgress,
+            TODO_STATE_COMPLETED => TodoState::Completed,
+            _ => {
+                return Err(invalid_tool_input(format!(
+                    "TodoWrite: todos[{index}].status is invalid"
+                )))
+            }
+        };
+        parsed.push(TodoItem {
+            id: String::new(),
+            content,
+            status,
+            active_form,
+        });
+    }
+    Ok(parsed)
+}
+
+fn todos_result_projection(input: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let count = input
+        .array_len("/todos")
+        .expect("TodoWrite todos were validated");
+    let todos = (0..count)
+        .map(|index| {
+            input
+                .subprojection(&format!("/todos/{index}"))
+                .and_then(|item| item.pick_object_fields(&["content", "status", "activeForm"]))
+                .expect("TodoWrite todo has the schema fields")
+        })
+        .collect();
+    Utf16JsonProjection::array(todos).expect("TodoWrite todo list is valid JSON")
+}
+
+fn todo_items_projection(todos: &[TodoItem]) -> Utf16JsonProjection {
+    let items = todos
+        .iter()
+        .map(|todo| {
+            let mut fields = Vec::with_capacity(4);
+            if !todo.id.is_empty() {
+                fields.push(("id".into(), source_text_projection(&todo.id)));
+            }
+            fields.push(("content".into(), todo.content.clone()));
+            fields.push((
+                "status".into(),
+                source_text_projection(match todo.status {
+                    TodoState::Pending => TODO_STATE_PENDING,
+                    TodoState::InProgress => TODO_STATE_IN_PROGRESS,
+                    TodoState::Completed => TODO_STATE_COMPLETED,
+                }),
+            ));
+            fields.push(("activeForm".into(), todo.active_form.clone()));
+            Utf16JsonProjection::object(fields).expect("TodoWrite item is valid JSON")
+        })
+        .collect();
+    Utf16JsonProjection::array(items).expect("TodoWrite list is valid JSON")
+}
+
 /// `TodoWriteTool` — replaces the running session's `todos` list with the
 /// caller-supplied list. Wire-locked by spec §7 line 486.
 pub struct TodoWriteTool {
@@ -336,11 +449,18 @@ impl Tool for TodoWriteTool {
         TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("manage the session task checklist")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("manage the session task checklist".into())
     }
-    fn input_schema(&self) -> &Value {
-        &INPUT_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         // claude-code 2.1.263 `isEnabled(){return!X_()&&OO()}`: the V1/V2 mutex
@@ -380,20 +500,24 @@ impl Tool for TodoWriteTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TodoWrite mutates session state only; no external side-effect".into(),
@@ -404,11 +528,11 @@ impl Tool for TodoWriteTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         // claude-code v2.1.183 `description(){return Qla}`.
         "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.".into()
     }
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // claude-code v2.1.183 `prompt({model:e}){return Xla(e)}` where
         // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh(model)` selects the SHORT
         // `FWd` prompt for new models (opus-4-8 / fable-5 / mythos-5) and the
@@ -420,32 +544,17 @@ impl Tool for TodoWriteTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // Parse `todos` from `input`. (claude's TodoWrite emits NO per-tool
         // telemetry — per-call success/error is recorded by the generic tool
         // dispatcher — so the port no longer fires tengu_tool_todo_write_*.)
-        let raw_todos = match input.get("todos") {
-            Some(v) => v.clone(),
-            None => {
-                return Err(ToolError::InvalidInput(
-                    "TodoWrite: missing required 'todos' field".into(),
-                ));
-            }
-        };
-        let todos: Vec<TodoItem> = match serde_json::from_value(raw_todos) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(ToolError::InvalidInput(format!(
-                    "TodoWrite: invalid todos shape: {e}"
-                )));
-            }
-        };
+        let todos = parse_todos(&input)?;
 
         if let Err(msg) = validate_todos(&todos) {
-            return Err(ToolError::InvalidInput(msg));
+            return Err(invalid_tool_input(msg));
         }
 
         // Mutate session. `TodoWriteTool.ts:69-70` — `allDone = todos.every(completed)`
@@ -492,17 +601,58 @@ impl Tool for TodoWriteTool {
         );
 
         Ok(ToolCallResult {
-            data: json!({
-                "oldTodos": old_todos,
-                "newTodos": todos,
-            }),
-            model_content: Some(content),
+            data: Utf16JsonProjection::object(vec![
+                ("oldTodos".into(), todo_items_projection(&old_todos)),
+                ("newTodos".into(), todos_result_projection(&input)),
+            ])
+            .expect("TodoWrite result is valid JSON"),
+            model_content: Some(source_text_projection(&content)),
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+#[cfg(test)]
+struct TestTodoWriteResult {
+    data: Value,
+    model_content: Option<String>,
+}
+
+#[cfg(test)]
+impl TodoWriteTool {
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestTodoWriteResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection serializes"),
+        )
+        .expect("test result JSON parses");
+        let model_content = result
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .map(str::to_owned);
+        Ok(TestTodoWriteResult {
+            data,
+            model_content,
+        })
+    }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -514,6 +664,27 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+    fn todo(id: &str, content: &str, status: TodoState, active_form: &str) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: source_text_projection(content),
+            status,
+            active_form: source_text_projection(active_form),
+        }
+    }
+
+    fn source_text_units(units: &[u16]) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+            .expect("source test text is valid JSON")
+    }
+
+    fn prompt_text(prompt: Utf16JsonProjection) -> String {
+        prompt
+            .string_at("")
+            .expect("generated prompt is a root string")
+            .to_owned()
+    }
 
     fn make_tool_and_session() -> (
         TodoWriteTool,
@@ -550,7 +721,9 @@ mod tests {
         assert_eq!(tool.name(), "TodoWrite");
         assert_eq!(
             tool.search_hint(),
-            Some("manage the session task checklist")
+            Some(Utf16JsonProjection::from(
+                "manage the session task checklist"
+            ))
         );
         assert_eq!(tool.max_result_size_chars(), 100_000);
         assert!(tool.should_defer(), "shouldDefer:!0");
@@ -625,36 +798,16 @@ mod tests {
     #[test]
     fn validate_accepts_well_formed_list() {
         let todos = vec![
-            TodoItem {
-                id: "a".into(),
-                content: "x".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "b".into(),
-                content: "y".into(),
-                status: TodoState::InProgress,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "c".into(),
-                content: "z".into(),
-                status: TodoState::Completed,
-                active_form: "active".into(),
-            },
+            todo("a", "x", TodoState::Pending, "active"),
+            todo("b", "y", TodoState::InProgress, "active"),
+            todo("c", "z", TodoState::Completed, "active"),
         ];
         assert!(validate_todos(&todos).is_ok());
     }
 
     #[test]
     fn validate_rejects_empty_content() {
-        let todos = vec![TodoItem {
-            id: "a".into(),
-            content: String::new(),
-            status: TodoState::Pending,
-            active_form: "active".into(),
-        }];
+        let todos = vec![todo("a", "", TodoState::Pending, "active")];
         let err = validate_todos(&todos).expect_err("empty content must reject");
         assert_eq!(err, "Content cannot be empty");
     }
@@ -664,12 +817,7 @@ mod tests {
         // claude-code zod `TodoItemSchema` (BWd) has no `.max()` on content —
         // long todos must be accepted (matches v2.1.183).
         let huge = "x".repeat(10_000);
-        let todos = vec![TodoItem {
-            id: "a".into(),
-            content: huge,
-            status: TodoState::Pending,
-            active_form: "active".into(),
-        }];
+        let todos = vec![todo("a", &huge, TodoState::Pending, "active")];
         assert!(validate_todos(&todos).is_ok());
     }
 
@@ -678,18 +826,8 @@ mod tests {
         // TS `TodoItemSchema` has no `id` concept, so there is no uniqueness
         // rule; id-less input deserializes to empty ids, which must not reject.
         let todos = vec![
-            TodoItem {
-                id: "dup".into(),
-                content: "x".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "dup".into(),
-                content: "y".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
+            todo("dup", "x", TodoState::Pending, "active"),
+            todo("dup", "y", TodoState::Pending, "active"),
         ];
         assert!(validate_todos(&todos).is_ok());
     }
@@ -699,18 +837,8 @@ mod tests {
         // TS treats single-in-progress as advisory (prompt-only), never an
         // error — multiple `in_progress` items must be accepted.
         let todos = vec![
-            TodoItem {
-                id: "a".into(),
-                content: "x".into(),
-                status: TodoState::InProgress,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "b".into(),
-                content: "y".into(),
-                status: TodoState::InProgress,
-                active_form: "active".into(),
-            },
+            todo("a", "x", TodoState::InProgress, "active"),
+            todo("b", "y", TodoState::InProgress, "active"),
         ];
         assert!(validate_todos(&todos).is_ok());
     }
@@ -718,18 +846,8 @@ mod tests {
     #[test]
     fn validate_accepts_zero_in_progress() {
         let todos = vec![
-            TodoItem {
-                id: "a".into(),
-                content: "x".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "b".into(),
-                content: "y".into(),
-                status: TodoState::Completed,
-                active_form: "active".into(),
-            },
+            todo("a", "x", TodoState::Pending, "active"),
+            todo("b", "y", TodoState::Completed, "active"),
         ];
         assert!(validate_todos(&todos).is_ok());
     }
@@ -737,30 +855,10 @@ mod tests {
     #[test]
     fn summary_counts_each_state() {
         let todos = vec![
-            TodoItem {
-                id: "a".into(),
-                content: "x".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "b".into(),
-                content: "y".into(),
-                status: TodoState::Pending,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "c".into(),
-                content: "z".into(),
-                status: TodoState::InProgress,
-                active_form: "active".into(),
-            },
-            TodoItem {
-                id: "d".into(),
-                content: "w".into(),
-                status: TodoState::Completed,
-                active_form: "active".into(),
-            },
+            todo("a", "x", TodoState::Pending, "active"),
+            todo("b", "y", TodoState::Pending, "active"),
+            todo("c", "z", TodoState::InProgress, "active"),
+            todo("d", "w", TodoState::Completed, "active"),
         ];
         assert_eq!(summary(&todos), (2_u32, 1_u32, 1_u32));
     }
@@ -879,12 +977,7 @@ mod tests {
     #[test]
     fn validate_rejects_empty_active_form() {
         // claude-code TodoItemSchema requires `activeForm` non-empty (min(1)).
-        let todos = vec![TodoItem {
-            id: "a".into(),
-            content: "x".into(),
-            status: TodoState::Pending,
-            active_form: String::new(),
-        }];
+        let todos = vec![todo("a", "x", TodoState::Pending, "")];
         let err = validate_todos(&todos).expect_err("empty activeForm must reject");
         assert_eq!(err, "Active form cannot be empty");
     }
@@ -903,7 +996,60 @@ mod tests {
             .expect("activeForm happy path");
         let s = session.lock().await;
         assert_eq!(s.todos.len(), 1);
-        assert_eq!(s.todos[0].active_form, "Shipping it");
+        assert_eq!(s.todos[0].active_form.string_at(""), Some("Shipping it"));
+    }
+
+    #[tokio::test]
+    async fn source_todo_text_survives_session_and_old_todos_result() {
+        let (tool, _sink, session, use_ctx) = make_tool_and_session();
+        let content_units = vec![b'a' as u16, 0xD800, b'b' as u16];
+        let active_units = vec![0xDC00, b'x' as u16];
+        let first = Utf16JsonProjection::object(vec![(
+            "todos".into(),
+            Utf16JsonProjection::array(vec![Utf16JsonProjection::object(vec![
+                ("content".into(), source_text_units(&content_units)),
+                (
+                    "status".into(),
+                    source_text_projection(TODO_STATE_IN_PROGRESS),
+                ),
+                ("activeForm".into(), source_text_units(&active_units)),
+            ])
+            .expect("todo input object is valid JSON")])
+            .expect("todo input list is valid JSON"),
+        )])
+        .expect("TodoWrite input is valid JSON");
+        Tool::call(&tool, first, use_ctx.clone(), fresh_tx())
+            .await
+            .expect("source todo text is accepted");
+
+        let next = generated_builtin_result(&json!({
+            "todos": [{
+                "content": "next",
+                "status": "in_progress",
+                "activeForm": "Doing next"
+            }]
+        }));
+        let result = Tool::call(&tool, next, use_ctx, fresh_tx())
+            .await
+            .expect("second source update succeeds");
+
+        let stored = session.lock().await;
+        assert_eq!(
+            stored.todos[0].content.string_units(""),
+            Some(content_units.clone())
+        );
+        assert_eq!(
+            stored.todos[0].active_form.string_units(""),
+            Some(active_units.clone())
+        );
+        assert_eq!(
+            result.data.string_units("/oldTodos/0/content"),
+            Some(content_units.clone())
+        );
+        assert_eq!(
+            result.data.string_units("/oldTodos/0/activeForm"),
+            Some(active_units.clone())
+        );
     }
 
     // ── all-completed clears the stored list (TodoWriteTool.ts:70) ───────
@@ -1114,18 +1260,20 @@ mod tests {
             include_examples: false,
             model: None,
             model_profile: None,
+            ..Default::default()
         };
         let with_model = |m: &str| PromptOptions {
             include_examples: false,
             model: Some(m.to_string()),
             model_profile: None,
+            ..Default::default()
         };
 
         // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒
         // the long UWd prompt — NOT the old custom 3-sentence blurb.
         {
             let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
-            let p = tool.prompt(&opts).await;
+            let p = prompt_text(tool.prompt(&opts).await);
             assert_eq!(p, TODO_WRITE_PROMPT_FULL);
             // Binary-locked head + tail of UWd.
             assert!(p.starts_with(
@@ -1160,7 +1308,7 @@ mod tests {
                 "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
             ] {
                 assert_eq!(
-                    tool.prompt(&with_model(classic)).await,
+                    prompt_text(tool.prompt(&with_model(classic)).await),
                     TODO_WRITE_PROMPT_FULL,
                     "UWu classic {classic:?} ⇒ UWd"
                 );
@@ -1168,7 +1316,7 @@ mod tests {
             // UWu == false ⇒ short FWd. opus-4-8 is OUTSIDE UWu's 4-0..4-7 list.
             for new_model in ["claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"] {
                 assert_eq!(
-                    tool.prompt(&with_model(new_model)).await,
+                    prompt_text(tool.prompt(&with_model(new_model)).await),
                     TODO_WRITE_PROMPT_SIMPLE,
                     "new model {new_model:?} ⇒ FWd"
                 );
@@ -1176,7 +1324,7 @@ mod tests {
             // `dfe` early-access (`-eap`) is never the standard prompt ⇒ FWd.
             for eap in ["claude-opus-4-7-eap", "claude-sonnet-4-5-eap[x]"] {
                 assert_eq!(
-                    tool.prompt(&with_model(eap)).await,
+                    prompt_text(tool.prompt(&with_model(eap)).await),
                     TODO_WRITE_PROMPT_SIMPLE,
                     "early-access {eap:?} ⇒ FWd"
                 );
@@ -1187,7 +1335,7 @@ mod tests {
         // (overrides the model branch — fires even for a classic model).
         for truthy in ["1", "true", "yes", "on", " On "] {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", truthy);
-            let p = tool.prompt(&with_model("claude-opus-4-7")).await;
+            let p = prompt_text(tool.prompt(&with_model("claude-opus-4-7")).await);
             assert_eq!(p, TODO_WRITE_PROMPT_SIMPLE, "truthy {truthy:?} ⇒ FWd");
             assert!(p.starts_with(
                 "Create and update a task list for the current session. The list is rendered to the user as your working plan."
@@ -1200,7 +1348,7 @@ mod tests {
         // (overrides the model branch — fires even for opus-4-8).
         for falsy in ["0", "false", "no", "off"] {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", falsy);
-            let p = tool.prompt(&with_model("claude-opus-4-8")).await;
+            let p = prompt_text(tool.prompt(&with_model("claude-opus-4-8")).await);
             assert_eq!(p, TODO_WRITE_PROMPT_FULL, "defined-falsy {falsy:?} ⇒ UWd");
         }
 
@@ -1208,7 +1356,10 @@ mod tests {
         // short-circuits to UWd (the binary's `Dh(undefined)` guard runs first).
         {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "1");
-            assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
+            assert_eq!(
+                prompt_text(tool.prompt(&opts).await),
+                TODO_WRITE_PROMPT_FULL
+            );
         }
 
         // Any other (non-truthy, non-defined-falsy) value falls through to the
@@ -1216,14 +1367,17 @@ mod tests {
         {
             let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "garbage");
             assert_eq!(
-                tool.prompt(&with_model("claude-opus-4-7")).await,
+                prompt_text(tool.prompt(&with_model("claude-opus-4-7")).await),
                 TODO_WRITE_PROMPT_FULL
             );
             assert_eq!(
-                tool.prompt(&with_model("claude-opus-4-8")).await,
+                prompt_text(tool.prompt(&with_model("claude-opus-4-8")).await),
                 TODO_WRITE_PROMPT_SIMPLE
             );
-            assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
+            assert_eq!(
+                prompt_text(tool.prompt(&opts).await),
+                TODO_WRITE_PROMPT_FULL
+            );
         }
 
         // Selector helper agrees with the tool method.

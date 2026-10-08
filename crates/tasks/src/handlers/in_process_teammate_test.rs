@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use futures::StreamExt;
 use std::collections::HashMap as StdHashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::sync::Mutex as StdMutex;
 
 use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use lingxi_core::host::RuntimeSpawner;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -18,6 +20,63 @@ use tokio::sync::Mutex as TokioMutex;
 struct InMemoryFs {
     files: TokioMutex<StdHashMap<String, String>>,
 }
+
+#[test]
+fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
+    let agent_id = lingxi_core::types::AgentId::new();
+    let refusal_text = Utf16JsonProjection::from("refusal body");
+    let row = lingxi_core::host::ServerFallbackApiErrorRow::new(
+        &refusal_text,
+        "2026-10-04T00:00:00.000Z".into(),
+    );
+    let query_message = serde_json::to_value(row.query_message()).unwrap();
+    let api_error_event = SubagentEvent::ServerFallbackApiErrorRow {
+        agent_id: agent_id.clone(),
+        row: row.clone(),
+        message_index: 7,
+    };
+    let ordinary_message_event = SubagentEvent::Message {
+        agent_id,
+        message: query_message,
+        message_index: Some(7),
+    };
+    let api_line = event_line(&api_error_event);
+    assert!(
+        api_line.contains("refusal body"),
+        "refusal text remains visible"
+    );
+    assert_eq!(
+        api_line,
+        event_line(&ordinary_message_event),
+        "the dedicated row event projects visible assistant text exactly once"
+    );
+    assert_eq!(terminal_status(&api_error_event), None);
+    assert!(!is_idle_event(&api_error_event));
+
+    let tombstone = SubagentEvent::ServerFallbackTombstone {
+        agent_id,
+        message: lingxi_core::host::ServerFallbackTombstoneMessage {
+            uuid: row.uuid.clone(),
+            message_type: "assistant".into(),
+            timestamp: "2026-10-04T00:00:00.000Z".into(),
+            request_id: row.request_id.clone(),
+            request_ref: None,
+            provider_message_id: None,
+            model: Some("test-model".into()),
+            stop_reason: Some("refusal".into()),
+            stop_details: row.message.stop_details.clone(),
+            usage: Some(row.message.usage.clone()),
+            content: row.message.content.clone(),
+            is_api_error_message: Some(true),
+            supersedes_uuids: None,
+        },
+        display_only: true,
+    };
+    assert!(event_line(&tombstone).is_empty());
+    assert_eq!(terminal_status(&tombstone), None);
+    assert!(!is_idle_event(&tombstone));
+}
+
 impl InMemoryFs {
     fn new() -> Self {
         Self {
@@ -90,7 +149,7 @@ impl FileSystem for InMemoryFs {
 
 // ---- Scripted SubagentApiClient ----------------------------------------
 
-/// Hands back a pre-scripted queue of responses, one per `messages_create`.
+/// Hands back a pre-scripted queue of responses, one per `stream(request)`.
 /// When exhausted it returns an `end_turn` text turn so each turn-set
 /// terminates and the persistent runner parks for the next message. An
 /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
@@ -121,20 +180,28 @@ impl GatedApiClient {
 
 #[async_trait]
 impl SubagentApiClient for GatedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.histories.lock().unwrap().push(messages);
-        if call == 0 {
-            self.first_started.add_permits(1);
-            self.release_first.acquire().await.unwrap().forget();
-        }
-        Ok(text_response(if call == 0 { "first" } else { "second" }))
+        request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let messages = request.messages;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.histories.lock().unwrap().push(messages);
+            if call == 0 {
+                self.first_started.add_permits(1);
+                self.release_first.acquire().await.unwrap().forget();
+            }
+            Ok(text_response(if call == 0 { "first" } else { "second" }))
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 impl ScriptedApiClient {
@@ -163,20 +230,27 @@ impl ScriptedApiClient {
 }
 #[async_trait]
 impl SubagentApiClient for ScriptedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let next = self.responses.lock().unwrap().pop_front();
-        match next {
-            Some(Ok(resp)) => Ok(resp),
-            Some(Err(msg)) => Err(llm_runtime::LlmError::InvalidRequest { message: msg }),
-            None => Ok(text_response("(idle)")),
-        }
+        _request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.responses.lock().unwrap().pop_front();
+            match next {
+                Some(Ok(resp)) => Ok(resp),
+                Some(Err(msg)) => Err(llm_runtime::LlmError::InvalidRequest { message: msg }),
+                None => Ok(text_response("(idle)")),
+            }
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
@@ -187,12 +261,14 @@ fn text_response(text: &str) -> llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: llm_runtime::ExecutionUsage::default(),
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: Default::default(),
+        resumable: None,
     }
 }
 
@@ -207,6 +283,8 @@ struct RecordingSink {
     /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
     /// the failed idle notification's `failureReason` to the lead).
     failures: StdMutex<Vec<(String, String)>>,
+    team_activity: StdMutex<Vec<(lingxi_core::types::AgentId, bool)>>,
+    event_order: StdMutex<Vec<String>>,
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
@@ -221,17 +299,34 @@ impl TaskStatusSink for RecordingSink {
     }
 
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.event_order
+            .lock()
+            .unwrap()
+            .push(format!("status:{status:?}"));
         self.statuses
             .lock()
             .unwrap()
             .push((task_id.to_string(), status));
     }
     async fn set_failed(&self, task_id: &str, error: &str) {
+        self.event_order.lock().unwrap().push("failed".into());
         self.failures
             .lock()
             .unwrap()
             .push((task_id.to_string(), error.to_string()));
         self.set_status(task_id, TaskStatus::Failed).await;
+    }
+    async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), String> {
+        self.team_activity.lock().unwrap().push((agent_id, active));
+        self.event_order
+            .lock()
+            .unwrap()
+            .push(format!("team-active:{active}"));
+        Ok(())
     }
 }
 impl RecordingSink {
@@ -429,7 +524,24 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
     let output = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs));
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime as Arc<dyn RuntimeSpawner>, 8));
-    let handler = InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["ok"]));
+    let handler = InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["ok"]))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.to_string(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::FirstParty),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    opus: Some("claude-opus-4-8".into()),
+                    sonnet: Some("claude-sonnet-5".into()),
+                    haiku: Some("claude-haiku-4-5".into()),
+                    fable: Some("claude-fable-5-1".into()),
+                },
+                ..Default::default()
+            })
+        }));
     match default_model {
         Some(m) => handler.with_default_model(m),
         None => handler,
@@ -440,17 +552,17 @@ struct StaticSystemPromptRenderer(&'static str);
 
 #[async_trait]
 impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
-    async fn render_default_system_prompt(&self) -> String {
-        self.0.to_string()
+    async fn render_default_system_prompt(&self) -> Utf16JsonProjection {
+        Utf16JsonProjection::from(self.0)
     }
 }
 
-struct TaggedDiagnosticsSource(usize);
+struct TaggedDiagnosticsSource(Option<Utf16JsonProjection>);
 
 #[async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for TaggedDiagnosticsSource {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
-        Some(format!("diagnostics-cursor-{}", self.0))
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection> {
+        self.0.clone()
     }
 }
 
@@ -461,8 +573,9 @@ async fn build_context_creates_an_independent_diagnostics_source_per_teammate() 
     let handler =
         model_test_handler(None).with_new_diagnostics_source_factory(Arc::new(move || {
             let cursor = factory_counter.fetch_add(1, Ordering::SeqCst) + 1;
-            Arc::new(TaggedDiagnosticsSource(cursor))
-                as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
+            Arc::new(TaggedDiagnosticsSource(Some(
+                format!("diagnostics-cursor-{cursor}").into(),
+            ))) as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
         }));
 
     let first_definition = DefaultTeammateDefinition
@@ -497,12 +610,20 @@ async fn build_context_creates_an_independent_diagnostics_source_per_teammate() 
     let first_source = first.new_diagnostics_source.expect("first source");
     let second_source = second.new_diagnostics_source.expect("second source");
     assert!(!Arc::ptr_eq(&first_source, &second_source));
+    let first_diagnostics = first_source
+        .take_new_diagnostics_block()
+        .await
+        .expect("first diagnostics block");
+    let second_diagnostics = second_source
+        .take_new_diagnostics_block()
+        .await
+        .expect("second diagnostics block");
     assert_eq!(
-        first_source.take_new_diagnostics_block().await.as_deref(),
+        first_diagnostics.string_at(""),
         Some("diagnostics-cursor-1")
     );
     assert_eq!(
-        second_source.take_new_diagnostics_block().await.as_deref(),
+        second_diagnostics.string_at(""),
         Some("diagnostics-cursor-2")
     );
     assert_eq!(next_cursor.load(Ordering::SeqCst), 2);
@@ -517,7 +638,7 @@ async fn build_context_renders_default_addendum_then_custom_prompt() {
         .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
-    def.system_prompt = Some("CUSTOM AGENT PROMPT".to_string());
+    def.system_prompt = Some("CUSTOM AGENT PROMPT".to_string().into());
 
     let ctx = handler
         .build_context(
@@ -533,9 +654,22 @@ async fn build_context_renders_default_addendum_then_custom_prompt() {
         "BASE DEFAULT PROMPT\n{TEAMMATE_SYSTEM_PROMPT_ADDENDUM}\n\n# Custom Agent Instructions\nCUSTOM AGENT PROMPT"
     );
     assert_eq!(
-        ctx.rendered_system_prompt.as_deref(),
+        ctx.rendered_system_prompt
+            .as_ref()
+            .and_then(|source| source.string_at("")),
         Some(expected.as_str())
     );
+}
+
+#[test]
+fn teammate_system_prompt_keeps_lone_surrogate_from_custom_agent_source() {
+    let custom = Utf16JsonProjection::parse(r#""left\ud800right""#).unwrap();
+    let rendered = render_teammate_system_prompt(&Utf16JsonProjection::from("base"), Some(&custom));
+    let rendered_units = rendered.string_units("").unwrap();
+    let custom_units = custom.string_units("").unwrap();
+    assert!(rendered_units
+        .windows(custom_units.len())
+        .any(|units| units == custom_units));
 }
 
 #[tokio::test]
@@ -594,6 +728,47 @@ async fn build_context_resolves_inherit_to_default_model() {
         ctx.prompt_messages[0].text_content(),
         "<teammate-message teammate_id=\"team-lead\">\ngo research\n</teammate-message>"
     );
+}
+
+#[tokio::test]
+async fn build_context_preserves_initial_description_utf16_units() {
+    let handler = model_test_handler(Some("claude-opus-4-7"));
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    let units = vec![b'l' as u16, b'e' as u16, 0xd800, b't' as u16];
+    let description = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .unwrap();
+    let expected = teammate_message_envelope(TEAM_LEAD_NAME, &description)
+        .string_units("")
+        .unwrap();
+    let ctx = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "alpha",
+            description,
+            def,
+        )
+        .await
+        .unwrap();
+    let actual = match &ctx.prompt_messages[0] {
+        lingxi_core::types::ConversationMessage::User { content, .. } => {
+            content.iter().find_map(|block| match block {
+                lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => Some(utf16_code_units.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    assert_eq!(actual, Some(expected));
+    assert_eq!(ctx.native_query_depth, 1);
 }
 
 // Full teammate parity (P1): the handler inherits a budget enforcer, seeds
@@ -671,6 +846,302 @@ async fn build_context_without_default_model_leaves_model_raw() {
     assert!(ctx.prompt_messages.is_empty());
 }
 
+#[tokio::test]
+async fn build_context_preserves_the_profile_that_serves_the_inherited_child_route() {
+    let handler = model_test_handler(Some("claude-sonnet-5"))
+        .with_default_model_profile(Some("team-provider".into()));
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    let ctx = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await
+        .expect("route is supplied by the host provider");
+
+    assert!(matches!(
+        &ctx.agent_definition.model,
+        AgentModel::Explicit(model) if model == "claude-sonnet-5"
+    ));
+    assert_eq!(ctx.model_profile.as_deref(), Some("team-provider"));
+}
+
+#[tokio::test]
+async fn build_context_uses_shared_live_session_model_and_profile_selection() {
+    let live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(live_selection
+        .set(Arc::new(|| {
+            Ok(Some(agent::DefaultModelSelection {
+                model: "live-sonnet".into(),
+                model_profile: Some("live-provider".into()),
+                model_resolution_context: agent::ModelResolutionContext {
+                    route: agent::ModelRouteFacts {
+                        model: "live-sonnet".into(),
+                        profile: Some("live-provider".into()),
+                        provider: Some(agent::ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: agent::FamilyModelDefaults {
+                        opus: Some("live-opus".into()),
+                        sonnet: Some("live-sonnet".into()),
+                        haiku: Some("live-haiku".into()),
+                        fable: None,
+                    },
+                    ..Default::default()
+                },
+            }))
+        }))
+        .is_ok());
+    let handler = model_test_handler(Some("boot-model"))
+        .with_default_model_selection_provider_handle(live_selection);
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    let ctx = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await
+        .expect("live selection carries its resolved route");
+
+    assert!(matches!(
+        &ctx.agent_definition.model,
+        AgentModel::Explicit(model) if model == "live-sonnet"
+    ));
+    assert_eq!(ctx.model_profile.as_deref(), Some("live-provider"));
+}
+
+#[tokio::test]
+async fn alias_child_keeps_the_profile_that_resolved_its_final_model() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(
+            |model: &str, profile: Option<&str>| match (model, profile) {
+                ("parent-model", Some("provider-a")) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        sonnet: Some("shared-child-model".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", Some("provider-a")) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", None) => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: vec!["provider-a".into(), "provider-b".into()],
+                }),
+                _ => Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                }),
+            },
+        ));
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+
+    let context = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            definition,
+        )
+        .await
+        .expect("the alias was resolved under provider-a");
+
+    assert!(matches!(
+        context.agent_definition.model,
+        AgentModel::Explicit(ref model) if model == "shared-child-model"
+    ));
+    assert_eq!(context.model_profile.as_deref(), Some("provider-a"));
+}
+
+#[tokio::test]
+async fn explicit_child_profile_overrides_the_default_route() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (profile, sonnet) = match (model, profile) {
+                ("parent-model", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
+                ("provider-b-sonnet", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "unexpected test route".into(),
+                    });
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(sonnet.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+
+    let context = handler
+        .build_context_for_profile(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            Some("provider-b"),
+            definition,
+        )
+        .await
+        .expect("explicit profile selects its own alias route");
+
+    assert!(matches!(
+        context.agent_definition.model,
+        AgentModel::Explicit(ref model) if model == "provider-b-sonnet"
+    ));
+    assert_eq!(context.model_profile.as_deref(), Some("provider-b"));
+}
+
+#[tokio::test]
+async fn explicit_child_model_ambiguity_fails_context_admission() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let provider_queries = Arc::new(StdMutex::new(Vec::new()));
+    let observed_queries = provider_queries.clone();
+    let handler = model_test_handler(Some("parent-model")).with_model_resolution_context_provider(
+        Arc::new(move |model: &str, profile: Option<&str>| {
+            observed_queries
+                .lock()
+                .unwrap()
+                .push((model.to_owned(), profile.map(str::to_owned)));
+            match (model, profile) {
+                ("parent-model", _) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        sonnet: Some("shared-child-model".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", None) => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: vec!["provider-a".into(), "provider-b".into()],
+                }),
+                _ => Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                }),
+            }
+        }),
+    );
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Explicit("shared-child-model".into());
+
+    let result = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            definition,
+        )
+        .await;
+    let error = match result {
+        Err(TaskError::Internal(message)) => message,
+        Err(error) => panic!("unexpected context-admission error: {error}"),
+        Ok(_) => panic!("ambiguous explicit model must fail before task admission"),
+    };
+    assert_eq!(
+        error,
+        ModelResolutionError::AmbiguousRoute {
+            model: "shared-child-model".into(),
+            profiles: vec!["provider-a".into(), "provider-b".into()],
+        }
+        .to_string(),
+        "the explicit wire model must fail with the resolver's exact multi-profile cause"
+    );
+    assert_eq!(
+        *provider_queries.lock().unwrap(),
+        vec![
+            ("parent-model".into(), None),
+            ("shared-child-model".into(), None),
+        ],
+        "the child route is queried without an implicit provider, so neither profile is selected"
+    );
+}
+
+#[tokio::test]
+async fn build_context_does_not_fall_back_to_boot_route_when_live_selection_is_unavailable() {
+    let live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(live_selection.set(Arc::new(|| Ok(None))).is_ok());
+    let handler = model_test_handler(Some("boot-model"))
+        .with_default_model_selection_provider_handle(live_selection);
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+
+    let result = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await;
+    let Err(error) = result else {
+        panic!("missing live route must not silently select boot provider");
+    };
+    assert!(error
+        .to_string()
+        .contains("model/provider selection is unavailable"));
+}
+
 // ---- #15: opusplan + plan mode resolves an Inherit teammate to Opus -------
 //
 // The composition root threads `with_permission_mode(cfg.permission_mode)` +
@@ -696,7 +1167,18 @@ async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
     // Derive the parent EXACTLY as the composition root does: resolve the raw
     // "opusplan" alias to the main-loop wire id (Sonnet outside plan mode) —
     // proving the swap below is to OPUS, not a pass-through of a literal.
-    let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+    let parent = agent::model_resolution::resolve_user_specified_model(
+        "opusplan",
+        &agent::ModelResolutionContext {
+            family_defaults: agent::FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let handler = model_test_handler(Some(&parent))
         .with_permission_mode(PermissionMode::Plan)
         .with_model_setting("opusplan");
@@ -722,7 +1204,18 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
     // gated on plan mode (not on the setting alone). Parent derived via the
     // resolver, exactly as the composition root produces it.
     let _g = OpusEnvGuard::clear_providers();
-    let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+    let parent = agent::model_resolution::resolve_user_specified_model(
+        "opusplan",
+        &agent::ModelResolutionContext {
+            family_defaults: agent::FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         parent, "claude-sonnet-5",
         "opusplan resolves to Sonnet outside plan mode"
@@ -855,16 +1348,17 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let api_handle = api.clone();
     let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
     let c = ctx(fs.clone(), rt.clone());
+    let agent_id = lingxi_core::types::AgentId::new();
 
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: lingxi_core::types::AgentId::new(),
+                agent_id,
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -885,6 +1379,11 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
     assert!(body.contains("completed:"), "turn-set 1 spooled: {body:?}");
     assert!(body.contains("answer one"), "turn-set 1 text: {body:?}");
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true)],
+        "the team member becomes active after the pool actually allocates"
+    );
 
     // Inject a message — drives turn-set 2 after the runner had idled.
     handler
@@ -894,6 +1393,11 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
     assert!(body.contains("answer two"), "turn-set 2 text: {body:?}");
     assert_eq!(api_handle.call_count(), 2, "one round-trip per turn-set");
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, true)],
+        "a successfully injected UserMessage re-enters active query state"
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while sink.idle_tasks.lock().unwrap().len() < 2 {
@@ -919,6 +1423,25 @@ async fn spawn_send_message_then_kill_lifecycle() {
 
     // Kill tears it down; the entry is removed.
     handler.kill(&h.task_id, c.clone()).await.unwrap();
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, true), (agent_id, false)],
+        "kill writes inactive before sending UserExit"
+    );
+    let order = sink.event_order.lock().unwrap();
+    let inactive = order
+        .iter()
+        .rposition(|event| event == "team-active:false")
+        .unwrap();
+    let killed = order
+        .iter()
+        .rposition(|event| event == "status:Killed")
+        .unwrap();
+    assert!(
+        inactive < killed,
+        "inactive precedes the terminal status: {order:?}"
+    );
+    drop(order);
     assert!(
         handler.entries.lock().await.is_empty(),
         "kill deregisters the slot"
@@ -952,15 +1475,16 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
     let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
     let c = ctx(fs.clone(), rt.clone());
 
+    let agent_id = lingxi_core::types::AgentId::new();
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: lingxi_core::types::AgentId::new(),
+                agent_id,
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c,
         )
@@ -978,6 +1502,21 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
         await_terminal(&sink).await,
         Some(TaskStatus::Failed),
         "Failed event reports terminal TaskStatus::Failed"
+    );
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, false)],
+        "failure closes the team activity interval"
+    );
+    let order = sink.event_order.lock().unwrap();
+    let inactive = order
+        .iter()
+        .position(|event| event == "team-active:false")
+        .unwrap();
+    let failed = order.iter().position(|event| event == "failed").unwrap();
+    assert!(
+        inactive < failed,
+        "inactive precedes failure publication: {order:?}"
     );
 }
 
@@ -1001,7 +1540,7 @@ async fn failed_turn_set_reports_error_reason_through_set_failed() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c,
         )
@@ -1035,7 +1574,7 @@ async fn send_message_after_runner_terminated_is_not_found() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1145,6 +1684,7 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: Some(lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
                     origin_session_id: Some(lingxi_core::types::SessionId::nil()),
+                    parent_native_query_depth: None,
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),
@@ -1152,7 +1692,7 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1206,7 +1746,7 @@ async fn no_idle_firer_is_a_noop() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1234,11 +1774,29 @@ fn idle_hook_follow_up_preserves_feedback_and_additional_context_bytes() {
         ..Default::default()
     };
     assert_eq!(
-        teammate_idle_follow_up(&outcome).as_deref(),
+        teammate_idle_follow_up(&outcome)
+            .as_ref()
+            .map(|text| text.display.as_str()),
         Some(
             "TeammateIdle hook feedback:\nkeep working\n\n<system-reminder>\nTeammateIdle hook additional context: inspect the failing test\nthen rerun it\n</system-reminder>"
         )
     );
+}
+
+#[test]
+fn teammate_idle_message_event_keeps_isolated_utf16_units() {
+    let text = hooks::ExactHookText::from_utf16(vec![u16::from(b'x'), 0xD800]);
+    let event = teammate_idle_user_message_event(text);
+    let lingxi_core::Event::UserMessageJsUtf16 {
+        content,
+        utf16_code_units,
+        ..
+    } = event
+    else {
+        panic!("isolated surrogate must use the exact user-message event");
+    };
+    assert_eq!(content, "x�");
+    assert_eq!(utf16_code_units, [u16::from(b'x'), 0xD800]);
 }
 
 #[tokio::test]
@@ -1258,7 +1816,7 @@ async fn blocking_idle_hook_feedback_drives_one_follow_up_turn() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1309,7 +1867,7 @@ async fn idle_hook_prevent_continuation_terminates_the_teammate() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1491,7 +2049,8 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
     handler
         .send_message(
             &handle.task_id,
-            "queued one\n\nqueued two".into(),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""queued \ud800 one""#)
+                .unwrap(),
             c.clone(),
         )
         .await
@@ -1513,11 +2072,27 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
     assert_eq!(api.calls.load(Ordering::SeqCst), 2);
     {
         let histories = api.histories.lock().unwrap();
-        assert!(
-            histories[1]
-                .iter()
-                .any(|message| message.text_content() == "queued one\n\nqueued two"),
-            "the drained mailbox batch becomes one next turn after idle"
+        let exact_message_units = histories[1].iter().find_map(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                content.iter().find_map(|block| match block {
+                    lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => Some(utf16_code_units.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        });
+        assert_eq!(
+            exact_message_units,
+            Some(
+                "queued "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" one".encode_utf16())
+                    .collect()
+            ),
+            "the UJP message survives the queue and becomes exact UTF-16 history"
         );
     }
     handler.kill(&handle.task_id, c).await.unwrap();
@@ -1590,8 +2165,7 @@ fn todo(
     status: lingxi_core::TodoState,
     owner: Option<&str>,
 ) -> task_store::TodoTask {
-    let mut t =
-        task_store::TodoTask::new(subject.into(), "desc".into(), None, serde_json::Map::new());
+    let mut t = task_store::TodoTask::new(subject.into(), "desc".into(), None, None);
     t.status = status;
     t.owner = owner.map(str::to_string);
     t
@@ -1643,23 +2217,41 @@ fn claimed_task_prompt_is_byte_exact() {
     // after the colon at end-of-line and a space before the subject.
     let mut t = todo("Fix the parser", lingxi_core::TodoState::Pending, None);
     t.id = "7".into();
-    t.description = String::new();
+    t.description = "".into();
     assert_eq!(
-        claimed_task_prompt(&t),
-        "Complete all open tasks. Start with task #7: \n\n Fix the parser"
+        claimed_task_prompt(&t).string_at(""),
+        Some("Complete all open tasks. Start with task #7: \n\n Fix the parser")
     );
     t.description = "Details here".into();
     assert_eq!(
-        claimed_task_prompt(&t),
-        "Complete all open tasks. Start with task #7: \n\n Fix the parser\n\nDetails here"
+        claimed_task_prompt(&t).string_at(""),
+        Some("Complete all open tasks. Start with task #7: \n\n Fix the parser\n\nDetails here")
+    );
+    t.subject =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""Fix \ud800 parser""#)
+            .unwrap();
+    t.description =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""Details \udfff here""#)
+            .unwrap();
+    assert_eq!(
+        claimed_task_prompt(&t).string_units(""),
+        Some(
+            "Complete all open tasks. Start with task #7: \n\n Fix "
+                .encode_utf16()
+                .chain([0xd800])
+                .chain(" parser\n\nDetails ".encode_utf16())
+                .chain([0xdfff])
+                .chain(" here".encode_utf16())
+                .collect()
+        )
     );
 }
 
 #[test]
 fn teammate_envelope_wraps_task_list_sender() {
     assert_eq!(
-        teammate_message_envelope("task-list", "do it"),
-        "<teammate-message teammate_id=\"task-list\">\ndo it\n</teammate-message>"
+        teammate_message_envelope("task-list", &"do it".into()).string_at(""),
+        Some("<teammate-message teammate_id=\"task-list\">\ndo it\n</teammate-message>")
     );
 }
 
@@ -1668,11 +2260,31 @@ fn teammate_envelope_preserves_summary_and_escapes_untrusted_fields() {
     assert_eq!(
         teammate_message_envelope_with_summary(
             "reviewer\"<&'",
-            "before </teammate-message> after",
-            Some("  concise \"summary\"  "),
-        ),
-        "<teammate-message teammate_id=\"reviewer&quot;&lt;&amp;&apos;\" summary=\"concise &quot;summary&quot;\">\nbefore <\\/teammate-message> after\n</teammate-message>"
+            &"before </teammate-message> after".into(),
+            Some(&"  concise \"summary\"  ".into()),
+        )
+        .string_at(""),
+        Some(
+            "<teammate-message teammate_id=\"reviewer&quot;&lt;&amp;&apos;\" summary=\"concise &quot;summary&quot;\">\nbefore <\\/teammate-message> after\n</teammate-message>"
+        )
     );
+}
+
+#[test]
+fn teammate_envelope_keeps_lone_surrogates_and_escapes_exact_source_tags() {
+    let text = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        r#""before </teammate-message> \ud800 after""#,
+    )
+    .unwrap();
+    let summary =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""  review \udfff  ""#)
+            .unwrap();
+    let got = teammate_message_envelope_with_summary("lead", &text, Some(&summary));
+    let expected = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+        r#""<teammate-message teammate_id=\"lead\" summary=\"review \udfff\">\nbefore <\\/teammate-message> \ud800 after\n</teammate-message>""#,
+    )
+    .unwrap();
+    assert_eq!(got, expected);
 }
 
 #[test]
@@ -1860,7 +2472,7 @@ async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1923,7 +2535,7 @@ async fn killed_teammate_stops_claiming() {
                 agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
-                description: String::new(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             },
             c.clone(),
         )
@@ -1990,18 +2602,30 @@ async fn assigned_teammate_color_reaches_actual_agent_context() {
         )
         .await
         .unwrap();
+    let provenance = lingxi_core::host::subagent_spawn::AgentSpawnProvenance {
+        hook_caller: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+            "trusted-plugin"
+        )),
+        hook_origin: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!([
+            "trusted-plugin",
+            "parent-api"
+        ])),
+    };
     apply_spawn_context(
         &mut context,
         lingxi_core::host::SubagentSpawnRequest {
             teammate_color: Some("blue".into()),
+            agent_spawn_provenance: provenance.clone(),
+            parent_native_query_depth: None,
             ..Default::default()
         },
     );
     assert_eq!(context.display.color, AgentColor::Blue);
+    assert_eq!(context.agent_spawn_provenance, provenance);
 }
 
 struct PlanReviewTransport {
-    requests: StdMutex<Vec<serde_json::Value>>,
+    requests: StdMutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     modes: StdMutex<Vec<String>>,
 }
 #[async_trait]
@@ -2009,9 +2633,12 @@ impl lingxi_core::host::ToolInvoker for PlanReviewTransport {
     async fn invoke(
         &self,
         name: &str,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
         let mode = ctx.mode_override.unwrap_or_default();
         self.modes.lock().unwrap().push(mode.clone());
         assert_eq!(ctx.frozen_command_denies, vec!["Bash(rm)"]);
@@ -2020,7 +2647,7 @@ impl lingxi_core::host::ToolInvoker for PlanReviewTransport {
                 "plan mode disallows mutation".into(),
             ));
         }
-        Ok(serde_json::json!({"ok":true}))
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"ok":true}"#).unwrap())
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -2037,21 +2664,28 @@ impl lingxi_core::host::mailbox::MailboxRouterHandle for PlanReviewTransport {
     {
         assert_eq!(from, "planner");
         assert_eq!(to, "team-lead");
-        self.requests
-            .lock()
-            .unwrap()
-            .push(serde_json::from_str(&message.content).unwrap());
+        self.requests.lock().unwrap().push(message.content);
         Ok(lingxi_core::host::mailbox::RouteAck {
             claimed_at: std::time::SystemTime::now(),
             claim_window_secs: 30,
         })
     }
 }
+fn source_json_fixture(
+    value: &serde_json::Value,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+        .expect("bounded JSON test fixture converts to a source projection")
+}
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,
+        instruction_context: None,
+        fork_context: None,
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         parent_agent_id: None,
+        native_query_depth: None,
         origin_session_id: None,
         agent_name: Some("planner".into()),
         team_name: Some("team".into()),
@@ -2065,6 +2699,11 @@ fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationConte
         observer: None,
         parent_model: None,
         parent_model_profile: None,
+        agent_spawn_provenance: Default::default(),
+        tool_context_state: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
+        current_history: Vec::new(),
         mode_override: Some("plan".into()),
         request_source: None,
         frozen_command_denies: vec!["Bash(rm)".into()],
@@ -2091,13 +2730,19 @@ async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permis
     )
     .with_status_sink(sink.clone(), "task-plan".into());
     let submitted = control
-        .submit(serde_json::json!({"plan":"Test the change, then implement"}))
+        .submit(source_json_fixture(
+            &serde_json::json!({"plan":"Test the change, then implement"}),
+        ))
         .await
         .unwrap();
-    let id = submitted["requestId"].as_str().unwrap().to_owned();
+    let id = submitted.string_at("/requestId").unwrap().to_owned();
     assert!(control.awaiting());
     assert!(control
-        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .invoke(
+            "Write",
+            source_json_fixture(&serde_json::json!({})),
+            plan_invocation()
+        )
         .await
         .is_err());
     assert_eq!(
@@ -2109,33 +2754,44 @@ async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permis
                 permission_mode: None
             })
             .await
-            .unwrap(),
-        "[Plan Rejected] add rollback"
+            .unwrap()
+            .string_at(""),
+        Some("[Plan Rejected] add rollback")
     );
     assert!(control
-        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .invoke(
+            "Write",
+            source_json_fixture(&serde_json::json!({})),
+            plan_invocation()
+        )
         .await
         .is_err());
     let next = control
-        .submit(serde_json::json!({"plan":"Test, implement and preserve rollback"}))
+        .submit(source_json_fixture(
+            &serde_json::json!({"plan":"Test, implement and preserve rollback"}),
+        ))
         .await
         .unwrap();
     let reply = PlanApprovalResponse {
-        request_id: next["requestId"].as_str().unwrap().into(),
+        request_id: next.string_at("/requestId").unwrap().into(),
         approved: true,
         feedback: None,
         permission_mode: Some("default".into()),
     };
     assert_eq!(
-        control.apply(reply.clone()).await.unwrap(),
-        "[Plan Approved] You can now proceed with implementation"
+        control.apply(reply.clone()).await.unwrap().string_at(""),
+        Some("[Plan Approved] You can now proceed with implementation")
     );
     assert!(
         control.apply(reply).await.is_none(),
         "duplicate response ignored"
     );
     assert!(control
-        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .invoke(
+            "Write",
+            source_json_fixture(&serde_json::json!({})),
+            plan_invocation()
+        )
         .await
         .is_ok());
     assert_eq!(
@@ -2143,8 +2799,8 @@ async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permis
         vec!["plan", "plan", "default"]
     );
     assert_eq!(
-        transport.requests.lock().unwrap()[0]["type"],
-        "plan_approval_request"
+        transport.requests.lock().unwrap()[0].string_at("/type"),
+        Some("plan_approval_request")
     );
     assert_eq!(
         *sink.awaiting_plan.lock().unwrap(),
@@ -2171,7 +2827,7 @@ async fn mismatched_plan_review_never_elevates_permission() {
         "/plans/planner.md".into(),
     );
     control
-        .submit(serde_json::json!({"plan":"proposal"}))
+        .submit(source_json_fixture(&serde_json::json!({"plan":"proposal"})))
         .await
         .unwrap();
     let text = control
@@ -2183,9 +2839,13 @@ async fn mismatched_plan_review_never_elevates_permission() {
         })
         .await
         .unwrap();
-    assert!(text.starts_with("[Plan Rejected]"));
+    assert!(text.string_at("").unwrap().starts_with("[Plan Rejected]"));
     assert!(control
-        .invoke("Write", serde_json::json!({}), plan_invocation())
+        .invoke(
+            "Write",
+            source_json_fixture(&serde_json::json!({})),
+            plan_invocation()
+        )
         .await
         .is_err());
 }
@@ -2193,7 +2853,11 @@ async fn mismatched_plan_review_never_elevates_permission() {
 struct PlanModeAvailability(bool);
 #[async_trait]
 impl lingxi_core::host::PermissionGate for PlanModeAvailability {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> lingxi_core::host::PermissionDecision {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
         lingxi_core::host::PermissionDecision::Allow
     }
     fn can_request_auto_mode(&self) -> bool {
@@ -2230,12 +2894,12 @@ async fn approved_modes_use_live_host_availability() {
         )
         .with_permission_gate(Some(Arc::new(PlanModeAvailability(available))));
         let result = control
-            .submit(serde_json::json!({"plan":"proposal"}))
+            .submit(source_json_fixture(&serde_json::json!({"plan":"proposal"})))
             .await
             .unwrap();
         control
             .apply(PlanApprovalResponse {
-                request_id: result["requestId"].as_str().unwrap().into(),
+                request_id: result.string_at("/requestId").unwrap().into(),
                 approved: true,
                 feedback: None,
                 permission_mode: Some(mode.into()),
@@ -2243,7 +2907,11 @@ async fn approved_modes_use_live_host_availability() {
             .await
             .unwrap();
         control
-            .invoke("Read", serde_json::json!({}), plan_invocation())
+            .invoke(
+                "Read",
+                source_json_fixture(&serde_json::json!({})),
+                plan_invocation(),
+            )
             .await
             .unwrap();
         assert_eq!(transport.modes.lock().unwrap()[0], expected);
@@ -2274,6 +2942,7 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
                 description: "make a plan".into(),
                 inheritance: None,
                 spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    parent_native_query_depth: None,
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),
@@ -2285,14 +2954,16 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
     api.first_started.acquire().await.unwrap().forget();
     let requester = lingxi_core::host::teammate_plan::requester(&agent_id).unwrap();
     let submitted = requester
-        .submit(serde_json::json!({"plan":"Scoped proposal"}))
+        .submit(source_json_fixture(
+            &serde_json::json!({"plan":"Scoped proposal"}),
+        ))
         .await
         .unwrap();
     handler
         .apply_plan_approval(
             &handle.task_id,
             lingxi_core::host::teammate_plan::PlanApprovalResponse {
-                request_id: submitted["requestId"].as_str().unwrap().into(),
+                request_id: submitted.string_at("/requestId").unwrap().into(),
                 approved: true,
                 feedback: None,
                 permission_mode: Some("default".into()),
@@ -2311,9 +2982,11 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
     let spool = dir.path().join(format!("{}.output", handle.task_id));
     await_spool(&fs, spool.to_str().unwrap(), |body| body.contains("second")).await;
     let histories = api.histories.lock().unwrap();
-    assert!(histories[1].iter().any(|message| message
-        .text_content()
-        .contains("[Plan Approved] You can now proceed with implementation")));
+    assert!(histories[1].iter().any(|message| {
+        message
+            .text_content()
+            .contains("[Plan Approved] You can now proceed with implementation")
+    }));
     assert!(!histories[1]
         .iter()
         .any(|message| message.text_content().contains("plan_approval_response")));
@@ -2357,6 +3030,7 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
                 description: "make a plan".into(),
                 inheritance: None,
                 spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    parent_native_query_depth: None,
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),

@@ -1,0 +1,23 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Return the fixed refusal stop-details fixture response.",
+  "visible_text": "FIXED_REFUSAL_TEXT",
+  "stop_reason": "refusal",
+  "explanation_prefix": "FIXED_EXPLANATION_PREFIX ",
+  "explanation_suffix": " FIXED_EXPLANATION_SUFFIX",
+  "explanation_utf16_units_hex": "00460049005800450044005f004500580050004c0041004e004100540049004f004e005f0050005200450046004900580020d800002000460049005800450044005f004500580050004c0041004e004100540049004f004e005f005300550046004600490058",
+  "cases": [
+    {
+      "id": "refusal-cyber",
+      "category": "cyber",
+      "session_id": "00000000-0000-4000-8000-000000002950",
+      "response_id": "msg_fixed_stop_details_cyber_293"
+    },
+    {
+      "id": "refusal-generic",
+      "session_id": "00000000-0000-4000-8000-000000002951",
+      "response_id": "msg_fixed_stop_details_generic_293"
+    }
+  ]
+}

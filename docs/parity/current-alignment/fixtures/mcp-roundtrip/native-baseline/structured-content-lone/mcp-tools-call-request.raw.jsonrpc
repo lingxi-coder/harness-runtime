@@ -1,0 +1,1 @@
+{"method":"tools/call","params":{"name":"emit_payload","arguments":{"mode":"source-units"},"_meta":{"claudecode/toolUseId":"toolu_native_mcp_fixture_1","progressToken":2}},"jsonrpc":"2.0","id":2}

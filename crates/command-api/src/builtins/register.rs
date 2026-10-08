@@ -124,9 +124,9 @@ pub fn register_core_batch_1(
     // `/exit` carries ["quit"]. Like `continue→resume`, these are NOT builtin
     // names (absent from `BUILTIN_COMMAND_NAMES`) — they dispatch to the target
     // handler without their own palette row.
-    reg.register_alias("reset".to_string(), "clear".to_string());
-    reg.register_alias("new".to_string(), "clear".to_string());
-    reg.register_alias("quit".to_string(), "exit".to_string());
+    reg.register_alias("reset".into(), "clear".into());
+    reg.register_alias("new".into(), "clear".into());
+    reg.register_alias("quit".into(), "exit".into());
 }
 
 /// Overwrite the 12 batch-2 entries (`agents`, `config`, `doctor`, `hooks`,
@@ -178,8 +178,8 @@ pub fn register_core_batch_2(
     // claude-code parity (#61): `/config` carries the alias ["settings"] and
     // `/permissions` carries ["allowed-tools"]. Resolution-only aliases (no
     // separate palette row), like `continue→resume`.
-    reg.register_alias("settings".to_string(), "config".to_string());
-    reg.register_alias("allowed-tools".to_string(), "permissions".to_string());
+    reg.register_alias("settings".into(), "config".into());
+    reg.register_alias("allowed-tools".into(), "permissions".into());
 }
 
 /// Overwrite the 4 batch-4 (engine-data) entries (`context`, `export`,
@@ -219,7 +219,7 @@ pub fn register_core_batch_4(
 
     // claude-code parity: `/resume` carries the `continue` alias
     // (src/commands/resume/index.ts: aliases: ['continue']).
-    reg.register_alias("continue".to_string(), "resume".to_string());
+    reg.register_alias("continue".into(), "resume".into());
 }
 
 /// Register the batch-3 (M-parity) handle-free slash commands.
@@ -479,17 +479,17 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
     // H-BIN-11 (cc2.1.207): `/background` carries the `bg` alias
     // (`name:"background",aliases:["bg"]`). Resolution-only alias, no separate
     // palette row — like `continue→resume`.
-    reg.register_alias("bg".to_string(), "background".to_string());
+    reg.register_alias("bg".into(), "background".into());
 
     // claude-code parity (#61): resolution aliases for the interactive-only
     // commands whose target stub is registered above (byte-verified alias sets).
     // Like continue→resume these are NOT builtin names (no separate palette row).
-    reg.register_alias("checkpoint".to_string(), "rewind".to_string());
-    reg.register_alias("undo".to_string(), "rewind".to_string());
-    reg.register_alias("name".to_string(), "rename".to_string());
-    reg.register_alias("plugins".to_string(), "plugin".to_string());
-    reg.register_alias("marketplace".to_string(), "plugin".to_string());
-    reg.register_alias("bashes".to_string(), "tasks".to_string());
+    reg.register_alias("checkpoint".into(), "rewind".into());
+    reg.register_alias("undo".into(), "rewind".into());
+    reg.register_alias("name".into(), "rename".into());
+    reg.register_alias("plugins".into(), "plugin".into());
+    reg.register_alias("marketplace".into(), "plugin".into());
+    reg.register_alias("bashes".into(), "tasks".into());
 
     // claude-code parity (#61/#66): `/usage` carries aliases ["cost","stats"]
     // (BIN v2.1.183: `name:"usage",aliases:["cost","stats"]`). `cost`/`stats`
@@ -497,17 +497,17 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
     // objects); LingXi removed them as builtins and routes them here as
     // resolution-only aliases of the `usage` command (registered above, and
     // overwritten with the real UsageHandler by `register_core_batch_5`).
-    reg.register_alias("cost".to_string(), "usage".to_string());
-    reg.register_alias("stats".to_string(), "usage".to_string());
+    reg.register_alias("cost".into(), "usage".into());
+    reg.register_alias("stats".into(), "usage".into());
 
     // claude-code parity (#61): `/desktop` aliases ["app"], `/mobile` aliases
     // ["ios","android"], `/session` aliases ["remote"] — all three target
     // commands ARE LingXi builtins (registered as pass-1 stubs in
     // `register_all_builtin_commands`), so the aliases resolve.
-    reg.register_alias("app".to_string(), "desktop".to_string());
-    reg.register_alias("ios".to_string(), "mobile".to_string());
-    reg.register_alias("android".to_string(), "mobile".to_string());
-    reg.register_alias("remote".to_string(), "session".to_string());
+    reg.register_alias("app".into(), "desktop".into());
+    reg.register_alias("ios".into(), "mobile".into());
+    reg.register_alias("android".into(), "mobile".into());
+    reg.register_alias("remote".into(), "session".into());
 }
 
 #[cfg(test)]
@@ -515,6 +515,7 @@ mod registry_tests {
     use super::*;
     use crate::builtin_support::BUILTIN_COMMAND_NAMES;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn register_all_registers_exactly_87_names() {
@@ -523,7 +524,7 @@ mod registry_tests {
         assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
-                reg.resolve(name).is_some(),
+                reg.resolve(&name.into()).is_some(),
                 "expected command /{name} registered"
             );
         }
@@ -536,11 +537,18 @@ mod registry_tests {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         for name in ["background", "cd", "focus", "tui", "usage-credits"] {
-            assert!(reg.resolve(name).is_some(), "/{name} missing");
-            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+            assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
+                "/{name} handler missing"
+            );
         }
-        let cmd = reg.resolve("bg").expect("/bg alias must resolve");
-        assert_eq!(cmd.name, "background", "/bg should resolve to /background");
+        let cmd = reg.resolve(&"bg".into()).expect("/bg alias must resolve");
+        assert_eq!(
+            cmd.name.string_at(""),
+            Some("background"),
+            "/bg should resolve to /background"
+        );
     }
 
     /// claude-code parity (#61/#66): `/cost` and `/stats` resolve to `/usage`,
@@ -565,9 +573,13 @@ mod registry_tests {
             ("remote", "session"),
         ] {
             let cmd = reg
-                .resolve(alias)
+                .resolve(&alias.into())
                 .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
-            assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
+            assert_eq!(
+                cmd.name.string_at(""),
+                Some(target),
+                "/{alias} should resolve to /{target}"
+            );
         }
         // Removed standalone commands are gone from the builtin name surface.
         for removed in ["vim", "pr-comments"] {
@@ -590,7 +602,7 @@ mod registry_tests {
 
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
-                reg.get_handler(name).is_some(),
+                reg.get_handler(&name.into()).is_some(),
                 "expected handler for /{name}"
             );
         }
@@ -612,9 +624,13 @@ mod registry_tests {
             ("bashes", "tasks"),
         ] {
             let cmd = reg
-                .resolve(alias)
+                .resolve(&alias.into())
                 .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
-            assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
+            assert_eq!(
+                cmd.name.string_at(""),
+                Some(target),
+                "/{alias} should resolve to /{target}"
+            );
         }
     }
 
@@ -626,11 +642,11 @@ mod registry_tests {
 
         // Pick a definitely-not-in-the-18-core command.
         let h = reg
-            .get_handler("teleport")
+            .get_handler(&"teleport".into())
             .expect("teleport handler missing");
         let args = ParsedSlashCommand {
-            name: "teleport".to_string(),
-            raw_args: String::new(),
+            name: "teleport".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
@@ -647,7 +663,7 @@ mod registry_tests {
         register_all_builtin_commands(&mut reg);
         register_all_builtin_commands(&mut reg); // call twice
         for name in BUILTIN_COMMAND_NAMES {
-            assert!(reg.resolve(name).is_some());
+            assert!(reg.resolve(&name.into()).is_some());
         }
     }
 }
@@ -656,6 +672,7 @@ mod registry_tests {
 mod batch_1_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
@@ -666,10 +683,12 @@ mod batch_1_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_1(&mut reg, handle.clone());
 
-        let h = reg.get_handler("clear").expect("clear handler missing");
+        let h = reg
+            .get_handler(&"clear".into())
+            .expect("clear handler missing");
         let args = ParsedSlashCommand {
-            name: "clear".to_string(),
-            raw_args: String::new(),
+            name: "clear".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
@@ -694,12 +713,12 @@ mod batch_1_tests {
         // survives future name churn while still asserting the stub mechanism.
         let mut found_stub = false;
         for name in crate::builtin_support::BUILTIN_COMMAND_NAMES {
-            let Some(h) = reg.get_handler(name) else {
+            let Some(h) = reg.get_handler(&name.into()) else {
                 continue;
             };
             let args = ParsedSlashCommand {
                 name: (*name).to_string(),
-                raw_args: String::new(),
+                raw_args: String::new().into(),
                 positional_args: vec![],
             };
             if let CommandResult::Done { display: Some(s) } = h.handle(&args).await {
@@ -729,8 +748,11 @@ mod batch_1_tests {
         register_core_batch_1(&mut reg, handle);
 
         for name in ["clear", "compact", "exit", "help", "init", "memory"] {
-            assert!(reg.resolve(name).is_some(), "/{name} missing");
-            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+            assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
+                "/{name} handler missing"
+            );
         }
     }
 }
@@ -739,12 +761,13 @@ mod batch_1_tests {
 mod batch_3_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
 
     fn args(name: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: String::new(),
+            name: name.into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -760,7 +783,7 @@ mod batch_3_tests {
         // Sample of the InjectMessage (`inject`-kind) batch-3 commands.
         for name in ["commit", "security-review", "init-verifiers"] {
             let h = reg
-                .get_handler(name)
+                .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::InjectMessage { content } => {
@@ -784,7 +807,7 @@ mod batch_3_tests {
         register_all_builtin_commands(&mut reg);
 
         let h = reg
-            .get_handler("stickers")
+            .get_handler(&"stickers".into())
             .expect("stickers handler missing");
         match h.handle(&args("stickers")).await {
             CommandResult::Done { display: Some(s) } => {
@@ -805,7 +828,7 @@ mod batch_3_tests {
         register_all_builtin_commands(&mut reg);
 
         let h = reg
-            .get_handler("teleport")
+            .get_handler(&"teleport".into())
             .expect("teleport handler missing");
         match h.handle(&args("teleport")).await {
             CommandResult::Done { display: Some(s) } => {
@@ -829,8 +852,11 @@ mod batch_3_tests {
             "statusline",
             "stickers",
         ] {
-            assert!(reg.resolve(name).is_some(), "/{name} missing");
-            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+            assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
+                "/{name} handler missing"
+            );
         }
     }
 
@@ -843,7 +869,7 @@ mod batch_3_tests {
 
         for name in ["release-notes"] {
             let h = reg
-                .get_handler(name)
+                .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {
@@ -863,13 +889,14 @@ mod batch_3_tests {
 mod batch_5_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args(name: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: String::new(),
+            name: name.into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -881,13 +908,16 @@ mod batch_5_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_5(&mut reg, handle);
 
-        assert!(reg.resolve("effort").is_some(), "/effort missing");
+        assert!(reg.resolve(&"effort".into()).is_some(), "/effort missing");
         assert!(
-            reg.get_handler("effort").is_some(),
+            reg.get_handler(&"effort".into()).is_some(),
             "/effort handler missing"
         );
-        assert!(reg.resolve("usage").is_some(), "/usage missing");
-        assert!(reg.get_handler("usage").is_some(), "/usage handler missing");
+        assert!(reg.resolve(&"usage".into()).is_some(), "/usage missing");
+        assert!(
+            reg.get_handler(&"usage".into()).is_some(),
+            "/usage handler missing"
+        );
     }
 
     /// After batch-5 wiring `/effort` must NOT return the locked M5 stub
@@ -899,7 +929,9 @@ mod batch_5_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_5(&mut reg, handle);
 
-        let h = reg.get_handler("effort").expect("effort handler missing");
+        let h = reg
+            .get_handler(&"effort".into())
+            .expect("effort handler missing");
         match h.handle(&args("effort")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_ne!(
@@ -920,7 +952,9 @@ mod batch_5_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_5(&mut reg, handle);
 
-        let h = reg.get_handler("usage").expect("usage handler missing");
+        let h = reg
+            .get_handler(&"usage".into())
+            .expect("usage handler missing");
         match h.handle(&args("usage")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Total cost:            $"));
@@ -936,12 +970,13 @@ mod batch_5_tests {
 mod batch_6_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
 
     fn args(name: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: String::new(),
+            name: name.into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -950,9 +985,12 @@ mod batch_6_tests {
     fn keybindings_resolves_with_handler_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert!(reg.resolve("keybindings").is_some(), "/keybindings missing");
         assert!(
-            reg.get_handler("keybindings").is_some(),
+            reg.resolve(&"keybindings".into()).is_some(),
+            "/keybindings missing"
+        );
+        assert!(
+            reg.get_handler(&"keybindings".into()).is_some(),
             "/keybindings handler missing"
         );
     }
@@ -966,7 +1004,7 @@ mod batch_6_tests {
         register_all_builtin_commands(&mut reg);
 
         let h = reg
-            .get_handler("keybindings")
+            .get_handler(&"keybindings".into())
             .expect("keybindings handler missing");
         match h.handle(&args("keybindings")).await {
             CommandResult::Done { display: Some(s) } => {
@@ -994,7 +1032,7 @@ mod batch_6_tests {
         register_all_builtin_commands(&mut reg);
         register_core_batch_6(&mut reg, true);
         register_core_batch_6(&mut reg, true); // twice
-        assert!(reg.get_handler("keybindings").is_some());
+        assert!(reg.get_handler(&"keybindings".into()).is_some());
     }
 }
 
@@ -1002,13 +1040,14 @@ mod batch_6_tests {
 mod batch_4_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args(name: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: String::new(),
+            name: name.into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -1021,8 +1060,11 @@ mod batch_4_tests {
         register_core_batch_4(&mut reg, handle);
 
         for name in ["context", "export", "files", "resume"] {
-            assert!(reg.resolve(name).is_some(), "/{name} missing");
-            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+            assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
+                "/{name} handler missing"
+            );
         }
     }
 
@@ -1039,7 +1081,7 @@ mod batch_4_tests {
 
         for name in ["context", "files", "resume"] {
             let h = reg
-                .get_handler(name)
+                .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {
@@ -1063,7 +1105,9 @@ mod batch_4_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_4(&mut reg, handle);
 
-        let h = reg.get_handler("resume").expect("resume handler missing");
+        let h = reg
+            .get_handler(&"resume".into())
+            .expect("resume handler missing");
         match h.handle(&args("resume")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(s, "No resumable sessions found.");
@@ -1083,9 +1127,9 @@ mod batch_4_tests {
         register_core_batch_4(&mut reg, handle);
 
         let cmd = reg
-            .resolve("continue")
+            .resolve(&"continue".into())
             .expect("continue alias should resolve");
-        assert_eq!(cmd.name, "resume");
+        assert_eq!(cmd.name.string_at(""), Some("resume"));
     }
 
     /// The `continue` alias must also dispatch to the resume *handler* (proves
@@ -1100,7 +1144,7 @@ mod batch_4_tests {
         register_core_batch_4(&mut reg, handle);
 
         let h = reg
-            .get_handler("continue")
+            .get_handler(&"continue".into())
             .expect("continue alias should map to the resume handler");
         match h.handle(&args("continue")).await {
             CommandResult::Done { display: Some(s) } => {
@@ -1115,6 +1159,7 @@ mod batch_4_tests {
 mod batch_8_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
@@ -1126,11 +1171,11 @@ mod batch_8_tests {
     /// "not registered" can no longer be expressed as `get_handler` == None).
     async fn subtask_display(reg: &CommandRegistry) -> String {
         let h = reg
-            .get_handler("subtask")
+            .get_handler(&"subtask".into())
             .expect("/subtask always has at least its unimplemented stub");
         let parsed = ParsedSlashCommand {
-            name: "subtask".to_string(),
-            raw_args: String::new(),
+            name: "subtask".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&parsed).await {
@@ -1178,19 +1223,26 @@ mod batch_8_tests {
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
         for name in ["subtask", "fork"] {
-            assert!(reg.resolve(name).is_some(), "/{name} missing");
-            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+            assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+            assert!(
+                reg.get_handler(&name.into()).is_some(),
+                "/{name} handler missing"
+            );
         }
         assert_eq!(
-            reg.resolve("subtask")
+            reg.resolve(&"subtask".into())
                 .expect("/subtask must resolve")
-                .description,
-            "Send a subagent off with your full context; its result comes back here"
+                .description
+                .string_at(""),
+            Some("Send a subagent off with your full context; its result comes back here")
         );
         // The DEFAULT `/fork` is now the background-session-copy variant (`vAd`).
         assert_eq!(
-            reg.resolve("fork").expect("/fork must resolve").description,
-            "Copy this conversation into a new background session and keep working here"
+            reg.resolve(&"fork".into())
+                .expect("/fork must resolve")
+                .description
+                .string_at(""),
+            Some("Copy this conversation into a new background session and keep working here")
         );
     }
 
@@ -1216,10 +1268,12 @@ mod batch_8_tests {
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
         let fork_desc = reg
-            .resolve("fork")
+            .resolve(&"fork".into())
             .expect("/fork must resolve")
             .description
-            .clone();
+            .string_at("")
+            .unwrap_or_default()
+            .to_owned();
         let subtask = subtask_display(&reg).await;
 
         // Restore the env before asserting so a failure never leaks the override.
@@ -1248,7 +1302,9 @@ mod batch_8_tests {
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), true);
 
         assert_eq!(
-            reg.resolve("fork").expect("/fork must resolve").description,
+            reg.resolve(&"fork".into())
+                .expect("/fork must resolve")
+                .description,
             "Spawn a background agent that inherits the full conversation"
         );
         assert_eq!(
@@ -1268,10 +1324,12 @@ mod batch_8_tests {
         register_all_builtin_commands(&mut reg);
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
-        let h = reg.get_handler("subtask").expect("subtask handler missing");
+        let h = reg
+            .get_handler(&"subtask".into())
+            .expect("subtask handler missing");
         let args = ParsedSlashCommand {
-            name: "subtask".to_string(),
-            raw_args: String::new(),
+            name: "subtask".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
@@ -1290,6 +1348,7 @@ mod connect_tests {
         ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
         CopilotConnectStep,
     };
+    use crate::model::SourceTextTestExt;
     use async_trait::async_trait;
 
     struct NoopWriter;
@@ -1330,9 +1389,9 @@ mod connect_tests {
             Arc::new(NoopCopilot),
             Arc::new(NoopChatGpt),
         );
-        assert!(reg.resolve("connect").is_some(), "/connect missing");
+        assert!(reg.resolve(&"connect".into()).is_some(), "/connect missing");
         assert!(
-            reg.get_handler("connect").is_some(),
+            reg.get_handler(&"connect".into()).is_some(),
             "/connect handler missing"
         );
     }
@@ -1342,12 +1401,13 @@ mod connect_tests {
 mod interactive_only_tests {
     use super::*;
     use crate::model::CommandResult;
+    use crate::model::SourceTextTestExt;
     use crate::parser::ParsedSlashCommand;
 
     fn args(name: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: String::new(),
+            name: name.into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -1374,7 +1434,7 @@ mod interactive_only_tests {
             "usage",
         ] {
             let h = reg
-                .get_handler(name)
+                .get_handler(&name.into())
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {

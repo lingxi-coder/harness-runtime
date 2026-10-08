@@ -21,7 +21,7 @@ fn message_dto_round_trips() {
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {
-                text: "thinking out loud".to_string(),
+                text: "thinking out loud".into(),
             },
             MessageBlockDto::Thinking {
                 thinking: "internal".to_string(),
@@ -71,6 +71,29 @@ fn message_dto_round_trips() {
     assert_eq!(back, msg);
 }
 
+#[test]
+fn message_text_keeps_lone_surrogates_as_a_json_string() {
+    let message = MessageDto {
+        loop_wakeup: None,
+        role: "assistant".into(),
+        blocks: vec![MessageBlockDto::Text {
+            text: client::protocol::text::ClientTextDto::from_code_units(vec![
+                b'x' as u16,
+                0xd800,
+                b'y' as u16,
+            ]),
+        }],
+        images: Vec::new(),
+    };
+    let wire = serde_json::to_string(&message).expect("serialize exact message text");
+    assert!(wire.contains(r#""text":"x\ud800y""#), "{wire}");
+    let decoded: MessageDto = serde_json::from_str(&wire).expect("deserialize exact text");
+    let MessageBlockDto::Text { text } = &decoded.blocks[0] else {
+        panic!("expected text block")
+    };
+    assert_eq!(text.code_units, vec![b'x' as u16, 0xd800, b'y' as u16]);
+}
+
 /// The block-kind set equals the kinds the TUI scrollback renders:
 /// `Text | Thinking | RedactedThinking | CompactBoundary | ToolUse |
 /// ToolResult`. Structural parity anchor (plan F1-02).
@@ -79,7 +102,7 @@ fn message_block_set_matches_tui_scrollback() {
     // Construct one of every block kind and collect the snake_case wire tags.
     let blocks = [
         MessageBlockDto::Text {
-            text: String::new(),
+            text: String::new().into(),
         },
         MessageBlockDto::Thinking {
             thinking: String::new(),

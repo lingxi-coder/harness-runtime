@@ -42,6 +42,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -217,8 +218,8 @@ fn allowed_in_batch(action: &str) -> bool {
     )
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "action": {
@@ -312,7 +313,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "dy": { "type": "integer" }
         },
         "required": ["action"]
-    })
+    }))
 });
 
 /// One-line dim summary per action, mirroring `toolRendering.tsx`
@@ -339,7 +340,7 @@ fn result_summary(action: &str) -> Option<&'static str> {
 
 fn map_err(e: &ComputerError) -> ToolError {
     match e {
-        ComputerError::PermissionDenied(m) => ToolError::PermissionDenied(m.clone()),
+        ComputerError::PermissionDenied(m) => ToolError::PermissionDenied(m.clone().into()),
         other => ToolError::Internal(other.to_string()),
     }
 }
@@ -428,26 +429,16 @@ fn image_action_result(
 
 /// Read a `[x, y]` tuple under `key`, falling back to the legacy flat `x`/`y`
 /// scalars when reading the `"coordinate"` key. Returns `None` if absent.
-fn coord(input: &Value, key: &str) -> Option<(u32, u32)> {
-    #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
-    if let Some(arr) = input.get(key).and_then(Value::as_array) {
-        if arr.len() == 2 {
-            if let (Some(x), Some(y)) = (arr[0].as_u64(), arr[1].as_u64()) {
-                return Some((x as u32, y as u32));
-            }
-        }
-        return None;
-    }
-    // Legacy flat fallback only for the primary `coordinate` field.
-    if key == "coordinate" {
-        let x = input.get("x").and_then(Value::as_u64);
-        let y = input.get("y").and_then(Value::as_u64);
-        #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
-        if let (Some(x), Some(y)) = (x, y) {
-            return Some((x as u32, y as u32));
-        }
-    }
-    None
+fn coord(input: &Utf16JsonProjection, key: &str) -> Option<(u32, u32)> {
+    validate::require_coord(input, key).ok()
+}
+
+fn exact_string(value: JsonValueView<'_>) -> Option<String> {
+    String::from_utf16(value.code_units()?).ok()
+}
+
+fn exact_string_property(input: &Utf16JsonProjection, key: &str) -> Option<String> {
+    exact_string(input.get_property(key)?)
 }
 
 /// Translate a `scroll_direction`/`scroll_amount` (or legacy `direction`/
@@ -456,7 +447,7 @@ fn coord(input: &Value, key: &str) -> Option<(u32, u32)> {
 /// through to the native scroll call with no cap). Falls back to the legacy
 /// flat `dx`/`dy` when neither `scroll_direction` nor `direction` is
 /// supplied. One tick ≈ `amount` (default 3).
-fn scroll_delta(input: &Value) -> Result<(i32, i32), ToolError> {
+fn scroll_delta(input: &Utf16JsonProjection) -> Result<(i32, i32), ToolError> {
     if let Some(dir) = validate::scroll_direction(input)? {
         let amount = validate::scroll_amount(input)?;
         return Ok(match dir {
@@ -479,8 +470,19 @@ impl Tool for ComputerTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Gate on backend presence: advertising a tool that can only ever
@@ -494,12 +496,14 @@ impl Tool for ComputerTool {
     fn max_result_size_chars(&self) -> usize {
         4096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         matches!(
-            input.get("action").and_then(Value::as_str),
+            input
+                .get_property("action")
+                .and_then(|value| value.as_str()),
             Some(
                 "screenshot"
                     | "display_size"
@@ -512,7 +516,11 @@ impl Tool for ComputerTool {
         )
     }
 
-    async fn check_permissions(&self, _input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // Parity note: claude-code does NOT permission-prompt per action — the
         // `mcp__computer-use__*` tools are pre-added to allowedTools, and the
         // dedicated `request_access` tool handles session-scoped approval via
@@ -535,41 +543,44 @@ impl Tool for ComputerTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .unwrap_or("screenshot");
         format!("Computer action: {action}")
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Capture the screen and drive the mouse/keyboard/clipboard/apps.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some(a) if ACTIONS.contains(&a) => self
                 .validate_final_input(a, input)
-                .map_err(|e| ValidationError(e.to_string())),
-            Some(a) => Err(ValidationError(format!("unknown action: {a}"))),
+                .map_err(|e| ValidationError(e.model_facing_message())),
+            Some(a) => Err(ValidationError(format!("unknown action: {a}").into())),
             None => Err(ValidationError("`action` is required".into())),
         }
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .ok_or_else(|| ToolError::InvalidInput("`action` is required".into()))?
             .to_string();
 
@@ -629,7 +640,7 @@ impl Tool for ComputerTool {
         }
         result
     }
-    fn map_result_text(&self, result: &Value) -> Option<String> {
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
         tool_api::tool_result_media::computer_batch_model_text(result)
     }
     fn native_computer_capabilities(
@@ -657,8 +668,8 @@ impl Tool for ComputerTool {
     async fn computer_model_output(
         &self,
         ctx: &ToolUseContext,
-        content: &str,
-        blocks: Option<&[Value]>,
+        content: &Utf16JsonProjection,
+        blocks: Option<&[Utf16JsonProjection]>,
     ) -> Result<(), ToolError> {
         self.apply_model_observation(ctx, content, blocks).await
     }
@@ -749,15 +760,15 @@ impl ComputerTool {
 
     async fn handle_request_access(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let raw_apps: Vec<String> = input
-            .get("apps")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
+            .get_property("apps")
+            .and_then(|apps| apps.array_len().map(|len| (apps, len)))
+            .map(|(apps, len)| {
+                (0..len)
+                    .filter_map(|index| apps.get_index(index).and_then(exact_string))
                     .collect()
             })
             .unwrap_or_default();
@@ -765,7 +776,7 @@ impl ComputerTool {
         for name in &raw_apps {
             resolved_apps.push(self.resolve_app_identifier(name).await);
         }
-        let tier = match input.get("tier").and_then(Value::as_str) {
+        let tier = match input.get_property("tier").and_then(|value| value.as_str()) {
             Some("read") => AppTier::Read,
             Some("click") => AppTier::Click,
             _ => AppTier::Full, // default — matches upstream's "full" unless the model asks for less
@@ -781,10 +792,9 @@ impl ComputerTool {
         };
         let request = permission::computer_access::ComputerAccessRequest {
             reason: input
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("control your computer")
-                .to_string(),
+                .get_property("reason")
+                .and_then(exact_string)
+                .unwrap_or_else(|| "control your computer".to_string()),
             apps: resolved_apps
                 .iter()
                 .map(|label| permission::computer_access::RequestedApp {
@@ -793,16 +803,16 @@ impl ComputerTool {
                 .collect(),
             tier: tier.to_bridge(),
             clipboard_read: input
-                .get("clipboardRead")
-                .and_then(Value::as_bool)
+                .get_property("clipboardRead")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false),
             clipboard_write: input
-                .get("clipboardWrite")
-                .and_then(Value::as_bool)
+                .get_property("clipboardWrite")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false),
             system_key_combos: input
-                .get("systemKeyCombos")
-                .and_then(Value::as_bool)
+                .get_property("systemKeyCombos")
+                .and_then(|value| value.as_bool())
                 .unwrap_or(false),
             tcc_state,
         };
@@ -875,10 +885,11 @@ impl ComputerTool {
         finish(data, "list_granted_applications")
     }
 
-    async fn handle_switch_display(&self, input: &Value) -> Result<ToolCallResult, ToolError> {
-        let display = input
-            .get("display")
-            .and_then(Value::as_str)
+    async fn handle_switch_display(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Result<ToolCallResult, ToolError> {
+        let display = exact_string_property(input, "display")
             .ok_or_else(|| ToolError::InvalidInput("display is required".into()))?;
 
         if display.eq_ignore_ascii_case("auto") {
@@ -917,7 +928,7 @@ impl ComputerTool {
         let displays = cc.list_displays().await.map_err(|e| map_err(&e))?;
         let Some(matched) = displays
             .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(display))
+            .find(|d| d.name.eq_ignore_ascii_case(&display))
         else {
             let available = if displays.is_empty() {
                 "none detected".to_string()
@@ -928,9 +939,9 @@ impl ComputerTool {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            return Err(ToolError::InvalidInput(format!(
-                "No display named \"{display}\". Available: {available}."
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("No display named \"{display}\". Available: {available}.").into(),
+            ));
         };
         let id = matched.id;
         let resolved_name = matched.name.clone();
@@ -950,39 +961,47 @@ impl ComputerTool {
 
     async fn handle_batch(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
         progress_tx: &ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let items = input
-            .get("actions")
-            .and_then(Value::as_array)
+        let count = input
+            .array_len("/actions")
             .ok_or_else(|| ToolError::InvalidInput("actions must be a non-empty array".into()))?;
-        if items.is_empty() {
+        if count == 0 {
             return Err(ToolError::InvalidInput(
                 "actions must be a non-empty array".into(),
             ));
         }
-        let mut results = Vec::with_capacity(items.len());
-        for (i, item) in items.iter().enumerate() {
-            let Some(obj) = item.as_object() else {
-                return Err(ToolError::InvalidInput(format!(
-                    "actions[{i}] must be an object"
-                )));
-            };
-            let Some(sub_action) = obj.get("action").and_then(Value::as_str) else {
-                return Err(ToolError::InvalidInput(format!(
-                    "actions[{i}].action must be a string"
-                )));
+        let mut results = Vec::with_capacity(count);
+        for i in 0..count {
+            let item_pointer = format!("/actions/{i}");
+            let item = input.subprojection(&item_pointer).map_err(|_| {
+                ToolError::InvalidInput(format!("actions[{i}] must be an object").into())
+            })?;
+            if item
+                .at_pointer("")
+                .and_then(|value| value.object_entries())
+                .is_none()
+            {
+                return Err(ToolError::InvalidInput(
+                    format!("actions[{i}] must be an object").into(),
+                ));
+            }
+            let Some(sub_action) = item.get_property("action").and_then(|value| value.as_str())
+            else {
+                return Err(ToolError::InvalidInput(
+                    format!("actions[{i}].action must be a string").into(),
+                ));
             };
             if !allowed_in_batch(sub_action) || !ACTIONS.contains(&sub_action) {
-                return Err(ToolError::InvalidInput(format!(
-                    "actions[{i}].action=\"{sub_action}\" is not allowed in a batch"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("actions[{i}].action=\"{sub_action}\" is not allowed in a batch")
+                        .into(),
+                ));
             }
-            let sub_input = Value::Object(obj.clone());
             let _ = (ctx, progress_tx); // batch sub-actions don't emit per-item progress yet
-            match self.execute_one(sub_action, &sub_input, ctx).await {
+            match self.execute_one(sub_action, &item, ctx).await {
                 Ok(data) => results.push(json!({ "action": sub_action, "result": data })),
                 Err(e) => {
                     self.invalidate_frame(ctx).await;
@@ -1063,13 +1082,13 @@ impl ComputerTool {
             None => Err(ToolError::PermissionDenied(format!(
                 "\"{}\" is not in the allowed applications. Call request_access to add it.",
                 front.display_name
-            ))),
+            ).into())),
             Some(tier) if tier < required => Err(ToolError::PermissionDenied(format!(
                 "\"{}\" is granted at tier \"{}\"; this action requires tier \"{}\". Call request_access to upgrade it.",
                 front.display_name,
                 tier.as_str(),
                 required.as_str()
-            ))),
+            ).into())),
             Some(_) => Ok(()),
         }
     }
@@ -1084,7 +1103,7 @@ impl ComputerTool {
     async fn execute_one(
         &self,
         action: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<Value, ToolError> {
         // `wait` carries no host capability — it only pauses. Handled before
@@ -1105,7 +1124,7 @@ impl ComputerTool {
             .held_keys
             .is_empty();
         let tier_action = if action == "mouse_click"
-            && input.get("button").and_then(Value::as_str) == Some("left")
+            && input.string_at("/button") == Some("left")
             && !has_held_keys
         {
             "left_click"
@@ -1189,14 +1208,17 @@ impl ComputerTool {
         if get(state.grant_flags) {
             Ok(())
         } else {
-            Err(ToolError::PermissionDenied(format!(
-                "Clipboard {} is not granted. Request `{flag_name}` via request_access.",
-                if flag_name == "clipboardRead" {
-                    "read"
-                } else {
-                    "write"
-                }
-            )))
+            Err(ToolError::PermissionDenied(
+                format!(
+                    "Clipboard {} is not granted. Request `{flag_name}` via request_access.",
+                    if flag_name == "clipboardRead" {
+                        "read"
+                    } else {
+                        "write"
+                    }
+                )
+                .into(),
+            ))
         }
     }
 
@@ -1219,7 +1241,7 @@ impl ComputerTool {
         } else {
             Err(ToolError::PermissionDenied(format!(
                 "\"{chord}\" is a system-level shortcut. Request the `systemKeyCombos` grant via request_access to use it."
-            )))
+            ).into()))
         }
     }
 
@@ -1310,40 +1332,66 @@ impl ComputerTool {
             Ok(())
         }
     }
-    fn validate_final_input(&self, action: &str, input: &Value) -> Result<(), ToolError> {
+    fn validate_final_input(
+        &self,
+        action: &str,
+        input: &Utf16JsonProjection,
+    ) -> Result<(), ToolError> {
         if !ACTIONS.contains(&action) {
-            return Err(ToolError::InvalidInput(format!("unknown action: {action}")));
+            return Err(ToolError::InvalidInput(
+                format!("unknown action: {action}").into(),
+            ));
         }
         extensions::validate(action, input)?;
         if action == "computer_batch" {
-            let items = input
-                .get("actions")
-                .and_then(Value::as_array)
-                .filter(|a| !a.is_empty())
+            let len = input
+                .array_len("/actions")
+                .filter(|len| *len > 0)
                 .ok_or_else(|| {
                     ToolError::InvalidInput("actions must be a non-empty array".into())
                 })?;
-            if items.len() > 1000 {
+            if len > 1000 {
                 return Err(ToolError::InvalidInput(
                     "actions exceeds maximum of 1000".into(),
                 ));
             }
-            for (i, item) in items.iter().enumerate() {
-                let sub = item.get("action").and_then(Value::as_str).ok_or_else(|| {
-                    ToolError::InvalidInput(format!("actions[{i}].action must be a string"))
+            for i in 0..len {
+                let item = input.subprojection(&format!("/actions/{i}")).map_err(|_| {
+                    ToolError::InvalidInput(format!("actions[{i}] must be an object").into())
                 })?;
-                if !allowed_in_batch(sub) {
-                    return Err(ToolError::InvalidInput(format!(
-                        "actions[{i}].action=\"{sub}\" is not allowed in a batch"
-                    )));
+                if item
+                    .at_pointer("")
+                    .and_then(|value| value.object_entries())
+                    .is_none()
+                {
+                    return Err(ToolError::InvalidInput(
+                        format!("actions[{i}] must be an object").into(),
+                    ));
                 }
-                self.validate_final_input(sub, item)?;
+                let sub = item
+                    .get_property("action")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput(
+                            format!("actions[{i}].action must be a string").into(),
+                        )
+                    })?;
+                if !allowed_in_batch(sub) {
+                    return Err(ToolError::InvalidInput(
+                        format!("actions[{i}].action=\"{sub}\" is not allowed in a batch").into(),
+                    ));
+                }
+                self.validate_final_input(sub, &item)?;
             }
         }
         Ok(())
     }
 
-    async fn validate_host_parameters(&self, action: &str, input: &Value) -> Result<(), ToolError> {
+    async fn validate_host_parameters(
+        &self,
+        action: &str,
+        input: &Utf16JsonProjection,
+    ) -> Result<(), ToolError> {
         let cc = self
             .ctx
             .computer_control
@@ -1363,21 +1411,21 @@ impl ComputerTool {
             // Current backends validate the full key set before posting events.
             // Older partial backends keep their own original key parser.
             if cc.capabilities().held_keys
-                || input.get("keys").is_some()
+                || input.get_property("keys").is_some()
                 || matches!(action, "key_down" | "key_up")
             {
                 cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
             }
         }
         if action == "mouse_click"
-            && matches!(input["button"].as_str(), Some("back" | "forward"))
+            && matches!(input.string_at("/button"), Some("back" | "forward"))
             && !cc.capabilities().side_buttons
         {
             return Err(ToolError::InvalidInput(
                 "backend does not support side buttons".into(),
             ));
         }
-        if input.get("pixel_delta").is_some() && !cc.capabilities().pixel_scroll {
+        if input.get_property("pixel_delta").is_some() && !cc.capabilities().pixel_scroll {
             return Err(ToolError::InvalidInput(
                 "backend does not support pixel scrolling".into(),
             ));
@@ -1385,7 +1433,8 @@ impl ComputerTool {
         let presses_left = matches!(
             action,
             "left_click_drag" | "left_mouse_down" | "left_click" | "double_click" | "triple_click"
-        ) || (action == "mouse_click" && input["button"] == "left");
+        ) || (action == "mouse_click"
+            && input.string_at("/button") == Some("left"));
         if presses_left
             && self
                 .runtime
@@ -1443,8 +1492,15 @@ impl ComputerTool {
         Ok(())
     }
 
-    async fn target_coordinate(&self, input: &Value) -> Result<(u32, u32), ToolError> {
-        if input.get("use_current_cursor").and_then(Value::as_bool) == Some(true) {
+    async fn target_coordinate(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Result<(u32, u32), ToolError> {
+        if input
+            .get_property("use_current_cursor")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
             self.ctx
                 .computer_control
                 .as_ref()
@@ -1459,7 +1515,7 @@ impl ComputerTool {
     async fn execute_backend(
         &self,
         action: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<Value, ToolError> {
         let cc = self
@@ -1467,7 +1523,11 @@ impl ComputerTool {
             .computer_control
             .as_ref()
             .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?;
-        if input.get("use_current_cursor").and_then(Value::as_bool) == Some(true) {
+        if input
+            .get_property("use_current_cursor")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
             match action {
                 "mouse_click" | "left_click" | "right_click" | "middle_click" | "double_click"
                 | "triple_click" => {
@@ -1477,8 +1537,8 @@ impl ComputerTool {
                         "double_click" => ("left", 2),
                         "triple_click" => ("left", 3),
                         "mouse_click" => (
-                            input["button"]
-                                .as_str()
+                            input
+                                .string_at("/button")
                                 .ok_or_else(|| ToolError::InvalidInput("button required".into()))?,
                             1,
                         ),
@@ -1550,8 +1610,8 @@ impl ComputerTool {
             }
             "mouse_click" => {
                 let (x, y) = self.target_coordinate(input).await?;
-                let button = input["button"]
-                    .as_str()
+                let button = input
+                    .string_at("/button")
                     .ok_or_else(|| ToolError::InvalidInput("button required".into()))?;
                 cc.mouse_click(x, y, button)
                     .await
@@ -1678,7 +1738,11 @@ impl ComputerTool {
                         .backend_inputs_dirty = false;
                 }
                 typed.map_err(|e| map_err(&e))?;
-                if input.get("press_enter").and_then(Value::as_bool) == Some(true) {
+                if input
+                    .get_property("press_enter")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+                {
                     self.check_cancel(ctx)?;
                     self.runtime
                         .lock()
@@ -1699,7 +1763,7 @@ impl ComputerTool {
                 let keys = extensions::keys(input, "keys")?;
                 self.enforce_cumulative_shortcuts(&keys)?;
                 let repeat = validate::key_repeat(input)?;
-                if input.get("keys").is_some() {
+                if input.get_property("keys").is_some() {
                     cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
                 }
                 for _ in 0..repeat {
@@ -1708,7 +1772,7 @@ impl ComputerTool {
                         .lock()
                         .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
                         .backend_inputs_dirty = true;
-                    let result = if input.get("keys").is_some() {
+                    let result = if input.get_property("keys").is_some() {
                         cc.key_chord(keys.clone()).await
                     } else {
                         cc.key(validate::require_text(input)?).await
@@ -1794,11 +1858,8 @@ impl ComputerTool {
                 Ok(json!({ "ok": true }))
             }
             "open_application" => {
-                let name = input
-                    .get("bundle_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ToolError::InvalidInput("bundle_id is required".into()))?
-                    .to_string();
+                let name = exact_string_property(input, "bundle_id")
+                    .ok_or_else(|| ToolError::InvalidInput("bundle_id is required".into()))?;
                 // Gate against the allowlist BEFORE launching anything — this
                 // action had no permission check at all, letting the model
                 // open arbitrary apps regardless of what request_access had
@@ -1813,16 +1874,21 @@ impl ComputerTool {
                     .tier_for(&resolved)
                     .is_some();
                 if !is_granted {
-                    return Err(ToolError::PermissionDenied(format!(
-                        "\"{name}\" is not granted for this session. Call request_access first."
-                    )));
+                    return Err(ToolError::PermissionDenied(
+                        format!(
+                            "\"{name}\" is not granted for this session. Call request_access first."
+                        )
+                        .into(),
+                    ));
                 }
                 cc.open_application(resolved)
                     .await
                     .map_err(|e| map_err(&e))?;
                 Ok(json!({ "ok": true, "opened": name }))
             }
-            other => Err(ToolError::InvalidInput(format!("unknown action: {other}"))),
+            other => Err(ToolError::InvalidInput(
+                format!("unknown action: {other}").into(),
+            )),
         }
     }
 
@@ -2038,19 +2104,23 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
     // only: width/height/byte-count). `model_content` here is deliberately a
     // short placeholder plus any resize/multi-display note, matching
     // `tool-file`'s Read-on-image path exactly.
+    let source_data = tool_api::tool_trait::generated_builtin_result(&data);
     let model_content = (data.get("type").and_then(Value::as_str) == Some("image"))
         .then(|| match data.get("note").and_then(Value::as_str) {
-            Some(note) => format!("[Image content provided in tool result.] {note}"),
-            None => "[Image content provided in tool result.]".to_string(),
+            Some(note) => Utf16JsonProjection::from(format!(
+                "[Image content provided in tool result.] {note}"
+            )),
+            None => Utf16JsonProjection::from("[Image content provided in tool result.]"),
         })
-        .or_else(|| tool_api::tool_result_media::computer_batch_model_text(&data));
+        .or_else(|| tool_api::tool_result_media::computer_batch_model_text(&source_data));
     ToolCallResult {
-        data,
+        data: source_data,
         model_content,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -2078,12 +2148,32 @@ pub fn register_all_with_access_resolver(
 }
 
 #[cfg(test)]
+fn test_projection(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("test JSON is valid")
+}
+
+#[cfg(test)]
+fn test_data(value: &Utf16JsonProjection) -> Value {
+    serde_json::from_str(
+        &value
+            .to_json_string()
+            .expect("generated test result is valid JSON"),
+    )
+    .expect("generated test result is representable as serde_json::Value")
+}
+
+#[cfg(test)]
+fn test_model_text(value: Option<&Utf16JsonProjection>) -> Option<&str> {
+    value.and_then(|text| text.string_at(""))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn schema_covers_full_action_set() {
-        let schema = &*INPUT_SCHEMA;
+        let schema: Value = serde_json::from_str(&INPUT_SCHEMA.to_json_string().unwrap()).unwrap();
         let actions = schema["properties"]["action"]["enum"]
             .as_array()
             .expect("action enum");
@@ -2097,7 +2187,8 @@ mod tests {
 
     #[test]
     fn schema_has_tuple_and_legacy_coordinate_fields() {
-        let props = &INPUT_SCHEMA["properties"];
+        let schema: Value = serde_json::from_str(&INPUT_SCHEMA.to_json_string().unwrap()).unwrap();
+        let props = &schema["properties"];
         assert_eq!(props["coordinate"]["type"], "array");
         assert_eq!(props["start_coordinate"]["type"], "array");
         assert_eq!(props["region"]["minItems"], 4);
@@ -2121,44 +2212,68 @@ mod tests {
     #[test]
     fn coord_reads_tuple_form() {
         let input = json!({ "coordinate": [12, 34] });
-        assert_eq!(coord(&input, "coordinate"), Some((12, 34)));
+        assert_eq!(
+            coord(&test_projection(&input), "coordinate"),
+            Some((12, 34))
+        );
         let start = json!({ "start_coordinate": [5, 6] });
-        assert_eq!(coord(&start, "start_coordinate"), Some((5, 6)));
+        assert_eq!(
+            coord(&test_projection(&start), "start_coordinate"),
+            Some((5, 6))
+        );
     }
 
     #[test]
     fn coord_falls_back_to_flat_xy_for_coordinate() {
         let input = json!({ "x": 7, "y": 8 });
-        assert_eq!(coord(&input, "coordinate"), Some((7, 8)));
-        assert_eq!(coord(&input, "start_coordinate"), None);
+        assert_eq!(coord(&test_projection(&input), "coordinate"), Some((7, 8)));
+        assert_eq!(coord(&test_projection(&input), "start_coordinate"), None);
     }
 
     #[test]
     fn coord_rejects_malformed_tuple() {
-        assert_eq!(coord(&json!({ "coordinate": [1] }), "coordinate"), None);
         assert_eq!(
-            coord(&json!({ "coordinate": [1, 2, 3] }), "coordinate"),
+            coord(
+                &test_projection(&json!({ "coordinate": [1] })),
+                "coordinate"
+            ),
             None
         );
-        assert_eq!(coord(&json!({}), "coordinate"), None);
+        assert_eq!(
+            coord(
+                &test_projection(&json!({ "coordinate": [1, 2, 3] })),
+                "coordinate"
+            ),
+            None
+        );
+        assert_eq!(coord(&test_projection(&json!({})), "coordinate"), None);
     }
 
     #[test]
     fn scroll_direction_translates_to_delta() {
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "up", "scroll_amount": 5 })).unwrap(),
+            scroll_delta(&test_projection(
+                &json!({ "scroll_direction": "up", "scroll_amount": 5 })
+            ))
+            .unwrap(),
             (0, -5)
         );
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "down", "scroll_amount": 2 })).unwrap(),
+            scroll_delta(&test_projection(
+                &json!({ "scroll_direction": "down", "scroll_amount": 2 })
+            ))
+            .unwrap(),
             (0, 2)
         );
         assert_eq!(
-            scroll_delta(&json!({ "direction": "left", "amount": 4 })).unwrap(),
+            scroll_delta(&test_projection(
+                &json!({ "direction": "left", "amount": 4 })
+            ))
+            .unwrap(),
             (-4, 0)
         );
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "right" })).unwrap(),
+            scroll_delta(&test_projection(&json!({ "scroll_direction": "right" }))).unwrap(),
             (3, 0)
         );
     }
@@ -2166,24 +2281,28 @@ mod tests {
     #[test]
     fn scroll_falls_back_to_flat_delta() {
         assert_eq!(
-            scroll_delta(&json!({ "dx": 3, "dy": -2 })).unwrap(),
+            scroll_delta(&test_projection(&json!({ "dx": 3, "dy": -2 }))).unwrap(),
             (3, -2)
         );
-        assert_eq!(scroll_delta(&json!({})).unwrap(), (0, 0));
+        assert_eq!(scroll_delta(&test_projection(&json!({}))).unwrap(), (0, 0));
     }
 
     #[test]
     fn scroll_delta_rejects_unbounded_amount() {
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "up", "scroll_amount": 101 }))
-                .unwrap_err()
-                .to_string(),
+            scroll_delta(&test_projection(
+                &json!({ "scroll_direction": "up", "scroll_amount": 101 })
+            ))
+            .unwrap_err()
+            .to_string(),
             "invalid input: scroll_amount exceeds maximum of 100"
         );
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "up", "scroll_amount": -1 }))
-                .unwrap_err()
-                .to_string(),
+            scroll_delta(&test_projection(
+                &json!({ "scroll_direction": "up", "scroll_amount": -1 })
+            ))
+            .unwrap_err()
+            .to_string(),
             "invalid input: scroll_amount must be a non-negative int"
         );
     }
@@ -2191,7 +2310,7 @@ mod tests {
     #[test]
     fn scroll_delta_rejects_invalid_direction() {
         assert_eq!(
-            scroll_delta(&json!({ "scroll_direction": "sideways" }))
+            scroll_delta(&test_projection(&json!({ "scroll_direction": "sideways" })))
                 .unwrap_err()
                 .to_string(),
             "invalid input: scroll_direction must be 'up', 'down', 'left', or 'right'"
@@ -2243,9 +2362,9 @@ mod tests {
     #[test]
     fn finish_attaches_summary_only_when_known() {
         let r = finish(json!({ "ok": true }), "left_click");
-        assert_eq!(r.data["summary"], "Clicked");
+        assert_eq!(test_data(&r.data)["summary"], "Clicked");
         let r2 = finish(json!({ "ok": true }), "display_size");
-        assert!(r2.data.get("summary").is_none());
+        assert!(test_data(&r2.data).get("summary").is_none());
     }
 
     #[test]
@@ -2452,7 +2571,7 @@ mod integration_tests {
 
     async fn call(tool: &ComputerTool, input: Value) -> Result<ToolCallResult, ToolError> {
         tool.call(
-            input,
+            test_projection(&input),
             tool_api::test_support::fresh_ctx(),
             tool_api::test_support::fresh_tx(),
         )
@@ -2560,7 +2679,7 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["ok"], true);
+        assert_eq!(test_data(&result.data)["ok"], true);
     }
 
     #[tokio::test]
@@ -2586,7 +2705,7 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["ok"], true);
+        assert_eq!(test_data(&result.data)["ok"], true);
     }
 
     #[tokio::test]
@@ -2712,10 +2831,10 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["stepsCompleted"], 1);
-        assert!(result.data.get("stepFailed").is_some());
+        assert_eq!(test_data(&result.data)["stepsCompleted"], 1);
+        assert!(test_data(&result.data).get("stepFailed").is_some());
         assert_eq!(
-            result.data["results"].as_array().map(Vec::len),
+            test_data(&result.data)["results"].as_array().map(Vec::len),
             Some(1),
             "the batch must not run the third action after the second one failed"
         );
@@ -2743,7 +2862,10 @@ mod integration_tests {
         let ctx = tool_api::test_support::fresh_ctx();
         for action in ["request_access", "left_click"] {
             match tool
-                .check_permissions(&json!({ "action": action, "coordinate": [1, 2] }), &ctx)
+                .check_permissions(
+                    &test_projection(&json!({ "action": action, "coordinate": [1, 2] })),
+                    &ctx,
+                )
                 .await
             {
                 PermissionResult::Allow { .. } => {}
@@ -2769,7 +2891,10 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["granted"].as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            test_data(&result.data)["granted"].as_array().map(Vec::len),
+            Some(0)
+        );
         let err = call(
             &tool,
             json!({ "action": "left_click", "coordinate": [1, 2] }),
@@ -2815,8 +2940,8 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["granted"], json!(["com.a.app"]));
-        assert_eq!(result.data["denied"], json!(["com.b.app"]));
+        assert_eq!(test_data(&result.data)["granted"], json!(["com.a.app"]));
+        assert_eq!(test_data(&result.data)["denied"], json!(["com.b.app"]));
     }
 
     #[tokio::test]
@@ -2835,9 +2960,9 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["ok"], true);
+        assert_eq!(test_data(&result.data)["ok"], true);
         assert!(
-            result.data["note"]
+            test_data(&result.data)["note"]
                 .as_str()
                 .unwrap()
                 .contains("LG UltraFine"),
@@ -2882,7 +3007,7 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["ok"], true);
+        assert_eq!(test_data(&result.data)["ok"], true);
         assert_eq!(*cc.selected_display.lock().unwrap(), None);
     }
 
@@ -2940,7 +3065,7 @@ mod integration_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.data["ok"], true);
+        assert_eq!(test_data(&result.data)["ok"], true);
     }
 
     #[tokio::test]
@@ -2957,7 +3082,8 @@ mod integration_tests {
         let result = call(&tool, json!({ "action": "screenshot" }))
             .await
             .unwrap();
-        let note = result.data["note"]
+        let data = test_data(&result.data);
+        let note = data["note"]
             .as_str()
             .expect("note present for multi-display");
         assert!(note.contains("Built-in Retina Display"), "{note}");
@@ -2975,7 +3101,11 @@ mod integration_tests {
         let result = call(&tool, json!({ "action": "screenshot" }))
             .await
             .unwrap();
-        assert!(result.data.get("note").is_none(), "{:?}", result.data);
+        assert!(
+            test_data(&result.data).get("note").is_none(),
+            "{:?}",
+            result.data
+        );
     }
 
     /// Spawn a real, cheap, briefly-lived child process to stand in for "a
@@ -3103,13 +3233,18 @@ impl Drop for CallLease<'_> {
     }
 }
 
-fn signed_delta(input: &Value, key: &str) -> Result<i32, ToolError> {
-    input.get(key).map_or(Ok(0), |v| {
-        v.as_i64()
-            .and_then(|n| i32::try_from(n).ok())
+fn signed_delta(input: &Utf16JsonProjection, key: &str) -> Result<i32, ToolError> {
+    input.get_property(key).map_or(Ok(0), |value| {
+        value
+            .as_number()
+            .filter(|number| number.is_finite() && number.fract() == 0.0)
+            .and_then(|number| {
+                (number >= i64::MIN as f64 && number < i64::MAX as f64).then_some(number as i64)
+            })
+            .and_then(|number| i32::try_from(number).ok())
             .filter(|n| n.unsigned_abs() <= 100_000)
             .ok_or_else(|| {
-                ToolError::InvalidInput(format!("{key} must be an integer within 100000"))
+                ToolError::InvalidInput(format!("{key} must be an integer within 100000").into())
             })
     })
 }

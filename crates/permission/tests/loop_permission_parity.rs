@@ -5,7 +5,14 @@ use permission::rule::{
     PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
 };
 use permission::{PermissionMode, PermissionResult};
-use serde_json::json;
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!($($tokens)+),
+        )
+        .unwrap()
+    };
+}
 
 fn rule(name: &str, behavior: PermissionBehavior) -> PermissionRule {
     PermissionRule {
@@ -154,7 +161,11 @@ async fn loop_permissions_reach_outer_transport_only_when_required() {
     struct Prompt(AtomicUsize);
     #[async_trait::async_trait]
     impl PermissionGate for Prompt {
-        async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             self.0.fetch_add(1, Ordering::SeqCst);
             PermissionDecision::Deny {
                 reason: "transport reached".into(),
@@ -197,9 +208,9 @@ async fn auto_loop_permission_uses_bound_llm_classifier_and_preserves_rules() {
         async fn classify(
             &self,
             _: &str,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &[permission::host_context::HostContextRecord],
-            _: &[String],
+            _: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
         ) -> AutoModeClassifierVerdict {
             self.0.fetch_add(1, Ordering::SeqCst);
             AutoModeClassifierVerdict::Allow {
@@ -211,7 +222,11 @@ async fn auto_loop_permission_uses_bound_llm_classifier_and_preserves_rules() {
     struct NoPrompt;
     #[async_trait::async_trait]
     impl PermissionGate for NoPrompt {
-        async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             panic!("the LLM verdict must bypass prompt transport")
         }
     }

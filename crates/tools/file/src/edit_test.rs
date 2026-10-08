@@ -24,11 +24,11 @@ mod tests {
     /// Simulate a prior full `Read` of `target` so the read-before-write
     /// staleness guard (Batch F) is satisfied: records the file's current
     /// raw-UTF-8 content (the same form `Read` stores) and its current floored
-    /// mtime under the canonicalized key, with `offset`/`limit` = `None` (a
-    /// full read). Call AFTER writing the file's bytes so the seeded mtime
-    /// matches the on-disk mtime (guard fires only when current mtime is
-    /// strictly greater).
+    /// mtime under Native's normalized session-cwd route key, with
+    /// `offset`/`limit` = `None` (a full read). Canonical remains the source
+    /// for disk access only. Call AFTER writing the bytes so mtime matches.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
         // Decode the SAME way the guard compares (raw UTF-8, BOM-stripped),
@@ -42,7 +42,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -70,16 +70,23 @@ mod tests {
         std::fs::write(&target, "original").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        seed_full_read(&ctx, &target);
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                crate::generated_result(&json!({ "file_path": link.to_string_lossy() })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read the same lexical route before testing the write refusal");
         let tool = FileEditTool::new(ctx);
 
         let error = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": link.to_string_lossy(),
                     "old_string": "original",
                     "new_string": "changed"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -89,6 +96,7 @@ mod tests {
             tool_api::tool_trait::ToolError::InvalidInput(message) => message,
             other => panic!("unexpected error: {other:?}"),
         };
+        let message = message.string_at("").unwrap();
         assert!(message.starts_with("Refusing to write "));
         assert!(
             message.ends_with("it is a symbolic link. Write to the link's target path instead.")
@@ -206,11 +214,11 @@ mod tests {
             let tool = FileEditTool::new(ctx);
             let outcome = tool
                 .call(
-                    json!({
+                    crate::generated_result(&json!({
                         "file_path": target.to_str().unwrap(),
                         "old_string": "world",
                         "new_string": "Rust"
-                    }),
+                    })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
@@ -223,8 +231,8 @@ mod tests {
                     std::fs::read_to_string(&target).unwrap(),
                     "hello Rust plus formatter churn"
                 );
-                assert_eq!(result.data["staleRecovered"], true);
-                let mc = result.model_content.unwrap();
+                assert_eq!(crate::test_data(&result.data)["staleRecovered"], true);
+                let mc = crate::test_model_text(result.model_content.as_ref()).unwrap();
                 assert!(
                     mc.ends_with("Read it before edits that depend on surrounding content.)"),
                     "stale note missing: {mc}"
@@ -266,27 +274,27 @@ mod tests {
 
     #[test]
     fn normalize_edit_aliases_fills_canonical_keys() {
-        let mut v = json!({
+        let mut v = crate::generated_result(&json!({
             "path": "/p.txt", "old_str": "a", "new_str": "b", "replace_name": "true"
-        });
+        }));
         normalize_edit_aliases(&mut v);
-        assert_eq!(v["file_path"], "/p.txt");
-        assert_eq!(v["old_string"], "a");
-        assert_eq!(v["new_string"], "b");
-        assert_eq!(v["replace_all"], true);
+        assert_eq!(v.string_at("/file_path").as_deref(), Some("/p.txt"));
+        assert_eq!(v.string_at("/old_string").as_deref(), Some("a"));
+        assert_eq!(v.string_at("/new_string").as_deref(), Some("b"));
+        assert_eq!(v.bool_at("/replace_all"), Some(true));
     }
 
     #[test]
     fn normalize_edit_aliases_explicit_canonical_wins_and_replace_name_bool() {
-        let mut v = json!({
+        let mut v = crate::generated_result(&json!({
             "file_path": "/canon.txt", "path": "/alias.txt",
             "old_string": "x", "old_str": "y", "new_string": "z",
             "replace_name": true,
-        });
+        }));
         normalize_edit_aliases(&mut v);
-        assert_eq!(v["file_path"], "/canon.txt"); // explicit canonical wins
-        assert_eq!(v["old_string"], "x");
-        assert_eq!(v["replace_all"], true); // replace_name: true → replace_all
+        assert_eq!(v.string_at("/file_path").as_deref(), Some("/canon.txt")); // explicit canonical wins
+        assert_eq!(v.string_at("/old_string").as_deref(), Some("x"));
+        assert_eq!(v.bool_at("/replace_all"), Some(true)); // replace_name: true → replace_all
     }
 
     #[tokio::test]
@@ -301,11 +309,11 @@ mod tests {
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "world",
                     "new_string": "Rust"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -315,23 +323,23 @@ mod tests {
         // echoes the ORIGINAL input path verbatim (not canonicalized).
         let input_path = target.to_str().unwrap();
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             edit_result_message(input_path, false, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
         // Result data is the binary FileEditTool record (1:1 field set); the
         // model render rides on model_content, NOT inside data.
-        assert_eq!(result.data["filePath"], input_path);
-        assert_eq!(result.data["oldString"], "world");
-        assert_eq!(result.data["newString"], "Rust");
-        assert!(result.data["originalFile"]
+        assert_eq!(crate::test_data(&result.data)["filePath"], input_path);
+        assert_eq!(crate::test_data(&result.data)["oldString"], "world");
+        assert_eq!(crate::test_data(&result.data)["newString"], "Rust");
+        assert!(crate::test_data(&result.data)["originalFile"]
             .as_str()
             .unwrap()
             .starts_with("hello world"));
-        assert_eq!(result.data["userModified"], false);
-        assert_eq!(result.data["replaceAll"], false);
-        assert!(result.data.get("content").is_none());
-        assert!(result.data.get("replacements").is_none());
+        assert_eq!(crate::test_data(&result.data)["userModified"], false);
+        assert_eq!(crate::test_data(&result.data)["replaceAll"], false);
+        assert!(crate::test_data(&result.data).get("content").is_none());
+        assert!(crate::test_data(&result.data).get("replacements").is_none());
     }
 
     // ── Finding #16: deletion (new_string == "") consumes the trailing newline,
@@ -349,11 +357,11 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "bravo",
                 "new_string": ""
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -378,11 +386,11 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "bravo\n",
                 "new_string": ""
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -408,11 +416,11 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": " charlie",
                 "new_string": ""
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -432,12 +440,12 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "DROP",
                 "new_string": "",
                 "replace_all": true
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -494,11 +502,11 @@ mod tests {
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "anything",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -532,11 +540,11 @@ mod tests {
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "anything",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -590,11 +598,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": "//server/share/file.txt",
                     "old_string": "a",
                     "new_string": "b"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -649,11 +657,11 @@ that bypasses Perforce tracking."
             let tool = FileEditTool::new(ctx);
             let err = tool
                 .call(
-                    json!({
+                    crate::generated_result(&json!({
                         "file_path": target.to_str().unwrap(),
                         "old_string": "bravo",
                         "new_string": "delta"
-                    }),
+                    })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
@@ -673,11 +681,11 @@ that bypasses Perforce tracking."
             let tool = FileEditTool::new(ctx);
             let err = tool
                 .call(
-                    json!({
+                    crate::generated_result(&json!({
                         "file_path": target.to_str().unwrap(),
                         "old_string": "bravo",
                         "new_string": "delta"
-                    }),
+                    })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
@@ -697,11 +705,11 @@ that bypasses Perforce tracking."
             let tool = FileEditTool::new(ctx);
             let err = tool
                 .call(
-                    json!({
+                    crate::generated_result(&json!({
                         "file_path": target.to_str().unwrap(),
                         "old_string": "bravo",
                         "new_string": "delta"
-                    }),
+                    })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
@@ -738,11 +746,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let _result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "",
                     "new_string": "brand new contents\n"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -764,11 +772,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -790,11 +798,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "",
                 "new_string": "seeded"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -813,11 +821,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "cells",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -837,11 +845,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "hello",
                     "new_string": "hello"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -858,11 +866,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "x",
                     "new_string": "y"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -893,11 +901,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "foo",
                     "new_string": "bar"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -907,8 +915,10 @@ that bypasses Perforce tracking."
         // TS `matches`, trailing `String:` echoes the original `old_string`.
         match err {
             ToolError::InvalidInput(m) => assert_eq!(
-                m,
-                "Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: foo"
+                m.string_at(""),
+                Some(
+                    "Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: foo"
+                )
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -925,12 +935,12 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "foo",
                     "new_string": "bar",
                     "replace_all": true
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -940,7 +950,7 @@ that bypasses Perforce tracking."
         // replaced." message verbatim to the model.
         let input_path = target.to_str().unwrap();
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             edit_result_message(input_path, true, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "bar bar bar");
@@ -956,11 +966,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "absent",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -971,8 +981,12 @@ that bypasses Perforce tracking."
         // old_string ⇒ `pUa` false ⇒ NO escape-swap note appended.
         match err {
             ToolError::InvalidInput(m) => {
-                assert_eq!(m, "String to replace not found in file.\nString: absent");
-                assert!(!m.contains("tried swapping"));
+                let message = m.string_at("").unwrap();
+                assert_eq!(
+                    message,
+                    "String to replace not found in file.\nString: absent"
+                );
+                assert!(!message.contains("tried swapping"));
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -991,11 +1005,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "café",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1003,11 +1017,12 @@ that bypasses Perforce tracking."
             .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
+                let message = m.string_at("").unwrap();
                 assert_eq!(
-                    m,
+                    message,
                     format!("String to replace not found in file.\nString: café{ESCAPE_SWAP_NOTE}")
                 );
-                assert!(m.contains("tried swapping"));
+                assert!(message.contains("tried swapping"));
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1025,11 +1040,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "x\\u00e9y",
                     "new_string": "z"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1037,8 +1052,11 @@ that bypasses Perforce tracking."
             .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
-                assert!(m.contains("tried swapping"));
-                assert!(m.starts_with("String to replace not found in file.\nString: x\\u00e9y"));
+                let message = m.string_at("").unwrap();
+                assert!(message.contains("tried swapping"));
+                assert!(
+                    message.starts_with("String to replace not found in file.\nString: x\\u00e9y")
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1055,11 +1073,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "caf\\u00e9",
                 "new_string": "latte"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1080,11 +1098,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "é",
                 "new_string": "E"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1108,20 +1126,19 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "L",
                     "new_string": "M",
                     "replace_all": true
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        let sp = result.data["structuredPatch"]
-            .as_array()
-            .expect("hunk array");
+        let data = crate::test_data(&result.data);
+        let sp = data["structuredPatch"].as_array().expect("hunk array");
         assert!(!sp.is_empty(), "expected at least one hunk");
         let h0 = &sp[0];
         assert!(h0["oldStart"].is_number());
@@ -1147,12 +1164,12 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 // Matches across the CRLF that was normalized to LF.
                 "old_string": "line one\nline two",
                 "new_string": "first\nsecond"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1179,11 +1196,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "world",
                 "new_string": "Rust"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1207,11 +1224,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "EDITME",
                 "new_string": "done"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1233,11 +1250,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "\"hello\"",
                 "new_string": "\"world\""
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1262,11 +1279,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "'b'",
                 "new_string": "don't"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1289,11 +1306,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "'q'",
                 "new_string": "'word'"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1316,11 +1333,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "\"hello\"",
                 "new_string": "\"world\""
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1346,11 +1363,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "world",
                     "new_string": "Rust"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1359,7 +1376,9 @@ that bypasses Perforce tracking."
         // ToolError::Display prefixes "invalid input: "; assert the exact
         // byte-locked message on the InvalidInput payload.
         match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m.string_at(""), Some(crate::FILE_NOT_READ_ERROR));
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // File untouched.
@@ -1379,6 +1398,7 @@ that bypasses Perforce tracking."
         std::fs::write(&target, "a\nb\nc\n").unwrap();
         set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(&target).unwrap();
         let mtime_ms = std::fs::metadata(&canon)
             .ok()
@@ -1387,7 +1407,7 @@ that bypasses Perforce tracking."
         // Seed a PARTIAL read (offset/limit set) — a ranged view, not a full one.
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content: "a\nb\nc\n".into(),
                 mtime_ms,
@@ -1402,11 +1422,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let res = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "b",
                     "new_string": "B"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1414,6 +1434,42 @@ that bypasses Perforce tracking."
             .expect("ranged read + unchanged mtime must let the edit proceed");
         assert!(!res.is_error);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nB\nc\n");
+    }
+
+    #[tokio::test]
+    async fn actual_read_then_edit_uses_the_normalized_session_route_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "old text\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let state = ctx.read_file_state.clone();
+        let input_path = "nested/../source.txt";
+        let route = crate::normalize_model_file_path(input_path, &ctx.cwd());
+
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                crate::generated_result(&json!({ "file_path": input_path })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read succeeds through the active session cwd");
+        assert!(tool_api::read_file_state::get(&state, &route).is_some());
+
+        FileEditTool::new(ctx)
+            .call(
+                crate::generated_result(&json!({
+                    "file_path": input_path,
+                    "old_string": "old text",
+                    "new_string": "new text"
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Edit looks up the same Native lexical route that Read recorded");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new text\n");
     }
 
     #[tokio::test]
@@ -1434,11 +1490,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "tampered",
                     "new_string": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1448,7 +1504,12 @@ that bypasses Perforce tracking."
             // FT-07: stale-changed-content returns the oracle's
             // `validateInput` errorCode-7 literal (cc-238.js @226407883),
             // not the call-phase race sentence `WVo`.
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(
+                    m.string_at(""),
+                    Some(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+                );
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // Edit refused → file left as the external content.
@@ -1471,11 +1532,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let _result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "keep me",
                     "new_string": "edited"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1495,11 +1556,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "alpha",
                 "new_string": "ALPHA"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1509,11 +1570,11 @@ that bypasses Perforce tracking."
         // the guard for the second edit.
         let _result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "old_string": "beta",
                     "new_string": "BETA"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1531,11 +1592,11 @@ that bypasses Perforce tracking."
         seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": target.to_str().unwrap(),
                 "old_string": "beta",
                 "new_string": "BETA"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1555,7 +1616,7 @@ that bypasses Perforce tracking."
         // body — the long body lives in prompt().
         let d = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1572,8 +1633,11 @@ that bypasses Perforce tracking."
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert!(long.starts_with(
             "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
         ));
@@ -1606,8 +1670,11 @@ that bypasses Perforce tracking."
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(p, EDIT_PROMPT_SHORT);
         assert!(p.starts_with("Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail."));
         // Line-prefix slot resolves to "line number + tab" (N$e() default false).
@@ -1637,11 +1704,11 @@ that bypasses Perforce tracking."
 
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": "rel.txt",
                 "old_string": "world",
                 "new_string": "worktree"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1674,11 +1741,11 @@ that bypasses Perforce tracking."
 
         let tool = FileEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "file_path": "rel.txt",
                 "old_string": "world",
                 "new_string": "boot"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1701,11 +1768,11 @@ that bypasses Perforce tracking."
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
-                serde_json::json!({
+                crate::generated_result(&serde_json::json!({
                     "file_path": "/fenced/config.txt",
                     "old_string": "a",
                     "new_string": "b"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1713,7 +1780,7 @@ that bypasses Perforce tracking."
             .unwrap_err();
         match err {
             ToolError::InvalidInput(message) => {
-                assert!(message.contains("not host-backed"), "{message}");
+                assert!(message.string_at("").unwrap().contains("not host-backed"));
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }

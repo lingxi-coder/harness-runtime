@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use command_api::{CommandRegistry, SlashCommand, SlashCommandKind};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader};
@@ -51,7 +52,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             effort: frontmatter.effort.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
-            argument_names: frontmatter.argument_names.clone(),
+            argument_names: cmd.argument_names.clone(),
             // SKILLEXEC.6: forward the frontmatter `shell` selector so embedded
             // `!command` expansion routes through the author's chosen shell.
             shell: frontmatter.shell,
@@ -87,7 +88,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
         } => SkillDescriptor {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
-            body: String::new(),
+            body: "".into(),
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
@@ -173,17 +174,18 @@ impl CommandRegistrySkillLoader {
 
 #[async_trait::async_trait]
 impl SkillLoader for CommandRegistrySkillLoader {
-    async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+    async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError> {
         // `resolve` follows aliases (TS `findCommand` over name + aliases).
         let reg = self.registry.read().await;
         Ok(reg
             .resolve(name)
+            .filter(|cmd| reg.session_skill_allowed(cmd))
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
 
-    async fn skill_invoked(&self, name: &str) {
+    async fn skill_invoked(&self, name: &Utf16JsonProjection) {
         if let Some(observer) = self.invocation_observer.as_ref() {
-            observer(name.to_string()).await;
+            observer(name.clone()).await;
         }
     }
 
@@ -191,9 +193,13 @@ impl SkillLoader for CommandRegistrySkillLoader {
     /// point at a plugin-qualified `some-plugin:foo`. Only names are exposed —
     /// the suggestion never needs a descriptor, and building them all would
     /// touch disk for a path that is already an error.
-    async fn list_names(&self) -> Vec<String> {
+    async fn list_names(&self) -> Vec<Utf16JsonProjection> {
         let reg = self.registry.read().await;
-        reg.list_all().iter().map(|cmd| cmd.name.clone()).collect()
+        reg.list_all()
+            .iter()
+            .filter(|cmd| reg.session_skill_allowed(cmd))
+            .map(|cmd| cmd.name.clone())
+            .collect()
     }
 }
 
@@ -205,18 +211,19 @@ mod tests {
 
     fn markdown_cmd(name: &str, body: &str) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
-            description: format!("{name} description"),
+            name: name.to_string().into(),
+            description: format!("{name} description").into(),
+            argument_names: vec!["name".into()],
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from(format!("/x/{name}.md")),
                 frontmatter: CommandFrontmatter {
                     model: Some("opus".to_string()),
                     allowed_tools: Some(vec!["Bash".to_string()]),
-                    argument_names: vec!["name".to_string()],
+                    argument_names: vec!["name".into()],
                     ..CommandFrontmatter::default()
                 },
-                prompt_template: body.to_string(),
+                prompt_template: body.into(),
             },
             ..SlashCommand::default()
         }
@@ -229,18 +236,92 @@ mod tests {
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
 
         let desc = loader
-            .load("review-pr")
+            .load(&"review-pr".into())
             .await
             .expect("load ok")
             .expect("command present");
-        assert_eq!(desc.name, "review-pr");
-        assert_eq!(desc.description, "review-pr description");
-        assert_eq!(desc.body, "Review $ARGUMENTS");
+        assert_eq!(desc.name.string_at(""), Some("review-pr"));
+        assert_eq!(
+            desc.description.string_at(""),
+            Some("review-pr description")
+        );
+        assert_eq!(desc.body.string_at(""), Some("Review $ARGUMENTS"));
         assert_eq!(desc.command_type, SkillCommandType::Prompt);
         assert_eq!(desc.model.as_deref(), Some("opus"));
         assert_eq!(desc.allowed_tools, vec!["Bash".to_string()]);
-        assert_eq!(desc.argument_names, vec!["name".to_string()]);
+        assert_eq!(
+            desc.argument_names
+                .iter()
+                .map(|name| name.string_at(""))
+                .collect::<Vec<_>>(),
+            vec![Some("name")]
+        );
         assert!(!desc.disable_model_invocation);
+    }
+
+    #[tokio::test]
+    async fn preserves_exact_command_name_and_description_units_in_skill_descriptor() {
+        let raw_name =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xd800]), vec![0xd800])
+                .expect("exact command name fixture");
+        let raw_description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&[b'd' as u16, 0xdfff]),
+            vec![b'd' as u16, 0xdfff],
+        )
+        .expect("exact description fixture");
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: raw_name.clone(),
+            description: raw_description.clone(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/x/exact.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: Utf16JsonProjection::parse(r#""body\ud800 $ARGUMENTS""#).unwrap(),
+            },
+            ..SlashCommand::default()
+        });
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(registry)));
+        let descriptor = loader
+            .load(&raw_name)
+            .await
+            .expect("load succeeds")
+            .expect("exact Source name resolves");
+        assert_eq!(
+            descriptor.body.string_units(""),
+            Utf16JsonProjection::parse(r#""body\ud800 $ARGUMENTS""#)
+                .unwrap()
+                .string_units("")
+        );
+        assert_eq!(descriptor.name.string_units(""), raw_name.string_units(""));
+        assert_eq!(
+            descriptor.description.string_units(""),
+            raw_description.string_units("")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skill_grants_filter_load_and_names_without_hiding_manual_commands() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(markdown_cmd("verify", "body"));
+        registry.register_command(markdown_cmd("simplify", "body"));
+        registry.set_session_skill_allowlist(Some(vec!["verify".to_string()]));
+        let registry = Arc::new(RwLock::new(registry));
+        let loader = CommandRegistrySkillLoader::new(registry.clone());
+        assert!(loader.load(&"verify".into()).await.unwrap().is_some());
+        assert!(loader.load(&"simplify".into()).await.unwrap().is_none());
+        assert_eq!(
+            loader
+                .list_names()
+                .await
+                .iter()
+                .map(|name| name.string_at(""))
+                .collect::<Vec<_>>(),
+            vec![Some("verify")]
+        );
+        assert!(registry.read().await.resolve(&"simplify".into()).is_some());
+        registry.write().await.set_session_skill_allowlist(None);
+        assert!(loader.load(&"simplify".into()).await.unwrap().is_some());
     }
 
     /// A skill's declared `effort` must reach the descriptor.
@@ -262,7 +343,7 @@ mod tests {
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
 
         let declared = loader
-            .load("deep-review")
+            .load(&"deep-review".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -273,7 +354,7 @@ mod tests {
         );
 
         let undeclared = loader
-            .load("plain")
+            .load(&"plain".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -287,15 +368,19 @@ mod tests {
     async fn unregistered_name_resolves_to_none() {
         let reg = CommandRegistry::new();
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
-        assert!(loader.load("nope").await.expect("load ok").is_none());
+        assert!(loader
+            .load(&"nope".into())
+            .await
+            .expect("load ok")
+            .is_none());
     }
 
     #[tokio::test]
     async fn builtin_command_maps_to_non_prompt_other() {
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "help".to_string(),
-            description: "Show help".to_string(),
+            name: "help".into(),
+            description: "Show help".into(),
             source: CommandSource::Builtin,
             kind: SlashCommandKind::Builtin {
                 handler_id: "help".to_string(),
@@ -304,7 +389,7 @@ mod tests {
         });
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let desc = loader
-            .load("help")
+            .load(&"help".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -321,7 +406,7 @@ mod tests {
             "sess:test-1".to_string(),
         );
         let desc = loader
-            .load("dir-skill")
+            .load(&"dir-skill".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -338,7 +423,7 @@ mod tests {
         reg.register_command(cmd);
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let desc = loader
-            .load("dir-skill")
+            .load(&"dir-skill".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -356,7 +441,7 @@ mod tests {
         // `new` wires no session id.
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let desc = loader
-            .load("plain")
+            .load(&"plain".into())
             .await
             .expect("load ok")
             .expect("present");
@@ -369,14 +454,16 @@ mod tests {
         use command_api::BundledPromptFn;
         struct B;
         impl BundledPromptFn for B {
-            fn build(&self, args: &str) -> String {
-                format!("built:{args}")
+            fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+                let mut units = "built:".encode_utf16().collect::<Vec<_>>();
+                units.extend(args.string_units("").unwrap());
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap()
             }
         }
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "loop".to_string(),
-            description: "loopy".to_string(),
+            name: "loop".into(),
+            description: "loopy".into(),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
@@ -391,16 +478,16 @@ mod tests {
         });
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let desc = loader
-            .load("loop")
+            .load(&"loop".into())
             .await
             .expect("load ok")
             .expect("present");
         assert_eq!(desc.command_type, SkillCommandType::Prompt);
-        assert_eq!(desc.description, "loopy");
+        assert_eq!(desc.description.string_at(""), Some("loopy"));
         assert_eq!(desc.model.as_deref(), Some("opus"));
         assert_eq!(desc.allowed_tools, vec!["CronCreate".to_string()]);
         let builder = desc.dynamic_body.as_ref().expect("dynamic_body carried");
-        assert_eq!(builder.build("x"), "built:x");
+        assert_eq!(builder.build(&"x".into()).string_at(""), Some("built:x"));
     }
 
     #[tokio::test]
@@ -411,7 +498,7 @@ mod tests {
         reg.register_command(cmd);
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let desc = loader
-            .load("internal")
+            .load(&"internal".into())
             .await
             .expect("load ok")
             .expect("present");

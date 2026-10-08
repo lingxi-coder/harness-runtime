@@ -39,6 +39,13 @@ impl BackgroundExitSink for AdoptedExitSink {
             )
             .await;
     }
+    async fn on_background_deadline_exit(&self, id: &str, code: Option<i32>) {
+        if self.wait_until_activated().await {
+            if let Some(registry) = self.status.task_registry() {
+                let _ = registry.settle_background_bash_deadline(id, code).await;
+            }
+        }
+    }
     async fn on_stall(&self, id: &str, tail: &str) {
         if self.wait_until_activated().await {
             if let Some(registry) = self.status.task_registry() {
@@ -391,7 +398,7 @@ impl TaskRegistry {
                 if allocated { self.output_manager.adopt_output(&output, std::path::Path::new(&record.process.output_path)).await.map_err(|error| TaskError::Io(error.to_string()))?; }
                 self.mark_shell_supervised(&record.task_id).await;
                 let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
-                    is_adopted: true, caller: record.caller.clone(), command: record.command.clone(),
+                    is_adopted: true, stop_cause: None, caller: record.caller.clone(), command: record.command.clone(),
                     pid: Some(record.process.pid), exit_code: None, cwd: record.cwd.clone(), is_backgrounded: Some(true),
                     base: TaskStateBase {
                         id: record.task_id.clone(), task_type: TaskType::LocalBash, status: TaskStatus::Running,

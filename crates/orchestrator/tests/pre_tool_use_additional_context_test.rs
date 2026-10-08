@@ -119,8 +119,11 @@ impl Tool for EchoTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "echo".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -213,7 +216,7 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -271,7 +274,7 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
     let found_separate = s.history.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(|b| {
             matches!(
-            b, ContentBlock::Text { text } if text == expected)
+            b, ContentBlock::Text { text, .. } if text == expected)
         }),
         _ => false,
     });

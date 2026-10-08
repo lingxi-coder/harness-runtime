@@ -3705,7 +3705,7 @@ mod tests {
         // The detached native stop can finish after teardown. Its generation
         // and handle no longer match the registry, so it must not resurrect it.
         stop_gate.notify_one();
-        let _ = timeout(Duration::from_secs(2), stopping)
+        timeout(Duration::from_secs(2), stopping)
             .await
             .expect("in-flight stop settles after teardown")
             .expect("manual-stop request task joins");

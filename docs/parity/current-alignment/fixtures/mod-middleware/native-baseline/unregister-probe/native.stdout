@@ -1,0 +1,8 @@
+
+unregister.test.ts:
+(fail) probe on() subscription disposer policy [12.36ms]
+  HooksError: native-mod-unregister-probe: hooks module did not load: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/mod-middleware/run-output/unregister-probe/hooks/register.js:2: the value of on("session.append") is kept (assigned, passed, read, or returned from a nested function); it takes .catch(handler) where it is called and nothing else; $ is always spelled $.noun.event(...) at the call site, on is always on("<event>", hook), and next.to always next.to(e, "<tier>")
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [0.14s]

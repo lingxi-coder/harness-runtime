@@ -77,7 +77,7 @@ pub fn truncate_head_for_ptl_retry(
             is_meta: true,
             content,
             ..
-        }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text }] if text == PTL_RETRY_MARKER) => {
+        }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text, .. }] if text == PTL_RETRY_MARKER) => {
             &messages[1..]
         }
         _ => &messages[..],
@@ -149,10 +149,14 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: tool.into(),
-                input: json!({}),
+                input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &json!({}),
+                )
+                .expect("empty object is valid JSON"),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -162,13 +166,17 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 

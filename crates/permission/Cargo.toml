@@ -12,6 +12,7 @@ telemetry = { path = "../telemetry" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+indexmap.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "io-std", "fs"] }
 tracing.workspace = true

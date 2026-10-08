@@ -20,6 +20,7 @@
 //! ([`crate::schedule::CronExpression::next_match_after`]).
 
 use lingxi_core::host::{FileSystem, FlockGuard, FsError};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -85,8 +86,9 @@ pub struct CronTask {
     pub id: String,
     /// 5-field cron expression (local time).
     pub cron: String,
-    /// Prompt enqueued at each fire time.
-    pub prompt: String,
+    /// Prompt enqueued at each fire time, preserving its JSON string code units.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub prompt: Utf16JsonProjection,
     /// Creation time, epoch **milliseconds**.
     pub created_at: u64,
     /// Last fire time, epoch **milliseconds**. Omitted until the job first
@@ -271,7 +273,7 @@ pub struct UnmodeledTask {
     /// Index of this entry in the `tasks` array it was read from.
     pub index: usize,
     /// The entry exactly as it appeared on disk.
-    pub raw: serde_json::Value,
+    pub raw: Utf16JsonProjection,
 }
 
 /// Absolute path to the SESSION cron tasks file for `project_root`
@@ -373,30 +375,16 @@ pub async fn write_tasks_body(
     body: &str,
 ) -> Result<(), FsError> {
     // The session cron envelope contains only upstream fields: task-center
-    // configuration never leaks into this store. Records this parser could not
-    // model DO survive — `ScheduledTasks::unmodeled` exists precisely so a
-    // malformed sibling does not evaporate the first time another task fires.
+    // configuration never leaks into this store. Source projections keep prompt
+    // strings and skipped siblings exact across this read-modify-write.
     let document = parse_tasks(body);
-    let mut entries: Vec<_> = document
-        .tasks
-        .iter()
-        .filter(|task| task.automation.is_none())
-        .map(|task| {
-            let mut value = serde_json::to_value(task).expect("serializable cron task");
-            if let Some(object) = value.as_object_mut() {
-                object.remove("sessionId");
-                object.remove("expiresAt");
-            }
-            value
+    let output = task_document(task_document_entries(&document, true))
+        .and_then(|projection| projection.to_pretty_json_string())
+        .map(|mut body| {
+            body.push('\n');
+            body
         })
-        .collect();
-    for skipped in &document.unmodeled {
-        let at = skipped.index.min(entries.len());
-        entries.insert(at, skipped.raw.clone());
-    }
-    let output = serde_json::to_string_pretty(&serde_json::json!({"tasks": entries}))
-        .map_err(|error| FsError::Io(error.to_string()))?
-        + "\n";
+        .map_err(|error| FsError::Io(error.to_string()))?;
     fs.write_file_rooted_atomic(
         project_root,
         &Path::new(".claude").join(SCHEDULED_TASKS_FILE),
@@ -425,14 +413,64 @@ pub async fn write_automation_tasks_body(
         .await
 }
 
-fn javascript_truthy(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::Bool(value) => *value,
-        serde_json::Value::Number(value) => value.as_f64().is_some_and(|n| n != 0.0),
-        serde_json::Value::String(value) => !value.is_empty(),
-        _ => true,
+fn javascript_truthy(value: JsonValueView<'_>) -> bool {
+    if value.is_null() {
+        return false;
     }
+    if let Some(value) = value.as_bool() {
+        return value;
+    }
+    if let Some(value) = value.as_number() {
+        return value != 0.0 && !value.is_nan();
+    }
+    if let Some(units) = value.code_units() {
+        return !units.is_empty();
+    }
+    true
+}
+
+fn source_string(value: Option<JsonValueView<'_>>) -> Option<String> {
+    String::from_utf16(value?.code_units()?).ok()
+}
+
+fn source_number(value: Option<JsonValueView<'_>>) -> Option<f64> {
+    value?.as_number()
+}
+
+fn task_projection(task: &CronTask) -> Utf16JsonProjection {
+    let json = serde_json::to_string(task).expect("serializable cron task");
+    Utf16JsonProjection::parse(&json).expect("serialized cron task is valid JSON")
+}
+
+fn task_document(
+    entries: Vec<Utf16JsonProjection>,
+) -> Result<Utf16JsonProjection, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    let tasks = Utf16JsonProjection::array(entries)?;
+    Utf16JsonProjection::object(vec![("tasks".to_owned(), tasks)])
+}
+
+fn task_document_entries(
+    document: &ScheduledTasks,
+    session_file: bool,
+) -> Vec<Utf16JsonProjection> {
+    let mut entries: Vec<_> = document
+        .tasks
+        .iter()
+        .filter(|task| !session_file || task.automation.is_none())
+        .map(|task| {
+            let mut projection = task_projection(task);
+            if session_file {
+                let _ = projection.remove_field("sessionId");
+                let _ = projection.remove_field("expiresAt");
+            }
+            projection
+        })
+        .collect();
+    for skipped in &document.unmodeled {
+        let at = skipped.index.min(entries.len());
+        entries.insert(at, skipped.raw.clone());
+    }
+    entries
 }
 
 /// Parse a tasks-file body into [`ScheduledTasks`] the way claude-code's
@@ -468,108 +506,120 @@ pub fn parse_automation_tasks_strict(body: &str) -> Result<ScheduledTasks, Strin
 }
 
 fn parse_tasks_document(body: &str, task_center: bool) -> Result<ScheduledTasks, String> {
-    let doc = serde_json::from_str::<serde_json::Value>(body).map_err(|e| e.to_string())?;
-    let Some(entries) = doc.get("tasks").and_then(serde_json::Value::as_array) else {
+    let document = Utf16JsonProjection::parse(body).map_err(|error| error.to_string())?;
+    let Some(entries) = document.get_property("tasks") else {
         return Err("expected an object with a `tasks` array".to_string());
     };
-    let mut unmodeled: Vec<UnmodeledTask> = Vec::new();
-    let tasks = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| {
-            let mut skip = |entry: &serde_json::Value| {
-                unmodeled.push(UnmodeledTask {
-                    index,
-                    raw: entry.clone(),
-                });
-            };
-            let (Some(id), Some(cron), Some(prompt), Some(created_at)) = (
-                entry.get("id").and_then(serde_json::Value::as_str),
-                entry.get("cron").and_then(serde_json::Value::as_str),
-                entry.get("prompt").and_then(serde_json::Value::as_str),
-                entry.get("createdAt").and_then(serde_json::Value::as_f64),
-            ) else {
-                tracing::warn!("[ScheduledTasks] skipping malformed task: {entry}");
-                skip(entry);
-                return None;
-            };
-            if crate::schedule::parse_cron(cron).is_err() {
-                tracing::warn!("[ScheduledTasks] skipping task {id} with invalid cron '{cron}'");
-                skip(entry);
-                return None;
-            }
-            // A present-but-non-positive `expiresAt` is NOT an expiry instant:
-            // `0` / a negative / `NaN` would normalise to `Some(0)`, which every
-            // reader tests as `expiry <= now` and deletes the task. Treat those
-            // the way `lastFiredAt` is treated downstream — as absent.
-            let ms = |v: f64| {
-                if v.is_finite() && v > 0.0 {
-                    v as u64
-                } else {
-                    0
-                }
-            };
-            let automation = match entry.get("automation").filter(|value| !value.is_null()) {
-                Some(value) => {
-                    match serde_json::from_value::<crate::automation::CronAutomation>(value.clone())
-                    {
-                        Ok(config) if config.version == 2 => Some(config),
-                        _ => {
-                            skip(entry);
-                            return None;
-                        }
+    let Some(entry_count) = entries.array_len() else {
+        return Err("expected an object with a `tasks` array".to_string());
+    };
+    let mut unmodeled = Vec::new();
+    let mut tasks = Vec::with_capacity(entry_count);
+    for index in 0..entry_count {
+        let pointer = format!("/tasks/{index}");
+        let Ok(entry) = document.subprojection(&pointer) else {
+            continue;
+        };
+        let mut skip = || {
+            unmodeled.push(UnmodeledTask {
+                index,
+                raw: entry.clone(),
+            });
+        };
+        let invalid = || entry.to_json_string().unwrap_or_default();
+        let Some(id) = source_string(entry.get_property("id")) else {
+            tracing::warn!("[ScheduledTasks] skipping malformed task: {}", invalid());
+            skip();
+            continue;
+        };
+        let Some(cron) = source_string(entry.get_property("cron")) else {
+            tracing::warn!("[ScheduledTasks] skipping malformed task: {}", invalid());
+            skip();
+            continue;
+        };
+        let Some(prompt_value) = entry.get_property("prompt") else {
+            tracing::warn!("[ScheduledTasks] skipping malformed task: {}", invalid());
+            skip();
+            continue;
+        };
+        if prompt_value.as_str().is_none() {
+            tracing::warn!("[ScheduledTasks] skipping malformed task: {}", invalid());
+            skip();
+            continue;
+        }
+        let Some(created_at) = source_number(entry.get_property("createdAt")) else {
+            tracing::warn!("[ScheduledTasks] skipping malformed task: {}", invalid());
+            skip();
+            continue;
+        };
+        if crate::schedule::parse_cron(&cron).is_err() {
+            tracing::warn!("[ScheduledTasks] skipping task {id} with invalid schedule '{cron}'");
+            skip();
+            continue;
+        }
+        let prompt = entry
+            .subprojection("/prompt")
+            .map_err(|error| error.to_string())?;
+        let automation = match entry.get_property("automation") {
+            Some(value) if !value.is_null() => {
+                let config = entry
+                    .subprojection("/automation")
+                    .and_then(|projection| projection.to_json_string())
+                    .ok()
+                    .and_then(|source| {
+                        serde_json::from_str::<crate::automation::CronAutomation>(&source).ok()
+                    });
+                match config.filter(|config| config.version == 2) {
+                    Some(config) => Some(config),
+                    None => {
+                        skip();
+                        continue;
                     }
                 }
-                None => None,
-            };
-            let is_automation = task_center || automation.is_some();
-            Some(CronTask {
-                creator: CronTaskCreator {
-                    created_by_session_id: entry
-                        .get("createdBySessionId")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    created_by_pid: entry
-                        .get("createdByPid")
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|pid| u32::try_from(pid).ok()),
-                    created_by_proc_start: entry
-                        .get("createdByProcStart")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                },
-                automation,
-                id: id.to_string(),
-                cron: cron.to_string(),
-                prompt: prompt.to_string(),
-                created_at: ms(created_at),
-                last_fired_at: entry
-                    .get("lastFiredAt")
-                    .and_then(serde_json::Value::as_f64)
-                    .map(ms),
-                // claude-code normalises `recurring` / `permanent` to present-only-when-true.
-                recurring: entry
-                    .get("recurring")
-                    .filter(|value| javascript_truthy(value))
-                    .map(|_| true),
-                permanent: entry
-                    .get("permanent")
-                    .filter(|value| javascript_truthy(value))
-                    .map(|_| true),
-                expires_at: entry
-                    .get("expiresAt")
-                    .filter(|_| is_automation)
-                    .and_then(serde_json::Value::as_f64)
-                    .filter(|v| v.is_finite() && *v > 0.0)
-                    .map(ms),
-                session_id: entry
-                    .get("sessionId")
-                    .filter(|_| is_automation)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            })
-        })
-        .collect();
+            }
+            _ => None,
+        };
+        let is_automation = task_center || automation.is_some();
+        let ms = |value: f64| {
+            if value.is_finite() && value > 0.0 {
+                value as u64
+            } else {
+                0
+            }
+        };
+        tasks.push(CronTask {
+            creator: CronTaskCreator {
+                created_by_session_id: source_string(entry.get_property("createdBySessionId")),
+                created_by_pid: source_number(entry.get_property("createdByPid"))
+                    .filter(|pid| pid.is_finite() && *pid >= 0.0 && pid.fract() == 0.0)
+                    .map(|pid| pid as u64)
+                    .and_then(|pid| u32::try_from(pid).ok()),
+                created_by_proc_start: source_string(entry.get_property("createdByProcStart")),
+            },
+            automation,
+            id,
+            cron,
+            prompt,
+            created_at: ms(created_at),
+            last_fired_at: source_number(entry.get_property("lastFiredAt")).map(ms),
+            // claude-code normalises `recurring` / `permanent` to present-only-when-true.
+            recurring: entry
+                .get_property("recurring")
+                .filter(|value| javascript_truthy(*value))
+                .map(|_| true),
+            permanent: entry
+                .get_property("permanent")
+                .filter(|value| javascript_truthy(*value))
+                .map(|_| true),
+            expires_at: entry
+                .get_property("expiresAt")
+                .filter(|_| is_automation)
+                .and_then(|value| value.as_number())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(ms),
+            session_id: source_string(entry.get_property("sessionId")).filter(|_| is_automation),
+        });
+    }
     Ok(ScheduledTasks { tasks, unmodeled })
 }
 
@@ -585,28 +635,13 @@ fn parse_tasks_document(body: &str, task_center: bool) -> Result<ScheduledTasks,
 #[must_use]
 pub fn serialize_tasks(tasks: &ScheduledTasks) -> String {
     let fallback = || String::from("{\n  \"tasks\": []\n}");
-    let mut s = if tasks.unmodeled.is_empty() {
-        // `serde_json::to_string_pretty` uses a 2-space indent (matching
-        // `JSON.stringify(_, null, 2)`).
-        serde_json::to_string_pretty(tasks).unwrap_or_else(|_| fallback())
-    } else {
-        let mut entries: Vec<serde_json::Value> = tasks
-            .tasks
-            .iter()
-            .map(|task| serde_json::to_value(task).unwrap_or(serde_json::Value::Null))
-            .collect();
-        // Ascending by recorded index (the order `parse_tasks_strict` collects
-        // them in), clamped because the modeled tasks may have shrunk or grown.
-        for skipped in &tasks.unmodeled {
-            let at = skipped.index.min(entries.len());
-            entries.insert(at, skipped.raw.clone());
-        }
-        serde_json::to_string_pretty(&serde_json::json!({ "tasks": entries }))
-            .unwrap_or_else(|_| fallback())
-    };
-    // The trailing newline claude-code adds.
-    s.push('\n');
-    s
+    task_document(task_document_entries(tasks, false))
+        .and_then(|projection| projection.to_pretty_json_string())
+        .map(|mut body| {
+            body.push('\n');
+            body
+        })
+        .unwrap_or_else(|_| fallback())
 }
 
 #[cfg(test)]
@@ -715,6 +750,22 @@ mod tests {
         assert!(!s.contains("agentId"));
         // Round-trips exactly.
         assert_eq!(parse_tasks(&s), doc);
+    }
+
+    #[test]
+    fn persisted_prompt_keeps_lone_utf16_units_through_read_modify_write() {
+        let body =
+            r#"{"tasks":[{"id":"d12345678","cron":"* * * * *","prompt":"\ud800x","createdAt":1}]}"#;
+        let expected = Utf16JsonProjection::parse(r#""\ud800x""#).unwrap();
+        let parsed = parse_tasks_strict(body).unwrap();
+        assert_eq!(parsed.tasks.len(), 1);
+        assert_eq!(parsed.tasks[0].prompt, expected);
+
+        let serialized = serialize_tasks(&parsed);
+        assert!(serialized.contains(r#""prompt": "\ud800x""#));
+        let reloaded = parse_tasks_strict(&serialized).unwrap();
+        assert_eq!(reloaded.tasks[0].prompt, expected);
+        assert_eq!(reloaded, parsed);
     }
 
     #[test]

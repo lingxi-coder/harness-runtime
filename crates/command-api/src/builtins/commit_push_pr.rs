@@ -21,9 +21,12 @@
 //!   non-undercover default values.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{
+    source_concat, trim_source_text, BuiltinCommandHandler, CommandResult, PromptPart,
+};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Per-command allowed-tools for `/commit-push-pr`, verbatim from the TS
 /// `commit-push-pr.ts:10-23` `ALLOWED_TOOLS`. Injected into a fresh per-command
@@ -151,14 +154,21 @@ Return the PR URL when you're done, so the user can see it.",
 #[async_trait]
 impl BuiltinCommandHandler for CommitPushPrHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let mut content = build_prompt();
-
         // TS: append user instructions if args provided (trimmed, non-empty).
-        let trimmed = args.raw_args.trim();
-        if !trimmed.is_empty() {
-            content.push_str("\n\n## Additional instructions from user\n\n");
-            content.push_str(trimmed);
-        }
+        let trimmed = trim_source_text(&args.raw_args);
+        let content: Utf16JsonProjection = if trimmed
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
+            build_prompt().into()
+        } else {
+            let base = build_prompt();
+            source_concat([
+                PromptPart::Text(&base),
+                PromptPart::Text("\n\n## Additional instructions from user\n\n"),
+                PromptPart::Source(&trimmed),
+            ])
+        };
 
         CommandResult::InjectMessage { content }
     }
@@ -179,11 +189,12 @@ impl BuiltinCommandHandler for CommitPushPrHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "commit-push-pr".to_string(),
-            raw_args: raw.to_string(),
+            name: "commit-push-pr".into(),
+            raw_args: raw.into(),
             positional_args: vec![],
         }
     }

@@ -15,7 +15,6 @@ presentation = [
     "dep:pulldown-cmark",
     "dep:similar",
     "dep:tool-api",
-    "dep:serde_json",
 ]
 adapter = [
     "presentation",
@@ -51,7 +50,7 @@ orchestrator = { path = "../orchestrator", optional = true }
 async-trait = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -59,7 +58,6 @@ syn = { version = "2", features = ["full", "visit"] }
 insta = { version = "1.40", features = ["yaml"] }
 uuid = { version = "1.10", features = ["v4"] }
 llm-runtime = { path = "../llm-runtime" }
-serde_json = { workspace = true }
 uniffi_meta = "=0.32.2"
 
 [lints]

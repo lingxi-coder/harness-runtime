@@ -47,14 +47,15 @@
 //! ## Wire shape
 //!
 //! [`lingxi_core::host::permission_gate::PermissionCheckContext::permission_layers`] carries
-//! RAW `serde_json::Value` objects (the `platform-api` crate sits BELOW this one and
+//! raw `Utf16JsonProjection` objects (the `platform-api` crate sits BELOW this one and
 //! cannot name [`PermissionLayer`]; same precedent as
 //! `PermissionCheckContext::permission_suggestions`). Each element is the
 //! upstream discriminated-union shape, e.g.
 //! `{"kind":"bash_command_clamp","rules":["Bash(git status:*)"]}`.
 
 use crate::mode::PermissionMode;
-use serde_json::Value;
+use crate::source_input::{exact_string, generated_text};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
 
 /// One entry of upstream's `toolUseContext.permissionLayers` array.
@@ -66,13 +67,13 @@ use std::path::PathBuf;
 /// exactly, and so a round-trip through [`PermissionLayer::to_wire`] is lossless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionLayer {
-    /// `allowed_tools` — extra `command` ALLOW rules (`ULa`).
-    AllowedTools(Vec<String>),
-    /// `disallowed_tools` — extra `command` DENY rules (`jLa`).
-    DisallowedTools(Vec<String>),
+    /// `allowed_tools` — exact source `command` ALLOW rule strings (`ULa`).
+    AllowedTools(Vec<Utf16JsonProjection>),
+    /// `disallowed_tools` — exact source `command` DENY rule strings (`jLa`).
+    DisallowedTools(Vec<Utf16JsonProjection>),
     /// `bash_command_clamp` — ONE clamp GROUP. Every group must admit every
     /// command span, so groups intersect (see [`crate::bash_command_clamp`]).
-    BashCommandClamp(Vec<String>),
+    BashCommandClamp(Vec<Utf16JsonProjection>),
     /// `avoid_prompts` — this agent cannot surface a permission prompt
     /// (`shouldAvoidPermissionPrompts`).
     AvoidPrompts,
@@ -89,7 +90,7 @@ pub enum PermissionLayer {
     /// `max_thinking_tokens` — ignored by the permission fold.
     MaxThinkingTokens(u64),
     /// `flag_settings` — ignored by the permission fold.
-    FlagSettings(Value),
+    FlagSettings(Utf16JsonProjection),
 }
 
 impl PermissionLayer {
@@ -131,87 +132,130 @@ impl PermissionLayer {
         )
     }
 
-    /// Parse one wire object. Returns `None` for an unknown/ malformed kind —
-    /// upstream's `switch` simply has no arm for it, so an unrecognized layer is
-    /// inert, never an error.
+    /// Parse one source-preserving wire object. Returns `None` for an unknown /
+    /// malformed kind — upstream's `switch` simply has no arm for it, so an
+    /// unrecognized layer is inert, never an error. The wire array remains exact
+    /// in `PermissionCheckContext`; typed string fields use strict UTF-16
+    /// decoding, so isolated-surrogate rule text is not matched by the current
+    /// UTF-8 permission-rule engine and remains a Native parity gap.
     #[must_use]
-    pub fn from_wire(value: &Value) -> Option<Self> {
-        let object = value.as_object()?;
-        let strings = |key: &str| -> Vec<String> {
-            object
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
+    pub fn from_wire(value: &Utf16JsonProjection) -> Option<Self> {
+        let object = value.at_pointer("")?;
+        let strings = |key: &str| -> Vec<Utf16JsonProjection> {
+            let Some(items) = object.get_property(key) else {
+                return Vec::new();
+            };
+            let Some(count) = items.array_len() else {
+                return Vec::new();
+            };
+            (0..count)
+                .filter_map(|index| {
+                    items.get_index(index)?.code_units()?;
+                    value.subprojection(&format!("/{key}/{index}")).ok()
                 })
-                .unwrap_or_default()
+                .collect()
         };
-        match object.get("kind").and_then(Value::as_str)? {
+        let kind = exact_string(object.get_property("kind")?)?;
+        match kind {
             "allowed_tools" => Some(Self::AllowedTools(strings("allowedTools"))),
             "disallowed_tools" => Some(Self::DisallowedTools(strings("disallowedTools"))),
             "bash_command_clamp" => Some(Self::BashCommandClamp(strings("rules"))),
             "avoid_prompts" => Some(Self::AvoidPrompts),
             "permission_mode" => Some(Self::PermissionMode(
-                object.get("mode").and_then(Value::as_str)?.to_string(),
+                exact_string(object.get_property("mode")?)?.to_owned(),
             )),
-            "working_directory" => Some(Self::WorkingDirectory(PathBuf::from(
-                object.get("directory").and_then(Value::as_str)?,
-            ))),
+            "working_directory" => Some(Self::WorkingDirectory(PathBuf::from(exact_string(
+                object.get_property("directory")?,
+            )?))),
             "effort" => Some(Self::Effort(
-                object.get("effort").and_then(Value::as_str)?.to_string(),
+                exact_string(object.get_property("effort")?)?.to_owned(),
             )),
             "model" => Some(Self::Model(
-                object
-                    .get("mainLoopModel")
-                    .and_then(Value::as_str)?
-                    .to_string(),
+                exact_string(object.get_property("mainLoopModel")?)?.to_owned(),
             )),
-            "max_thinking_tokens" => Some(Self::MaxThinkingTokens(
-                object.get("maxThinkingTokens").and_then(Value::as_u64)?,
-            )),
+            "max_thinking_tokens" => {
+                let budget = object.get_property("maxThinkingTokens")?.as_number()?;
+                if !budget.is_finite()
+                    || budget < 0.0
+                    || budget.fract() != 0.0
+                    || budget >= u64::MAX as f64
+                {
+                    return None;
+                }
+                Some(Self::MaxThinkingTokens(budget as u64))
+            }
             "flag_settings" => Some(Self::FlagSettings(
-                object.get("flagSettings").cloned().unwrap_or(Value::Null),
+                value
+                    .subprojection("/flagSettings")
+                    .unwrap_or_else(|_| Utf16JsonProjection::parse("null").unwrap()),
             )),
             _ => None,
         }
     }
 
-    /// Render back to the wire object [`Self::from_wire`] accepts.
+    /// Render a typed layer back to the source wire object accepted by
+    /// [`Self::from_wire`]. Arbitrary flag settings are inserted as their
+    /// original projection rather than converted through serde JSON.
     #[must_use]
-    pub fn to_wire(&self) -> Value {
+    pub fn to_wire(&self) -> Utf16JsonProjection {
         let kind = self.kind();
         match self {
-            Self::AllowedTools(tools) => serde_json::json!({"kind": kind, "allowedTools": tools}),
+            Self::AllowedTools(tools) => {
+                generated_wire(kind, "allowedTools", generated_strings(tools))
+            }
             Self::DisallowedTools(tools) => {
-                serde_json::json!({"kind": kind, "disallowedTools": tools})
+                generated_wire(kind, "disallowedTools", generated_strings(tools))
             }
-            Self::BashCommandClamp(rules) => serde_json::json!({"kind": kind, "rules": rules}),
-            Self::AvoidPrompts => serde_json::json!({"kind": kind}),
-            Self::PermissionMode(mode) => serde_json::json!({"kind": kind, "mode": mode}),
+            Self::BashCommandClamp(rules) => {
+                generated_wire(kind, "rules", generated_strings(rules))
+            }
+            Self::AvoidPrompts => generated_wire_without_value(kind),
+            Self::PermissionMode(mode) => generated_wire(kind, "mode", generated_text(mode)),
             Self::WorkingDirectory(dir) => {
-                serde_json::json!({"kind": kind, "directory": dir.to_string_lossy()})
+                // This is an explicit OS-path-to-JSON boundary; the source input
+                // is already a typed PathBuf, not an arbitrary JSON string.
+                let path = dir.to_string_lossy();
+                generated_wire(kind, "directory", generated_text(path.as_ref()))
             }
-            Self::Effort(effort) => serde_json::json!({"kind": kind, "effort": effort}),
-            Self::Model(model) => serde_json::json!({"kind": kind, "mainLoopModel": model}),
-            Self::MaxThinkingTokens(budget) => {
-                serde_json::json!({"kind": kind, "maxThinkingTokens": budget})
-            }
-            Self::FlagSettings(settings) => {
-                serde_json::json!({"kind": kind, "flagSettings": settings})
-            }
+            Self::Effort(effort) => generated_wire(kind, "effort", generated_text(effort)),
+            Self::Model(model) => generated_wire(kind, "mainLoopModel", generated_text(model)),
+            Self::MaxThinkingTokens(budget) => generated_wire(
+                kind,
+                "maxThinkingTokens",
+                Utf16JsonProjection::from_serde_value(&serde_json::json!(budget))
+                    .expect("generated integer is valid JSON"),
+            ),
+            Self::FlagSettings(settings) => generated_wire(kind, "flagSettings", settings.clone()),
         }
     }
 }
 
-/// Parse a raw wire array (as carried on
-/// [`lingxi_core::host::permission_gate::PermissionCheckContext::permission_layers`]),
-/// dropping entries no upstream `switch` arm would match.
+/// Create a projection for a locally generated wire object. Values are typed
+/// fields or exact source subprojections supplied by the caller.
+fn generated_wire(kind: &str, field: &str, value: Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut wire = generated_wire_without_value(kind);
+    wire.set_field(field, value)
+        .expect("generated permission layer fields form an object");
+    wire
+}
+
+fn generated_wire_without_value(kind: &str) -> Utf16JsonProjection {
+    let mut wire =
+        Utf16JsonProjection::parse("{}").expect("generated permission layer root is a JSON object");
+    wire.set_field("kind", generated_text(kind))
+        .expect("generated permission layer kind is a string");
+    wire
+}
+
+fn generated_strings(values: &[Utf16JsonProjection]) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(values.to_vec())
+        .expect("permission layer strings form a valid source array")
+}
+
+/// Parse a raw source wire array, dropping entries no upstream `switch` arm
+/// would match.
 #[must_use]
-pub fn parse_permission_layers(wire: &[Value]) -> Vec<PermissionLayer> {
+pub fn parse_permission_layers(wire: &[Utf16JsonProjection]) -> Vec<PermissionLayer> {
     wire.iter().filter_map(PermissionLayer::from_wire).collect()
 }
 
@@ -273,12 +317,12 @@ pub struct FoldedPermissionContext {
     /// layer is skipped when the killswitch is on or bypass is unavailable).
     pub mode: Option<PermissionMode>,
     /// Extra `command`-source ALLOW rule strings (`ULa`), deduped in order.
-    pub allow_command_rules: Vec<String>,
+    pub allow_command_rules: Vec<Utf16JsonProjection>,
     /// Extra `command`-source DENY rule strings (`jLa`), deduped in order.
-    pub deny_command_rules: Vec<String>,
+    pub deny_command_rules: Vec<Utf16JsonProjection>,
     /// Accumulated clamp groups, in layer order
     /// (`bashCommandClamps:[...t.bashCommandClamps??[], i.rules]`).
-    pub bash_command_clamps: Vec<Vec<String>>,
+    pub bash_command_clamps: Vec<Vec<Utf16JsonProjection>>,
     /// `shouldAvoidPermissionPrompts` — sticky-true.
     pub should_avoid_permission_prompts: bool,
     /// The LAST `working_directory` layer's directory (`n.findLast(...)`).
@@ -391,9 +435,12 @@ pub fn layer_mode_from_wire(mode: &str) -> Option<PermissionMode> {
 }
 
 /// `to([...existing, ...added])` — concat then unique, preserving first-seen order.
-fn push_unique(target: &mut Vec<String>, added: &[String]) {
+fn push_unique(target: &mut Vec<Utf16JsonProjection>, added: &[Utf16JsonProjection]) {
     for item in added {
-        if !target.iter().any(|existing| existing == item) {
+        if !target
+            .iter()
+            .any(|existing| existing.string_units("") == item.string_units(""))
+        {
             target.push(item.clone());
         }
     }
@@ -403,8 +450,17 @@ fn push_unique(target: &mut Vec<String>, added: &[String]) {
 mod tests {
     use super::*;
 
+    fn source(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+    }
+
     fn clamp(rules: &[&str]) -> PermissionLayer {
-        PermissionLayer::BashCommandClamp(rules.iter().map(|r| (*r).to_string()).collect())
+        PermissionLayer::BashCommandClamp(
+            rules
+                .iter()
+                .map(|rule| Utf16JsonProjection::from(*rule))
+                .collect(),
+        )
     }
 
     #[test]
@@ -420,8 +476,8 @@ mod tests {
         assert_eq!(
             folded.bash_command_clamps,
             vec![
-                vec!["Bash(git status:*)".to_string()],
-                vec!["Bash(ls:*)".to_string()]
+                vec![Utf16JsonProjection::from("Bash(git status:*)")],
+                vec![Utf16JsonProjection::from("Bash(ls:*)")]
             ]
         );
         assert!(!folded.is_empty());
@@ -509,9 +565,9 @@ mod tests {
         assert_eq!(
             folded.allow_command_rules,
             vec![
-                "Bash(ls:*)".to_string(),
-                "Read".to_string(),
-                "Glob".to_string()
+                Utf16JsonProjection::from("Bash(ls:*)"),
+                Utf16JsonProjection::from("Read"),
+                Utf16JsonProjection::from("Glob")
             ]
         );
     }
@@ -530,7 +586,7 @@ mod tests {
             PermissionLayer::Effort("high".into()),
             PermissionLayer::Model("some-model".into()),
             PermissionLayer::MaxThinkingTokens(0),
-            PermissionLayer::FlagSettings(serde_json::json!({"a": 1})),
+            PermissionLayer::FlagSettings(source(&serde_json::json!({"a": 1}))),
         ];
         let folded = fold_permission_layers(&layers, LayerFoldInputs::default());
         assert!(folded.is_empty());
@@ -548,7 +604,7 @@ mod tests {
             PermissionLayer::Effort("high".into()),
             PermissionLayer::Model("m".into()),
             PermissionLayer::MaxThinkingTokens(1),
-            PermissionLayer::FlagSettings(Value::Null),
+            PermissionLayer::FlagSettings(Utf16JsonProjection::parse("null").unwrap()),
         ];
         let kept: Vec<&str> = strip_widening_permission_layers(&layers)
             .iter()
@@ -590,17 +646,41 @@ mod tests {
             PermissionLayer::Effort("low".into()),
             PermissionLayer::Model("m".into()),
             PermissionLayer::MaxThinkingTokens(4096),
-            PermissionLayer::FlagSettings(serde_json::json!({"k": true})),
+            PermissionLayer::FlagSettings(source(&serde_json::json!({"k": true}))),
         ];
-        let wire: Vec<Value> = layers.iter().map(PermissionLayer::to_wire).collect();
+        let wire: Vec<Utf16JsonProjection> = layers.iter().map(PermissionLayer::to_wire).collect();
         assert_eq!(parse_permission_layers(&wire), layers);
+    }
+
+    #[test]
+    fn source_rule_units_survive_layer_wire_and_fold() {
+        let source_rule = Utf16JsonProjection::parse(r#""Bash(\ud800)""#)
+            .expect("rule text is valid JSON with an isolated UTF-16 unit");
+        let layer = PermissionLayer::AllowedTools(vec![source_rule.clone()]);
+        let wire = layer.to_wire();
+        assert!(wire.to_json_string().unwrap().contains(r#"\ud800"#));
+
+        let parsed = PermissionLayer::from_wire(&wire).expect("known layer parses");
+        assert_eq!(parsed, layer);
+        let folded = fold_permission_layers(&[parsed], LayerFoldInputs::default());
+        assert_eq!(folded.allow_command_rules, vec![source_rule]);
+    }
+
+    #[test]
+    fn flag_settings_round_trip_keeps_exact_source_subtree() {
+        let settings = Utf16JsonProjection::parse(r#"{"label":"\ud800","nested":[1,{"ok":true}]}"#)
+            .expect("test source is valid JSON");
+        let layer = PermissionLayer::FlagSettings(settings.clone());
+        let wire = layer.to_wire();
+        assert_eq!(wire.subprojection("/flagSettings").unwrap(), settings);
+        assert_eq!(PermissionLayer::from_wire(&wire), Some(layer));
     }
 
     #[test]
     fn unknown_layer_kinds_are_inert_not_errors() {
         let wire = vec![
-            serde_json::json!({"kind": "brand_new_kind", "x": 1}),
-            serde_json::json!({"kind": "bash_command_clamp", "rules": ["Bash(ls:*)"]}),
+            source(&serde_json::json!({"kind": "brand_new_kind", "x": 1})),
+            source(&serde_json::json!({"kind": "bash_command_clamp", "rules": ["Bash(ls:*)"]})),
         ];
         let parsed = parse_permission_layers(&wire);
         assert_eq!(parsed.len(), 1);

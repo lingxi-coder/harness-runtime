@@ -20,13 +20,14 @@
 //! withdraw a skill the model has already been shown.
 
 use crate::model::Skill;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Which conditional skills this session has activated.
 #[derive(Debug, Default, Clone)]
 pub struct ConditionalSkills {
-    activated: HashSet<String>,
+    activated: HashSet<Vec<u16>>,
 }
 
 /// Does this skill withhold itself until a path matches?
@@ -55,14 +56,18 @@ impl ConditionalSkills {
     /// [`Self::activate_for_paths`] has matched it.
     #[must_use]
     pub fn is_available(&self, skill: &Skill) -> bool {
-        !is_conditional(skill) || self.activated.contains(&skill.name)
+        !is_conditional(skill)
+            || self
+                .activated
+                .contains(&skill.name.encode_utf16().collect::<Vec<_>>())
     }
 
     /// Whether `name` has been activated (upstream
     /// `activatedConditionalSkillNames`).
     #[must_use]
-    pub fn is_activated(&self, name: &str) -> bool {
-        self.activated.contains(name)
+    pub fn is_activated(&self, name: &Utf16JsonProjection) -> bool {
+        name.string_units("")
+            .is_some_and(|units| self.activated.contains(&units))
     }
 
     /// Availability for a listing built from records that are not [`Skill`]s —
@@ -75,12 +80,15 @@ impl ConditionalSkills {
     /// contains the matching file — the model has already been shown the skill.
     pub fn is_available_named(
         &mut self,
-        name: &str,
+        name: &Utf16JsonProjection,
         patterns: &[String],
         touched: &[PathBuf],
         root: &Path,
     ) -> bool {
-        if patterns.is_empty() || self.activated.contains(name) {
+        let Some(name_units) = name.string_units("") else {
+            return false;
+        };
+        if patterns.is_empty() || self.activated.contains(&name_units) {
             return true;
         }
         let matcher = build_matcher(root, patterns);
@@ -89,10 +97,10 @@ impl ConditionalSkills {
                 continue;
             };
             if matcher.matched_path_or_any_parents(&rel, false).is_ignore() {
-                self.activated.insert(name.to_string());
+                self.activated.insert(name_units.to_vec());
                 tracing::info!(
                     "[skills] Activated conditional skill '{}' (matched path: {})",
-                    name,
+                    name.string_at("").unwrap_or_default(),
                     rel.display()
                 );
                 return true;
@@ -115,7 +123,8 @@ impl ConditionalSkills {
     ) -> Vec<String> {
         let mut newly = Vec::new();
         for skill in skills {
-            if !is_conditional(skill) || self.activated.contains(&skill.name) {
+            let name_units = skill.name.encode_utf16().collect::<Vec<_>>();
+            if !is_conditional(skill) || self.activated.contains(&name_units) {
                 continue;
             }
             let Some(patterns) = skill.frontmatter.paths.as_ref() else {
@@ -130,7 +139,7 @@ impl ConditionalSkills {
                 // pattern like `docs/` is meant to claim everything beneath it,
                 // and plain `matched` only ever tests the final component.
                 if matcher.matched_path_or_any_parents(&rel, false).is_ignore() {
-                    self.activated.insert(skill.name.clone());
+                    self.activated.insert(name_units.clone());
                     newly.push(skill.name.clone());
                     tracing::info!(
                         "[skills] Activated conditional skill '{}' (matched path: {})",
@@ -204,7 +213,7 @@ mod tests {
                 paths: paths.map(|p| p.into_iter().map(str::to_string).collect()),
                 ..SkillFrontmatter::default()
             },
-            content: String::new(),
+            content: String::new().into(),
             source: SkillSource::Settings(lingxi_core::types::SettingsScope::User),
             loaded_from: LoadedFrom::Skills,
             plugin_id: None,
@@ -292,12 +301,17 @@ mod tests {
         let patterns = vec!["*.rs".to_string()];
 
         assert!(
-            state.is_available_named("rust", &[], &[], root),
+            state.is_available_named(&Utf16JsonProjection::from("rust"), &[], &[], root),
             "no patterns ⇒ unconditional"
         );
-        assert!(!state.is_available_named("rust", &patterns, &[], root));
+        assert!(!state.is_available_named(
+            &Utf16JsonProjection::from("rust"),
+            &patterns,
+            &[],
+            root
+        ));
         assert!(state.is_available_named(
-            "rust",
+            &Utf16JsonProjection::from("rust"),
             &patterns,
             &[PathBuf::from("/work/repo/src/a.rs")],
             root
@@ -305,9 +319,28 @@ mod tests {
         // The read-state map is an LRU, so the matching path can age out of the
         // touched set. The skill must stay listed anyway.
         assert!(
-            state.is_available_named("rust", &patterns, &[], root),
+            state.is_available_named(&Utf16JsonProjection::from("rust"), &patterns, &[], root),
             "activation is remembered, not recomputed from the current touched set"
         );
+    }
+
+    #[test]
+    fn named_activation_uses_exact_utf16_identity() {
+        let mut state = ConditionalSkills::new();
+        let root = Path::new("/work/repo");
+        let patterns = vec!["*.rs".to_string()];
+        let first = Utf16JsonProjection::parse(r#""name-\ud800""#).unwrap();
+        let different = Utf16JsonProjection::parse(r#""name-\ud801""#).unwrap();
+
+        assert!(state.is_available_named(
+            &first,
+            &patterns,
+            &[PathBuf::from("/work/repo/src/a.rs")],
+            root,
+        ));
+        assert!(state.is_activated(&first));
+        assert!(!state.is_activated(&different));
+        assert!(!state.is_available_named(&different, &patterns, &[], root));
     }
 
     /// Gitignore semantics, not plain globbing: a directory pattern matches

@@ -87,8 +87,11 @@ impl tool_api::Tool for DurablePatchTool {
     async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
         "return an edit result".into()
     }
-    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _: &tool_api::PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -119,9 +122,12 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
         &self,
         _: &str,
         _: Option<&str>,
-        _: Option<&str>,
+        _: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _: Vec<ConversationMessage>,
-        _: Vec<serde_json::Value>,
+        _: Vec<llm_runtime::ToolDeclaration>,
+        _: &str,
+        _skip_global_cache_for_system_prompt: bool,
+        _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<
         futures::stream::BoxStream<'static, Result<llm_runtime::HistoryEvent, LlmError>>,
         LlmError,
@@ -211,7 +217,8 @@ async fn streaming_edit_ack_is_driven_while_model_cost_settlement_waits() {
         Arc::new(BoundedPersistence::new(sender)),
         CostDurabilityGate::default(),
     );
-    let orchestrator = Arc::new(base.with_cost_tracker(tracker.clone()));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(base.with_cost_tracker(tracker.clone()));
     let turn = tokio::spawn({
         let orchestrator = orchestrator.clone();
         async move { orchestrator.run_turn_streaming("make an edit").await }
@@ -565,6 +572,7 @@ async fn batched_turn_drop_retains_and_acks_the_originating_session_charge() {
         vec![LlmContentBlock::Text {
             text: "finished".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -572,7 +580,8 @@ async fn batched_turn_drop_retains_and_acks_the_originating_session_charge() {
     let base = batched_orchestrator(response);
     let session_id = base.session().lock().await.session_id;
     let mut durability = BlockedDurability::new(session_id).await;
-    let orchestrator = Arc::new(base.with_cost_tracker(durability.tracker.clone()));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(base.with_cost_tracker(durability.tracker.clone()));
 
     let task = tokio::spawn({
         let orchestrator = orchestrator.clone();
@@ -612,7 +621,8 @@ async fn streaming_turn_drop_retains_and_acks_the_originating_session_charge() {
     );
     let session_id = base.session().lock().await.session_id;
     let mut durability = BlockedDurability::new(session_id).await;
-    let orchestrator = Arc::new(base.with_cost_tracker(durability.tracker.clone()));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(base.with_cost_tracker(durability.tracker.clone()));
 
     let task = tokio::spawn({
         let orchestrator = orchestrator.clone();
@@ -635,7 +645,9 @@ impl ModelCallPreparer for FreezeDuringPrepare {
         &self,
         _orch: &ConversationOrchestrator,
         _path: ModelCallPath,
-        _system_prompt: Option<&str>,
+        _system_prompt: Option<
+            &lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         _cancel: Option<&CancellationToken>,
         draft: PreparedModelCall,
     ) -> Result<PreparedModelCall, OrchestratorError> {
@@ -668,9 +680,10 @@ async fn captured_durable_scope_frozen_during_prepare_prevents_stream_dispatch()
     let persistence = Arc::new(BoundedPersistence::new(sender));
     let gate = CostDurabilityGate::default();
     let tracker = durable_tracker(session_id, persistence.clone(), gate.clone());
-    let orchestrator = base
-        .with_cost_tracker(tracker)
-        .with_model_call_preparer(Arc::new(FreezeDuringPrepare { gate: gate.clone() }));
+    let orchestrator = ConversationOrchestrator::into_shared(
+        base.with_cost_tracker(tracker)
+            .with_model_call_preparer(Arc::new(FreezeDuringPrepare { gate: gate.clone() })),
+    );
 
     let result = orchestrator.run_turn_streaming("do not dispatch").await;
 
@@ -701,12 +714,28 @@ impl VisionApi {
 impl OrchestratorApiClient for VisionApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: crate::OrchestratorApiRequest,
     ) -> Result<llm_runtime::HistoryResponse, LlmError> {
+        let (request_model, request_profile, request_system, _msgs, _tools) = match request {
+            crate::OrchestratorApiRequest::Main(request) => (
+                request.model,
+                request.profile,
+                request.system.map(|system| system.display_text()),
+                request.messages,
+                request.tools,
+            ),
+            crate::OrchestratorApiRequest::HookPrompt(request) => (
+                request.model,
+                request.profile,
+                Some(request.system),
+                request.messages,
+                Vec::new(),
+            ),
+        };
+        let _model = request_model.as_str();
+        let _profile = request_profile.as_deref();
+        let _system = request_system.as_deref();
+
         Err(LlmError::Transport {
             message: "main request must not run before vision cancellation".into(),
         })
@@ -780,13 +809,13 @@ impl VisionProgressOutput {
 
 #[async_trait]
 impl OutputStream for VisionProgressOutput {
-    async fn emit_text(&self, _text: &str) {}
+    async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 
@@ -794,8 +823,8 @@ impl OutputStream for VisionProgressOutput {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _model_text: &str,
-        _result: &serde_json::Value,
+        _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 
@@ -854,7 +883,8 @@ async fn vision_progress_cancellation_retains_known_delegate_usage() {
     .with_vision_delegation(true);
     let session_id = base.session().lock().await.session_id;
     let mut durability = BlockedDurability::new(session_id).await;
-    let orchestrator = Arc::new(base.with_cost_tracker(durability.tracker.clone()));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(base.with_cost_tracker(durability.tracker.clone()));
     let cancel = CancellationToken::new();
     let task = tokio::spawn({
         let orchestrator = orchestrator.clone();
@@ -914,8 +944,12 @@ impl SideQueryClient for CancelAfterCompactionResponse {
 fn assistant_message(text: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
         id: MessageId::new(),
-        content: vec![ContentBlock::Text { text: text.into() }],
+        content: vec![ContentBlock::Text {
+            text: text.into(),
+            citations: None,
+        }],
         stop_reason: Some("end_turn".into()),
+        resumable: None,
     }
 }
 
@@ -993,6 +1027,7 @@ fn answer_response(text: &str) -> llm_runtime::HistoryResponse {
         vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -1006,9 +1041,9 @@ async fn assert_answer_reached_history(orchestrator: &ConversationOrchestrator, 
     let handle = orchestrator.session();
     let session = handle.lock().await;
     let found = session.history.iter().any(|message| match message {
-        ConversationMessage::Assistant { content, .. } => content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text: body } if body.contains(text))),
+        ConversationMessage::Assistant { content, .. } => content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text: body, .. } if body.contains(text)),
+        ),
         _ => false,
     });
     assert!(
@@ -1025,7 +1060,9 @@ async fn assert_answer_reached_history(orchestrator: &ConversationOrchestrator, 
 async fn batched_settlement_failure_keeps_the_answer_and_stops_the_next_call() {
     let base = batched_orchestrator(answer_response("the paid answer"));
     let session_id = base.session().lock().await.session_id;
-    let orchestrator = base.with_cost_tracker(refusing_durability(session_id));
+    let orchestrator = ConversationOrchestrator::into_shared(
+        base.with_cost_tracker(refusing_durability(session_id)),
+    );
 
     orchestrator
         .run_turn("ask once")
@@ -1064,7 +1101,9 @@ async fn streaming_settlement_failure_keeps_the_answer_and_stops_the_next_call()
         std::env::temp_dir(),
     );
     let session_id = base.session().lock().await.session_id;
-    let orchestrator = base.with_cost_tracker(refusing_durability(session_id));
+    let orchestrator = ConversationOrchestrator::into_shared(
+        base.with_cost_tracker(refusing_durability(session_id)),
+    );
 
     orchestrator
         .run_turn_streaming("ask once")
@@ -1102,12 +1141,28 @@ struct BlockingVisionApi;
 impl OrchestratorApiClient for BlockingVisionApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: crate::OrchestratorApiRequest,
     ) -> Result<llm_runtime::HistoryResponse, LlmError> {
+        let (request_model, request_profile, request_system, _msgs, _tools) = match request {
+            crate::OrchestratorApiRequest::Main(request) => (
+                request.model,
+                request.profile,
+                request.system.map(|system| system.display_text()),
+                request.messages,
+                request.tools,
+            ),
+            crate::OrchestratorApiRequest::HookPrompt(request) => (
+                request.model,
+                request.profile,
+                Some(request.system),
+                request.messages,
+                Vec::new(),
+            ),
+        };
+        let _model = request_model.as_str();
+        let _profile = request_profile.as_deref();
+        let _system = request_system.as_deref();
+
         Err(LlmError::Transport {
             message: "the main request must not run: vision is cancelled first".into(),
         })
@@ -1134,7 +1189,7 @@ async fn a_cancelled_vision_delegation_surfaces_as_cancelled_not_an_error() {
     let image = ImageSource::Url {
         url: "https://example.com/vision-cancel.png".into(),
     };
-    let orchestrator = Arc::new(
+    let orchestrator = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(),
             Arc::new(BlockingVisionApi),

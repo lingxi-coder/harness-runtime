@@ -101,11 +101,11 @@ pub async fn load_and_register_custom_commands(
     // First-wins over the loader's `[managed, user, project]` order (see the
     // module docs): `register_command` is last-wins, so we must skip a name once
     // a higher-priority layer has already claimed it.
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<Vec<u16>> = HashSet::new();
     let mut registered = 0usize;
     for file in &files {
         let command = build_markdown_command(file, file.source);
-        if seen.insert(command.name.clone()) {
+        if seen.insert(command.name.string_units("").unwrap_or_default()) {
             reg.register_command(command);
             registered += 1;
         }
@@ -124,7 +124,7 @@ pub async fn load_and_register_managed_custom_commands(
     let mut registered = 0;
     for file in &files {
         let command = build_markdown_command(file, file.source);
-        if seen.insert(command.name.clone()) {
+        if seen.insert(command.name.string_units("").unwrap_or_default()) {
             reg.register_command(command);
             registered += 1;
         }
@@ -162,11 +162,11 @@ pub async fn load_and_register_skill_commands_with_roots(
         additional_skill_dirs,
     )
     .await;
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<Vec<u16>> = HashSet::new();
     let mut registered = 0usize;
     for file in &files {
         let command = build_skill_command(file, file.source);
-        if seen.insert(command.name.clone()) {
+        if seen.insert(command.name.string_units("").unwrap_or_default()) {
             reg.register_command(command);
             registered += 1;
         }
@@ -184,7 +184,7 @@ pub async fn load_and_register_managed_skill_commands(
     let mut registered = 0;
     for file in &files {
         let command = build_skill_command(file, file.source);
-        if seen.insert(command.name.clone()) {
+        if seen.insert(command.name.string_units("").unwrap_or_default()) {
             reg.register_command(command);
             registered += 1;
         }
@@ -243,19 +243,22 @@ mod tests {
                 .await;
         assert_eq!(n, 2, "two custom commands registered");
 
-        let foo = reg.resolve("foo").expect("/foo should resolve");
+        let foo = reg.resolve(&"foo".into()).expect("/foo should resolve");
         // Description strips the leading `#` header; the prompt template keeps the
         // full markdown body verbatim (header line included).
-        assert_eq!(foo.description, "Foo");
+        assert_eq!(foo.description.string_at(""), Some("Foo"));
         match &foo.kind {
             SlashCommandKind::Markdown {
                 prompt_template, ..
-            } => assert_eq!(prompt_template, "# Foo\n\nDo the foo with $1"),
+            } => assert_eq!(
+                prompt_template.string_at(""),
+                Some("# Foo\n\nDo the foo with $1")
+            ),
             other => panic!("expected Markdown kind, got {other:?}"),
         }
 
         assert!(
-            reg.resolve("sub:bar").is_some(),
+            reg.resolve(&"sub:bar".into()).is_some(),
             "namespaced /sub:bar should resolve"
         );
 
@@ -280,10 +283,10 @@ mod tests {
         let n = load_and_register_skill_commands(&mut reg, &project, &lingxi_home, &home).await;
         assert_eq!(n, 1);
 
-        let cmd = reg.resolve("demo").expect("/demo should resolve");
+        let cmd = reg.resolve(&"demo".into()).expect("/demo should resolve");
         assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
         assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
-        assert_eq!(cmd.description, "Demo skill");
+        assert_eq!(cmd.description.string_at(""), Some("Demo skill"));
         assert!(matches!(cmd.kind, SlashCommandKind::Markdown { .. }));
 
         fs::remove_dir_all(&root).ok();
@@ -312,13 +315,13 @@ mod tests {
         let n = load_and_register_skill_commands(&mut reg, &project, &lingxi_home, &home).await;
         assert_eq!(n, 1);
 
-        let cmd = reg.resolve("dup").expect("/dup should resolve");
-        assert_eq!(cmd.description, "User skill");
+        let cmd = reg.resolve(&"dup".into()).expect("/dup should resolve");
+        assert_eq!(cmd.description.string_at(""), Some("User skill"));
         assert_eq!(cmd.skill_root.as_deref(), Some(user_skill_dir.as_path()));
         match &cmd.kind {
             SlashCommandKind::Markdown {
                 prompt_template, ..
-            } => assert_eq!(prompt_template, "USER body\n"),
+            } => assert_eq!(prompt_template.string_at(""), Some("USER body\n")),
             other => panic!("expected Markdown kind, got {other:?}"),
         }
 
@@ -370,17 +373,17 @@ mod tests {
         .await;
         assert_eq!(n, 1);
 
-        let cmd = reg.resolve("dup").expect("/dup should resolve");
+        let cmd = reg.resolve(&"dup".into()).expect("/dup should resolve");
         assert_eq!(
             cmd.source,
             crate::CommandSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
-        assert_eq!(cmd.description, "Managed skill");
+        assert_eq!(cmd.description.string_at(""), Some("Managed skill"));
         assert_eq!(cmd.skill_root.as_deref(), Some(managed_skill_dir.as_path()));
         match &cmd.kind {
             SlashCommandKind::Markdown {
                 prompt_template, ..
-            } => assert_eq!(prompt_template, "MANAGED body\n"),
+            } => assert_eq!(prompt_template.string_at(""), Some("MANAGED body\n")),
             other => panic!("expected Markdown kind, got {other:?}"),
         }
 
@@ -411,12 +414,13 @@ mod tests {
         let mut reg = CommandRegistry::new();
         load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home).await;
 
-        let dup = reg.resolve("dup").expect("/dup should resolve");
+        let dup = reg.resolve(&"dup".into()).expect("/dup should resolve");
         match &dup.kind {
             SlashCommandKind::Markdown {
                 prompt_template, ..
             } => assert_eq!(
-                prompt_template, "USER body",
+                prompt_template.string_at(""),
+                Some("USER body"),
                 "first-wins over [managed,user,project] => user wins over project"
             ),
             other => panic!("expected Markdown kind, got {other:?}"),
@@ -446,7 +450,7 @@ mod tests {
         crate::builtins::register_all_builtin_commands(&mut reg);
         assert!(
             matches!(
-                reg.resolve("commit").map(|c| &c.kind),
+                reg.resolve(&"commit".into()).map(|c| &c.kind),
                 Some(SlashCommandKind::Builtin { .. })
             ),
             "precondition: /commit is a builtin before custom registration"
@@ -454,7 +458,9 @@ mod tests {
 
         load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home).await;
 
-        let commit = reg.resolve("commit").expect("/commit still resolves");
+        let commit = reg
+            .resolve(&"commit".into())
+            .expect("/commit still resolves");
         assert!(
             matches!(commit.kind, SlashCommandKind::Markdown { .. }),
             "custom /commit must shadow the builtin (Markdown kind)"
@@ -478,7 +484,7 @@ mod tests {
             load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home)
                 .await;
         assert_eq!(n, 0, "no custom commands discovered");
-        assert!(reg.resolve("anything").is_none());
+        assert!(reg.resolve(&"anything".into()).is_none());
 
         fs::remove_dir_all(&root).ok();
     }

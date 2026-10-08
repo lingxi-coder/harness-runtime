@@ -17,42 +17,14 @@
 //! and at the call site (both the async-agent and the sync-agent completion
 //! paths): `cu.content=[{type:"text",text:xg.warning},...cu.content]`.
 //!
-//! # 🚨 Status: NOT WIRED, and the reason this module used to give is stale
-//!
-//! This module previously gated everything on `feature('TRANSCRIPT_CLASSIFIER')`
-//! and documented the result as "a faithful port is a NO-OP on the common path".
-//! Both halves are wrong at 2.1.270:
-//!
-//! * **The flag is gone.** `TRANSCRIPT_CLASSIFIER` does not occur anywhere in
-//!   the 2.1.270 binary (0 hits across 1697 chunks). `EZe`'s only gate is
-//!   `toolPermissionContext.mode !== "auto"` plus the `handback` kind, so
-//!   upstream reviews EVERY auto-mode subagent handoff. An OFF-by-default env
-//!   flag is not a faithful port of that — it is a gate that can never open,
-//!   the same shape as the graduated `tengu_carved_slate` rollout flag.
-//! * **The classifier exists now.** The "LARGE deferred subsystem with no Rust
-//!   analog" is [`permission::loop_llm`] — `bke`'s two-stage fast/thinking
-//!   protocol, the bundled 2.1.270 system prompt, and the verdict parser — with
-//!   `orchestrator::loop_permission_classifier::SessionLoopClassifier` binding a
-//!   provider to it. `EZe` calls the same `bke` the tool path calls, differing
-//!   only in its options (`isSubagentLoop: true`, `severityEligible: true`).
-//!
-//! What is actually missing is the wiring, and it is not contained in this
-//! crate:
-//!
-//! 1. a handoff-shaped classifier seam — [`permission::classifier::LoopPermissionClassifier`]
-//!    takes `(tool_name, input, host_context, deny_rules)`, and a handoff takes
-//!    the subagent's messages plus its final text;
-//! 2. a way for the agent tool to reach it — `self.ctx.permission_gate` is a
-//!    `&dyn PermissionGate`, which cannot see `PolicyPermissionGate::loop_classifier_handle`;
-//! 3. the subagent's transcript at the completion site, which today has only the
-//!    terminal result JSON.
-//!
-//! The prepend itself has a home already: `agent.rs` builds `content_texts` and
-//! already unshifts the max-turns harness note with `content_texts.insert(0, …)`,
-//! which is exactly `[{type:"text",text:warning},...content]`.
-//!
-//! Until those three land, this module carries only the byte-locked copy, so
-//! that whoever wires it does not have to re-derive it from the binary.
+//! `AgentTool` calls the live permission gate's handoff review with the child's
+//! transcript path. `PolicyPermissionGate` delegates that review to its bound
+//! session classifier, and the tool prepends the warning to both structured
+//! content and the text returned to the parent model. No rollout flag gates
+//! that auto-mode path. A delivered `SubagentHandback` report has already been
+//! reviewed by its own classifier-only tool call, so its `send` or `flagged`
+//! disposition bypasses this completed-work review. A withheld report excludes
+//! the unsent final text while retaining review of actions in the transcript.
 
 /// `kae(model, httpStatus, errorKind)` — the warning when the review could not
 /// be run at all (`kind: "unavailable"`).

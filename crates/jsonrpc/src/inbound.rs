@@ -41,6 +41,11 @@ impl Dispatcher {
         self.inner.write().await.insert(name.into(), handler);
     }
 
+    /// Clone the registered local handler without retaining the registry lock.
+    pub async fn get_registered(&self, method: &str) -> Option<BoxedHandler> {
+        self.inner.read().await.get(method).cloned()
+    }
+
     /// Dispatch one peer request. If no handler is registered, returns a
     /// `MethodNotFound` response so the writer side can ship it.
     pub async fn dispatch(&self, req: Request) -> Response {
@@ -54,7 +59,7 @@ impl Dispatcher {
                 Some(req.id),
                 ResponseError {
                     code: METHOD_NOT_FOUND,
-                    message: format!("method not found: {}", req.method),
+                    message: format!("method not found: {}", req.method).into(),
                     data: None,
                 },
             ),
@@ -65,7 +70,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::{Id, JSONRPC_VERSION};
+    use crate::messages::{Id, JsonPayload, JSONRPC_VERSION};
     use serde_json::json;
 
     struct Echo;
@@ -73,7 +78,11 @@ mod tests {
     #[async_trait]
     impl InboundHandler for Echo {
         async fn handle(&self, req: Request) -> Response {
-            Response::success(req.id, req.params.unwrap_or(json!(null)))
+            Response::success(
+                req.id,
+                req.params
+                    .unwrap_or_else(|| JsonPayload::parse("null").unwrap()),
+            )
         }
     }
 
@@ -85,7 +94,7 @@ mod tests {
         assert_eq!(resp.jsonrpc, JSONRPC_VERSION);
         let err = resp.error.expect("error response");
         assert_eq!(err.code, METHOD_NOT_FOUND);
-        assert!(err.message.contains("missing"));
+        assert!(err.message.display().contains("missing"));
         assert_eq!(resp.id, Some(Id::Number(1)));
         assert!(resp.result.is_none());
     }
@@ -94,10 +103,14 @@ mod tests {
     async fn dispatch_calls_registered_handler() {
         let d = Dispatcher::new();
         d.register("echo", Arc::new(Echo)).await;
-        let req = Request::new("echo", Some(json!({"x": 1})), Id::Number(42));
+        let req = Request::new(
+            "echo",
+            Some(JsonPayload::from_serializable(&json!({"x": 1})).unwrap()),
+            Id::Number(42),
+        );
         let resp = d.dispatch(req).await;
         assert_eq!(resp.id, Some(Id::Number(42)));
-        assert_eq!(resp.result, Some(json!({"x": 1})));
+        assert_eq!(resp.result.unwrap().to_value().unwrap(), json!({"x": 1}));
         assert!(resp.error.is_none());
     }
 
@@ -115,6 +128,6 @@ mod tests {
         d.register("m", Arc::new(Echo)).await;
         d.register("m", Arc::new(Two)).await;
         let resp = d.dispatch(Request::new("m", None, Id::Number(1))).await;
-        assert_eq!(resp.result, Some(json!(2)));
+        assert_eq!(resp.result.unwrap().to_value().unwrap(), json!(2));
     }
 }

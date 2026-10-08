@@ -37,11 +37,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use serde::Deserialize;
-
 use crate::definition::HookDefinition;
-use crate::response::{HookDecision, HookOutcome, HookResponse, HookResult};
+use crate::response::{ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult};
+use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Fixed system prompt the prompt hook evaluates against (`execPromptHook.ts`,
 /// v2.1.263). The general hook retains LingXi branding; the Stop evaluator
@@ -87,7 +86,7 @@ pub struct PromptHookRequest {
     pub transcript_path: Option<std::path::PathBuf>,
     /// The user-turn prompt: the hook's `prompt` with `$ARGUMENTS` substituted
     /// by the serialized event payload (`execPromptHook.ts:35,42`).
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
     /// The fixed evaluation system prompt ([`PROMPT_HOOK_SYSTEM_PROMPT`];
     /// `execPromptHook.ts:64-70`). Passed explicitly so the runner stays a dumb
     /// transport with no hook-specific knowledge.
@@ -132,18 +131,61 @@ pub trait HookPromptRunner: Send + Sync {
     /// Execute the query, returning the assistant's concatenated text content
     /// (the analog of `extractTextContent(response.message.content)`;
     /// `execPromptHook.ts:105`).
-    async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError>;
+    async fn run(&self, req: PromptHookRequest) -> Result<Utf16JsonProjection, PromptHookError>;
 }
 
 /// Parsed `{ok, reason?}` model response (`hookHelpers.ts:16-24`
-/// `hookResponseSchema`).
-#[derive(Debug, Deserialize)]
+/// `hookResponseSchema`). String fields come from the exact flat JSON
+/// projection so escaped unpaired surrogates remain valid JSON and retain
+/// their JavaScript display semantics.
+#[derive(Debug)]
 struct PromptHookResponse {
     ok: bool,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
+    reason: Option<ExactHookText>,
     impossible: bool,
+}
+
+fn parse_prompt_hook_response(
+    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<PromptHookResponse, String> {
+    let root = projection
+        .at_pointer("")
+        .ok_or_else(|| "expected object".to_string())?;
+    if root.object_entries().is_none() {
+        return Err("expected object".to_string());
+    }
+
+    let ok_value = root
+        .get_property("ok")
+        .ok_or_else(|| "missing field `ok`".to_string())?;
+    let ok = ok_value
+        .as_bool()
+        .ok_or_else(|| "invalid field `ok`: expected a boolean".to_string())?;
+    let reason = match root.get_property("reason") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => {
+            if value.as_str().is_none() {
+                return Err("invalid field `reason`: expected a string".to_string());
+            }
+            Some(
+                ExactHookText::from_json_projection(projection, "/reason")
+                    .expect("validated prompt reason is a JSON string"),
+            )
+        }
+    };
+    let impossible = match root.get_property("impossible") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "invalid field `impossible`: expected a boolean".to_string())?,
+    };
+
+    Ok(PromptHookResponse {
+        ok,
+        reason,
+        impossible,
+    })
 }
 
 /// Telemetry hint for the caller (parallels `HttpExecutionSignal` /
@@ -191,7 +233,7 @@ impl PromptExecutor {
     pub(crate) async fn execute(
         &self,
         hook: &HookDefinition,
-        prompt_template: &str,
+        prompt_template: &Utf16JsonProjection,
         model: Option<&str>,
         continue_on_block: bool,
         payload_json: &str,
@@ -203,8 +245,11 @@ impl PromptExecutor {
             return PromptExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Error,
-                    stdout: String::new(),
-                    stderr: format!("Hook {} failed: prompt executor not wired", hook.id),
+                    stdout: ExactHookText::default(),
+                    stderr: ExactHookText::from_text(format!(
+                        "Hook {} failed: prompt executor not wired",
+                        hook.id
+                    )),
                     exit_code: None,
                     response: None,
                 },
@@ -213,20 +258,30 @@ impl PromptExecutor {
         };
 
         // Replace `$ARGUMENTS` with the JSON input (`execPromptHook.ts:35`).
-        let payload = serde_json::from_str::<serde_json::Value>(payload_json).ok();
+        let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse_utf16_json(
+            &payload_json.encode_utf16().collect::<Vec<_>>(),
+        )
+        .ok();
         let is_stop = matches!(
             payload
                 .as_ref()
-                .and_then(|p| p.get("hook_event_name"))
-                .and_then(serde_json::Value::as_str),
+                .and_then(|p| p.at_pointer(""))
+                .and_then(|p| p.get_property("hook_event_name"))
+                .and_then(|value| value.as_str()),
             Some("Stop" | "SubagentStop")
         );
         let condition = if is_stop {
-            format!(
-                "Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: {prompt_template}"
-            )
+            let mut units = "Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: "
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            units.extend(
+                prompt_template
+                    .string_units("")
+                    .expect("prompt template is a string projection"),
+            );
+            text_projection(units)
         } else {
-            prompt_template.to_owned()
+            prompt_template.clone()
         };
         let processed_prompt = add_arguments_to_prompt(&condition, payload_json);
 
@@ -234,11 +289,12 @@ impl PromptExecutor {
             transcript: self.transcript.clone(),
             transcript_path: payload
                 .as_ref()
+                .and_then(|p| p.at_pointer(""))
                 .and_then(|p| {
-                    p.get("agent_transcript_path")
-                        .or_else(|| p.get("transcript_path"))
+                    p.get_property("agent_transcript_path")
+                        .or_else(|| p.get_property("transcript_path"))
                 })
-                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.as_str())
                 .filter(|p| !p.is_empty())
                 .map(std::path::PathBuf::from),
             prompt: processed_prompt,
@@ -260,8 +316,8 @@ impl PromptExecutor {
                 return PromptExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Cancelled,
-                        stdout: String::new(),
-                        stderr: format!("Hook {} cancelled", hook.id),
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!("Hook {} cancelled", hook.id)),
                         exit_code: None,
                         response: None,
                     },
@@ -272,12 +328,12 @@ impl PromptExecutor {
                 return PromptExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Timeout,
-                        stdout: String::new(),
-                        stderr: format!(
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!(
                             "Hook {} failed: timeout after {}ms",
                             hook.id,
                             d.as_millis()
-                        ),
+                        )),
                         exit_code: None,
                         response: None,
                     },
@@ -290,8 +346,10 @@ impl PromptExecutor {
                 return PromptExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Error,
-                        stdout: String::new(),
-                        stderr: format!("Error executing prompt hook: {msg}"),
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!(
+                            "Error executing prompt hook: {msg}"
+                        )),
                         exit_code: None,
                         response: None,
                     },
@@ -301,17 +359,22 @@ impl PromptExecutor {
         };
 
         // `fullResponse = content.trim()` (`execPromptHook.ts:110`).
-        let full_response = raw.trim().to_string();
+        let full_response = ExactHookText::from_json_projection(&raw, "")
+            .expect("prompt runner returns a JSON string projection")
+            .trim_js();
 
         // `safeParseJSON(fullResponse)` (`execPromptHook.ts:113`).
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&full_response) else {
+        let parsed_json = lingxi_core::types::utf16_json::Utf16JsonProjection::parse_utf16_json(
+            &full_response.utf16_code_units,
+        );
+        let Ok(value) = parsed_json else {
             // Parse failure ⇒ `non_blocking_error` with stderr "JSON validation
             // failed" + the raw response on stdout (`execPromptHook.ts:114-131`).
             return PromptExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Error,
                     stdout: full_response,
-                    stderr: "JSON validation failed".to_string(),
+                    stderr: ExactHookText::from_text("JSON validation failed"),
                     exit_code: None,
                     response: None,
                 },
@@ -320,14 +383,14 @@ impl PromptExecutor {
         };
 
         // `hookResponseSchema().safeParse(json)` (`execPromptHook.ts:133`).
-        let parsed: PromptHookResponse = match serde_json::from_value(value) {
+        let parsed: PromptHookResponse = match parse_prompt_hook_response(&value) {
             Ok(p) => p,
             Err(e) => {
                 return PromptExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Error,
                         stdout: full_response,
-                        stderr: format!("Schema validation failed: {e}"),
+                        stderr: ExactHookText::from_text(format!("Schema validation failed: {e}")),
                         exit_code: None,
                         response: None,
                     },
@@ -342,7 +405,7 @@ impl PromptExecutor {
                 result: HookResult {
                     outcome: HookOutcome::Success,
                     stdout: full_response,
-                    stderr: String::new(),
+                    stderr: ExactHookText::default(),
                     exit_code: None,
                     response: (is_stop && !parsed.ok && parsed.impossible).then(|| HookResponse {
                         impossible: true,
@@ -359,19 +422,21 @@ impl PromptExecutor {
             //   - `decision: Block` + `reason` is the blocking error surfaced to
             //     the user; the merge step copies it into the aggregate.
             //   - `prevent_continuation` carries the TS `preventContinuation`.
-            let reason = parsed.reason.unwrap_or_default();
+            let parsed_reason = parsed.reason.unwrap_or_default();
+            let mut reason = ExactHookText::from_utf16(prompt_reason_prefix(prompt_template));
+            reason.push(&parsed_reason);
             PromptExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Success,
                     stdout: full_response,
-                    stderr: String::new(),
+                    stderr: ExactHookText::default(),
                     exit_code: None,
                     response: Some(HookResponse {
                         decision: Some(HookDecision::Block),
                         // 2.1.195 surfaces the prompt-hook block as
                         // `[${e.prompt}]: ${reason}` — the hook's own (raw) prompt
                         // in brackets, then the model's reason (oracle off 519000).
-                        reason: Some(format!("[{prompt_template}]: {reason}")),
+                        reason: Some(reason),
                         // `continueOnBlock` (schemas/hooks.ts): default false →
                         // a block prevents continuation; true lets the turn proceed.
                         prevent_continuation: !is_stop && !continue_on_block,
@@ -400,14 +465,52 @@ impl PromptExecutor {
 /// disallowed by scope. Those forms are therefore left untouched. The hook
 /// schema documents `$ARGUMENTS` as the placeholder (`schemas/hooks.ts:70-73`),
 /// which is the path exercised here.
-pub(crate) fn add_arguments_to_prompt(prompt: &str, json_input: &str) -> String {
-    if prompt.contains("$ARGUMENTS") {
-        return prompt.replace("$ARGUMENTS", json_input);
+pub(crate) fn add_arguments_to_prompt(
+    prompt: &Utf16JsonProjection,
+    json_input: &str,
+) -> Utf16JsonProjection {
+    let prompt_units = prompt
+        .string_units("")
+        .expect("prompt template is a string projection");
+    let placeholder = "$ARGUMENTS".encode_utf16().collect::<Vec<_>>();
+    let input_units = json_input.encode_utf16().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(prompt_units.len() + input_units.len());
+    let mut index = 0;
+    let mut replaced = false;
+    while index < prompt_units.len() {
+        if prompt_units[index..].starts_with(&placeholder) {
+            output.extend_from_slice(&input_units);
+            index += placeholder.len();
+            replaced = true;
+        } else {
+            output.push(prompt_units[index]);
+            index += 1;
+        }
     }
-    if json_input.is_empty() {
-        return prompt.to_string();
+    if !replaced {
+        if input_units.is_empty() {
+            return prompt.clone();
+        }
+        output.extend("\n\nARGUMENTS: ".encode_utf16());
+        output.extend(input_units);
     }
-    format!("{prompt}\n\nARGUMENTS: {json_input}")
+    text_projection(output)
+}
+
+fn prompt_reason_prefix(prompt: &Utf16JsonProjection) -> Vec<u16> {
+    let mut units = vec![b'[' as u16];
+    units.extend(
+        prompt
+            .string_units("")
+            .expect("prompt template is a string projection"),
+    );
+    units.extend("]: ".encode_utf16());
+    units
+}
+
+fn text_projection(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text is derived from exact UTF-16 units")
 }
 
 #[cfg(test)]
@@ -432,13 +535,13 @@ mod tests {
     /// Records the request it received and returns a scripted result.
     struct MockRunner {
         recorded: Mutex<Vec<PromptHookRequest>>,
-        result: Mutex<Option<Result<String, PromptHookError>>>,
+        result: Mutex<Option<Result<Utf16JsonProjection, PromptHookError>>>,
     }
     impl MockRunner {
         fn ok(body: &str) -> Arc<Self> {
             Arc::new(Self {
                 recorded: Mutex::new(Vec::new()),
-                result: Mutex::new(Some(Ok(body.to_string()))),
+                result: Mutex::new(Some(Ok(body.into()))),
             })
         }
         fn err(e: PromptHookError) -> Arc<Self> {
@@ -450,7 +553,10 @@ mod tests {
     }
     #[async_trait]
     impl HookPromptRunner for MockRunner {
-        async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+        async fn run(
+            &self,
+            req: PromptHookRequest,
+        ) -> Result<Utf16JsonProjection, PromptHookError> {
             self.recorded.lock().unwrap().push(req);
             self.result
                 .lock()
@@ -497,7 +603,7 @@ mod tests {
         });
         exec.execute(
             &make_prompt_hook(),
-            "evaluate",
+            &"evaluate".into(),
             None,
             false,
             r#"{"hook_event_name":"Stop"}"#,
@@ -507,7 +613,10 @@ mod tests {
         let transcript = calls[0].transcript.as_ref().unwrap();
         assert_eq!(transcript.last_usage_tokens, 123);
         assert_eq!(transcript.messages.len(), 1);
-        assert!(!calls[0].prompt.contains("live evidence"));
+        assert!(!calls[0]
+            .prompt
+            .string_at("")
+            .is_some_and(|prompt| prompt.contains("live evidence")));
     }
 
     #[tokio::test]
@@ -519,16 +628,22 @@ mod tests {
                 serde_json::json!({"hook_event_name":event,"transcript_path":"/tmp/session.jsonl"})
                     .to_string();
             let outcome = exec
-                .execute(&make_prompt_hook(), "all tests pass", None, false, &payload)
+                .execute(
+                    &make_prompt_hook(),
+                    &"all tests pass".into(),
+                    None,
+                    false,
+                    &payload,
+                )
                 .await;
             let response = outcome.result.response.unwrap();
             assert_eq!(response.decision, Some(HookDecision::Block));
             assert!(!response.prevent_continuation);
             let calls = runner.recorded.lock().unwrap();
             assert_eq!(calls[0].system_prompt, STOP_PROMPT_HOOK_SYSTEM_PROMPT);
-            assert!(calls[0]
-                .prompt
-                .starts_with("Based on the conversation transcript above,"));
+            assert!(calls[0].prompt.string_at("").is_some_and(|prompt| {
+                prompt.starts_with("Based on the conversation transcript above,")
+            }));
             assert_eq!(
                 calls[0].transcript_path.as_deref(),
                 Some(std::path::Path::new("/tmp/session.jsonl"))
@@ -549,7 +664,13 @@ mod tests {
             let exec = PromptExecutor::new(Some(runner), Duration::from_secs(5));
             let payload = serde_json::json!({"hook_event_name":event}).to_string();
             let result = exec
-                .execute(&make_prompt_hook(), "condition", None, false, &payload)
+                .execute(
+                    &make_prompt_hook(),
+                    &"condition".into(),
+                    None,
+                    false,
+                    &payload,
+                )
                 .await
                 .result;
             assert_eq!(
@@ -578,7 +699,7 @@ mod tests {
         let outcome = exec
             .execute(
                 &hook,
-                "Is $ARGUMENTS safe?",
+                &"Is $ARGUMENTS safe?".into(),
                 None,
                 false,
                 r#"{"tool":"Bash"}"#,
@@ -594,7 +715,10 @@ mod tests {
         // The request carried the substituted prompt + fixed system prompt.
         let recorded = runner.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].prompt, r#"Is {"tool":"Bash"} safe?"#);
+        assert_eq!(
+            recorded[0].prompt.string_at(""),
+            Some(r#"Is {"tool":"Bash"} safe?"#)
+        );
         assert_eq!(recorded[0].system_prompt, PROMPT_HOOK_SYSTEM_PROMPT);
         assert_eq!(recorded[0].model, None);
     }
@@ -605,7 +729,9 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         // The transport call succeeded; the block is carried on the response.
@@ -613,7 +739,7 @@ mod tests {
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
         assert_eq!(
-            resp.reason.as_deref(),
+            resp.reason.as_ref().map(|reason| reason.display.as_str()),
             Some("[vet it]: rm -rf is dangerous")
         );
         assert!(resp.prevent_continuation);
@@ -627,7 +753,9 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, true, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, true, "{}")
+            .await;
 
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
@@ -643,11 +771,16 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
-        assert_eq!(resp.reason.as_deref(), Some("[vet it]: "));
+        assert_eq!(
+            resp.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some("[vet it]: ")
+        );
         assert!(resp.prevent_continuation);
     }
 
@@ -657,13 +790,39 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
-        assert_eq!(outcome.result.stderr, "JSON validation failed");
-        assert_eq!(outcome.result.stdout, "not json at all");
+        assert_eq!(outcome.result.stderr.display, "JSON validation failed");
+        assert_eq!(outcome.result.stdout.display, "not json at all");
         assert!(outcome.result.response.is_none());
+    }
+
+    #[tokio::test]
+    async fn json_response_preserves_escaped_unpaired_surrogate_in_stdout() {
+        let model_text = r#"{"ok":false,"reason":"\ud800"}"#;
+        let runner = MockRunner::ok(model_text);
+        let exec = PromptExecutor::new(Some(runner), Duration::from_secs(5));
+
+        let outcome = exec
+            .execute(&make_prompt_hook(), &"vet it".into(), None, false, "{}")
+            .await;
+
+        assert!(matches!(outcome.result.outcome, HookOutcome::Success));
+        assert_eq!(
+            outcome.result.stdout.utf16_code_units,
+            model_text.encode_utf16().collect::<Vec<_>>()
+        );
+        let response = outcome.result.response.expect("condition blocks");
+        assert_eq!(response.decision, Some(HookDecision::Block));
+        let reason = response.reason.expect("blocking reason is retained");
+        let mut expected_reason = "[vet it]: ".encode_utf16().collect::<Vec<_>>();
+        expected_reason.push(0xD800);
+        assert_eq!(reason.utf16_code_units, expected_reason);
+        assert_eq!(reason.display, "[vet it]: \u{FFFD}");
     }
 
     #[tokio::test]
@@ -672,16 +831,19 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
             outcome
                 .result
                 .stderr
+                .display
                 .starts_with("Schema validation failed:"),
             "stderr was {:?}",
-            outcome.result.stderr
+            outcome.result.stderr.display
         );
         assert!(outcome.result.response.is_none());
     }
@@ -691,11 +853,17 @@ mod tests {
         let exec = PromptExecutor::new(None, Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::NotWired);
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
-        assert!(outcome.result.stderr.contains("prompt executor not wired"));
+        assert!(outcome
+            .result
+            .stderr
+            .display
+            .contains("prompt executor not wired"));
         // Crucially: no Block decision — a no-runner prompt hook never blocks.
         assert!(outcome.result.response.is_none());
     }
@@ -706,7 +874,9 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         assert!(matches!(outcome.result.outcome, HookOutcome::Cancelled));
@@ -719,7 +889,9 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(30));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::TimedOut);
         assert!(matches!(outcome.result.outcome, HookOutcome::Timeout));
@@ -731,16 +903,19 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
+        let outcome = exec
+            .execute(&hook, &"vet it".into(), None, false, "{}")
+            .await;
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
             outcome
                 .result
                 .stderr
+                .display
                 .contains("Error executing prompt hook: provider 500"),
             "stderr was {:?}",
-            outcome.result.stderr
+            outcome.result.stderr.display
         );
         assert!(outcome.result.response.is_none());
     }
@@ -752,7 +927,13 @@ mod tests {
         let hook = make_prompt_hook();
 
         let _ = exec
-            .execute(&hook, "vet it", Some("claude-sonnet-4-6"), false, "{}")
+            .execute(
+                &hook,
+                &"vet it".into(),
+                Some("claude-sonnet-4-6"),
+                false,
+                "{}",
+            )
             .await;
 
         let recorded = runner.recorded.lock().unwrap();
@@ -762,7 +943,9 @@ mod tests {
     #[test]
     fn add_arguments_replaces_placeholder() {
         assert_eq!(
-            add_arguments_to_prompt("check $ARGUMENTS now", r#"{"a":1}"#),
+            add_arguments_to_prompt(&"check $ARGUMENTS now".into(), r#"{"a":1}"#)
+                .string_at("")
+                .unwrap(),
             r#"check {"a":1} now"#
         );
     }
@@ -770,7 +953,9 @@ mod tests {
     #[test]
     fn add_arguments_appends_when_no_placeholder() {
         assert_eq!(
-            add_arguments_to_prompt("evaluate this", r#"{"a":1}"#),
+            add_arguments_to_prompt(&"evaluate this".into(), r#"{"a":1}"#)
+                .string_at("")
+                .unwrap(),
             "evaluate this\n\nARGUMENTS: {\"a\":1}"
         );
     }
@@ -778,8 +963,20 @@ mod tests {
     #[test]
     fn add_arguments_no_placeholder_empty_json_leaves_prompt() {
         assert_eq!(
-            add_arguments_to_prompt("evaluate this", ""),
+            add_arguments_to_prompt(&"evaluate this".into(), "")
+                .string_at("")
+                .unwrap(),
             "evaluate this"
         );
+    }
+
+    #[test]
+    fn prompt_splice_preserves_lone_surrogate_units() {
+        let prompt = Utf16JsonProjection::parse(r#""check \ud800 $ARGUMENTS""#).unwrap();
+        let result = add_arguments_to_prompt(&prompt, r#"{"path":"\udc00"}"#);
+        let mut expected = "check ".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend(r#" {"path":"\udc00"}"#.encode_utf16());
+        assert_eq!(result.string_units(""), Some(expected));
     }
 }

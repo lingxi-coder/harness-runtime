@@ -1,0 +1,1 @@
+2026-10-08T07:37:54.840Z [DEBUG] [native-tool-result-persist-fixture] console.log: NATIVE_TOOL_RESULT_META={"tool":"mcp__native-tool-result-persist-fixture__probe","tool_use_id":"toolu_native_tool_result_fixture","result_units":50007,"unit_at_5":55296}

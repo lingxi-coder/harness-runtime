@@ -38,6 +38,12 @@ use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::task_created_firer::{TaskCreatedFire, TaskCreatedFirer};
 use hooks::HookExecutorImpl;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn empty_source_string() -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::new(), Vec::new())
+        .expect("the empty Rust string is a valid UTF-16 projection")
+}
 
 /// Adapts the engine's hook executor to the `tasks` crate's `TaskCreated` firer
 /// seam.
@@ -82,7 +88,7 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
         let event = HookEvent::TaskCreated {
             task_id: fire.task_id,
             task_type: fire.task_subject,
-            description: fire.task_description.unwrap_or_default(),
+            description: fire.task_description.unwrap_or_else(empty_source_string),
             teammate_name: fire.teammate_name,
             team_name: fire.team_name,
         };
@@ -109,6 +115,12 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
 mod tests {
     use super::*;
     use crate::test_support::noop_hook_executor;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    fn source_string(value: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+            .expect("Rust strings are valid UTF-16 projections")
+    }
 
     #[tokio::test]
     async fn no_matching_hook_is_a_noop_fire() {
@@ -123,8 +135,8 @@ mod tests {
         firer
             .fire(TaskCreatedFire {
                 task_id: "t1".into(),
-                task_subject: "LocalBash".into(),
-                task_description: Some("do the work".into()),
+                task_subject: source_string("LocalBash"),
+                task_description: Some(source_string("do the work")),
                 teammate_name: None,
                 team_name: None,
             })

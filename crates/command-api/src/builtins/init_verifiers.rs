@@ -33,7 +33,7 @@ impl InitVerifiersHandler {
 impl BuiltinCommandHandler for InitVerifiersHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::InjectMessage {
-            content: INIT_VERIFIERS_PROMPT.to_string(),
+            content: INIT_VERIFIERS_PROMPT.to_string().into(),
         }
     }
 
@@ -294,11 +294,12 @@ After writing the skill file(s), inform the user:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "init-verifiers".to_string(),
-            raw_args: String::new(),
+            name: "init-verifiers".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

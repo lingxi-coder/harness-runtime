@@ -8,6 +8,7 @@
 //! See spec §25.2 (`LspConnectionState`).
 
 use lingxi_core::host::{LspServerCapabilities, LspServerConfig};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use std::time::SystemTime;
 
@@ -54,8 +55,8 @@ pub enum LspConnectionState {
     Failed {
         /// Configuration registered for this server.
         config: LspServerConfig,
-        /// Human-readable failure description (claude-code `lastError`).
-        error: String,
+        /// Source-native failure description (claude-code `lastError`).
+        error: Utf16JsonProjection,
         /// Failed start attempts so far (claude-code `restartCount`).
         restarts: u32,
         /// Whether the exceeded-max-crash-recovery error has already been

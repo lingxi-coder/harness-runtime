@@ -257,38 +257,45 @@ pub async fn emit_thinking_signature_strip_retry(
         .await;
 }
 
-/// Emit `tengu_dispatch_header_fallback` (cc 2.1.219): an attempt carrying the
-/// opt-in `anthropic-dispatch-id: v2s` header failed with an HTTP 5xx
-/// (`reason:"5xx"`, `status` set) or a connection error (`reason:"conn_err"`,
-/// `status` absent — the oracle sends the literal `"none"`), and the header is
-/// stripped for the rest of the session.
-///
-/// No-op when `bus` is `None`.
+/// Current native dispatch recovery metadata; absent optional fields are omitted.
+pub struct DispatchFallbackEvent<'a> {
+    pub model: &'a str,
+    pub dispatch: Option<&'a str>,
+    pub reason: &'static str,
+    pub status: Option<u16>,
+    pub query_source: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+}
+
 pub async fn emit_dispatch_header_fallback(
     bus: &Option<Arc<AnalyticsBus>>,
-    model: &str,
-    reason: &'static str,
-    status: Option<u16>,
+    event: DispatchFallbackEvent<'_>,
 ) {
     let Some(bus) = bus else { return };
     let mut m = LogEventMetadata::new();
-    m.insert(
-        "model".into(),
-        AnalyticsValue::String(
-            Verified::assert_safe(model.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    m.insert("reason".into(), AnalyticsValue::String(reason.to_string()));
+    for (key, value) in [
+        ("model", event.model),
+        ("dispatch", event.dispatch.unwrap_or("none")),
+        ("resend_dispatch", "v2p"),
+        ("reason", event.reason),
+    ] {
+        m.insert(key.into(), AnalyticsValue::String(value.into()));
+    }
     m.insert(
         "status".into(),
-        match status {
-            Some(s) => AnalyticsValue::Int(i64::from(s)),
-            // `status:Te("none")` — the oracle stringifies the absent status.
-            None => AnalyticsValue::String("none".to_string()),
-        },
+        event.status.map_or_else(
+            || AnalyticsValue::String("none".into()),
+            |status| AnalyticsValue::Int(i64::from(status)),
+        ),
     );
+    for (key, value) in [
+        ("query_source", event.query_source),
+        ("request_id", event.request_id),
+    ] {
+        if let Some(value) = value {
+            m.insert(key.into(), AnalyticsValue::String(value.into()));
+        }
+    }
     bus.log_event("tengu_dispatch_header_fallback", m).await;
 }
 

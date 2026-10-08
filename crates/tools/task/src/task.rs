@@ -31,11 +31,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lingxi_core::host::task_registry::TaskRegistryError;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::TodoState;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -51,8 +52,10 @@ use crate::todo_store::{TodoStore, TodoTask};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    CoercedInput, DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult,
-    ToolError, ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, CoercedInput, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -286,30 +289,35 @@ async fn task_stop_not_found_message(
     requested: &str,
     suggestion: Option<&str>,
     caller_agent_id: Option<&str>,
-) -> String {
+) -> Utf16JsonProjection {
     use lingxi_core::host::display::sanitize_display;
     let (named_agents, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
-    let mut message = format!("No task found with ID: {}", sanitize_display(requested));
+    let mut message = format!("No task found with ID: {}", sanitize_display(requested))
+        .encode_utf16()
+        .collect::<Vec<_>>();
     if let Some(suggestion) = suggestion {
-        message.push_str(&format!(
-            ". Did you mean: {}?",
-            sanitize_display(suggestion)
-        ));
+        message.extend(format!(". Did you mean: {}?", sanitize_display(suggestion)).encode_utf16());
     }
     if !rosters.running_teammates.is_empty() {
-        message.push_str(&format!(
-            ". Running teammates: {}",
-            join_sanitized(&rosters.running_teammates)
-        ));
+        message.extend(
+            format!(
+                ". Running teammates: {}",
+                join_sanitized(&rosters.running_teammates)
+            )
+            .encode_utf16(),
+        );
     }
     if !named_agents.is_empty() {
-        message.push_str(&format!(
-            ". Running named agents: {}",
-            join_sanitized(&named_agents)
-        ));
+        message.extend(
+            format!(". Running named agents: {}", join_sanitized(&named_agents)).encode_utf16(),
+        );
     }
-    message.push_str(&background_agents_clause(&rosters));
-    message
+    message.extend(
+        background_agents_clause(&rosters)
+            .string_units("")
+            .unwrap_or_default(),
+    );
+    source_text_projection_units(&message)
 }
 
 /// claude-code `SWn` (@3695814) — TaskOutput's "no task found" message.
@@ -322,28 +330,39 @@ async fn task_output_not_found_message(
     registry: &std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     requested: &str,
     caller_agent_id: Option<&str>,
-) -> String {
+) -> Utf16JsonProjection {
     let (_named, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
-    format!(
-        "No task found with ID: {requested}{}",
+    let mut units = format!("No task found with ID: {requested}")
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(
         background_agents_clause(&rosters)
-    )
+            .string_units("")
+            .unwrap_or_default(),
+    );
+    source_text_projection_units(&units)
 }
 
 /// `JFe`'s tail: the clause, or an empty string when the roster is empty.
 fn background_agents_clause(
     rosters: &lingxi_core::host::task_registry::TaskNotFoundRosters,
-) -> String {
+) -> Utf16JsonProjection {
     if rosters.background_agents.is_empty() {
-        return String::new();
+        return source_text_projection("");
     }
     // Entries are pre-rendered `{id} ({description})` by the registry, whose
     // description already went through the sanitizer; joining them raw here
     // matches `d.join(", ")`.
-    format!(
-        ". Running background agents: {}",
-        rosters.background_agents.join(", ")
-    )
+    let mut units = ". Running background agents: "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    for (index, agent) in rosters.background_agents.iter().enumerate() {
+        if index > 0 {
+            units.extend(", ".encode_utf16());
+        }
+        units.extend(agent.string_units("").unwrap_or_default());
+    }
+    source_text_projection_units(&units)
 }
 
 fn join_sanitized(values: &[String]) -> String {
@@ -432,12 +451,20 @@ fn join_hash(ids: &[String]) -> String {
 }
 
 /// JS-truthiness of `task.metadata?._internal` (`TaskListTool` filter).
-fn metadata_internal_truthy(metadata: &Map<String, Value>) -> bool {
-    match metadata.get("_internal") {
-        None | Some(Value::Null | Value::Bool(false)) => false,
-        Some(Value::Bool(true) | Value::Array(_) | Value::Object(_)) => true,
-        Some(Value::Number(n)) => n.as_f64().is_none_or(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
+fn metadata_internal_truthy(metadata: Option<&Utf16JsonProjection>) -> bool {
+    let Some(value) = metadata.and_then(|metadata| metadata.get_property("_internal")) else {
+        return false;
+    };
+    if value.is_null() {
+        false
+    } else if let Some(boolean) = value.as_bool() {
+        boolean
+    } else if let Some(number) = value.as_number() {
+        number != 0.0
+    } else if value.code_units().is_some() {
+        !value.code_units().unwrap_or_default().is_empty()
+    } else {
+        value.array_len().is_some() || value.object_entries().is_some()
     }
 }
 
@@ -507,58 +534,78 @@ fn todo_store(config_home: Option<&std::path::Path>, list_id: &str) -> TodoStore
 /// Borrowed view of a [`TodoTask`] used to render `TaskList` lines.
 struct TaskListRow {
     id: String,
-    subject: String,
+    subject: Utf16JsonProjection,
     status: TodoState,
     owner: Option<String>,
     blocked_by: Vec<String>,
 }
 
 /// Render the `TaskList` result string (`mapToolResultToToolResultBlockParam`).
-fn render_task_list(rows: &[TaskListRow]) -> String {
+fn render_task_list(rows: &[TaskListRow]) -> Utf16JsonProjection {
     if rows.is_empty() {
-        return "No tasks found".to_string();
+        return source_text_projection("No tasks found");
     }
-    rows.iter()
-        .map(|row| {
-            let owner = row
-                .owner
-                .as_deref()
-                .filter(|o| !o.is_empty())
-                .map(|o| format!(" ({o})"))
-                .unwrap_or_default();
-            let blocked = if row.blocked_by.is_empty() {
-                String::new()
-            } else {
-                format!(" [blocked by {}]", join_hash(&row.blocked_by))
-            };
-            format!(
-                "#{} [{}] {}{owner}{blocked}",
-                row.id,
-                status_wire(row.status),
-                row.subject
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut units = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            units.push(u16::from(b'\n'));
+        }
+        let owner = row
+            .owner
+            .as_deref()
+            .filter(|o| !o.is_empty())
+            .map(|o| format!(" ({o})"))
+            .unwrap_or_default();
+        let blocked = if row.blocked_by.is_empty() {
+            String::new()
+        } else {
+            format!(" [blocked by {}]", join_hash(&row.blocked_by))
+        };
+        units.extend(format!("#{} [{}] ", row.id, status_wire(row.status)).encode_utf16());
+        units.extend(row.subject.string_units("").unwrap_or_default());
+        units.extend(owner.encode_utf16());
+        units.extend(blocked.encode_utf16());
+    }
+    source_text_projection_units(&units)
 }
 
 /// Render the `TaskGet` result string.
-fn render_task_get(task: Option<&TodoTask>) -> String {
+fn render_task_get(task: Option<&TodoTask>) -> Utf16JsonProjection {
     let Some(task) = task else {
-        return "Task not found".to_string();
+        return source_text_projection("Task not found");
     };
-    let mut lines = vec![
-        format!("Task #{}: {}", task.id, task.subject),
-        format!("Status: {}", status_wire(task.status)),
-        format!("Description: {}", task.description),
-    ];
+    let mut units = format!("Task #{}: ", task.id)
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(task.subject.string_units("").unwrap_or_default());
+    units.extend(format!("\nStatus: {}\nDescription: ", status_wire(task.status)).encode_utf16());
+    units.extend(task.description.string_units("").unwrap_or_default());
     if !task.blocked_by.is_empty() {
-        lines.push(format!("Blocked by: {}", join_hash(&task.blocked_by)));
+        units.extend(format!("\nBlocked by: {}", join_hash(&task.blocked_by)).encode_utf16());
     }
     if !task.blocks.is_empty() {
-        lines.push(format!("Blocks: {}", join_hash(&task.blocks)));
+        units.extend(format!("\nBlocks: {}", join_hash(&task.blocks)).encode_utf16());
     }
-    lines.join("\n")
+    source_text_projection_units(&units)
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("Task result is valid JSON")
+}
+
+fn source_string_field(input: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    let value = input.subprojection(&format!("/{key}")).ok()?;
+    value.string_units("").is_some().then_some(value)
+}
+
+fn source_string_array(values: &[String]) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(
+        values
+            .iter()
+            .map(|value| source_text_projection(value))
+            .collect(),
+    )
+    .expect("Task string array is valid JSON")
 }
 
 async fn emit_started(
@@ -605,9 +652,9 @@ async fn emit_completed(
 fn registry_err_to_tool_err(prefix: &str, e: TaskRegistryError) -> ToolError {
     match e {
         TaskRegistryError::NotFound(id) => {
-            ToolError::InvalidInput(format!("{prefix}: task not found: {id}"))
+            invalid_tool_input(format!("{prefix}: task not found: {id}"))
         }
-        TaskRegistryError::InvalidInput(s) => ToolError::InvalidInput(format!("{prefix}: {s}")),
+        TaskRegistryError::InvalidInput(s) => invalid_tool_input(format!("{prefix}: {s}")),
         TaskRegistryError::Internal(s) => ToolError::Internal(format!("{prefix}: {s}")),
     }
 }
@@ -898,6 +945,8 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
         }
     })
 });
+static TASK_CREATE_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_CREATE_SCHEMA));
 
 // ── Input coercion (claude-code `POe` / `Cce`) and steering (`yDn`) ──────
 //
@@ -914,6 +963,7 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 // object order the strip pass walks.
 
 /// `OR(e)` — a string with non-whitespace content.
+#[cfg(test)]
 fn is_filled_string(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
@@ -921,11 +971,13 @@ fn is_filled_string(value: Option<&Value>) -> bool {
 }
 
 /// `AOe(e)` — carries a batch parameter TaskCreate does not have.
+#[cfg(test)]
 fn has_batch_key(map: &serde_json::Map<String, Value>) -> bool {
     map.contains_key("tasks") || map.contains_key("todos")
 }
 
 /// `ROe(e)` — carries Agent-tool parameters.
+#[cfg(test)]
 fn has_agent_keys(map: &serde_json::Map<String, Value>) -> bool {
     map.contains_key("prompt") || map.contains_key("subagent_type")
 }
@@ -933,6 +985,7 @@ fn has_agent_keys(map: &serde_json::Map<String, Value>) -> bool {
 /// `TOo(e)` — derive a subject from a description: trim, cap at 80 CHARACTERS
 /// (`Array.from`, i.e. code points), and prefer to cut on the last space when
 /// that space is past the halfway point.
+#[cfg(test)]
 fn subject_from_description(description: &str) -> String {
     let trimmed = description.trim();
     let chars: Vec<char> = trimmed.chars().collect();
@@ -973,6 +1026,7 @@ const TASK_CREATE_KNOWN_STRIP: [&str; 12] = [
 
 /// Move `alias` onto `target` when the target is absent and the alias holds a
 /// filled string. Returns the tag to record.
+#[cfg(test)]
 fn apply_alias(
     map: &mut serde_json::Map<String, Value>,
     aliases: &[&str],
@@ -994,7 +1048,8 @@ fn apply_alias(
 
 /// `POe` — repair a near-miss TaskCreate call, or `None` when there is nothing
 /// to repair (or the shape is one `yDn` steers instead).
-fn coerce_task_create_input(input: &Value) -> Option<CoercedInput> {
+#[cfg(test)]
+fn coerce_task_create_input(input: &Value) -> Option<TestCoercedInput> {
     let map = input.as_object()?;
     if has_batch_key(map) {
         // Not repairable — `yDn` explains it instead.
@@ -1081,13 +1136,14 @@ fn coerce_task_create_input(input: &Value) -> Option<CoercedInput> {
     if tags.is_empty() {
         return None;
     }
-    Some(CoercedInput {
+    Some(TestCoercedInput {
         input: Value::Object(out),
         shape_class: tags.join("+"),
     })
 }
 
 /// `yDn` — the sentence shown instead of a bare schema rejection.
+#[cfg(test)]
 fn task_create_steer(input: &Value) -> Option<&'static str> {
     let map = input.as_object()?;
     let inner = map.get("task").and_then(Value::as_object);
@@ -1108,7 +1164,8 @@ fn task_create_steer(input: &Value) -> Option<&'static str> {
 
 /// `Cce` — TaskUpdate accepts `id`/`task_id` for `taskId` and `active_form`
 /// for `activeForm`.
-fn coerce_task_update_input(input: &Value) -> Option<CoercedInput> {
+#[cfg(test)]
+fn coerce_task_update_input(input: &Value) -> Option<TestCoercedInput> {
     let map = input.as_object()?;
     let mut out = map.clone();
     let mut tags: Vec<String> = Vec::new();
@@ -1117,10 +1174,347 @@ fn coerce_task_update_input(input: &Value) -> Option<CoercedInput> {
     if tags.is_empty() {
         return None;
     }
-    Some(CoercedInput {
+    Some(TestCoercedInput {
         input: Value::Object(out),
         shape_class: tags.join("+"),
     })
+}
+
+#[cfg(test)]
+struct TestCoercedInput {
+    input: Value,
+    shape_class: String,
+}
+
+fn source_object_view(input: &Utf16JsonProjection) -> Option<JsonValueView<'_>> {
+    let root = input.at_pointer("")?;
+    root.object_entries()?;
+    Some(root)
+}
+
+fn source_has_any(input: JsonValueView<'_>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| input.get_property(key).is_some())
+}
+
+fn source_filled_string(value: Option<JsonValueView<'_>>) -> bool {
+    value
+        .and_then(JsonValueView::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn source_set_field(
+    object: &mut Utf16JsonProjection,
+    key: &str,
+    value: Utf16JsonProjection,
+) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    if object.get_property(key).is_some() {
+        object.replace_pointer_projection(&format!("/{key}"), value)
+    } else {
+        let field = Utf16JsonProjection::object(vec![(key.to_owned(), value)])?;
+        object.merge_object_projection(&field)
+    }
+}
+
+fn source_apply_alias(
+    object: &mut Utf16JsonProjection,
+    alias: &str,
+    target: &str,
+    tags: &mut Vec<String>,
+) -> Option<()> {
+    let root = source_object_view(object)?;
+    if root.get_property(alias).is_some()
+        && root.get_property(target).is_none()
+        && source_filled_string(root.get_property(alias))
+    {
+        let value = object.subprojection(&format!("/{alias}")).ok()?;
+        object.remove_field(alias).ok()?;
+        source_set_field(object, target, value).ok()?;
+        tags.push(format!("alias_{alias}"));
+    }
+    Some(())
+}
+
+fn source_retain_task_create_fields(input: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let entries = input.object_entries()?;
+    let mut fields = Vec::new();
+    for entry in entries {
+        if TASK_CREATE_KEEP
+            .iter()
+            .any(|key| entry.code_units == key.encode_utf16().collect::<Vec<_>>())
+        {
+            fields.push((
+                entry.code_units.to_vec(),
+                input.subprojection_property_units(entry.code_units).ok()?,
+            ));
+        }
+    }
+    Utf16JsonProjection::object_units(fields).ok()
+}
+
+fn source_subject_from_description(value: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let units = value.string_units("")?;
+    let mut spans: Vec<(usize, usize, Option<char>)> = Vec::new();
+    let mut index = 0;
+    while index < units.len() {
+        let first = units[index];
+        if (0xD800..=0xDBFF).contains(&first)
+            && units
+                .get(index + 1)
+                .is_some_and(|second| (0xDC00..=0xDFFF).contains(second))
+        {
+            let scalar = 0x10000
+                + ((u32::from(first) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            spans.push((index, index + 2, char::from_u32(scalar)));
+            index += 2;
+        } else if (0xD800..=0xDFFF).contains(&first) {
+            spans.push((index, index + 1, None));
+            index += 1;
+        } else {
+            spans.push((index, index + 1, char::from_u32(u32::from(first))));
+            index += 1;
+        }
+    }
+    let is_trim_space =
+        |scalar: Option<char>| scalar.is_some_and(|ch| ch.is_whitespace() || ch == '\u{feff}');
+    let start = spans
+        .iter()
+        .position(|(_, _, scalar)| !is_trim_space(*scalar))
+        .unwrap_or(spans.len());
+    let end = spans
+        .iter()
+        .rposition(|(_, _, scalar)| !is_trim_space(*scalar))
+        .map_or(start, |last| last + 1);
+    let trimmed = &spans[start..end];
+    if trimmed.len() <= 80 {
+        let lo = trimmed.first().map_or(units.len(), |span| span.0);
+        let hi = trimmed.last().map_or(lo, |span| span.1);
+        return Some(source_text_projection_units(&units[lo..hi]));
+    }
+    let head = &trimmed[..80];
+    let chosen = head
+        .iter()
+        .rposition(|(_, _, scalar)| *scalar == Some(' '))
+        .filter(|index| *index > 40)
+        .unwrap_or(head.len());
+    let count = if chosen < head.len() {
+        chosen
+    } else {
+        head.len()
+    };
+    let lo = head.first()?.0;
+    let mut hi = head[count.saturating_sub(1)].1;
+    while hi > lo {
+        let last = spans
+            .iter()
+            .find(|(start, end, _)| *start < hi && *end == hi)
+            .copied()?;
+        if !is_trim_space(last.2) {
+            break;
+        }
+        hi = last.0;
+    }
+    Some(source_text_projection_units(&units[lo..hi]))
+}
+
+fn source_task_create_steer(input: &Utf16JsonProjection) -> Option<&'static str> {
+    let map = source_object_view(input)?;
+    let inner = map
+        .get_property("task")
+        .filter(|value| value.object_entries().is_some());
+    if source_has_any(map, &["tasks", "todos"])
+        || inner.is_some_and(|value| source_has_any(value, &["tasks", "todos"]))
+    {
+        return Some(
+            "TaskCreate creates ONE task per call and has no `tasks` or `todos` parameter. Call TaskCreate once per task, passing `subject` (a brief title) and `description` (what needs to be done) as top-level string parameters.",
+        );
+    }
+    if (source_has_any(map, &["prompt", "subagent_type"])
+        || inner.is_some_and(|value| source_has_any(value, &["prompt", "subagent_type"])))
+        && !(source_filled_string(map.get_property("subject"))
+            && source_filled_string(map.get_property("description")))
+    {
+        return Some(
+            "This call used Agent-tool parameters (`prompt`/`subagent_type`). TaskCreate adds an item to the task list and takes `subject` and `description` string parameters. To delegate work to a subagent, use the Agent tool instead.",
+        );
+    }
+    None
+}
+
+fn coerce_task_create_source(input: &Utf16JsonProjection) -> Option<CoercedInput> {
+    let root = source_object_view(input)?;
+    if source_has_any(root, &["tasks", "todos"]) {
+        return None;
+    }
+    let mut out = input.clone();
+    let mut tags = Vec::new();
+    if source_has_any(root, &["prompt", "subagent_type"])
+        && !(source_filled_string(root.get_property("subject"))
+            && source_filled_string(root.get_property("description")))
+    {
+        return None;
+    }
+
+    if root.get_property("subject").is_none()
+        && root.get_property("description").is_none()
+        && root.get_property("task").is_some()
+    {
+        let wrapped = input.subprojection("/task").ok()?;
+        if source_filled_string(wrapped.at_pointer("")) {
+            out.remove_field("task").ok()?;
+            source_set_field(&mut out, "description", wrapped).ok()?;
+            tags.push("task_wrapper_string".to_owned());
+        } else if let Some(inner) = source_object_view(&wrapped) {
+            if source_has_any(inner, &["tasks", "todos"])
+                || (source_has_any(inner, &["prompt", "subagent_type"])
+                    && !(source_filled_string(inner.get_property("subject"))
+                        && source_filled_string(inner.get_property("description"))))
+            {
+                return None;
+            }
+            out.remove_field("task").ok()?;
+            out.merge_object_projection(&wrapped).ok()?;
+            tags.push("task_wrapper_object".to_owned());
+        } else {
+            return None;
+        }
+    }
+
+    for (alias, target) in [
+        ("title", "subject"),
+        ("name", "subject"),
+        ("content", "description"),
+        ("active_form", "activeForm"),
+    ] {
+        source_apply_alias(&mut out, alias, target, &mut tags)?;
+    }
+    let current = source_object_view(&out)?;
+    if source_filled_string(current.get_property("subject"))
+        && current.get_property("description").is_none()
+    {
+        let subject = out.subprojection("/subject").ok()?;
+        source_set_field(&mut out, "description", subject).ok()?;
+        tags.push("backfill_description".to_owned());
+    } else if source_filled_string(current.get_property("description"))
+        && current.get_property("subject").is_none()
+    {
+        let description = out.subprojection("/description").ok()?;
+        let derived = source_subject_from_description(&description)?;
+        source_set_field(&mut out, "subject", derived).ok()?;
+        tags.push("backfill_subject".to_owned());
+    }
+
+    let current = source_object_view(&out)?;
+    if source_filled_string(current.get_property("subject"))
+        && source_filled_string(current.get_property("description"))
+    {
+        for entry in out.object_entries()? {
+            if !TASK_CREATE_KEEP
+                .iter()
+                .any(|key| entry.code_units == key.encode_utf16().collect::<Vec<_>>())
+            {
+                let label = if TASK_CREATE_KNOWN_STRIP.contains(&entry.display_key) {
+                    entry.display_key
+                } else {
+                    "other"
+                };
+                tags.push(format!("strip_{label}"));
+            }
+        }
+        out = source_retain_task_create_fields(&out)?;
+        let retained = source_object_view(&out)?;
+        if retained
+            .get_property("activeForm")
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            out.remove_field("activeForm").ok()?;
+            tags.push("drop_invalid_activeForm".to_owned());
+        }
+        let retained = source_object_view(&out)?;
+        if retained
+            .get_property("metadata")
+            .is_some_and(|value| value.object_entries().is_none())
+        {
+            out.remove_field("metadata").ok()?;
+            tags.push("drop_invalid_metadata".to_owned());
+        }
+    }
+    if tags.is_empty() {
+        None
+    } else {
+        Some(CoercedInput {
+            input: out,
+            shape_class: tags.join("+"),
+        })
+    }
+}
+
+fn coerce_task_update_source(input: &Utf16JsonProjection) -> Option<CoercedInput> {
+    source_object_view(input)?;
+    let mut out = input.clone();
+    let mut tags = Vec::new();
+    for alias in ["id", "task_id"] {
+        source_apply_alias(&mut out, alias, "taskId", &mut tags)?;
+    }
+    source_apply_alias(&mut out, "active_form", "activeForm", &mut tags)?;
+    if tags.is_empty() {
+        None
+    } else {
+        Some(CoercedInput {
+            input: out,
+            shape_class: tags.join("+"),
+        })
+    }
+}
+
+fn merge_task_metadata(
+    existing: Option<&Utf16JsonProjection>,
+    incoming: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
+    let empty = Utf16JsonProjection::parse("{}").ok()?;
+    let existing = existing
+        .filter(|value| {
+            value
+                .at_pointer("")
+                .is_some_and(|root| root.object_entries().is_some())
+        })
+        .unwrap_or(&empty);
+    let old_entries = existing.object_entries()?;
+    let new_entries = incoming.object_entries()?;
+    let mut fields: Vec<(Vec<u16>, Utf16JsonProjection)> = Vec::new();
+    for old in &old_entries {
+        let replacement = new_entries
+            .iter()
+            .find(|new| new.code_units == old.code_units);
+        if let Some(new) = replacement {
+            if new.value.is_null() {
+                continue;
+            }
+            fields.push((
+                old.code_units.to_vec(),
+                incoming.subprojection_property_units(new.code_units).ok()?,
+            ));
+        } else {
+            fields.push((
+                old.code_units.to_vec(),
+                existing.subprojection_property_units(old.code_units).ok()?,
+            ));
+        }
+    }
+    for new in &new_entries {
+        if old_entries
+            .iter()
+            .any(|old| old.code_units == new.code_units)
+            || new.value.is_null()
+        {
+            continue;
+        }
+        fields.push((
+            new.code_units.to_vec(),
+            incoming.subprojection_property_units(new.code_units).ok()?,
+        ));
+    }
+    Utf16JsonProjection::object_units(fields).ok()
 }
 
 /// Product-A V2 `TaskCreate` — appends a task to the todo store.
@@ -1152,19 +1546,26 @@ impl Tool for TaskCreateTool {
     fn name(&self) -> &str {
         TASK_CREATE_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("create a task in the task list")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("create a task in the task list".into())
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_CREATE_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_CREATE_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
     }
     /// claude-code `coerceInput: POe` — repair a near-miss call rather than
     /// bouncing it off the schema.
-    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
-        coerce_task_create_input(input)
+    fn coerce_input(&self, input: &Utf16JsonProjection) -> Option<CoercedInput> {
+        coerce_task_create_source(input)
     }
     /// claude-code `validationErrorSteer: yDn` — the shapes coercion cannot
     /// repair get a sentence saying what to call instead. Both are shapes this
@@ -1173,11 +1574,11 @@ impl Tool for TaskCreateTool {
     /// rather than adding one.
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match task_create_steer(input) {
-            Some(steer) => Err(ValidationError(steer.to_string())),
+        match source_task_create_steer(input) {
+            Some(steer) => Err(ValidationError(source_text_projection(steer))),
             None => Ok(()),
         }
     }
@@ -1189,20 +1590,24 @@ impl Tool for TaskCreateTool {
     }
     // claude TaskCreate `isConcurrencySafe(){return!1}` — TaskCreate mutates the
     // shared task list, so it must NOT be batched concurrently with other tools.
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskCreate appends a task to the session task list".into(),
@@ -1213,10 +1618,10 @@ impl Tool for TaskCreateTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Create a new task in the task list".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // getPrompt() (TaskCreateTool/prompt.ts): the swarms-ENABLED variant
         // splices the teammateContext / teammateTips inserts; the disabled
         // variant is byte-identical to the base const.
@@ -1229,7 +1634,7 @@ impl Tool for TaskCreateTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1237,8 +1642,8 @@ impl Tool for TaskCreateTool {
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
-        let subject = match input.get("subject").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let subject = match source_string_field(&input, "subject") {
+            Some(value) => value,
             None => {
                 emit_failed(
                     &bus,
@@ -1248,13 +1653,11 @@ impl Tool for TaskCreateTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskCreate: missing 'subject'".into(),
-                ));
+                return Err(invalid_tool_input("TaskCreate: missing 'subject'"));
             }
         };
-        let description = match input.get("description").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let description = match source_string_field(&input, "description") {
+            Some(value) => value,
             None => {
                 emit_failed(
                     &bus,
@@ -1264,21 +1667,14 @@ impl Tool for TaskCreateTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskCreate: missing 'description'".into(),
-                ));
+                return Err(invalid_tool_input("TaskCreate: missing 'description'"));
             }
         };
-        let active_form = input
-            .get("activeForm")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let active_form = source_string_field(&input, "activeForm");
         let metadata = input
-            .get("metadata")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-
+            .get_property("metadata")
+            .filter(|value| value.object_entries().is_some())
+            .and_then(|_| input.subprojection("/metadata").ok());
         emit_started(&bus, TASK_CREATE_STARTED, &invocation_id, &[]).await;
 
         let list_id = resolve_task_list_id(&ctx).await;
@@ -1313,7 +1709,7 @@ impl Tool for TaskCreateTool {
                 .fire_task_created(
                     &task_id,
                     &subject,
-                    Some(description.as_str()),
+                    Some(&description),
                     // claude-code `getAgentName()` / `getTeamName()`
                     // (`TaskCreateTool.ts:97-98`) — the creating teammate's
                     // display name + team, threaded on the call context.
@@ -1339,8 +1735,9 @@ impl Tool for TaskCreateTool {
                 // several) blocking hooks into one `\n`-joined reason, so the prefix
                 // applies once to the aggregate — byte-faithful with the TS feedback
                 // the model sees.
-                return Err(ToolError::Internal(format!(
-                    "TaskCreated hook feedback:\n{reason}"
+                return Err(ToolError::InvalidInput(source_text_prefix(
+                    "TaskCreated hook feedback:\n",
+                    &reason,
                 )));
             }
         }
@@ -1360,16 +1757,31 @@ impl Tool for TaskCreateTool {
         )
         .await;
 
+        let mut content_units = format!("Task #{task_id} created successfully: ")
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        content_units.extend(subject.string_units("").unwrap_or_default());
+        let data = source_object(vec![
+            (
+                "content".to_owned(),
+                source_text_projection_units(&content_units),
+            ),
+            (
+                "task".to_owned(),
+                source_object(vec![
+                    ("id".to_owned(), source_text_projection(&task_id)),
+                    ("subject".to_owned(), subject),
+                ]),
+            ),
+        ]);
         Ok(ToolCallResult {
-            data: json!({
-                "content": format!("Task #{task_id} created successfully: {subject}"),
-                "task": { "id": task_id, "subject": subject },
-            }),
+            data,
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -1386,6 +1798,8 @@ static TASK_GET_SCHEMA: Lazy<Value> = Lazy::new(|| {
         }
     })
 });
+static TASK_GET_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_GET_SCHEMA));
 
 /// Product-A V2 `TaskGet` — read one task from the todo store.
 pub struct TaskGetTool {
@@ -1416,11 +1830,18 @@ impl Tool for TaskGetTool {
     fn name(&self) -> &str {
         TASK_GET_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("retrieve a task by ID")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("retrieve a task by ID".into())
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_GET_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_GET_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
@@ -1431,20 +1852,24 @@ impl Tool for TaskGetTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskGet is read-only".into(),
@@ -1455,16 +1880,16 @@ impl Tool for TaskGetTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Get a task by ID from the task list".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         TASK_GET_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1472,7 +1897,7 @@ impl Tool for TaskGetTool {
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
-        let task_id = match input.get("taskId").and_then(Value::as_str) {
+        let task_id = match input.string_at("/taskId") {
             Some(s) => s.to_string(),
             None => {
                 emit_failed(
@@ -1483,7 +1908,7 @@ impl Tool for TaskGetTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput("TaskGet: missing 'taskId'".into()));
+                return Err(invalid_tool_input("TaskGet: missing 'taskId'"));
             }
         };
 
@@ -1504,23 +1929,30 @@ impl Tool for TaskGetTool {
 
         let content = render_task_get(task.as_ref());
         let task_json = match &task {
-            Some(t) => json!({
-                "id": t.id,
-                "subject": t.subject,
-                "description": t.description,
-                "status": status_wire(t.status),
-                "blocks": t.blocks,
-                "blockedBy": t.blocked_by,
-            }),
-            None => Value::Null,
+            Some(t) => source_object(vec![
+                ("id".to_owned(), source_text_projection(&t.id)),
+                ("subject".to_owned(), t.subject.clone()),
+                ("description".to_owned(), t.description.clone()),
+                (
+                    "status".to_owned(),
+                    source_text_projection(status_wire(t.status)),
+                ),
+                ("blocks".to_owned(), source_string_array(&t.blocks)),
+                ("blockedBy".to_owned(), source_string_array(&t.blocked_by)),
+            ]),
+            None => generated_builtin_result(&Value::Null),
         };
         Ok(ToolCallResult {
-            data: json!({ "content": content, "task": task_json }),
+            data: source_object(vec![
+                ("content".to_owned(), content),
+                ("task".to_owned(), task_json),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -1534,6 +1966,8 @@ static TASK_LIST_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {}
     })
 });
+static TASK_LIST_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_LIST_SCHEMA));
 
 /// Product-A V2 `TaskList` — enumerate the todo store.
 pub struct TaskListTool {
@@ -1564,11 +1998,18 @@ impl Tool for TaskListTool {
     fn name(&self) -> &str {
         TASK_LIST_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("list all tasks")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("list all tasks".into())
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_LIST_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_LIST_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
@@ -1579,20 +2020,24 @@ impl Tool for TaskListTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskList is read-only".into(),
@@ -1603,10 +2048,10 @@ impl Tool for TaskListTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "List all tasks in the task list".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // getPrompt() (TaskListTool/prompt.ts): the swarms-ENABLED variant adds
         // the teammate use-case bullet + `## Teammate Workflow` section; the
         // disabled variant is byte-identical to the base const.
@@ -1619,7 +2064,7 @@ impl Tool for TaskListTool {
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1636,7 +2081,7 @@ impl Tool for TaskListTool {
             .list()
             .await
             .into_iter()
-            .filter(|t| !metadata_internal_truthy(&t.metadata))
+            .filter(|t| !metadata_internal_truthy(t.metadata.as_ref()))
             .collect();
 
         emit_completed(
@@ -1672,7 +2117,7 @@ impl Tool for TaskListTool {
             .collect();
 
         let content = render_task_list(&rows);
-        let tasks: Vec<Value> = rows
+        let tasks: Vec<Utf16JsonProjection> = rows
             .iter()
             .map(|row| {
                 // T27: `owner` is `z.string().optional()` (TaskListTool.ts:23) and
@@ -1680,25 +2125,33 @@ impl Tool for TaskListTool {
                 // when unset — so the key is OMITTED from the JSON, never emitted
                 // as `owner: null`. Build the object and insert `owner` only when
                 // present.
-                let mut obj = json!({
-                    "id": row.id,
-                    "subject": row.subject,
-                    "status": status_wire(row.status),
-                    "blockedBy": row.blocked_by,
-                });
+                let mut fields = vec![
+                    ("id".to_owned(), source_text_projection(&row.id)),
+                    ("subject".to_owned(), row.subject.clone()),
+                    (
+                        "status".to_owned(),
+                        source_text_projection(status_wire(row.status)),
+                    ),
+                    ("blockedBy".to_owned(), source_string_array(&row.blocked_by)),
+                ];
                 if let Some(owner) = row.owner.as_deref() {
-                    obj["owner"] = Value::String(owner.to_string());
+                    fields.push(("owner".to_owned(), source_text_projection(owner)));
                 }
-                obj
+                source_object(fields)
             })
             .collect();
+        let tasks = Utf16JsonProjection::array(tasks).expect("TaskList result array is valid JSON");
         Ok(ToolCallResult {
-            data: json!({ "content": content, "tasks": tasks }),
+            data: source_object(vec![
+                ("content".to_owned(), content),
+                ("tasks".to_owned(), tasks),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -1723,6 +2176,8 @@ static TASK_UPDATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
         }
     })
 });
+static TASK_UPDATE_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_UPDATE_SCHEMA));
 
 /// Render the `TaskUpdate` success string (`Updated task #id field, field`).
 fn render_task_update_success(task_id: &str, updated_fields: &[String]) -> String {
@@ -1735,6 +2190,12 @@ fn render_task_update_fail(task_id: &str, error: Option<&str>) -> String {
         Some(e) => e.to_string(),
         None => format!("Task #{task_id} not found"),
     }
+}
+
+fn source_text_prefix(prefix: &str, source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(source.string_units("").unwrap_or_default());
+    source_text_projection_units(&units)
 }
 
 /// Product-A V2 `TaskUpdate` — mutate a task in the todo store.
@@ -1766,19 +2227,26 @@ impl Tool for TaskUpdateTool {
     fn name(&self) -> &str {
         TASK_UPDATE_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("update a task")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("update a task".into())
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_UPDATE_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_UPDATE_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
     }
     /// claude-code `coerceInput: Cce` — TaskUpdate accepts `id`/`task_id` for
     /// `taskId` and `active_form` for `activeForm`.
-    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
-        coerce_task_update_input(input)
+    fn coerce_input(&self, input: &Utf16JsonProjection) -> Option<CoercedInput> {
+        coerce_task_update_source(input)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1786,20 +2254,24 @@ impl Tool for TaskUpdateTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskUpdate mutates the session task list only".into(),
@@ -1810,16 +2282,16 @@ impl Tool for TaskUpdateTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Update a task in the task list".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         TASK_UPDATE_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -1827,7 +2299,7 @@ impl Tool for TaskUpdateTool {
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
-        let task_id = match input.get("taskId").and_then(Value::as_str) {
+        let task_id = match input.string_at("/taskId") {
             Some(s) => s.to_string(),
             None => {
                 emit_failed(
@@ -1838,9 +2310,7 @@ impl Tool for TaskUpdateTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskUpdate: missing 'taskId'".into(),
-                ));
+                return Err(invalid_tool_input("TaskUpdate: missing 'taskId'"));
             }
         };
 
@@ -1859,23 +2329,30 @@ impl Tool for TaskUpdateTool {
                 // mapToolResultToToolResultBlockParam (`error || "Task #N not
                 // found"`), carried here via `model_content`.
                 return Ok(ToolCallResult {
-                    data: json!({
-                        "success": false,
-                        "taskId": task_id,
-                        "updatedFields": Vec::<String>::new(),
-                        "error": "Task not found",
-                    }),
-                    model_content: Some(render_task_update_fail(&task_id, Some("Task not found"))),
+                    data: source_object(vec![
+                        (
+                            "success".to_owned(),
+                            generated_builtin_result(&json!(false)),
+                        ),
+                        ("taskId".to_owned(), source_text_projection(&task_id)),
+                        ("updatedFields".to_owned(), source_string_array(&[])),
+                        ("error".to_owned(), source_text_projection("Task not found")),
+                    ]),
+                    model_content: Some(source_text_projection(&render_task_update_fail(
+                        &task_id,
+                        Some("Task not found"),
+                    ))),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 });
             }
         };
 
         // Status: None / "deleted" (special action) / a real TodoState.
-        let status_input = match input.get("status").and_then(Value::as_str) {
+        let status_input = match input.string_at("/status") {
             None => StatusInput::None,
             Some("deleted") => StatusInput::Deleted,
             Some("pending") => StatusInput::State(TodoState::Pending),
@@ -1890,7 +2367,7 @@ impl Tool for TaskUpdateTool {
                     duration(),
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
+                return Err(invalid_tool_input(format!(
                     "TaskUpdate: invalid status '{other}'"
                 )));
             }
@@ -1902,71 +2379,97 @@ impl Tool for TaskUpdateTool {
             emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
             let (data, model_content) = if deleted {
                 (
-                    json!({
-                        "success": true,
-                        "taskId": task_id,
-                        "updatedFields": ["deleted"],
-                        "statusChange": { "from": status_wire(existing.status), "to": "deleted" },
-                    }),
+                    source_object(vec![
+                        ("success".to_owned(), generated_builtin_result(&json!(true))),
+                        ("taskId".to_owned(), source_text_projection(&task_id)),
+                        (
+                            "updatedFields".to_owned(),
+                            source_string_array(&["deleted".to_owned()]),
+                        ),
+                        (
+                            "statusChange".to_owned(),
+                            source_object(vec![
+                                (
+                                    "from".to_owned(),
+                                    source_text_projection(status_wire(existing.status)),
+                                ),
+                                ("to".to_owned(), source_text_projection("deleted")),
+                            ]),
+                        ),
+                    ]),
                     render_task_update_success(&task_id, &["deleted".to_string()]),
                 )
             } else {
                 (
-                    json!({
-                        "success": false,
-                        "taskId": task_id,
-                        "updatedFields": Vec::<String>::new(),
-                        "error": "Failed to delete task",
-                    }),
+                    source_object(vec![
+                        (
+                            "success".to_owned(),
+                            generated_builtin_result(&json!(false)),
+                        ),
+                        ("taskId".to_owned(), source_text_projection(&task_id)),
+                        ("updatedFields".to_owned(), source_string_array(&[])),
+                        (
+                            "error".to_owned(),
+                            source_text_projection("Failed to delete task"),
+                        ),
+                    ]),
                     render_task_update_fail(&task_id, Some("Failed to delete task")),
                 )
             };
             return Ok(ToolCallResult {
                 data,
-                model_content: Some(model_content),
+                model_content: Some(source_text_projection(&model_content)),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
 
         // Diff each provided field against the existing task.
-        let in_subject = input.get("subject").and_then(Value::as_str);
-        let in_description = input.get("description").and_then(Value::as_str);
-        let in_active_form = input.get("activeForm").and_then(Value::as_str);
-        let in_owner = input.get("owner").and_then(Value::as_str);
-        let in_metadata = input.get("metadata").and_then(Value::as_object);
+        let in_subject = source_string_field(&input, "subject");
+        let in_description = source_string_field(&input, "description");
+        let in_active_form = source_string_field(&input, "activeForm");
+        let in_owner = input.string_at("/owner").map(str::to_string);
+        let in_metadata = input
+            .get_property("metadata")
+            .filter(|value| value.object_entries().is_some())
+            .and_then(|_| input.subprojection("/metadata").ok());
 
         let mut updated_fields: Vec<String> = Vec::new();
-        let mut new_subject: Option<String> = None;
-        let mut new_description: Option<String> = None;
-        let mut new_active_form: Option<String> = None;
+        let mut new_subject: Option<Utf16JsonProjection> = None;
+        let mut new_description: Option<Utf16JsonProjection> = None;
+        let mut new_active_form: Option<Utf16JsonProjection> = None;
         let mut new_owner: Option<String> = None;
         let mut new_status: Option<TodoState> = None;
-        let mut new_metadata: Option<Map<String, Value>> = None;
+        let mut new_metadata: Option<Utf16JsonProjection> = None;
 
-        if let Some(s) = in_subject {
-            if s != existing.subject {
-                new_subject = Some(s.to_string());
+        if let Some(subject) = in_subject {
+            if !subject.semantically_eq(&existing.subject) {
+                new_subject = Some(subject);
                 updated_fields.push("subject".into());
             }
         }
-        if let Some(d) = in_description {
-            if d != existing.description {
-                new_description = Some(d.to_string());
+        if let Some(description) = in_description {
+            if !description.semantically_eq(&existing.description) {
+                new_description = Some(description);
                 updated_fields.push("description".into());
             }
         }
-        if let Some(af) = in_active_form {
-            if Some(af) != existing.active_form.as_deref() {
-                new_active_form = Some(af.to_string());
+        if let Some(active_form) = in_active_form {
+            if existing
+                .active_form
+                .as_ref()
+                .is_none_or(|current| !active_form.semantically_eq(current))
+            {
+                new_active_form = Some(active_form);
                 updated_fields.push("activeForm".into());
             }
         }
-        if let Some(o) = in_owner {
-            if Some(o) != existing.owner.as_deref() {
-                new_owner = Some(o.to_string());
+        if let Some(owner) = in_owner.as_deref() {
+            if Some(owner) != existing.owner.as_deref() {
+                new_owner = Some(owner.to_string());
                 updated_fields.push("owner".into());
             }
         }
@@ -1990,16 +2493,11 @@ impl Tool for TaskUpdateTool {
                 updated_fields.push("owner".into());
             }
         }
-        if let Some(meta) = in_metadata {
-            let mut merged = existing.metadata.clone();
-            for (key, value) in meta {
-                if value.is_null() {
-                    merged.remove(key);
-                } else {
-                    merged.insert(key.clone(), value.clone());
-                }
-            }
-            new_metadata = Some(merged);
+        if let Some(metadata) = in_metadata.as_ref() {
+            new_metadata = Some(
+                merge_task_metadata(existing.metadata.as_ref(), metadata)
+                    .expect("validated TaskUpdate metadata can be merged"),
+            );
             updated_fields.push("metadata".into());
         }
 
@@ -2025,7 +2523,7 @@ impl Tool for TaskUpdateTool {
                                 &task_id,
                                 status_wire(st),
                                 &existing.subject,
-                                Some(existing.description.as_str()),
+                                Some(&existing.description),
                                 ctx.agent_name.as_deref(),
                                 ctx.team_name.as_deref(),
                             )
@@ -2048,22 +2546,24 @@ impl Tool for TaskUpdateTool {
                             // tool_result. The sibling hooks already spell it
                             // this way (`TaskCreated` above, `Stop` and
                             // `TeammateIdle` in the orchestrator).
-                            let feedback = format!("TaskCompleted hook feedback:\n{reason}");
+                            let feedback =
+                                source_text_prefix("TaskCompleted hook feedback:\n", &reason);
                             return Ok(ToolCallResult {
-                                data: json!({
-                                    "success": false,
-                                    "taskId": task_id,
-                                    "updatedFields": Vec::<String>::new(),
-                                    "error": feedback,
-                                }),
-                                model_content: Some(render_task_update_fail(
-                                    &task_id,
-                                    Some(&feedback),
-                                )),
+                                data: source_object(vec![
+                                    (
+                                        "success".to_owned(),
+                                        generated_builtin_result(&json!(false)),
+                                    ),
+                                    ("taskId".to_owned(), source_text_projection(&task_id)),
+                                    ("updatedFields".to_owned(), source_string_array(&[])),
+                                    ("error".to_owned(), feedback.clone()),
+                                ]),
+                                model_content: Some(feedback),
                                 new_messages: vec![],
                                 context_modifier: None,
                                 is_error: false,
                                 mcp_meta: None,
+                                subagent_hooks_fired: false,
                             });
                         }
                     }
@@ -2099,7 +2599,7 @@ impl Tool for TaskUpdateTool {
                         t.status = v;
                     }
                     if let Some(v) = new_metadata.clone() {
-                        t.metadata = v;
+                        t.metadata = Some(v);
                     }
                 })
                 .await;
@@ -2124,18 +2624,24 @@ impl Tool for TaskUpdateTool {
                     .filter(|n| !n.is_empty())
                     .map_or_else(|| "team-lead".to_string(), str::to_string);
                 let timestamp = iso8601_utc(std::time::SystemTime::now());
-                let assignment_message = serde_json::to_string(&json!({
-                    "type": "task_assignment",
-                    "taskId": task_id,
-                    "subject": existing.subject,
-                    "description": existing.description,
-                    "assignedBy": sender_name,
-                    "timestamp": timestamp,
-                }))
-                .unwrap_or_default();
+                let assignment_payload = source_object(vec![
+                    ("type".to_owned(), source_text_projection("task_assignment")),
+                    ("taskId".to_owned(), source_text_projection(&task_id)),
+                    ("subject".to_owned(), existing.subject.clone()),
+                    ("description".to_owned(), existing.description.clone()),
+                    (
+                        "assignedBy".to_owned(),
+                        source_text_projection(&sender_name),
+                    ),
+                    ("timestamp".to_owned(), source_text_projection(&timestamp)),
+                ]);
+                let assignment_message = source_text_projection(
+                    &assignment_payload.to_json_string().unwrap_or_default(),
+                );
                 let msg = lingxi_core::host::mailbox::MailboxMessage {
                     message_id: fresh_invocation_id(),
                     content: assignment_message,
+                    summary: None,
                     timestamp: std::time::SystemTime::now(),
                     // claude-code `color: getTeammateColor()` (TaskUpdateTool.ts:294).
                     // The no-arg `getTeammateColor()` returns the SENDER session's
@@ -2153,10 +2659,9 @@ impl Tool for TaskUpdateTool {
         }
 
         // addBlocks: this task blocks each listed id.
-        if let Some(add_blocks) = input.get("addBlocks").and_then(Value::as_array) {
-            let new_blocks: Vec<String> = add_blocks
-                .iter()
-                .filter_map(Value::as_str)
+        if let Some(add_blocks_len) = input.array_len("/addBlocks") {
+            let new_blocks: Vec<String> = (0..add_blocks_len)
+                .filter_map(|index| input.string_at(&format!("/addBlocks/{index}")))
                 .filter(|id| !existing.blocks.iter().any(|b| b == id))
                 .map(str::to_string)
                 .collect();
@@ -2168,10 +2673,9 @@ impl Tool for TaskUpdateTool {
             }
         }
         // addBlockedBy: each listed id blocks this task.
-        if let Some(add_blocked_by) = input.get("addBlockedBy").and_then(Value::as_array) {
-            let new_blocked_by: Vec<String> = add_blocked_by
-                .iter()
-                .filter_map(Value::as_str)
+        if let Some(add_blocked_by_len) = input.array_len("/addBlockedBy") {
+            let new_blocked_by: Vec<String> = (0..add_blocked_by_len)
+                .filter_map(|index| input.string_at(&format!("/addBlockedBy/{index}")))
                 .filter(|id| !existing.blocked_by.iter().any(|b| b == id))
                 .map(str::to_string)
                 .collect();
@@ -2204,21 +2708,31 @@ impl Tool for TaskUpdateTool {
         // Oracle data shape (2.1.223 DCb zod): {success, taskId, updatedFields,
         // error?, statusChange?} — no `content` key; the rendered string rides
         // the model_content seam only.
-        let mut data = json!({
-            "success": true,
-            "taskId": task_id,
-            "updatedFields": updated_fields,
-        });
+        let mut fields = vec![
+            ("success".to_owned(), generated_builtin_result(&json!(true))),
+            ("taskId".to_owned(), source_text_projection(&task_id)),
+            (
+                "updatedFields".to_owned(),
+                source_string_array(&updated_fields),
+            ),
+        ];
         if let Some((from, to)) = status_change {
-            data["statusChange"] = json!({ "from": status_wire(from), "to": status_wire(to) });
+            fields.push((
+                "statusChange".to_owned(),
+                source_object(vec![
+                    ("from".to_owned(), source_text_projection(status_wire(from))),
+                    ("to".to_owned(), source_text_projection(status_wire(to))),
+                ]),
+            ));
         }
         Ok(ToolCallResult {
-            data,
-            model_content: Some(content),
+            data: source_object(fields),
+            model_content: Some(source_text_projection(&content)),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2268,6 +2782,8 @@ static TASK_STOP_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false
     })
 });
+static TASK_STOP_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_STOP_SCHEMA));
 
 /// Kills a task (surface stub).
 pub struct TaskStopTool {
@@ -2294,16 +2810,23 @@ impl Tool for TaskStopTool {
         ALIASES
     }
     /// `searchHint: 'kill a running background task'` (`TaskStopTool.ts:41`).
-    fn search_hint(&self) -> Option<&str> {
-        Some("kill a running background task")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("kill a running background task".into())
     }
     /// `userFacingName: () => 'Stop Task'` for the `external` build
     /// (`TaskStopTool.ts:46` — `''` only for `USER_TYPE === 'ant'`).
     fn user_facing_name(&self) -> Option<&str> {
         Some("Stop Task")
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_STOP_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_STOP_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -2316,23 +2839,27 @@ impl Tool for TaskStopTool {
         true
     }
     /// `isConcurrencySafe() { return true }` (`TaskStopTool.ts:54-56`).
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskStop kills the named task".into(),
@@ -2343,16 +2870,16 @@ impl Tool for TaskStopTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         TASK_STOP_DESCRIPTION.into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         TASK_STOP_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -2368,9 +2895,8 @@ impl Tool for TaskStopTool {
         // `??` (`Option::or`) only falls back for an absent `task_id`; a present
         // empty string survives the coalesce and is then rejected by `!id`.
         let resolved = input
-            .get("task_id")
-            .and_then(Value::as_str)
-            .or_else(|| input.get("shell_id").and_then(Value::as_str))
+            .string_at("/task_id")
+            .or_else(|| input.string_at("/shell_id"))
             .unwrap_or("");
         if resolved.is_empty() {
             emit_failed(
@@ -2381,9 +2907,7 @@ impl Tool for TaskStopTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(
-                "Missing required parameter: task_id".into(),
-            ));
+            return Err(invalid_tool_input("Missing required parameter: task_id"));
         }
         let task_id = resolved.to_string();
 
@@ -2418,7 +2942,7 @@ impl Tool for TaskStopTool {
         let record = match registry.resolve_stop_target(&task_id, &named_agents).await {
             Ok(lingxi_core::host::task_registry::TaskStopResolution::Found(record)) => record,
             Ok(lingxi_core::host::task_registry::TaskStopResolution::Ambiguous(message)) => {
-                return Err(ToolError::InvalidInput(message));
+                return Err(invalid_tool_input(message));
             }
             Ok(lingxi_core::host::task_registry::TaskStopResolution::NotFound { suggestion }) => {
                 emit_failed(
@@ -2429,7 +2953,7 @@ impl Tool for TaskStopTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
+                return Err(invalid_tool_input(
                     task_stop_not_found_message(
                         &self.ctx,
                         &registry,
@@ -2455,7 +2979,7 @@ impl Tool for TaskStopTool {
         let may_stop =
             caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref());
         let owner_refusal = || {
-            ToolError::InvalidInput(format!(
+            invalid_tool_input(format!(
                 "Task {display_id} is owned by {}; agent {} cannot stop it.",
                 lingxi_core::host::display::sanitize_display(
                     record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)
@@ -2469,7 +2993,7 @@ impl Tool for TaskStopTool {
         // observer cannot shut off its own observation loop through TaskStop.
         if record.is_observer {
             if caller_agent_id.is_some() && caller_agent_id == record.owner_agent_id {
-                return Err(ToolError::InvalidInput(format!("Observer {display_id} cannot stop itself; use the task UI or a main-session TaskStop.")));
+                return Err(invalid_tool_input(format!("Observer {display_id} cannot stop itself; use the task UI or a main-session TaskStop.")));
             }
             if !may_stop {
                 return Err(owner_refusal());
@@ -2499,7 +3023,7 @@ impl Tool for TaskStopTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(format!(
+            return Err(invalid_tool_input(format!(
                 "Task {display_id} is not running (status: {})",
                 record.status
             )));
@@ -2574,7 +3098,7 @@ impl Tool for TaskStopTool {
                 lingxi_core::host::task_registry::TaskRegistryError::InvalidInput(reason)
                     if reason == "unknown task type" =>
                 {
-                    ToolError::InvalidInput(format!("Unsupported task type: {task_type}"))
+                    invalid_tool_input(format!("Unsupported task type: {task_type}"))
                 }
                 _ => registry_err_to_tool_err("TaskStop", e),
             });
@@ -2589,20 +3113,35 @@ impl Tool for TaskStopTool {
         .await;
 
         // No `content` key → the orchestrator JSON-stringifies the whole data.
-        let mut data = json!({
-            "message": format!("Successfully stopped task: {task_id} ({command})"),
-            "task_id": task_id, "task_type": task_type, "command": command,
-        });
+        let mut fields = vec![
+            ("message".to_owned(), {
+                let mut units = "Successfully stopped task: "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                units.extend(task_id.encode_utf16());
+                units.extend(" (".encode_utf16());
+                units.extend(command.string_units("").unwrap_or_default());
+                units.extend(")".encode_utf16());
+                source_text_projection_units(&units)
+            }),
+            ("task_id".to_owned(), source_text_projection(&task_id)),
+            ("task_type".to_owned(), source_text_projection(&task_type)),
+            ("command".to_owned(), command.clone()),
+        ];
         if ended_with_live_loop {
-            data["note"] = json!(format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status));
+            fields.push((
+                "note".to_owned(),
+                source_text_projection(&format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status)),
+            ));
         }
         Ok(ToolCallResult {
-            data,
+            data: source_object(fields),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2657,6 +3196,8 @@ static TASK_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false
     })
 });
+static TASK_OUTPUT_SOURCE_SCHEMA: Lazy<Utf16JsonProjection> =
+    Lazy::new(|| generated_builtin_schema(&TASK_OUTPUT_SCHEMA));
 
 /// Default cap on the model-facing `<output>` of `TaskOutput`
 /// (`outputFormatting.ts:5` `TASK_MAX_OUTPUT_DEFAULT = 32_000`).
@@ -2679,13 +3220,12 @@ const TASK_OUTPUT_RESULT_HEADROOM: usize = 18_000;
 /// step: `"true"`→`true`, `"false"`→`false`; anything else passes through to the
 /// inner schema (here rejected → `None`, so the caller's `default` wins).
 /// Mirrors the in-repo convention in `tools/ui/src/send_message.rs`.
-fn semantic_bool(v: &Value) -> Option<bool> {
-    match v {
-        Value::Bool(b) => Some(*b),
-        Value::String(s) if s == "true" => Some(true),
-        Value::String(s) if s == "false" => Some(false),
+fn semantic_bool(v: JsonValueView<'_>) -> Option<bool> {
+    v.as_bool().or_else(|| match v.as_str() {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
         _ => None,
-    }
+    })
 }
 
 /// T30: parse the `TaskOutput` `timeout` (ms). claude-code's schema is
@@ -2696,10 +3236,10 @@ fn semantic_bool(v: &Value) -> Option<bool> {
 /// default), default `30000` when absent/non-numeric, and clamp into the
 /// `[0, 600000]` bounds the zod `.min(0).max(600000)` enforces. The result is the
 /// millisecond budget as a `u64`.
-fn parse_timeout_ms(input: &Value) -> u64 {
+fn parse_timeout_ms(input: &Utf16JsonProjection) -> u64 {
     let raw = input
-        .get("timeout")
-        .and_then(Value::as_f64)
+        .get_property("timeout")
+        .and_then(JsonValueView::as_number)
         .unwrap_or(30_000.0);
     raw.clamp(0.0, 600_000.0) as u64
 }
@@ -2805,129 +3345,163 @@ fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
 /// Port of `formatTaskOutput` (`outputFormatting.ts:22-38`). When the output
 /// length exceeds the (env-overridable) max, prepend a
 /// `[Truncated. Full output: <path>]\n\n` header and keep the LAST
-/// `maxLen - header.length` characters (the tail); otherwise return the output
-/// unchanged.
-///
-/// TS measures `String.length`/`slice` in UTF-16 code units; this port measures
-/// Unicode scalar values (`chars()`), which differ only for astral-plane chars.
-/// For the ASCII/BMP output that task spools carry this is identical.
+/// `maxLen - header.length` UTF-16 code units (the tail); otherwise return the
+/// source projection unchanged. This follows JavaScript `String.length` and
+/// `String.slice`, including a possible split of a surrogate pair.
+fn is_ecmascript_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009..=0x000D
+            | 0x0020
+            | 0x00A0
+            | 0x1680
+            | 0x2000..=0x200A
+            | 0x2028..=0x2029
+            | 0x202F
+            | 0x205F
+            | 0x3000
+            | 0xFEFF
+    )
+}
+
+fn trim_end_utf16(mut units: &[u16]) -> &[u16] {
+    while units
+        .last()
+        .is_some_and(|unit| is_ecmascript_whitespace(*unit))
+    {
+        units = &units[..units.len() - 1];
+    }
+    units
+}
+
+fn is_blank_utf16(units: &[u16]) -> bool {
+    units.iter().all(|unit| is_ecmascript_whitespace(*unit))
+}
+
 fn format_task_output(
-    output: &str,
+    output: &Utf16JsonProjection,
     task_id: &str,
     output_path: Option<&str>,
     omit_path: bool,
-) -> String {
+) -> Utf16JsonProjection {
+    let units = output
+        .string_units("")
+        .expect("TaskOutput body is a root-string projection");
     let max_len = max_task_output_length();
-    let char_count = output.chars().count();
-    if char_count <= max_len {
-        return output.to_string();
+    if units.len() <= max_len {
+        return output.clone();
     }
     if omit_path {
-        // claude-code `yWn`'s `omitPath` arm — there is no file to point at, so
-        // the header says how much survived instead:
-        //
-        // ```js
-        // let _=Qu(e,Math.max(0,o-hWn(o).length));
-        // return{content:hWn(_.length)+_,wasTruncated:!0}
-        // ```
-        //
-        // The budget is computed from `hWn(o)` (the CAP's digits) but the header
-        // finally emitted is `hWn(_.length)` (the KEPT length) — two different
-        // numbers, and the difference is what keeps the result inside the cap.
-        let available = max_len.saturating_sub(truncated_tail_header(max_len).chars().count());
-        let tail: String = output.chars().skip(char_count - available).collect();
-        return format!("{}{tail}", truncated_tail_header(tail.chars().count()));
+        // Native uses String.length and String.slice, both counted in UTF-16
+        // code units. Slicing is intentionally allowed to split a surrogate pair.
+        let available =
+            max_len.saturating_sub(truncated_tail_header(max_len).encode_utf16().count());
+        let tail = &units[units.len().saturating_sub(available)..];
+        let header = truncated_tail_header(tail.len());
+        let mut formatted = header.encode_utf16().collect::<Vec<_>>();
+        formatted.extend_from_slice(tail);
+        return source_text_projection_units(&formatted);
     }
     let header = format!(
         "[Truncated. Full output: {}]\n\n",
         task_output_path(task_id, output_path)
     );
-    let available = max_len.saturating_sub(header.chars().count());
-    // TS `output.slice(-availableSpace)` — keep the last `available` chars.
-    let tail: String = output.chars().skip(char_count - available).collect();
-    format!("{header}{tail}")
+    let available = max_len.saturating_sub(header.encode_utf16().count());
+    let tail = &units[units.len().saturating_sub(available)..];
+    let mut formatted = header.encode_utf16().collect::<Vec<_>>();
+    formatted.extend_from_slice(tail);
+    source_text_projection_units(&formatted)
 }
 
 /// claude-code `hWn(e)` — the `omitPath` truncation header.
-fn truncated_tail_header(kept_chars: usize) -> String {
+fn truncated_tail_header(kept_units: usize) -> String {
     format!(
-        "[Truncated to the last {kept_chars} characters; the earlier part of the report is not retrievable.]\n\n"
+        "[Truncated to the last {kept_units} characters; the earlier part of the report is not retrievable.]\n\n"
     )
 }
 
-/// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
-/// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
-/// joined by a BLANK line (`n.join("\n\n")`, 2.1.263 `src_160988549.js`
-/// @3695691). Fed to the model verbatim via
-/// the `content` key.
-fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(format!(
-        "<retrieval_status>{retrieval_status}</retrieval_status>"
-    ));
-    if let Some(t) = task {
-        parts.push(format!("<task_id>{}</task_id>", t.task_id));
-        parts.push(format!("<task_type>{}</task_type>", t.task_type));
-        parts.push(format!("<status>{}</status>", t.status));
-        // `<exit_code>` only when the task carries one (TS: defined && non-null).
-        if let Some(code) = t.exit_code {
-            parts.push(format!("<exit_code>{code}</exit_code>"));
-        }
-        // `<output>` only when the RAW trimmed output is non-blank (TS
-        // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
-        // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
-        //
-        // A `local_bash` spool goes through verbatim; EVERY other task type is
-        // untrusted model-adjacent text and runs through the subagent-output
-        // guard first (2.1.263 `src_160988549.js` @3695156):
-        //
-        // ```js
-        // d = e.task.task_type==="local_bash" ? o.trimEnd()
-        //   : uH(o.trimEnd(),{prependMarker:!e.task.isRawTranscript}).sanitized
-        // ```
-        //
-        // Without it an agent whose report contained `<system-reminder>` or an
-        // `antml:` tag had that text handed to the model with its control
-        // syntax intact — the very hole `Task`'s own result path closes.
-        if !t.output.trim().is_empty() {
-            let formatted = format_task_output(
-                &t.output,
-                &t.task_id,
-                t.output_path.as_deref(),
-                t.omit_output_path,
+/// Render TaskOutput's model-facing XML block with source UTF-16 units intact.
+fn render_task_output(
+    retrieval_status: &str,
+    task: Option<&TaskOutputView>,
+) -> Utf16JsonProjection {
+    let mut sections: Vec<Vec<u16>> = Vec::new();
+    sections.push(
+        format!("<retrieval_status>{retrieval_status}</retrieval_status>")
+            .encode_utf16()
+            .collect(),
+    );
+    if let Some(task) = task {
+        sections.push(
+            format!("<task_id>{}</task_id>", task.task_id)
+                .encode_utf16()
+                .collect(),
+        );
+        sections.push(
+            format!("<task_type>{}</task_type>", task.task_type)
+                .encode_utf16()
+                .collect(),
+        );
+        sections.push(
+            format!("<status>{}</status>", task.status)
+                .encode_utf16()
+                .collect(),
+        );
+        if let Some(code) = task.exit_code {
+            sections.push(
+                format!("<exit_code>{code}</exit_code>")
+                    .encode_utf16()
+                    .collect(),
             );
-            let trimmed = formatted.trim_end();
-            let body = if t.task_type == "local_bash" {
-                trimmed.to_string()
+        }
+        let output_units = task
+            .output
+            .string_units("")
+            .expect("TaskOutput body is a root-string projection");
+        if !is_blank_utf16(&output_units) {
+            let formatted = format_task_output(
+                &task.output,
+                &task.task_id,
+                task.output_path.as_deref(),
+                task.omit_output_path,
+            );
+            let formatted_units = formatted
+                .string_units("")
+                .expect("formatted TaskOutput is a root string");
+            let trimmed = trim_end_utf16(&formatted_units);
+            let body = if task.task_type == "local_bash" {
+                trimmed.to_vec()
             } else {
-                lingxi_core::host::subagent_output_guard::sanitize_text(
+                lingxi_core::host::subagent_output_guard::sanitize_utf16(
                     trimmed,
-                    // `prependMarker: !isRawTranscript` — a raw transcript was
-                    // never a report addressed to the model, so it is
-                    // neutralized silently.
-                    !t.is_raw_transcript,
+                    lingxi_core::host::subagent_output_guard::SanitizeOptions {
+                        prepend_marker: !task.is_raw_transcript,
+                        ..Default::default()
+                    },
                 )
                 .sanitized
             };
-            let head = t
-                .harness_head
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("{}\n\n", s.trim_end()))
-                .unwrap_or_default();
-            parts.push(format!("<output>\n{head}{body}\n</output>"));
+            let mut section = "<output>\n".encode_utf16().collect::<Vec<_>>();
+            if let Some(head) = task.harness_head.as_deref().filter(|head| !head.is_empty()) {
+                section.extend(head.trim_end().encode_utf16());
+                section.extend("\n\n".encode_utf16());
+            }
+            section.extend(body);
+            section.extend("\n</output>".encode_utf16());
+            sections.push(section);
         }
-        // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
-        // lines 299-301: `if (data.task.error) parts.push(\`<error>…</error>\`)`).
-        // Only emitted for a truthy (present, non-empty) error string — the
-        // agent task type's `error` field.
-        if let Some(error) = t.error.as_deref().filter(|e| !e.is_empty()) {
-            parts.push(format!("<error>{error}</error>"));
+        if let Some(error) = task.error.as_deref().filter(|error| !error.is_empty()) {
+            sections.push(format!("<error>{error}</error>").encode_utf16().collect());
         }
     }
-    // claude-code joins the parts with a BLANK line, not a single newline
-    // (2.1.263 `src_160988549.js` @3695691: `content: r.join("\n\n")`).
-    parts.join("\n\n")
+    let mut rendered = Vec::new();
+    for (index, section) in sections.into_iter().enumerate() {
+        if index > 0 {
+            rendered.extend("\n\n".encode_utf16());
+        }
+        rendered.extend(section);
+    }
+    source_text_projection_units(&rendered)
 }
 
 /// claude-code `rg()` — normalise a server-supplied status line before it goes
@@ -2940,16 +3514,29 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
 ///   if(s==="")return;
 ///   return s.length>B?`${oe(s,B)}\u2026 [truncated]`:s}
 /// ```
-fn normalize_mcp_status_message(raw: Option<&str>) -> Option<String> {
-    let collapsed = raw?.split_whitespace().collect::<Vec<_>>().join(" ");
+fn normalize_mcp_status_message(raw: Option<&Utf16JsonProjection>) -> Option<Utf16JsonProjection> {
+    let source = raw?.string_units("")?;
+    let mut collapsed = Vec::with_capacity(source.len());
+    let mut pending_space = false;
+    for unit in source {
+        if is_ecmascript_whitespace(unit) {
+            pending_space = !collapsed.is_empty();
+        } else {
+            if pending_space {
+                collapsed.push(u16::from(b' '));
+                pending_space = false;
+            }
+            collapsed.push(unit);
+        }
+    }
     if collapsed.is_empty() {
         return None;
     }
-    if collapsed.chars().count() > MCP_STATUS_MESSAGE_MAX {
-        let head: String = collapsed.chars().take(MCP_STATUS_MESSAGE_MAX).collect();
-        return Some(format!("{head}\u{2026} [truncated]"));
+    if collapsed.len() > MCP_STATUS_MESSAGE_MAX {
+        collapsed.truncate(MCP_STATUS_MESSAGE_MAX);
+        collapsed.extend("… [truncated]".encode_utf16());
     }
-    Some(collapsed)
+    Some(source_text_projection_units(&collapsed))
 }
 
 /// Cap for [`normalize_mcp_status_message`] (claude-code `B`).
@@ -2973,30 +3560,37 @@ const MCP_STATUS_MESSAGE_MAX: usize = 200;
 fn render_mcp_task_output(
     meta: &lingxi_core::host::task_registry::McpTaskOutputMeta,
     status: &str,
-) -> String {
-    let mut lines = vec![
-        format!("server: {}", meta.server_name),
-        format!("tool: {}", meta.tool_name),
-    ];
-    // Underscores render as spaces (`e.mcpStatus.replace("_"," ")`) — note the
-    // oracle's non-global replace, which only touches the FIRST underscore.
+) -> Utf16JsonProjection {
+    let mut output = Vec::new();
+    let append = |target: &mut Vec<u16>, text: &str| target.extend(text.encode_utf16());
+    append(&mut output, "server: ");
+    append(&mut output, &meta.server_name);
+    append(&mut output, "\ntool: ");
+    append(&mut output, &meta.tool_name);
+    append(&mut output, "\n");
     let mcp_status = meta.mcp_status.replacen('_', " ", 1);
-    lines.push(if status == "killed" {
-        format!("server status when stopped: {mcp_status}")
+    if status == "killed" {
+        append(&mut output, "server status when stopped: ");
     } else {
-        format!("status: {mcp_status}")
-    });
-    if let Some(message) = normalize_mcp_status_message(meta.status_message.as_deref()) {
-        lines.push(format!("status message: {message}"));
+        append(&mut output, "status: ");
     }
-    lines.push(format!(
-        "elapsed: {}",
-        lingxi_core::host::shell_support::format_duration_ms(meta.elapsed_ms)
-    ));
+    append(&mut output, &mcp_status);
+    if let Some(message) = normalize_mcp_status_message(meta.status_message.as_ref()) {
+        append(&mut output, "\nstatus message: ");
+        output.extend(message.string_units("").unwrap_or_default());
+    }
+    append(&mut output, "\nelapsed: ");
+    append(
+        &mut output,
+        &lingxi_core::host::shell_support::format_duration_ms(meta.elapsed_ms),
+    );
     if meta.mcp_status == "input_required" && status == "running" {
-        lines.push("waiting on the user: an elicitation dialog is open".to_string());
+        append(
+            &mut output,
+            "\nwaiting on the user: an elicitation dialog is open",
+        );
     }
-    lines.join("\n")
+    source_text_projection_units(&output)
 }
 
 /// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS
@@ -3005,8 +3599,8 @@ struct TaskOutputView {
     task_id: String,
     task_type: String,
     status: String,
-    description: String,
-    output: String,
+    description: Utf16JsonProjection,
+    output: Utf16JsonProjection,
     exit_code: Option<i32>,
     /// Agent-task error string (TS `TaskOutput.error`), rendered as a trailing
     /// `<error>…</error>` element after `<output>`. `None`/empty for non-agent
@@ -3052,16 +3646,20 @@ fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
 /// the first output read. Both races have the same zqo timeout/null shape.
 fn missing_waited_task_output() -> ToolCallResult {
     ToolCallResult {
-        data: json!({
-            "retrieval_status": "timeout",
-            "task": null,
-            "content": render_task_output("timeout", None),
-        }),
+        data: source_object(vec![
+            (
+                "retrieval_status".to_owned(),
+                source_text_projection("timeout"),
+            ),
+            ("task".to_owned(), generated_builtin_result(&Value::Null)),
+            ("content".to_owned(), render_task_output("timeout", None)),
+        ]),
         model_content: None,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -3096,15 +3694,22 @@ impl Tool for TaskOutputTool {
     }
     /// `searchHint: 'read output/logs from a background task'`
     /// (`TaskOutputTool.tsx:146`).
-    fn search_hint(&self) -> Option<&str> {
-        Some("read output/logs from a background task")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("read output/logs from a background task".into())
     }
     /// `userFacingName() { return 'Task Output' }` (`TaskOutputTool.tsx:151-153`).
     fn user_facing_name(&self) -> Option<&str> {
         Some("Task Output")
     }
-    fn input_schema(&self) -> &Value {
-        &TASK_OUTPUT_SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &TASK_OUTPUT_SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -3129,20 +3734,24 @@ impl Tool for TaskOutputTool {
     fn should_defer(&self) -> bool {
         true
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "TaskOutput reads spool file only".into(),
@@ -3153,16 +3762,16 @@ impl Tool for TaskOutputTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         TASK_OUTPUT_DESCRIPTION.into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         TASK_OUTPUT_PROMPT.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -3174,7 +3783,7 @@ impl Tool for TaskOutputTool {
 
         // `task_id` is required by the schema; guard mirrors `validateInput`
         // (`TaskOutputTool.tsx:188-193`): `if (!task_id)` → "Task ID is required".
-        let task_id = match input.get("task_id").and_then(Value::as_str) {
+        let task_id = match input.string_at("/task_id") {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
                 emit_failed(
@@ -3185,7 +3794,7 @@ impl Tool for TaskOutputTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput("Task ID is required".into()));
+                return Err(invalid_tool_input("Task ID is required"));
             }
         };
 
@@ -3213,7 +3822,10 @@ impl Tool for TaskOutputTool {
         // (TS `semanticBoolean` preprocess), rather than falling through to the
         // `true` default. `timeout` defaults to 30000 ms
         // (`z.number().min(0).max(600000).default(30000)`).
-        let block = input.get("block").and_then(semantic_bool).unwrap_or(true);
+        let block = input
+            .get_property("block")
+            .and_then(semantic_bool)
+            .unwrap_or(true);
         let timeout_ms = parse_timeout_ms(&input);
 
         // Existence check (`TaskOutputTool.tsx:215-218`): `if (!task) throw …`.
@@ -3230,7 +3842,7 @@ impl Tool for TaskOutputTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
+                return Err(invalid_tool_input(
                     task_output_not_found_message(
                         &self.ctx,
                         &registry,
@@ -3257,11 +3869,17 @@ impl Tool for TaskOutputTool {
             let _ = progress
                 .send(tool_api::ToolProgress {
                     tool_use_id: ctx.tool_use_id.clone().unwrap_or_default(),
-                    data: json!({
-                        "type": "waiting_for_task",
-                        "taskDescription": record.description,
-                        "taskType": record.task_type,
-                    }),
+                    data: source_object(vec![
+                        (
+                            "type".to_owned(),
+                            source_text_projection("waiting_for_task"),
+                        ),
+                        ("taskDescription".to_owned(), record.description.clone()),
+                        (
+                            "taskType".to_owned(),
+                            source_text_projection(&record.task_type),
+                        ),
+                    ]),
                 })
                 .await;
         }
@@ -3380,13 +3998,21 @@ impl Tool for TaskOutputTool {
                 chunk.status.as_deref().unwrap_or(record.status.as_str()),
             )
         });
-        let clean_result = chunk.result.clone().filter(|r| !r.is_empty()).or_else(|| {
-            chunk
-                .harness_head
-                .as_ref()
-                .filter(|head| !head.is_empty())
-                .map(|_| "[The agent produced no report text.]".to_string())
-        });
+        let clean_result = chunk
+            .result
+            .clone()
+            .filter(|value| {
+                value
+                    .string_units("")
+                    .is_some_and(|units| !units.is_empty())
+            })
+            .or_else(|| {
+                chunk
+                    .harness_head
+                    .as_ref()
+                    .filter(|head| !head.is_empty())
+                    .map(|_| source_text_projection("[The agent produced no report text.]"))
+            });
         // claude `isRawTranscript: !ue` — true exactly when the clean report was
         // empty and the body fell back to the transcript. Set ONLY in the
         // oracle's `local_agent` branch; every other type leaves it undefined,
@@ -3395,7 +4021,7 @@ impl Tool for TaskOutputTool {
         let omit_output_path = mcp_block.is_some();
         let output = mcp_block
             .or(clean_result)
-            .unwrap_or_else(|| chunk.content.clone());
+            .unwrap_or_else(|| source_text_projection(&chunk.content));
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
             task_type: record.task_type.clone(),
@@ -3422,42 +4048,56 @@ impl Tool for TaskOutputTool {
         // the key entirely when the chunk carries none. `prompt` / `result` /
         // `error` ride only for agent tasks (TS `getTaskOutputData` adds them in
         // the `local_agent` branch), so each is emitted only when present.
-        let mut task_obj = Map::new();
-        task_obj.insert("task_id".into(), json!(view.task_id));
-        task_obj.insert("task_type".into(), json!(view.task_type));
-        task_obj.insert("status".into(), json!(view.status));
-        task_obj.insert("description".into(), json!(view.description));
-        task_obj.insert("output".into(), json!(view.output));
+        let mut task_fields = vec![
+            ("task_id".to_owned(), source_text_projection(&view.task_id)),
+            (
+                "task_type".to_owned(),
+                source_text_projection(&view.task_type),
+            ),
+            ("status".to_owned(), source_text_projection(&view.status)),
+            ("description".to_owned(), view.description.clone()),
+            ("output".to_owned(), view.output.clone()),
+        ];
         if let Some(head) = &view.harness_head {
-            task_obj.insert("harnessHead".into(), json!(head));
+            task_fields.push(("harnessHead".to_owned(), source_text_projection(head)));
         }
         if let Some(code) = view.exit_code {
-            task_obj.insert("exit_code".into(), json!(code));
+            task_fields.push((
+                "exit_code".to_owned(),
+                generated_builtin_result(&json!(code)),
+            ));
         }
         if let Some(prompt) = &chunk.prompt {
-            task_obj.insert("prompt".into(), json!(prompt));
+            task_fields.push(("prompt".to_owned(), prompt.clone()));
         }
         if view.task_type == "local_agent" {
-            task_obj.insert("result".into(), json!(view.output));
-            task_obj.insert("isRawTranscript".into(), json!(view.is_raw_transcript));
+            task_fields.push(("result".to_owned(), view.output.clone()));
+            task_fields.push((
+                "isRawTranscript".to_owned(),
+                generated_builtin_result(&json!(view.is_raw_transcript)),
+            ));
         }
         if let Some(error) = view.error.as_deref().filter(|e| !e.is_empty()) {
-            task_obj.insert("error".into(), json!(error));
+            task_fields.push(("error".to_owned(), source_text_projection(error)));
         }
 
         // Nested `{ retrieval_status, task: { … } }` plus the `content` render so
         // the model sees it (`TaskOutputTool.tsx` data + `…BlockParam`).
         Ok(ToolCallResult {
-            data: json!({
-                "retrieval_status": retrieval_status,
-                "task": Value::Object(task_obj),
-                "content": content,
-            }),
+            data: source_object(vec![
+                (
+                    "retrieval_status".to_owned(),
+                    source_text_projection(retrieval_status),
+                ),
+                ("task".to_owned(), source_object(task_fields)),
+                ("content".to_owned(), content),
+            ]),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -3465,3 +4105,119 @@ impl Tool for TaskOutputTool {
 #[cfg(test)]
 #[path = "task_test.rs"]
 mod task_test;
+
+#[cfg(test)]
+struct TestTaskCallResult {
+    data: Value,
+    model_content: Option<String>,
+    is_error: bool,
+}
+
+#[cfg(test)]
+async fn test_tool_call<T: Tool>(
+    tool: &T,
+    input: Value,
+    ctx: ToolUseContext,
+    progress: ToolProgressSender,
+) -> Result<TestTaskCallResult, ToolError> {
+    let result = Tool::call(tool, generated_builtin_result(&input), ctx, progress).await?;
+    let data = serde_json::from_str(
+        &result
+            .data
+            .to_json_string()
+            .expect("test result projection is valid JSON"),
+    )
+    .expect("test result is JSON");
+    let model_content = result
+        .model_content
+        .map(|value| value.string_at("").unwrap_or_default().to_owned());
+    Ok(TestTaskCallResult {
+        data,
+        model_content,
+        is_error: result.is_error,
+    })
+}
+
+#[cfg(test)]
+macro_rules! test_value_call_adapter {
+    ($tool:ty) => {
+        impl $tool {
+            async fn call(
+                &self,
+                input: Value,
+                ctx: ToolUseContext,
+                progress: ToolProgressSender,
+            ) -> Result<TestTaskCallResult, ToolError> {
+                test_tool_call(self, input, ctx, progress).await
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+test_value_call_adapter!(TaskCreateTool);
+#[cfg(test)]
+test_value_call_adapter!(TaskGetTool);
+#[cfg(test)]
+test_value_call_adapter!(TaskListTool);
+#[cfg(test)]
+test_value_call_adapter!(TaskUpdateTool);
+#[cfg(test)]
+test_value_call_adapter!(TaskStopTool);
+#[cfg(test)]
+test_value_call_adapter!(TaskOutputTool);
+
+#[cfg(test)]
+impl TaskCreateTool {
+    fn coerce_input(&self, input: &Value) -> Option<TestCoercedInput> {
+        coerce_task_create_input(input)
+    }
+
+    async fn validate_input(
+        &self,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<(), TestValidationError> {
+        Tool::validate_input(self, &generated_builtin_result(input), ctx)
+            .await
+            .map_err(|error| {
+                TestValidationError(error.0.string_at("").unwrap_or_default().to_owned())
+            })
+    }
+}
+
+#[cfg(test)]
+impl TaskUpdateTool {
+    fn coerce_input(&self, input: &Value) -> Option<TestCoercedInput> {
+        coerce_task_update_input(input)
+    }
+}
+
+#[cfg(test)]
+struct TestValidationError(String);
+
+#[cfg(test)]
+impl TaskStopTool {
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        Tool::is_concurrency_safe(self, &generated_builtin_result(input))
+    }
+
+    fn is_destructive(&self, input: &Value) -> bool {
+        Tool::is_destructive(self, &generated_builtin_result(input))
+    }
+
+    fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
+        Tool::interrupt_behavior(self, &generated_builtin_result(input))
+    }
+}
+
+#[cfg(test)]
+impl TaskOutputTool {
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        Tool::is_concurrency_safe(self, &generated_builtin_result(input))
+    }
+}
+
+fn invalid_tool_input(message: impl Into<Utf16JsonProjection>) -> ToolError {
+    ToolError::InvalidInput(message.into())
+}

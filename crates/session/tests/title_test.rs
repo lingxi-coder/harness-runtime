@@ -6,18 +6,24 @@ use serde_json::json;
 use session::jsonl::{extract_title, JsonlMessage};
 
 fn make_user(content: serde_json::Value) -> JsonlMessage {
-    serde_json::from_value(json!({
-        "type": "user",
-        "uuid": "11111111-1111-1111-1111-111111111111",
-        "parentUuid": null,
-        "sessionId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        "timestamp": "2026-05-25T12:00:00.000Z",
-        "cwd": "/tmp",
-        "version": "0.6.0",
-        "isSidechain": false,
-        "userType": "external",
-        "message": {"role": "user", "content": content}
-    }))
+    session::jsonl::reader::route_lines(
+        &json!({
+            "type": "user",
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "parentUuid": null,
+            "sessionId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": "/tmp",
+            "version": "0.6.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": content}
+        })
+        .to_string(),
+    )
+    .messages_in_order
+    .into_iter()
+    .next()
     .expect("user message")
 }
 
@@ -109,18 +115,24 @@ fn whitespace_is_trimmed_before_truncation() {
 
 #[test]
 fn skips_assistant_to_find_user() {
-    let assistant = serde_json::from_value::<JsonlMessage>(json!({
-        "type": "assistant",
-        "uuid": "22222222-2222-2222-2222-222222222222",
-        "parentUuid": null,
-        "sessionId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        "timestamp": "2026-05-25T12:00:00.000Z",
-        "cwd": "/tmp",
-        "version": "0.6.0",
-        "isSidechain": false,
-        "userType": "external",
-        "message": {"role": "assistant", "content": "I am the model"}
-    }))
+    let assistant = session::jsonl::reader::route_lines(
+        &json!({
+            "type": "assistant",
+            "uuid": "22222222-2222-2222-2222-222222222222",
+            "parentUuid": null,
+            "sessionId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": "/tmp",
+            "version": "0.6.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "assistant", "content": "I am the model"}
+        })
+        .to_string(),
+    )
+    .messages_in_order
+    .into_iter()
+    .next()
     .unwrap();
     let user = make_user(json!("real prompt"));
     assert_eq!(extract_title(&[assistant, user]), "real prompt");

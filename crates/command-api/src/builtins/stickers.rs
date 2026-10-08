@@ -35,7 +35,7 @@ impl StickersHandler {
 impl BuiltinCommandHandler for StickersHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::Done {
-            display: Some("Opening sticker page in browser…".to_string()),
+            display: Some(("Opening sticker page in browser…".to_string()).into()),
         }
     }
 
@@ -57,8 +57,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "stickers".to_string(),
-            raw_args: String::new(),
+            name: "stickers".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

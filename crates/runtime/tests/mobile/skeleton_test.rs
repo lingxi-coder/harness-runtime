@@ -25,14 +25,14 @@ use std::time::Duration;
 use client::protocol::commands::ClientCommand;
 use client::protocol::events::{ClientEvent, TurnOutcomeDto};
 use harness_runtime::mobile::test_support::{
-    new_engine_with_streaming, CollectingPermissionSink, FakeListener, HostFakePlatform,
-    MobileConfig,
-};
-use orchestrator::test_support_stream::{
-    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    text_delta, MockStreamingApiClient,
+    CollectingPermissionSink, FakeListener, HostFakePlatform, MobileConfig,
+    new_engine_with_streaming,
 };
 use orchestrator::StreamingApiClient;
+use orchestrator::test_support_stream::{
+    MockStreamingApiClient, content_block_start_text, content_block_stop, message_delta_stop,
+    message_start, message_stop, text_delta,
+};
 
 /// Submit `NewSession`, tolerating the transient mid-turn rejection.
 ///
@@ -141,7 +141,7 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     // (5) Assert the message/turn boundary order.
     let text_idx = events
         .iter()
-        .position(|e| matches!(e, ClientEvent::TextDelta { text } if text.contains("hello from the skeleton")))
+        .position(|e| matches!(e, ClientEvent::TextDelta { text } if text.display().contains("hello from the skeleton")))
         .unwrap_or_else(|| panic!("expected a TextDelta carrying the scripted text; got {events:?}"));
 
     let turn_ended_idx = events
@@ -281,9 +281,11 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
         assert_eq!(session_ids.len(), 2);
         assert_ne!(session_ids[0], session_ids[1]);
         assert_eq!(listed.len(), 2, "each completed session must be listed");
-        assert!(session_ids
-            .iter()
-            .all(|id| listed_ids.contains(id.as_str())));
+        assert!(
+            session_ids
+                .iter()
+                .all(|id| listed_ids.contains(id.as_str()))
+        );
         assert!(listed.iter().all(|row| row.message_count >= 2));
     });
 }

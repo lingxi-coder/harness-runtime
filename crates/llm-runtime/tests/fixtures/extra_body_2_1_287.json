@@ -1,0 +1,2831 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "BOM removal",
+      "start": 178269894,
+      "end": 178269952,
+      "sha256": "617ba387f66555665310900c96786d56e8149d4658a45e63db7ea6d05b8d3b2a"
+    },
+    {
+      "label": "gt strict JSON parser/cache",
+      "start": 178287740,
+      "end": 178288288,
+      "sha256": "421271c35142f199eedbb888b707e76df47fdb935cb2a20d7daf142e3eb7b67f"
+    },
+    {
+      "label": "N object predicate",
+      "start": 178433819,
+      "end": 178433889,
+      "sha256": "e8cd0937338eafdfe29a7806d93ead49d398955341ab127a671cba569dc3008a"
+    },
+    {
+      "label": "instrumented JSON.stringify",
+      "start": 178113042,
+      "end": 178113126,
+      "sha256": "ca5ac7454a94324e4d26454cf5387e3b8f94be3d19d5a7c1f2cacac02549891d"
+    },
+    {
+      "label": "AFK predicate",
+      "start": 179887491,
+      "end": 179887551,
+      "sha256": "9cd8b4e2bc8747da00a9d140d02646b8dc4cab3751c20d4f77738a3afe5a8f40"
+    },
+    {
+      "label": "hV extra body sanitation",
+      "start": 187803280,
+      "end": 187804402,
+      "sha256": "913f9049a17563d75f9fb7af6741f142ed155dd1a7ed01dd9ee1eac827a90d01"
+    }
+  ],
+  "scope": "Actual hV, gt/se/Do, N, K_t and instrumented JSON.stringify. HIPAA false, logging/cache/measurement supplied; map sanitation and metadata string bytes, not complete HTTP serialization or arbitrary outer extra-body UTF16 parsing. Metadata includes escaped unpaired keys/leaves, duplicates, overflow and 2048-deep arrays.",
+  "cases": [
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": null,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": null,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":null,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": null,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": null,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":null,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": false,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": false,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":false,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": false,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": false,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":false,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": true,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": true,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 0,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 0,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":0,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 0,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 0,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":0,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 7,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 7,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":7,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 7,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 7,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":7,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"other\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"other\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "keep, other",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": "keep, other",
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":\"keep, other\",\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "keep, other",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": "keep, other",
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":\"keep, other\",\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afk-mode",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afk-mode",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "AFK-MODE-2026",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "AFK-MODE-2026",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "x-afk-mode-y",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "x-afk-mode-y",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afK-mode,keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afK-mode,keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "keep, afk-mode , keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "keep, afk-mode , keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "keep"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"keep\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            "keep",
+            "AFK-MODE",
+            null
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            "keep",
+            "AFK-MODE",
+            null
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            [
+              "keep",
+              null
+            ],
+            [
+              "afk-mode",
+              "other"
+            ]
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"other\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            [
+              "keep",
+              null
+            ],
+            [
+              "afk-mode",
+              "other"
+            ]
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep",
+            "other"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\",\"other\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "﻿afk-mode﻿,﻿keep﻿",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "﻿afk-mode﻿,﻿keep﻿",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afk-mode,keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": "afk-mode,keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": [
+            "keep"
+          ],
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":[\"keep\"],\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": {},
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": {},
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":{},\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": {},
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": {},
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":{},\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": {
+            "toString": "afk-mode"
+          },
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": {
+            "toString": "afk-mode"
+          },
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            {
+              "toString": null
+            }
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": [
+            {
+              "toString": null
+            }
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 1e+21,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 1e+21,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":1e+21,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 1e+21,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 1e+21,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":1e+21,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 1e-7,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 1e-7,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":1e-7,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 1e-7,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 1e-7,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":1e-7,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 0.000001,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 0.000001,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":0.000001,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 0.000001,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 0.000001,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":0.000001,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 9007199254740992,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 9007199254740992,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"betas\":9007199254740992,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "betas": 9007199254740992,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "betas": 9007199254740992,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"betas\":9007199254740992,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": null,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": null,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":null,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": null,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": false,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": false,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":false,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": false,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": true,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": true,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 0,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 0,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":0,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 0,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 7,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 7,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":7,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 7,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"other\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"other\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "keep, other",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": "keep, other",
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":\"keep, other\",\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "keep, other",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afk-mode",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afk-mode",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "AFK-MODE-2026",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "AFK-MODE-2026",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "x-afk-mode-y",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "x-afk-mode-y",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "after": 1,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ]
+        },
+        "json": "{\"before\":true,\"after\":1,\"anthropic_beta\":[\"computed\",\"keep\"]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afK-mode,keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afK-mode,keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "keep, afk-mode , keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "keep, afk-mode , keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "keep",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"keep\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "AFK-MODE",
+            null
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "AFK-MODE",
+            null
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            [
+              "keep",
+              null
+            ],
+            [
+              "afk-mode",
+              "other"
+            ]
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"other\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            [
+              "keep",
+              null
+            ],
+            [
+              "afk-mode",
+              "other"
+            ]
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "other",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"other\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "﻿afk-mode﻿,﻿keep﻿",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "﻿afk-mode﻿,﻿keep﻿",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "computed"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"computed\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afk-mode,keep",
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": "afk-mode,keep",
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "keep",
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"keep\",\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": {},
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": {},
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":{},\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": {},
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": {
+            "toString": "afk-mode"
+          },
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": {
+            "toString": "afk-mode"
+          },
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            {
+              "toString": null
+            }
+          ],
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": [
+            {
+              "toString": null
+            }
+          ],
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "error": "Cannot convert object to primitive value"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 1e+21,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 1e+21,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":1e+21,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 1e+21,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 1e-7,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 1e-7,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":1e-7,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 1e-7,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 0.000001,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 0.000001,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":0.000001,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 0.000001,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 9007199254740992,
+          "after": 1
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": 9007199254740992,
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":9007199254740992,\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "before": true,
+          "anthropic_beta": 9007199254740992,
+          "after": 1
+        },
+        "betas": [
+          "computed",
+          "keep"
+        ]
+      },
+      "expected": {
+        "value": {
+          "before": true,
+          "anthropic_beta": [
+            "computed",
+            "keep"
+          ],
+          "after": 1
+        },
+        "json": "{\"before\":true,\"anthropic_beta\":[\"computed\",\"keep\"],\"after\":1}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "user",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "user",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"user\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":\"secret\",\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"account\\\":\\\"abc\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"before\":1,\"tk\":false,\"after\":2}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"before\":1,\"after\":2}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"before\\\":1,\\\"after\\\":2}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":null,\"2\":2,\"0\":0,\"01\":1,\"nested\":{\"tk\":\"kept\"}}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"0\":0,\"2\":2,\"01\":1,\"nested\":{\"tk\":\"kept\"}}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"0\\\":0,\\\"2\\\":2,\\\"01\\\":1,\\\"nested\\\":{\\\"tk\\\":\\\"kept\\\"}}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "﻿{\"tk\":\"secret\",\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"account\\\":\\\"abc\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":true,\"number\":1e21,\"small\":1e-7,\"zero\":-0}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"number\":1e+21,\"small\":1e-7,\"zero\":0}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"number\\\":1e+21,\\\"small\\\":1e-7,\\\"zero\\\":0}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":true,\"text\":\"💥\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"text\":\"💥\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"text\\\":\\\"💥\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "null",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "null",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"null\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "[]",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "[]",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"[]\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"account\":\"abc\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"account\\\":\\\"abc\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "broken",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "broken",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"broken\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": null
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": null
+        },
+        "json": "{\"metadata\":null}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": []
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": []
+        },
+        "json": "{\"metadata\":[]}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {}
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {}
+        },
+        "json": "{\"metadata\":{}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": null
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": null
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":null}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": "not-an-object"
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": "not-an-object"
+        },
+        "json": "{\"metadata\":\"not-an-object\"}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":\"secret\",\"id\":\"\\ud800\",\"\\udc00\":\"value\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"id\":\"\\ud800\",\"\\udc00\":\"value\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"id\\\":\\\"\\\\ud800\\\",\\\"\\\\udc00\\\":\\\"value\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"t\\u006b\":1,\"id\":\"\\ud800A\\udc00💥\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"id\":\"\\ud800A\\udc00💥\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"id\\\":\\\"\\\\ud800A\\\\udc00💥\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":false,\"\\ud800\":1,\"\\udc00\":2,\"\\ud800\":3,\"0\":0,\"4294967294\":4,\"4294967295\":5}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"0\":0,\"4294967294\":4,\"\\ud800\":3,\"\\udc00\":2,\"4294967295\":5}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"0\\\":0,\\\"4294967294\\\":4,\\\"\\\\ud800\\\":3,\\\"\\\\udc00\\\":2,\\\"4294967295\\\":5}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"__proto__\":{\"tk\":\"nested\"},\"tk\":null,\"value\":{\"tk\":\"kept\"}}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"__proto__\":{\"tk\":\"nested\"},\"value\":{\"tk\":\"kept\"}}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"__proto__\\\":{\\\"tk\\\":\\\"nested\\\"},\\\"value\\\":{\\\"tk\\\":\\\"kept\\\"}}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"large\":1e999,\"small\":-1e-999,\"integer\":18446744073709551615}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"large\":null,\"small\":0,\"integer\":18446744073709552000}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"large\\\":null,\\\"small\\\":0,\\\"integer\\\":18446744073709552000}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":01}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":01}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":01}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":1.}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":1.}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":1.}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":1e}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":1e}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":1e}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":[1,]}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":[1,]}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":[1,]}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":[1 2]}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":[1 2]}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":[1 2]}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":\"\\uQQQQ\"}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0,\"value\":\"\\uQQQQ\"}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0,\\\"value\\\":\\\"\\\\uQQQQ\\\"}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":0}false",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"tk\":0}false",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"tk\\\":0}false\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "  {\"id\":\"\\ud800\"}  ",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "  {\"id\":\"\\ud800\"}  ",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"  {\\\"id\\\":\\\"\\\\ud800\\\"}  \",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":\"secret\",\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"\\ud800\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"\\ud800\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"deep\\\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\\\"\\\\ud800\\\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}\",\"other\":\"kept\"}}"
+      }
+    },
+    {
+      "input": {
+        "extra": {
+          "metadata": {
+            "user_id": "{\"tk\":\"secret\",\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"\\ud800\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+            "other": "kept"
+          }
+        },
+        "betas": []
+      },
+      "expected": {
+        "value": {
+          "metadata": {
+            "user_id": "{\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"\\ud800\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+            "other": "kept"
+          }
+        },
+        "json": "{\"metadata\":{\"user_id\":\"{\\\"deep\\\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\\\"\\\\ud800\\\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}\",\"other\":\"kept\"}}"
+      }
+    }
+  ],
+  "rawCases": [
+    {
+      "raw": "",
+      "expected": {}
+    },
+    {
+      "raw": "null",
+      "expected": {}
+    },
+    {
+      "raw": "[]",
+      "expected": {}
+    },
+    {
+      "raw": "7",
+      "expected": {}
+    },
+    {
+      "raw": "broken",
+      "expected": {}
+    },
+    {
+      "raw": "{\"x\":1}",
+      "expected": {
+        "x": 1
+      }
+    },
+    {
+      "raw": "﻿{\"x\":1}",
+      "expected": {
+        "x": 1
+      }
+    },
+    {
+      "raw": "﻿﻿{\"x\":1}",
+      "expected": {}
+    },
+    {
+      "raw": " {\"x\":1}",
+      "expected": {
+        "x": 1
+      }
+    },
+    {
+      "raw": "﻿{\"metadata\":{\"user_id\":\"{\\\"tk\\\":true,\\\"id\\\":\\\"x\\\"}\"}}",
+      "expected": {
+        "metadata": {
+          "user_id": "{\"id\":\"x\"}"
+        }
+      }
+    }
+  ]
+}

@@ -7,6 +7,7 @@
 
 use jsonrpc::Connection;
 use lingxi_core::host::LspServerConfig;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp::client::LspClient;
 use lsp_types::ServerCapabilities;
 use serde_json::{json, Value};
@@ -20,6 +21,11 @@ const FRAME_BUFFER: usize = 64 * 1024;
 
 /// Read one `Content-Length`-framed JSON-RPC message off a reader.
 async fn read_one_frame(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Value {
+    let body = read_one_frame_raw(reader).await;
+    serde_json::from_slice(&body).expect("parse json")
+}
+
+async fn read_one_frame_raw(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
     let mut header = Vec::new();
     let mut byte = [0u8; 1];
     // Read until \r\n\r\n
@@ -40,7 +46,7 @@ async fn read_one_frame(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Val
         .expect("parse length");
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body).await.expect("read body");
-    serde_json::from_slice(&body).expect("parse json")
+    body
 }
 
 /// Write a `Content-Length`-framed JSON-RPC response.
@@ -53,6 +59,13 @@ async fn write_frame(writer: &mut (impl tokio::io::AsyncWrite + Unpin), val: &Va
         .expect("write header");
     writer.write_all(&body).await.expect("write body");
     writer.flush().await.expect("flush");
+}
+
+async fn write_raw_frame(writer: &mut (impl tokio::io::AsyncWrite + Unpin), body: &str) {
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    writer.write_all(header.as_bytes()).await.unwrap();
+    writer.write_all(body.as_bytes()).await.unwrap();
+    writer.flush().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -68,10 +81,13 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         extension_to_language: [(".rs".to_string(), "rust".to_string())]
             .into_iter()
             .collect(),
-        initialization_options: Some(json!({ "checkOnSave": true })),
-        settings: Some(json!({
-            "rust-analyzer": { "check": { "command": "clippy" } }
-        })),
+        initialization_options: Some(
+            Utf16JsonProjection::parse(r#"{"checkOnSave":true}"#).unwrap(),
+        ),
+        settings: Some(
+            Utf16JsonProjection::parse(r#"{"rust-analyzer":{"check":{"command":"clippy"}}}"#)
+                .unwrap(),
+        ),
         ..Default::default()
     };
     client
@@ -207,10 +223,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_hover_round_trips_and_deserializes() {
-    use lsp_types::{
-        Hover, HoverContents, MarkedString, Position, TextDocumentIdentifier,
-        TextDocumentPositionParams,
-    };
+    use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
 
     let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
     let (client_read, client_write) = tokio::io::split(client_io);
@@ -244,16 +257,56 @@ async fn request_hover_round_trips_and_deserializes() {
             character: 2,
         },
     };
-    let hover: Option<Hover> = client
+    let params = Utf16JsonProjection::parse(&serde_json::to_string(&params).unwrap()).unwrap();
+    let hover = client
         .request("textDocument/hover", params)
         .await
         .expect("hover ok");
-    let hover = hover.expect("hover present");
-    match hover.contents {
-        HoverContents::Scalar(MarkedString::String(s)) => assert_eq!(s, "Hello hover"),
-        other => panic!("unexpected hover contents shape: {other:?}"),
-    }
+    assert_eq!(hover.string_at("/contents"), Some("Hello hover"));
 
+    peer_task.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialize_keeps_raw_initialization_option_strings_on_the_wire() {
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = LspClient::new(
+        "test-server".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    );
+    let config = LspServerConfig {
+        command: "test-server".into(),
+        extension_to_language: [(".rs".into(), "rust".into())].into_iter().collect(),
+        initialization_options: Some(Utf16JsonProjection::parse(r#"{"probe":"\ud800"}"#).unwrap()),
+        ..Default::default()
+    };
+
+    let peer_task = tokio::spawn(async move {
+        let raw = read_one_frame_raw(&mut peer_io).await;
+        let body = std::str::from_utf8(&raw).expect("JSON-RPC body is UTF-8 JSON text");
+        assert!(
+            body.contains(r#""initializationOptions":{"probe":"\ud800"}"#),
+            "{body}"
+        );
+        let request: Value = serde_json::from_slice(&raw).expect("parse initialize request");
+        write_frame(
+            &mut peer_io,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": { "capabilities": {} }
+            }),
+        )
+        .await;
+        let initialized = read_one_frame(&mut peer_io).await;
+        assert_eq!(initialized["method"], "initialized");
+    });
+
+    client
+        .initialize("file:///tmp", &config)
+        .await
+        .expect("initialize succeeds");
     peer_task.await.expect("peer ok");
 }
 
@@ -266,13 +319,33 @@ async fn notify_surfaces_closed_connection_error() {
     client.connection().close();
 
     let error = client
-        .notify("initialized", json!({}))
+        .notify("initialized", Utf16JsonProjection::parse("{}").unwrap())
         .await
         .expect_err("closed connection should reject notifications");
     assert!(
         matches!(error, lingxi_core::host::LspError::Transport(ref message) if message.contains("LSP notification 'initialized' failed") && message.contains("writer closed")),
         "expected closed-notify transport error, got {error:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_keeps_unpaired_utf16_in_raw_json_params() {
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = LspClient::new("test-server".to_string(), connection);
+
+    client
+        .notify(
+            "test/source",
+            Utf16JsonProjection::parse(r#"{"value":"\ud800"}"#).unwrap(),
+        )
+        .await
+        .expect("notification accepted");
+
+    let body = read_one_frame_raw(&mut peer_io).await;
+    let body = std::str::from_utf8(&body).expect("JSON-RPC frame is UTF-8 JSON text");
+    assert!(body.contains(r#""params":{"value":"\ud800"}"#), "{body}");
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -304,12 +377,85 @@ async fn content_modified_retries_three_times_with_stable_params() {
         }
     });
 
-    let result: Value = client
-        .request("textDocument/hover", json!({"stable": true}))
+    let result = client
+        .request(
+            "textDocument/hover",
+            Utf16JsonProjection::parse(r#"{"stable":true}"#).unwrap(),
+        )
         .await
         .expect("fourth attempt succeeds");
-    assert_eq!(result, json!({"ok": true}));
+    assert_eq!(
+        result.get_property("ok").and_then(|value| value.as_bool()),
+        Some(true)
+    );
     peer_task.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_retains_unpaired_server_result_string_units() {
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = LspClient::new(
+        "test-server".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    );
+    let peer_task = tokio::spawn(async move {
+        let request = read_one_frame(&mut peer_io).await;
+        assert_eq!(request["method"], "textDocument/hover");
+        write_raw_frame(
+            &mut peer_io,
+            r#"{"jsonrpc":"2.0","id":0,"result":{"contents":"x\ud800"}}"#,
+        )
+        .await;
+    });
+    let result = client
+        .request(
+            "textDocument/hover",
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .expect("source result is valid JSON");
+    assert_eq!(
+        result.string_units("/contents"),
+        Some(vec![b'x' as u16, 0xd800])
+    );
+    peer_task.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_retains_unpaired_jsonrpc_error_message_units() {
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = LspClient::new(
+        "test-server".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    );
+    let peer_task = tokio::spawn(async move {
+        let request = read_one_frame(&mut peer_io).await;
+        assert_eq!(request["method"], "textDocument/hover");
+        write_raw_frame(
+            &mut peer_io,
+            r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"server failed\ud800"}}"#,
+        )
+        .await;
+    });
+    let error = client
+        .request(
+            "textDocument/hover",
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .expect_err("server error is returned");
+    let lingxi_core::host::LspError::ServerError(message) = error else {
+        panic!("expected source server error, got {error:?}");
+    };
+    let units = message.string_units("").expect("root string");
+    assert!(units.ends_with(&[0xd800]));
+    let needle = "server failed".encode_utf16().collect::<Vec<_>>();
+    assert!(units
+        .windows(needle.len())
+        .any(|part| part == needle.as_slice()));
+    peer_task.await.expect("peer task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -474,7 +620,7 @@ async fn shutdown_server_error_does_not_send_exit() {
         .await
         .expect_err("shutdown server error must surface");
     assert!(
-        matches!(error, lingxi_core::host::LspError::ServerError(ref message) if message.contains("shutdown failed")),
+        matches!(error, lingxi_core::host::LspError::ServerError(ref message) if message.string_at("").is_some_and(|text| text.contains("shutdown failed"))),
         "expected server shutdown failure, got {error:?}"
     );
     peer.await.expect("peer task");

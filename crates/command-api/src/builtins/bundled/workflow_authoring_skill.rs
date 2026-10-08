@@ -43,21 +43,25 @@ pub(crate) const WORKFLOW_AUTHORING_MENU_DESCRIPTION: &str =
 pub struct WorkflowAuthoringPromptFn;
 
 impl BundledPromptFn for WorkflowAuthoringPromptFn {
-    fn build(&self, _args: &str) -> String {
-        workflow::description::authoring_skill_prompt()
+    fn build(
+        &self,
+        _args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        workflow::description::authoring_skill_prompt().into()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     /// The skill exists to carry the hooks the tool description no longer
     /// inlines. If it served anything less, moving them out would have made
     /// them unreachable.
     #[test]
     fn the_skill_serves_the_whole_authoring_reference() {
-        let body = WorkflowAuthoringPromptFn.build("");
+        let body = WorkflowAuthoringPromptFn.build(&"".into());
         assert!(body.starts_with("# Workflow authoring reference"));
         for hook in [
             "- agent(prompt: string",

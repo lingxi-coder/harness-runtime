@@ -2,11 +2,10 @@ use super::*;
 use tokio::sync::mpsc;
 
 fn task(status: &str) -> cron::CronTask {
-    serde_json::from_value(serde_json::json!({
-        "id": "d12345678", "cron": "0 9 * * *", "prompt": "brief", "createdAt": 1,
-        "recurring": false,
-        "automation": { "version": 2, "status": status, "model": "anthropic/claude-sonnet-4-6", "reasoning": {"type":"automatic"}, "runMode":"new_session", "notificationPolicy":"all" }
-    })).unwrap()
+    let body = format!(
+        r#"{{"id":"d12345678","cron":"0 9 * * *","prompt":"brief","createdAt":1,"recurring":false,"automation":{{"version":2,"status":"{status}","model":"anthropic/claude-sonnet-4-6","reasoning":{{"type":"automatic"}},"runMode":"new_session","notificationPolicy":"all"}}}}"#
+    );
+    serde_json::from_str(&body).unwrap()
 }
 
 async fn claimed_test_run() -> (
@@ -83,7 +82,7 @@ async fn supervisor_retries_transient_commit_io_without_reexecuting_turn() {
 
 #[tokio::test]
 async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_identity() {
-    use crate::mobile::test_support::{test_config, FakeListener, HostFakePlatform};
+    use crate::mobile::test_support::{FakeListener, HostFakePlatform, test_config};
     use lingxi_core::host::PermissionGate as _;
     let temp = tempfile::tempdir().unwrap();
     let config = test_config(temp.path());
@@ -333,15 +332,17 @@ async fn explicit_manual_token_survives_busy_retry_and_blocks_terminal_replay() 
     .await
     .unwrap();
     assert!(matches!(completed.status, CronFireStatusDto::Ok));
-    assert!(cron::claim_automation_run_now_at(
-        fs.as_ref(),
-        temp.path(),
-        "d12345678",
-        now + std::time::Duration::from_secs(60),
-        token
-    )
-    .await
-    .is_none());
+    assert!(
+        cron::claim_automation_run_now_at(
+            fs.as_ref(),
+            temp.path(),
+            "d12345678",
+            now + std::time::Duration::from_secs(60),
+            token
+        )
+        .await
+        .is_none()
+    );
     let saved = read_cron_tasks(fs.as_ref(), temp.path()).await;
     let runs = &saved.tasks[0].automation.as_ref().unwrap().runs;
     assert_eq!(runs.len(), 1);
@@ -539,14 +540,16 @@ async fn cancelled_claim_settles_after_foreign_runtime_is_destroyed_without_exec
     .await
     .unwrap();
     assert!(!executed.load(std::sync::atomic::Ordering::Acquire));
-    assert!(cron::claim_automation_run_now(
-        fs.as_ref(),
-        temp.path(),
-        "d12345678",
-        std::time::SystemTime::now()
-    )
-    .await
-    .is_some());
+    assert!(
+        cron::claim_automation_run_now(
+            fs.as_ref(),
+            temp.path(),
+            "d12345678",
+            std::time::SystemTime::now()
+        )
+        .await
+        .is_some()
+    );
 }
 
 #[tokio::test]
@@ -643,9 +646,11 @@ async fn scheduled_empty_anchor_is_replayable_before_first_prompt() {
             .is_err()
     );
     std::fs::write(&path, "").unwrap();
-    assert!(cron_replay_session(&home, &cwd.to_string_lossy(), id, fs)
-        .await
-        .is_err());
+    assert!(
+        cron_replay_session(&home, &cwd.to_string_lossy(), id, fs)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -687,9 +692,11 @@ async fn scheduled_existing_session_uses_its_persisted_mode() {
 fn only_naturally_completed_turns_are_successful() {
     use orchestrator::conversation::TurnOutcome;
     assert!(cron_scheduled_turn_outcome(TurnOutcome::EndTurn).is_ok());
-    assert!(cron_scheduled_turn_outcome(TurnOutcome::Cancelled)
-        .unwrap_err()
-        .starts_with(cron::AUTOMATION_CANCELLED_PREFIX));
+    assert!(
+        cron_scheduled_turn_outcome(TurnOutcome::Cancelled)
+            .unwrap_err()
+            .starts_with(cron::AUTOMATION_CANCELLED_PREFIX)
+    );
     let exhausted = cron_scheduled_turn_outcome(TurnOutcome::MaxTurns).unwrap_err();
     assert!(exhausted.contains("maximum turns"));
     assert!(!exhausted.starts_with(cron::AUTOMATION_CANCELLED_PREFIX));
@@ -771,7 +778,7 @@ async fn legacy_scope_migration_keeps_loop_sentinels_without_reviving_them() {
         assert_eq!(remaining.tasks.len(), 4);
         for (index, task) in remaining.tasks.iter().enumerate() {
             assert_eq!(task.id, format!("loop-{index}"));
-            assert_eq!(task.prompt, sentinels[index]);
+            assert_eq!(task.prompt, Utf16JsonProjection::from(sentinels[index]));
             assert!(task.automation.is_none());
         }
         let destination = cron::tasks_file::parse_automation_tasks(
@@ -779,7 +786,10 @@ async fn legacy_scope_migration_keeps_loop_sentinels_without_reviving_them() {
         );
         assert_eq!(destination.tasks.len(), 1);
         assert_eq!(destination.tasks[0].id, "d12345678");
-        assert_eq!(destination.tasks[0].prompt, "brief");
+        assert_eq!(
+            destination.tasks[0].prompt,
+            Utf16JsonProjection::from("brief")
+        );
         assert_eq!(
             destination.tasks[0].automation.as_ref().unwrap().status,
             cron::AutomationStatus::Paused
@@ -834,11 +844,13 @@ async fn migration_marker_recovers_each_publication_boundary_without_duplicate_t
             serde_json::from_str(&migrated.automation_json.unwrap()).unwrap();
         assert_eq!(automation.status, cron::AutomationStatus::Active);
         assert_eq!(automation.model, "anthropic/claude-sonnet-4-6");
-        assert!(cron::tasks_file::parse_automation_tasks(
-            &std::fs::read_to_string(cron::scheduled_tasks_path(root)).unwrap()
-        )
-        .tasks
-        .is_empty());
+        assert!(
+            cron::tasks_file::parse_automation_tasks(
+                &std::fs::read_to_string(cron::scheduled_tasks_path(root)).unwrap()
+            )
+            .tasks
+            .is_empty()
+        );
         let marker: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.join(".lingxi/cron-v2-migration.json")).unwrap(),
         )

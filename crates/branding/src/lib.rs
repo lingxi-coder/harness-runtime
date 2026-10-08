@@ -16,6 +16,44 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Canonical branded counterpart of the native effort-level environment.
+pub const EFFORT_LEVEL_ENV: &str = "LINGXI_EFFORT_LEVEL";
+
+/// Branded counterpart of native per-model capability overrides.
+pub const MODEL_CAPABILITIES_ENV: &str = "LINGXI_MODEL_CAPABILITIES";
+
+/// Subscription metadata accompanying an environmental OAuth token.
+pub const SUBSCRIPTION_TYPE_ENV: &str = "LINGXI_SUBSCRIPTION_TYPE";
+/// Rate-limit metadata accompanying an environmental OAuth token.
+pub const RATE_LIMIT_TIER_ENV: &str = "LINGXI_RATE_LIMIT_TIER";
+
+/// Branded counterpart of the native global Fast-mode disable switch.
+pub const DISABLE_FAST_MODE_ENV: &str = "LINGXI_DISABLE_FAST_MODE";
+/// Native JavaScript-truthy switch disabling 1M model alias parsing.
+pub const DISABLE_1M_CONTEXT_ENV: &str = "LINGXI_DISABLE_1M_CONTEXT";
+/// Native JavaScript-truthy switch disabling legacy model remapping.
+pub const DISABLE_LEGACY_MODEL_REMAP_ENV: &str = "LINGXI_DISABLE_LEGACY_MODEL_REMAP";
+/// Branded counterpart of the native automatic structured-output disable flag.
+pub const DISABLE_STRUCTURED_OUTPUTS_ENV: &str = "LINGXI_DISABLE_STRUCTURED_OUTPUTS";
+/// Disable native refusal-fallback admission through a typed boolean.
+pub const DISABLE_REFUSAL_FALLBACK_ENV: &str = "LINGXI_DISABLE_REFUSAL_FALLBACK";
+/// Native automatic connector-only thinking display switch.
+pub const THINKING_DISPLAY_UPDATES_ENV: &str = "LINGXI_THINKING_DISPLAY_UPDATES";
+/// Native maximum retry budget for one logical model call.
+pub const MAX_RETRIES_ENV: &str = "LINGXI_MAX_RETRIES";
+/// Native persistent retry switch for unattended work.
+pub const RETRY_WATCHDOG_ENV: &str = "LINGXI_RETRY_WATCHDOG";
+/// Native remote-session switch, parsed as a typed boolean.
+pub const REMOTE_ENV: &str = "LINGXI_REMOTE";
+/// Native nonstream timeout retry ceiling, independent of ordinary retries.
+pub const NONSTREAMING_TIMEOUT_RETRIES_ENV: &str = "LINGXI_NONSTREAMING_TIMEOUT_RETRIES";
+/// Native stream-to-nonstream fallback disable switch.
+pub const DISABLE_NONSTREAMING_FALLBACK_ENV: &str = "LINGXI_DISABLE_NONSTREAMING_FALLBACK";
+/// Native organization-check bypass, excluded for agent-owned remote sessions.
+pub const SKIP_FAST_MODE_ORG_CHECK_ENV: &str = "LINGXI_SKIP_FAST_MODE_ORG_CHECK";
+/// Native transient-network bypass, excluded for agent-owned remote sessions.
+pub const SKIP_FAST_MODE_NETWORK_ERRORS_ENV: &str = "LINGXI_SKIP_FAST_MODE_NETWORK_ERRORS";
+
 /// User config directory name under `$HOME` (e.g. `~/.lingxi`). Also the
 /// per-project config dir name (`<repo>/.lingxi/`).
 pub const DOT_DIR: &str = ".lingxi";
@@ -85,6 +123,42 @@ pub const MANAGED_DIR_MACOS: &str = "/Library/Application Support/LingXi";
 pub const MANAGED_DIR_WINDOWS: &str = r"C:\Program Files\LingXi";
 /// Other (Linux/BSD) location.
 pub const MANAGED_DIR_UNIX: &str = "/etc/lingxi";
+
+/// Current product namespace inventory, audited by the brand gate. Native
+/// protocol identifiers and the unbranded global-config filename are separate.
+pub const NAMESPACE_VALUES: &[&str] = &[
+    THINKING_DISPLAY_UPDATES_ENV,
+    EFFORT_LEVEL_ENV,
+    MODEL_CAPABILITIES_ENV,
+    SUBSCRIPTION_TYPE_ENV,
+    RATE_LIMIT_TIER_ENV,
+    DISABLE_FAST_MODE_ENV,
+    DISABLE_1M_CONTEXT_ENV,
+    DISABLE_LEGACY_MODEL_REMAP_ENV,
+    DISABLE_STRUCTURED_OUTPUTS_ENV,
+    DISABLE_REFUSAL_FALLBACK_ENV,
+    MAX_RETRIES_ENV,
+    RETRY_WATCHDOG_ENV,
+    REMOTE_ENV,
+    NONSTREAMING_TIMEOUT_RETRIES_ENV,
+    DISABLE_NONSTREAMING_FALLBACK_ENV,
+    SKIP_FAST_MODE_ORG_CHECK_ENV,
+    SKIP_FAST_MODE_NETWORK_ERRORS_ENV,
+    DOT_DIR,
+    GLOBAL_CONFIG_FILE,
+    CONFIG_DIR_ENV,
+    MEMORY_FILE,
+    MEMORY_LOCAL_FILE,
+    PLUGIN_MANIFEST_DIR,
+    PLUGIN_ROOT_ENV,
+    PLUGIN_DATA_ENV,
+    PROJECT_DIR_ENV,
+    PRODUCT_NAME,
+    ENV_PREFIX,
+    MANAGED_DIR_MACOS,
+    MANAGED_DIR_WINDOWS,
+    MANAGED_DIR_UNIX,
+];
 
 /// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is
 /// supplied (honored verbatim, including an empty value — matching the upstream

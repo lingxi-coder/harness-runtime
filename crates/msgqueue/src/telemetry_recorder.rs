@@ -85,11 +85,17 @@ mod tests {
     use crate::queue::{
         MessageQueueManager, QueuePriority, QueueSource, QueuedCommand, QueuedCommandContent,
     };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
     use tracing::field::{Field, Visit};
     use tracing::subscriber::with_default;
     use tracing::{Event, Subscriber};
+
+    fn source_string(text: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
+            .expect("Rust strings are valid UTF-16 projections")
+    }
 
     /// A captured `tracing` event: its `event` name field plus the names of all
     /// other fields it carried.
@@ -154,7 +160,7 @@ mod tests {
             scheduled_fire_id: None,
             uuid: uuid.to_string(),
             content: QueuedCommandContent::UserInput {
-                text: uuid.to_string(),
+                text: source_string(uuid),
             },
             priority,
             queued_at: SystemTime::now(),

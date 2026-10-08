@@ -140,7 +140,7 @@ pub fn split_system_blocks_with(
         // org-scoped (the global path also treats a no-prefix body as the
         // rest/dynamic bucket; with no boundary it is org by the fallthrough).
         return vec![SystemBlock {
-            text: s.to_string(),
+            text: s.to_string().into(),
             cache_control: org_cc(),
         }];
     };
@@ -150,7 +150,7 @@ pub fn split_system_blocks_with(
         // (Prefix is org-scoped in default mode; in the global no-boundary
         // fallthrough it is likewise org.)
         return vec![SystemBlock {
-            text: HEADER.to_string(),
+            text: HEADER.to_string().into(),
             cache_control: org_cc(),
         }];
     }
@@ -167,12 +167,12 @@ pub fn split_system_blocks_with(
             let mut out = Vec::with_capacity(3);
             // prefix: cacheScope=null → never cached.
             out.push(SystemBlock {
-                text: HEADER.to_string(),
+                text: HEADER.to_string().into(),
                 cache_control: None,
             });
             if !static_part.is_empty() {
                 out.push(SystemBlock {
-                    text: static_part.to_string(),
+                    text: static_part.to_string().into(),
                     cache_control: global_cc(),
                 });
             }
@@ -193,7 +193,7 @@ pub fn split_system_blocks_with(
                 // tokens for memory/env/output-style on EVERY request instead
                 // of a cache read.
                 out.push(SystemBlock {
-                    text: dynamic_part.to_string(),
+                    text: dynamic_part.to_string().into(),
                     cache_control: org_cc(),
                 });
             }
@@ -206,11 +206,11 @@ pub fn split_system_blocks_with(
     // both org-scoped.
     vec![
         SystemBlock {
-            text: HEADER.to_string(),
+            text: HEADER.to_string().into(),
             cache_control: org_cc(),
         },
         SystemBlock {
-            text: rest.to_string(),
+            text: rest.to_string().into(),
             cache_control: org_cc(),
         },
     ]
@@ -227,10 +227,13 @@ mod tests {
         let blocks = split_system_blocks(&s, true);
         assert_eq!(blocks.len(), 2);
         // Prefix block is exactly HEADER, org-scoped → carries the breakpoint.
-        assert_eq!(blocks[0].text, HEADER);
+        assert_eq!(blocks[0].text.string_at(""), Some(HEADER));
         assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral));
         // Rest block is everything after the first separator, org-scoped → breakpoint.
-        assert_eq!(blocks[1].text, "rest section A\n\nrest section B");
+        assert_eq!(
+            blocks[1].text.string_at(""),
+            Some("rest section A\n\nrest section B")
+        );
         assert_eq!(blocks[1].cache_control, Some(CacheControl::Ephemeral));
     }
 
@@ -250,7 +253,7 @@ mod tests {
         let s = format!("{HEADER}{SECTION_SEP}");
         let blocks = split_system_blocks(&s, true);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].text, HEADER);
+        assert_eq!(blocks[0].text.string_at(""), Some(HEADER));
     }
 
     #[test]
@@ -260,7 +263,7 @@ mod tests {
         let s = "You are a custom assistant.\n\nDo X.";
         let blocks = split_system_blocks(s, true);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].text, s);
+        assert_eq!(blocks[0].text.string_at(""), Some(s));
     }
 
     #[test]
@@ -277,9 +280,9 @@ mod tests {
         };
         let blocks = split_system_blocks_with(&s, true, opts);
         assert_eq!(blocks.len(), 3);
-        assert_eq!(blocks[0].text, HEADER);
+        assert_eq!(blocks[0].text.string_at(""), Some(HEADER));
         assert_eq!(blocks[0].cache_control, None); // prefix cacheScope=null
-        assert_eq!(blocks[1].text, "static body");
+        assert_eq!(blocks[1].text.string_at(""), Some("static body"));
         assert_eq!(
             blocks[1].cache_control,
             Some(CacheControl::EphemeralScoped {
@@ -287,7 +290,7 @@ mod tests {
                 ttl_1h: false
             })
         );
-        assert_eq!(blocks[2].text, "dynamic body");
+        assert_eq!(blocks[2].text.string_at(""), Some("dynamic body"));
         // dynamic cacheScope="org" — `y8s` @237509234 ends
         //   if (m) f.push({text:m, cacheScope:"global"});   // static
         //   if (g) f.push({text:g, cacheScope:"org"});      // dynamic

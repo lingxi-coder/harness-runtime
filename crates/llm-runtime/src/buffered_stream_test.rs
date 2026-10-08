@@ -91,9 +91,17 @@ fn fixture(terminal: bool) -> (ApiService, Arc<BufferedTransport>, MessagesCreat
             lingxi_core::types::MessageId::new(),
             "test".into(),
         )],
-        vec![
-            json!({"name":"Read","description":"Read","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}),
-        ],
+        crate::convert::to_tool_declarations(vec![lingxi_core::host::SourceToolWireDefinition {
+            name: "Read".into(),
+            description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Read"),
+            input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+            )
+            .unwrap(),
+            strict: false,
+            defer_loading: false,
+        }])
+        .unwrap(),
     );
     request.opts.max_output_tokens = Some(64);
     (service, transport, request)
@@ -107,7 +115,7 @@ async fn buffered_stream_returns_a_complete_response_with_main_request_options()
         .await
         .unwrap();
     assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
-    assert!(response.content.iter().any(|block| matches!(block, crate::ContentBlock::ToolCall{id,input,..} if id=="call-1" && input==&json!({"path":"file"}))));
+    assert!(response.content.iter().any(|block| matches!(block, crate::ContentBlock::ToolCall{id,input,..} if id=="call-1" && input.string_at("/path").as_deref()==Some("file"))));
     let seen = transport.seen.lock().unwrap();
     let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
     assert_eq!(body["stream"], true);
@@ -118,10 +126,12 @@ async fn buffered_stream_returns_a_complete_response_with_main_request_options()
 #[tokio::test]
 async fn buffered_stream_does_not_return_completed_tool_blocks_without_a_terminal_response() {
     let (service, transport, request) = fixture(false);
-    assert!(service
-        .messages_create_buffered_stream(request)
-        .await
-        .is_err());
+    assert!(
+        service
+            .messages_create_buffered_stream(request)
+            .await
+            .is_err()
+    );
     assert_eq!(transport.seen.lock().unwrap().len(), 1);
 }
 
@@ -129,9 +139,11 @@ async fn buffered_stream_does_not_return_completed_tool_blocks_without_a_termina
 async fn buffered_stream_preserves_request_admission() {
     let (service, transport, mut request) = fixture(true);
     request.opts.request_dispatch_admission = Some(crate::RequestDispatchAdmission::new(|| false));
-    assert!(service
-        .messages_create_buffered_stream(request)
-        .await
-        .is_err());
+    assert!(
+        service
+            .messages_create_buffered_stream(request)
+            .await
+            .is_err()
+    );
     assert!(transport.seen.lock().unwrap().is_empty());
 }

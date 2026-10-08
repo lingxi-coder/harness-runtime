@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":"server-discover-probe-1","error":{"code":-32601,"message":"fixture method not found"}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"current-alignment-fixture","version":"1.0.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"emit_payload","description":"Return a fixed multiple-content result and structuredContent with a lone UTF-16 unit.","inputSchema":{"type":"object","properties":{"mode":{"type":"string","enum":["source-units"]}},"required":["mode"],"additionalProperties":false}}]}}
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"primary-\ud800\u03a9"},{"type":"text","text":"secondary-content-block"}],"structuredContent":{"ok":true,"label":"structured-\ud800\u03a9"}}}

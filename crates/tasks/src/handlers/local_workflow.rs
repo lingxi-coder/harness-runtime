@@ -45,6 +45,7 @@ use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -189,7 +190,7 @@ impl WorkflowRunMetrics {
                 tool_calls: *total_tool_use_count,
                 duration_ms: *total_duration_ms,
                 skipped: false,
-                empty_result: workflow_result_value_is_empty(content),
+                empty_result: workflow_result_projection_is_empty(content),
             },
             Ok(SubagentResult::Failed { reason, .. }) => WorkflowAgentMetric {
                 phase_index,
@@ -315,28 +316,36 @@ impl WorkflowRunMetrics {
     }
 }
 
-fn workflow_result_value_is_empty(value: &Value) -> bool {
-    match value {
-        Value::String(value) => workflow_result_text_is_empty(value),
-        Value::Array(values) => values.is_empty(),
-        Value::Object(values) => {
-            values.is_empty()
-                || (values.len() == 1
-                    && values.values().next().is_some_and(
-                        |value| matches!(value, Value::Array(items) if items.is_empty()),
-                    ))
+fn workflow_result_projection_is_empty(content: &Utf16JsonProjection) -> bool {
+    let mut value = content.clone();
+    loop {
+        let Some(root) = value.at_pointer("") else {
+            return false;
+        };
+        if let Some(units) = root.code_units() {
+            if units.is_empty() {
+                return true;
+            }
+            let Ok(parsed) = Utf16JsonProjection::parse_utf16_json(units) else {
+                return false;
+            };
+            value = parsed;
+            continue;
         }
-        _ => false,
+        if let Some(length) = root.array_len() {
+            return length == 0;
+        }
+        if let Some(entries) = root.object_entries() {
+            return entries.is_empty()
+                || (entries.len() == 1 && entries[0].value.array_len() == Some(0));
+        }
+        return false;
     }
 }
 
-fn workflow_result_text_is_empty(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
-    serde_json::from_str::<Value>(value)
-        .ok()
-        .is_some_and(|value| workflow_result_value_is_empty(&value))
+fn workflow_result_text_is_empty(text: &str) -> bool {
+    Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
+        .is_ok_and(|content| workflow_result_projection_is_empty(&content))
 }
 
 fn workflow_agent_display_model(opts: &Value) -> Option<String> {
@@ -563,44 +572,6 @@ struct WorkspaceLeaseToolInvoker {
 
 #[async_trait]
 impl ToolInvoker for WorkspaceLeaseToolInvoker {
-    async fn invoke(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        self.inner
-            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
-        self.inner
-            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    async fn invoke_detailed(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.inner
-            .invoke_detailed(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     async fn cleanup_computer_inputs(
         &self,
         agent_id: lingxi_core::types::AgentId,
@@ -609,6 +580,66 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
         self.inner
             .cleanup_computer_inputs(agent_id, origin_session_id)
             .await
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner.permission_mode()
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Utf16JsonProjection) -> Option<bool> {
+        self.inner.tool_is_concurrency_safe(name, input)
+    }
+
+    async fn invoke(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+        self.inner
+            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
+            .await
+    }
+
+    async fn invoke_with_workspace_lease(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+        self.inner
+            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
+            .await
+    }
+
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_detailed(name, input, ctx, Some(self.token))
+            .await
+    }
+
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_supplied_detailed(name, input, ctx, Some(self.token), supplied)
+            .await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -1566,7 +1597,11 @@ fn make_request(
 
     let system_prompt_override = if !has_agent_type && has_schema {
         // Case 2: bare schema call → xBp replaces kBp
-        Some(agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT.to_string())
+        Some(
+            agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT
+                .to_string()
+                .into(),
+        )
     } else {
         None
     };
@@ -1574,10 +1609,18 @@ fn make_request(
     let system_prompt_addendum = if has_agent_type {
         if has_schema {
             // Case 4: user agentType + schema → IBp addendum
-            Some(agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM.to_string())
+            Some(
+                agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM
+                    .to_string()
+                    .into(),
+            )
         } else {
             // Case 3: user agentType no schema → HBp addendum
-            Some(agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM.to_string())
+            Some(
+                agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM
+                    .to_string()
+                    .into(),
+            )
         }
     } else {
         None
@@ -1602,9 +1645,17 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        handback_opt_in: false,
+        parent_permission_mode: None,
+        handback_enabled: None,
+        handback_ends_turn_enabled: None,
+        restored_handback_state: None,
+        restored_handback_history: Vec::new(),
+        restore_handback_start: None,
         teammate_color: None,
         subagent_type,
-        prompt: prompt.to_string(),
+        parent_native_query_depth: None,
+        prompt: prompt.to_string().into(),
         observer: None,
         context_paths: Vec::new(),
         description: None,
@@ -1614,6 +1665,7 @@ fn make_request(
         // `agent(prompt, { label })` → the subagent's display label.
         name: opt_str("label"),
         team_name: None,
+        agent_spawn_provenance: Default::default(),
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
@@ -1622,6 +1674,7 @@ fn make_request(
         cwd: None,
         worktree: None,
         fork_context_messages: None,
+        instruction_context: None,
         fork_parent_system_prompt: None,
         // `agent(prompt, { schema })` → structured output. The opt is a JSON
         // Schema object; carry it as its serialised form for the runner to force.
@@ -1665,11 +1718,16 @@ fn make_request(
 /// (claude-code: `agent()` without a schema returns the subagent's final text);
 /// any other shape (an object/array from a structured `schema` run) is
 /// serialised verbatim so the script can `JSON.parse` it.
-fn value_to_text(content: Value) -> String {
-    match content {
-        Value::String(s) => s,
-        other => other.to_string(),
+fn projection_to_text(content: Utf16JsonProjection) -> String {
+    if let Some(text) = content.string_at("") {
+        // The workflow engine currently exposes Rust String; this is the
+        // explicit display boundary. The original projection remains intact
+        // until it reaches this API.
+        return text.to_owned();
     }
+    content
+        .to_json_string()
+        .expect("validated subagent projection serializes")
 }
 
 /// Map a terminal subagent result to the string the runner returns for that
@@ -1680,7 +1738,7 @@ fn value_to_text(content: Value) -> String {
 /// checks now behave correctly. (An empty-but-successful agent still returns "".)
 fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> String {
     match result {
-        Ok(SubagentResult::Completed { content, .. }) => value_to_text(content),
+        Ok(SubagentResult::Completed { content, .. }) => projection_to_text(content),
         Ok(SubagentResult::Failed { .. } | SubagentResult::Killed { .. }) | Err(_) => {
             workflow::WF_NULL_SENTINEL.to_string()
         }
@@ -1908,6 +1966,29 @@ impl WorkflowAgentLiveObserver {
     async fn snapshot(&self) -> WorkflowProgressUpdate {
         self.state.lock().await.clone()
     }
+
+    async fn observe_message(
+        &self,
+        message: lingxi_core::types::ConversationMessage,
+        surfaced_error: Option<String>,
+    ) {
+        let now = unix_time_ms_now();
+        self.publish_with(move |state| {
+            state.last_progress_at_ms = Some(now);
+            if surfaced_error.is_some() {
+                state.error = surfaced_error;
+            }
+            if let lingxi_core::types::ConversationMessage::Assistant { content, .. } = message {
+                for block in content {
+                    if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
+                        state.last_tool_name = Some(name.clone());
+                        state.last_tool_summary = Some(name);
+                    }
+                }
+            }
+        })
+        .await;
+    }
 }
 
 #[async_trait]
@@ -1965,22 +2046,25 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowAgentL
                 })
                 .await;
             }
-            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. } => {
-                let now = unix_time_ms_now();
-                self.publish_with(move |state| {
-                    state.last_progress_at_ms = Some(now);
-                    if let lingxi_core::types::ConversationMessage::Assistant { content, .. } =
-                        message
-                    {
-                        for block in content {
-                            if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
-                                state.last_tool_name = Some(name.clone());
-                                state.last_tool_summary = Some(name);
-                            }
-                        }
-                    }
-                })
-                .await;
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. }
+            | lingxi_core::host::subagent_spawn::SubagentObservation::MessageRow {
+                message, ..
+            } => self.observe_message(message, None).await,
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackApiErrorRow {
+                row,
+                ..
+            } => {
+                let message = row.query_message();
+                let refusal_text = message.text_content();
+                self.observe_message(message, Some(refusal_text)).await;
+            }
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackTombstone {
+                ..
+            } => {
+                // This observer holds only a progress projection, not a
+                // UUID-indexed transcript. The transcript-aware observer/output
+                // stream consumes the complete tombstone; do not guess which
+                // summary fields to retract here.
             }
             lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
@@ -2096,6 +2180,29 @@ fn known_workflow_agent_output(
 #[cfg(test)]
 mod captured_output_tests {
     use super::*;
+
+    #[test]
+    fn projected_agent_empty_result_uses_exact_json_text_and_shape() {
+        let json_text = Utf16JsonProjection::root_string(
+            "[]".to_string(),
+            vec![u16::from(b'['), u16::from(b']')],
+        )
+        .unwrap();
+        let ordinary_text = Utf16JsonProjection::root_string(
+            "answer".to_string(),
+            "answer".encode_utf16().collect(),
+        )
+        .unwrap();
+        assert!(workflow_result_projection_is_empty(&json_text));
+        assert!(!workflow_result_projection_is_empty(&ordinary_text));
+        assert!(workflow_result_projection_is_empty(
+            &Utf16JsonProjection::parse("{\"only\":[]}").unwrap()
+        ));
+        assert!(!workflow_result_projection_is_empty(
+            &Utf16JsonProjection::parse("{\"only\":[],\"extra\":true}").unwrap()
+        ));
+    }
+
     use lingxi_core::host::{
         BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
     };
@@ -2180,8 +2287,9 @@ mod captured_output_tests {
                 return Ok(result.clone());
             }
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: Value::String("answer".into()),
+                content: Utf16JsonProjection::parse(r#""answer""#).unwrap(),
                 usage: lingxi_core::host::SubagentUsage {
                     output_tokens: 7,
                     ..Default::default()
@@ -2202,10 +2310,10 @@ mod captured_output_tests {
         async fn invoke(
             &self,
             _: &str,
-            _: Value,
+            _: Utf16JsonProjection,
             _: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
-            Ok(Value::Null)
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").unwrap())
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -2281,8 +2389,9 @@ mod captured_output_tests {
         cumulative: lingxi_core::host::SubagentUsage,
     ) -> SubagentResult {
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: Value::String("answer".into()),
+            content: Utf16JsonProjection::parse(r#""answer""#).unwrap(),
             usage: lingxi_core::host::SubagentUsage {
                 output_tokens: output,
                 reasoning_output_tokens: reasoning,
@@ -4186,7 +4295,10 @@ impl Task for LocalWorkflowHandler {
                     workflow_metrics_snapshot.terminal_counts();
                 let terminal_outcome = match &outcome {
                     Ok(out) => lingxi_core::host::task_registry::WorkflowTerminalOutcome {
-                        result: out.result.clone(),
+                        // RunOutcome.result is the JS JSON.stringify text emitted
+                        // by the embedded workflow engine, so this is a bounded
+                        // generated root-string projection.
+                        result: out.result.clone().map(Utf16JsonProjection::from),
                         failures: out.failures.clone(),
                         agent_count: workflow_metrics_snapshot.call_count,
                         total_tokens: workflow_metrics_snapshot.total_tokens,

@@ -31,7 +31,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use migrations::settings_update::{read_settings_map, update_settings};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use migrations::settings_update::{
+    read_settings_source, update_settings_source_with_before_publish,
+};
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
 
@@ -302,96 +305,13 @@ fn verify_sha_pin(expected: Option<&str>, actual_head: &str) -> Result<(), Strin
     }
 }
 
-fn npm_package_path(package: &str) -> Result<PathBuf, String> {
-    let (package_name, version) = if let Some(scoped) = package.strip_prefix('@') {
-        let (scope, rest) = scoped
-            .split_once('/')
-            .ok_or_else(|| format!("invalid npm plugin source: {package}"))?;
-        let (name, version) = rest
-            .split_once('@')
-            .map_or((rest, None), |(name, version)| (name, Some(version)));
-        if scope.is_empty() || name.is_empty() {
-            return Err(format!("invalid npm plugin source: {package}"));
-        }
-        (format!("@{scope}/{name}"), version)
-    } else {
-        let (name, version) = package
-            .split_once('@')
-            .map_or((package, None), |(name, version)| (name, Some(version)));
-        (name.to_string(), version)
-    };
-    if package_name.starts_with('-')
-        || package_name
-            .trim_start_matches('@')
-            .split('/')
-            .any(|segment| {
-                segment.is_empty()
-                    || segment == "."
-                    || segment == ".."
-                    || !segment
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            })
-    {
-        return Err(format!("invalid npm plugin source: {package}"));
-    }
-    if version.is_some_and(|version| {
-        version.is_empty()
-            || !version.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(
-                        character,
-                        '.' | '-' | '_' | '+' | '*' | '^' | '~' | '<' | '>' | '=' | '|'
-                    )
-            })
-    }) {
-        return Err(format!("invalid npm plugin source: {package}"));
-    }
-    Ok(PathBuf::from(package_name))
-}
-
 fn materialize_npm_source(
     package: &str,
     version: Option<&str>,
     registry: Option<&str>,
     root: &Path,
 ) -> Result<PathBuf, String> {
-    // A separate `version` field (oracle: "Specific version or version range")
-    // combines with `package` the same way an inline `name@version` already
-    // does, reusing every existing validation / lookup path unchanged.
-    let spec = match version {
-        Some(version) if !version.is_empty() => format!("{package}@{version}"),
-        _ => package.to_string(),
-    };
-    let package_path = npm_package_path(&spec)?;
-    let mut command = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--prefix")
-        .arg(root);
-    if let Some(registry) = registry {
-        command.arg("--registry").arg(registry);
-    }
-    let status = command
-        .arg("--")
-        .arg(&spec)
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|error| format!("failed to start npm for plugin source: {error}"))?;
-    if !status.status.success() {
-        return Err(format!(
-            "failed to install npm plugin source: {}",
-            String::from_utf8_lossy(&status.stderr).trim()
-        ));
-    }
-    confined_source_subdir(&root.join("node_modules"), package_path.to_str())
+    crate::plugin_npm::materialize(package, version, registry, root)
 }
 
 /// CLI `-y` (oracle `jl({yes})`) or an explicit env grant.
@@ -1047,12 +967,29 @@ fn parse_scope(scope: Option<&str>) -> Result<WritableScope, String> {
     }
 }
 
-/// Read a scope's `enabledPlugins` map.
-fn read_enabled(scope: WritableScope, home: &Path, cwd: &Path) -> Map<String, Value> {
-    read_settings_map(&scope_path(scope, home, cwd))
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty source object is valid")
+}
+
+fn source_bool(value: bool) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(if value { "true" } else { "false" })
+        .expect("boolean JSON value is valid")
+}
+
+fn source_object_field(source: &Utf16JsonProjection, field: &str) -> Utf16JsonProjection {
+    let field_units: Vec<u16> = field.encode_utf16().collect();
+    source
+        .subprojection_property_units(&field_units)
         .ok()
-        .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
-        .unwrap_or_default()
+        .filter(|value| value.object_entries().is_some())
+        .unwrap_or_else(empty_source_object)
+}
+
+/// Read a scope's `enabledPlugins` map.
+fn read_enabled(scope: WritableScope, home: &Path, cwd: &Path) -> Utf16JsonProjection {
+    let settings = read_settings_source(&scope_path(scope, home, cwd))
+        .unwrap_or_else(|_| empty_source_object());
+    source_object_field(&settings, "enabledPlugins")
 }
 
 /// Set (`Some(true/false)`) or delete (`None`) an `enabledPlugins` entry at scope.
@@ -1066,15 +1003,17 @@ fn edit_enabled(
     let mut map = read_enabled(scope, home, cwd);
     match value {
         Some(b) => {
-            map.insert(id.to_string(), Value::Bool(b));
+            map.set_field(id, source_bool(b))
+                .map_err(|error| error.to_string())?;
         }
         None => {
-            map.remove(id);
+            map.remove_field(id).map_err(|error| error.to_string())?;
         }
     }
-    update_settings(
+    update_settings_source_with_before_publish(
         &scope_path(scope, home, cwd),
-        vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
+        vec![("enabledPlugins".to_string(), Some(map))],
+        || {},
     )
 }
 
@@ -1216,38 +1155,34 @@ fn persist_plugin_options(
     pairs: &[ConfigPair],
 ) -> Result<(), String> {
     let path = scope_path(scope, home, cwd);
-    let settings = read_settings_map(&path).unwrap_or_default();
-    let mut plugin_configs = settings
-        .get("pluginConfigs")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut entry = plugin_configs
-        .get(plugin_key)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut options = entry
-        .get("options")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let settings = read_settings_source(&path).unwrap_or_else(|_| empty_source_object());
+    let mut plugin_configs = source_object_field(&settings, "pluginConfigs");
+    let mut entry = source_object_field(&plugin_configs, plugin_key);
+    let mut options = source_object_field(&entry, "options");
     for pair in pairs {
         if field_is_sensitive(schema, &pair.key) {
             // Never write a secret to plaintext settings; drop any stale copy.
-            options.remove(&pair.key);
+            options
+                .remove_field(&pair.key)
+                .map_err(|error| error.to_string())?;
         } else {
-            options.insert(pair.key.clone(), pair.value.clone());
+            let value = Utf16JsonProjection::from_serde_value(&pair.value)
+                .map_err(|error| error.to_string())?;
+            options
+                .set_field(&pair.key, value)
+                .map_err(|error| error.to_string())?;
         }
     }
-    entry.insert("options".to_string(), Value::Object(options));
-    plugin_configs.insert(plugin_key.to_string(), Value::Object(entry));
-    update_settings(
+    entry
+        .set_field("options", options)
+        .map_err(|error| error.to_string())?;
+    plugin_configs
+        .set_field(plugin_key, entry)
+        .map_err(|error| error.to_string())?;
+    update_settings_source_with_before_publish(
         &path,
-        vec![(
-            "pluginConfigs".to_string(),
-            Some(Value::Object(plugin_configs)),
-        )],
+        vec![("pluginConfigs".to_string(), Some(plugin_configs))],
+        || {},
     )
 }
 
@@ -1488,11 +1423,8 @@ pub fn rollback_installed_registry(installed_tx: &plugin::installed::InstalledRe
     }
 }
 
-fn strict_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
-    if !path.exists() {
-        return Ok(Map::new());
-    }
-    read_settings_map(path).map_err(|error| error.to_string())
+fn strict_settings_source(path: &Path) -> Result<Utf16JsonProjection, String> {
+    read_settings_source(path)
 }
 
 pub fn edit_enabled_strict(
@@ -1503,22 +1435,24 @@ pub fn edit_enabled_strict(
     value: Option<bool>,
 ) -> Result<(), String> {
     let path = scope_path(scope, home, cwd);
-    let mut settings = strict_settings_map(&path)?;
-    let mut enabled = settings
-        .remove("enabledPlugins")
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let settings = strict_settings_source(&path)?;
+    let mut enabled = source_object_field(&settings, "enabledPlugins");
     match value {
         Some(enabled_value) => {
-            enabled.insert(id.to_string(), Value::Bool(enabled_value));
+            enabled
+                .set_field(id, source_bool(enabled_value))
+                .map_err(|error| error.to_string())?;
         }
         None => {
-            enabled.remove(id);
+            enabled
+                .remove_field(id)
+                .map_err(|error| error.to_string())?;
         }
     }
-    update_settings(
+    update_settings_source_with_before_publish(
         &path,
-        vec![("enabledPlugins".to_string(), Some(Value::Object(enabled)))],
+        vec![("enabledPlugins".to_string(), Some(enabled))],
+        || {},
     )
     .map_err(|error| error.to_string())
 }
@@ -1533,23 +1467,18 @@ fn clear_plugin_config_strict(
     if !path.exists() {
         return Ok(());
     }
-    let settings = strict_settings_map(&path)?;
-    let Some(mut plugin_configs) = settings
-        .get("pluginConfigs")
-        .and_then(Value::as_object)
-        .cloned()
-    else {
-        return Ok(());
-    };
-    if plugin_configs.remove(plugin_key).is_none() {
+    let settings = strict_settings_source(&path)?;
+    let mut plugin_configs = source_object_field(&settings, "pluginConfigs");
+    if plugin_configs.get_property(plugin_key).is_none() {
         return Ok(());
     }
-    update_settings(
+    plugin_configs
+        .remove_field(plugin_key)
+        .map_err(|error| error.to_string())?;
+    update_settings_source_with_before_publish(
         &path,
-        vec![(
-            "pluginConfigs".to_string(),
-            Some(Value::Object(plugin_configs)),
-        )],
+        vec![("pluginConfigs".to_string(), Some(plugin_configs))],
+        || {},
     )
     .map_err(|error| error.to_string())
 }
@@ -3393,24 +3322,6 @@ mod tests {
         assert_eq!(sanitize("../1.2.3", true), "..-1.2.3");
     }
 
-    #[test]
-    fn npm_package_path_rejects_argument_and_path_injection() {
-        assert_eq!(
-            npm_package_path("@scope/plugin@1.2.3").unwrap(),
-            PathBuf::from("@scope/plugin")
-        );
-        for invalid in [
-            "--foreground-scripts",
-            "@scope/../escape",
-            "../escape",
-            "plugin@file:../../escape",
-            "plugin@https://example.com/archive.tgz",
-            "plugin@",
-        ] {
-            assert!(npm_package_path(invalid).is_err(), "accepted {invalid}");
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn external_git_source_materializes_a_confined_subdirectory() {
@@ -4173,6 +4084,69 @@ mod tests {
         assert!(user_settings(&e)["pluginConfigs"]
             .get("hello@mymkt")
             .is_none());
+    }
+
+    #[test]
+    fn plugin_config_update_and_clear_preserve_exact_sibling_source() {
+        let e = env();
+        let path = scope_path(WritableScope::User, &e.home, &e.cwd);
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"pluginConfigs":{"hello@mymkt":{"options":{"EXISTING":"\udfff"},"mcpServers":{"server":{"input":"\ud800"}}},"other@mymkt":{"options":{"keep":true}}}}"#,
+        )
+        .unwrap();
+        let mut schema = Map::new();
+        schema.insert(
+            "REGION".to_string(),
+            serde_json::json!({"sensitive": false, "type": "string"}),
+        );
+        let pairs = vec![ConfigPair {
+            key: "REGION".into(),
+            value: Value::String("west".into()),
+            raw_value: "west".into(),
+        }];
+
+        persist_plugin_options(
+            WritableScope::User,
+            &e.home,
+            &e.cwd,
+            "hello@mymkt",
+            &schema,
+            &pairs,
+        )
+        .unwrap();
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(
+            source.string_units("/pluginConfigs/hello@mymkt/options/EXISTING"),
+            Some(vec![0xDFFF])
+        );
+        assert_eq!(
+            source.string_at("/pluginConfigs/hello@mymkt/options/REGION"),
+            Some("west")
+        );
+        assert_eq!(
+            source.string_units("/pluginConfigs/hello@mymkt/mcpServers/server/input"),
+            Some(vec![0xD800])
+        );
+        assert!(source
+            .at_pointer("/pluginConfigs/other@mymkt/options/keep")
+            .is_some());
+
+        clear_plugin_config_strict(WritableScope::User, &e.home, &e.cwd, "hello@mymkt").unwrap();
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert!(source.at_pointer("/pluginConfigs/hello@mymkt").is_none());
+        assert!(source
+            .at_pointer("/pluginConfigs/other@mymkt/options/keep")
+            .is_some());
     }
 
     #[test]

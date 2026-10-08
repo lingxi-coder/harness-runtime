@@ -13,6 +13,7 @@
 //! - `CACHE_TTL_MS = 15 * 60 * 1000` (15 minutes)
 //! - `MAX_CACHE_SIZE_BYTES = 50 * 1024 * 1024` (50 MB)
 
+use crate::source::Source;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -179,34 +180,40 @@ impl UrlCache {
 
 static URL_CACHE: Lazy<Mutex<UrlCache>> = Lazy::new(|| Mutex::new(UrlCache::new()));
 
+// Cache identity uses the original JavaScript string. URL parsing separately
+// takes its USVString projection; that projection must not alias distinct keys.
+fn cache_key(url: &Source) -> String {
+    url.to_json_string().expect("validated URL source string")
+}
+
 /// Look up a cached fetch by its *original* URL, honoring the 15-minute TTL.
 ///
 /// Returns `None` on a miss or an expired (lazily-evicted) entry. Uses
 /// [`Instant::now`] as the clock; see [`cache_get_at`] for the test seam.
 #[must_use]
-pub fn cache_get(url: &str) -> Option<CachedFetch> {
+pub fn cache_get(url: &Source) -> Option<CachedFetch> {
     cache_get_at(url, Instant::now())
 }
 
 /// [`cache_get`] with an injectable clock (test seam for TTL expiry).
 #[must_use]
-pub fn cache_get_at(url: &str, now: Instant) -> Option<CachedFetch> {
+pub fn cache_get_at(url: &Source, now: Instant) -> Option<CachedFetch> {
     let mut cache = URL_CACHE.lock().expect("URL_CACHE poisoned");
-    cache.get(url, now)
+    cache.get(&cache_key(url), now)
 }
 
 /// Store a successful fetch, keyed by its *original* URL (`utils.ts:505-517`).
 ///
 /// Uses [`Instant::now`] as the insert timestamp; see [`cache_set_at`] for the
 /// test seam.
-pub fn cache_set(url: String, entry: CachedFetch) {
+pub fn cache_set(url: Source, entry: CachedFetch) {
     cache_set_at(url, entry, Instant::now());
 }
 
 /// [`cache_set`] with an injectable insert timestamp (test seam for TTL aging).
-pub fn cache_set_at(url: String, entry: CachedFetch, now: Instant) {
+pub fn cache_set_at(url: Source, entry: CachedFetch, now: Instant) {
     let mut cache = URL_CACHE.lock().expect("URL_CACHE poisoned");
-    cache.insert(url, entry, now);
+    cache.insert(cache_key(&url), entry, now);
 }
 
 /// Empty the URL content cache. Mirrors `clearWebFetchCache` (`utils.ts:80-83`).
@@ -255,13 +262,17 @@ mod tests {
             entry("body-a", 200),
             now,
         );
-        let got = cache_get_at("https://global.example/roundtrip", now).expect("hit");
+        let got = cache_get_at(&"https://global.example/roundtrip".into(), now).expect("hit");
         assert_eq!(got, entry("body-a", 200));
     }
 
     #[test]
     fn miss_for_absent_key() {
-        assert!(cache_get_at("https://global.example/definitely-absent", Instant::now()).is_none());
+        assert!(cache_get_at(
+            &"https://global.example/definitely-absent".into(),
+            Instant::now()
+        )
+        .is_none());
     }
 
     #[test]
@@ -275,9 +286,9 @@ mod tests {
             entry("1", 200),
             now,
         );
-        assert!(cache_get_at("https://global.example/clear-1", now).is_some());
+        assert!(cache_get_at(&"https://global.example/clear-1".into(), now).is_some());
         clear_web_fetch_cache();
-        assert!(cache_get_at("https://global.example/clear-1", now).is_none());
+        assert!(cache_get_at(&"https://global.example/clear-1".into(), now).is_none());
     }
 
     // ---- eviction / TTL policy tested on a LOCAL UrlCache instance ----------
@@ -384,4 +395,17 @@ mod tests {
         let e = entry("", 204);
         assert_eq!(e.size_cost(), 1);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn source_url_cache_keys_do_not_alias_url_usvstring_replacements() {
+    let original = Source::parse(r#""https://example.com/\ud800""#).unwrap();
+    let replacement: Source = "https://example.com/�".into();
+    assert_eq!(original.string_at(""), replacement.string_at(""));
+    assert_ne!(cache_key(&original), cache_key(&replacement));
+    assert_eq!(
+        cache_key(&original),
+        cache_key(&Source::parse(r#""https://example.com/\uD800""#).unwrap())
+    );
 }

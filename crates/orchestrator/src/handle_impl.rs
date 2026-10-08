@@ -23,6 +23,7 @@
 
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
+use hooks::mods::ModSessionContext;
 use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
@@ -33,6 +34,53 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::Command;
+
+fn source_text_block(
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<lingxi_core::types::ContentBlock, HandleError> {
+    let text = source
+        .string_at("")
+        .ok_or_else(|| HandleError::ActionFailed("expected a source string".into()))?
+        .to_owned();
+    let utf16_code_units = source
+        .string_units("")
+        .ok_or_else(|| HandleError::ActionFailed("expected a source string".into()))?;
+    Ok(lingxi_core::types::ContentBlock::TextJsUtf16 {
+        text,
+        utf16_code_units,
+        citations: None,
+    })
+}
+
+fn user_message_from_source(
+    id: lingxi_core::types::MessageId,
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    is_meta: bool,
+) -> Result<lingxi_core::types::ConversationMessage, HandleError> {
+    Ok(lingxi_core::types::ConversationMessage::User {
+        id,
+        content: vec![source_text_block(source)?],
+        is_meta,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+    })
+}
+
+fn assistant_message_from_source(
+    id: lingxi_core::types::MessageId,
+    source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<lingxi_core::types::ConversationMessage, HandleError> {
+    Ok(lingxi_core::types::ConversationMessage::Assistant {
+        id,
+        content: vec![source_text_block(source)?],
+        stop_reason: None,
+        resumable: None,
+    })
+}
 
 /// Keep the session's provider-local wire model separate from the
 /// provider-qualified reference used by client pickers.
@@ -59,11 +107,59 @@ fn normalize_session_model_ref(
 }
 
 impl ConversationOrchestrator {
+    async fn background_session_snapshot(
+        &self,
+    ) -> (
+        lingxi_core::host::bg_session_forker::BgSessionSnapshot,
+        String,
+    ) {
+        let session = self.session.lock().await;
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model_reminder_attachments = session
+            .history
+            .iter()
+            .filter_map(|message| {
+                attachments
+                    .get(&message.id())
+                    .cloned()
+                    .map(|attachment| (message.id(), attachment))
+            })
+            .collect();
+        (
+            lingxi_core::host::bg_session_forker::BgSessionSnapshot {
+                history: session.history.clone(),
+                model_reminder_attachments,
+            },
+            session.model.clone(),
+        )
+    }
+
     /// Reset state whose lifetime is one conversation rather than one process.
     /// Both `/clear` and in-place resume cross that boundary; keeping any of
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        // Retire session-owned async hook completions before clearing or
+        // restoring the transcript. The token is cancelled before waiting for
+        // already-admitted durable attachment commits, so stale producers are
+        // rejected while accepted writes finish against the old session.
+        self.lifecycle_runtime
+            .session_tool_hook_generation
+            .reset()
+            .await;
+        self.tools.reset_bash_precommit_prompt_session();
+        // `/clear` and in-place resume can switch the session without a
+        // separate SessionEnd dispatch. Apply the same state reset; it is
+        // idempotent when SessionEnd already ran.
+        if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            if let Some(host) = registry.read().await.mod_host() {
+                host.reset_session_state();
+            }
+        }
         self.reset_goal_interruption();
         let protocol_session_id = self.session.lock().await.session_id;
         let session_id = protocol_session_id.to_string();
@@ -84,7 +180,7 @@ impl ConversationOrchestrator {
         self.prompt_runtime.reset_read_state();
         self.transcript.reset_session_scoped().await;
         self.orphan_forced_decisions.lock().await.clear();
-        self.prompt_runtime.reset_session_scoped().await;
+        self.prompt_runtime.prepare_session_scoped_reset().await;
     }
 
     /// Apply a model selection with Claude Code's pre/post model-switch hook
@@ -114,10 +210,27 @@ impl ConversationOrchestrator {
             (session.model.clone(), session.model_profile.clone())
         };
         if from_model == target_model && from_profile == target_profile {
+            if matches!(source, "command" | "picker" | "sdk") {
+                self.model_runtime
+                    .refusal_selection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .model_pick(&target_model);
+                self.model_runtime
+                    .refusal_cascade
+                    .lock()
+                    .await
+                    .clear_target();
+            }
             return Ok(());
         }
 
         if matches!(source, "command" | "picker" | "sdk") {
+            self.model_runtime
+                .refusal_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model_pick(&target_model);
             let aggregate = self
                 .run_pre_model_switch_hooks(
                     &from_model,
@@ -132,6 +245,7 @@ impl ConversationOrchestrator {
                     return Err(HandleError::ActionFailed(
                         aggregate
                             .reason
+                            .map(|reason| reason.display)
                             .filter(|reason| !reason.is_empty())
                             .unwrap_or_else(|| "Model switch blocked by hook".to_string()),
                     ));
@@ -143,6 +257,7 @@ impl ConversationOrchestrator {
                     return Err(HandleError::ActionFailed(
                         aggregate
                             .reason
+                            .map(|reason| reason.display)
                             .filter(|reason| !reason.is_empty())
                             .unwrap_or_else(|| "Model switch requires confirmation".to_string()),
                     ));
@@ -151,11 +266,23 @@ impl ConversationOrchestrator {
             }
         }
 
+        if matches!(source, "command" | "picker" | "sdk") {
+            self.model_runtime
+                .refusal_cascade
+                .lock()
+                .await
+                .clear_target();
+        }
         {
             let mut session = self.session.lock().await;
             session.model = target_model.clone();
             session.model_profile = target_profile.clone();
         }
+        self.model_runtime
+            .refusal_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .override_model = Some(Some(target_model.clone()));
         self.run_post_model_switch_hooks(
             &from_model,
             &target_model,
@@ -361,8 +488,12 @@ impl ConversationOrchestrator {
         let prepared_transcript =
             self.prepare_transcript_switch(new_session_id_value, durable_lock)?;
         prepared_transcript.prepare_legacy().await;
+        self.compaction_runtime.roll_over_total_tokens_context();
         self.reset_session_scoped_runtime().await;
+        let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
+        let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
+        let mut last_jsonl_uuid = self.transcript.last_jsonl_uuid.lock().await;
         let old_session_id = s.session_id;
         // All fallible and awaiting work is complete. Publish the captured
         // transcript authority, cost scope, and conversation state in one
@@ -371,23 +502,45 @@ impl ConversationOrchestrator {
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history.clear();
+        if let Some(restore) = self
+            .model_runtime
+            .refusal_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session_transition()
+        {
+            s.model = restore
+                .previous_app_state_model
+                .flatten()
+                .unwrap_or_else(|| self.config.model.clone());
+            s.model_profile = restore.previous_profile;
+        }
+        s.compacted_user_turns = 0;
+        s.virtual_user_messages.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
         s.model_context_excluded_messages.clear();
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
+        self.prompt_runtime
+            .commit_instruction_session_reset(&mut instruction_context);
         s.session_id = new_session_id_value;
+        reports.activate(new_session_id_value);
         let new_session_id = new_session_id_value.to_string();
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        *self.transcript.last_jsonl_uuid.lock().await = None;
+        *last_jsonl_uuid = None;
+        drop(last_jsonl_uuid);
+        drop(instruction_context);
         drop(s);
+        drop(reports);
         if let Some(on_activated) = on_activated {
             on_activated();
         }
         self.notify_session_activated(old_session_id, new_session_id_value)
             .await;
+        self.recover_main_reports_after_activation();
         self.invoked_skill_session_guard.replace(new_session_id);
         *self.compaction_runtime.compaction_tracking.lock().await =
             compaction::AutoCompactTrackingState::default();
@@ -442,11 +595,29 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
+        *self.prompt_runtime.context_rendering_hint.lock().await = runtime.context_rendering_hint;
+        let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
+        let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
         prepared_transcript.activate();
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history = history;
+        if let Some(restore) = self
+            .model_runtime
+            .refusal_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session_transition()
+        {
+            s.model = restore
+                .previous_app_state_model
+                .flatten()
+                .unwrap_or_else(|| self.config.model.clone());
+            s.model_profile = restore.previous_profile;
+        }
+        s.compacted_user_turns = runtime.compacted_user_turns;
+        s.virtual_user_messages = runtime.virtual_user_message_ids.into_iter().collect();
         if !runtime.model.is_empty() {
             // `session.model` is the WIRE model id; the provider profile rides
             // beside it. A transcript can hand back a provider-QUALIFIED
@@ -461,13 +632,46 @@ impl ConversationOrchestrator {
             // an unknown ref and an id whose own name contains a slash
             // (`openrouter/auto`) are both preserved.
             let listings = self.api.list_model_listings();
-            let (model, profile) = normalize_session_model_ref(
+            let (model, mut profile) = normalize_session_model_ref(
                 &runtime.model,
                 runtime.model_profile.as_deref(),
                 &listings,
             );
-            s.model = model;
-            s.model_profile = profile;
+            if profile.is_none() {
+                if let Some(serving_profile) =
+                    crate::query_model::server_session_serving_profile(&s.history, &model)
+                {
+                    profile = serving_profile;
+                }
+            }
+            if crate::query_model::restore_refusal_selection(self, Some(&model), &s.history, false)
+            {
+                s.model = model;
+                s.model_profile = profile;
+            }
+        } else {
+            // An empty hot-resume model snapshot means keep the live route.
+            // A persisted refusal notice is not evidence for selecting its
+            // fallback model; cold replay gets that from assistant rows.
+            s.model.clone_from(&from_model);
+            s.model_profile.clone_from(&from_profile);
+            if crate::query_model::server_fallback_matches_model(&s.history, &from_model) {
+                if s.model_profile.is_none() {
+                    if let Some(profile) =
+                        crate::query_model::server_session_serving_profile(&s.history, &from_model)
+                    {
+                        s.model_profile = profile;
+                    }
+                }
+                crate::query_model::restore_refusal_selection(
+                    self,
+                    Some(&from_model),
+                    &s.history,
+                    false,
+                );
+            } else {
+                crate::query_model::restore_refusal_selection(self, None, &s.history, false);
+            }
         }
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
@@ -481,6 +685,12 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             runtime.post_compact_skill_attachments.into_iter().collect();
+        *self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            runtime.model_reminder_attachments.into_iter().collect();
         s.active_goal = active_goal.map(|goal| lingxi_core::session::ActiveGoalState {
             condition: goal.condition,
             set_at: goal.set_at,
@@ -494,13 +704,19 @@ impl ConversationOrchestrator {
         let resumed_reasoning = runtime.reasoning_selection.clone();
         let resumed_model = s.model.clone();
         let resumed_profile = s.model_profile.clone();
+        self.prompt_runtime
+            .commit_instruction_session_reset(&mut instruction_context);
         s.session_id = session_id;
+        reports.activate(session_id);
+        drop(instruction_context);
         drop(s);
+        drop(reports);
         if let Some(on_activated) = on_activated {
             on_activated();
         }
         self.notify_session_activated(old_session_id, session_id)
             .await;
+        self.recover_main_reports_after_activation();
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         if let Some(selection) = resumed_reasoning {
@@ -597,8 +813,9 @@ impl ConversationOrchestrator {
         };
         if let Err(error) = observer.session_activated(previous, current).await {
             tracing::warn!(%error, "session committed but host presence did not follow it");
-            let notice =
-                format!("Session switched, but host presence could not be updated: {error}");
+            let notice = lingxi_core::types::utf16_json::Utf16JsonProjection::from(format!(
+                "Session switched, but host presence could not be updated: {error}"
+            ));
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(250),
                 self.output.emit_system_notice(&notice, false),
@@ -660,10 +877,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn force_compact_with_instructions(
         &self,
-        custom_instructions: &str,
+        custom_instructions: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<CompactionSummary, HandleError> {
+        let trimmed = compaction::prompt::trim_compact_source_text(custom_instructions);
+        let has_instructions = trimmed
+            .string_units("")
+            .is_some_and(|units| !units.is_empty());
         self.force_compact_with_instructions_and_cancel(
-            Some(custom_instructions).filter(|s| !s.trim().is_empty()),
+            Some(custom_instructions).filter(|_| has_instructions),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -671,7 +892,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn force_compact_with_instructions_and_cancel(
         &self,
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<CompactionSummary, HandleError> {
         ConversationOrchestrator::force_compact_with_instructions_and_cancel(
@@ -685,7 +906,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn summarize_at(
         &self,
         message_uuid: &str,
-        user_context: Option<&str>,
+        user_context: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         direction: lingxi_core::host::SummarizeDirection,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<CompactionSummary, HandleError> {
@@ -704,7 +925,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         })
     }
 
-    async fn set_active_goal(&self, condition: &str) {
+    async fn set_active_goal(
+        &self,
+        condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         let tokens_at_start = self.snapshot_cost_real().await.total_tokens;
         // `let l = t.getAppState().activeGoal; if (l !== void 0) kB(l,"superseded")`
         // (`src_161508826.js`) — a goal replaced by a newer one is torn down as
@@ -728,7 +952,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut s = self.session.lock().await;
         self.reset_goal_interruption();
         s.active_goal = Some(lingxi_core::session::ActiveGoalState {
-            condition: condition.to_string(),
+            condition: condition.clone(),
             set_at: SystemTime::now(),
             last_reason: None,
             iterations: 0,
@@ -747,7 +971,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             let mut metadata = telemetry::LogEventMetadata::new();
             metadata.insert(
                 "promptLength".into(),
-                telemetry::AnalyticsValue::Int(condition.encode_utf16().count() as i64),
+                telemetry::AnalyticsValue::Int(
+                    condition.string_units("").map_or(0, |units| units.len()) as i64,
+                ),
             );
             metadata.insert(
                 "via".into(),
@@ -768,7 +994,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
-    async fn set_active_goal_last_reason(&self, reason: Option<String>) {
+    async fn set_active_goal_last_reason(
+        &self,
+        reason: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
         let mut s = self.session.lock().await;
         if let Some(goal) = s.active_goal.as_mut() {
             goal.last_reason = reason;
@@ -801,7 +1030,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `ActionFailed` (the `/fork` handler renders "Could not fork
     /// conversation: …"). The handler already gates the "no first turn yet"
     /// case, but this also checks defensively.
-    async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
+    async fn fork_conversation(
+        &self,
+        directive: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<ForkOutcome, HandleError> {
         let spawner = self
             .fork_spawner
             .as_ref()
@@ -811,28 +1043,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .clone()
             .ok_or_else(|| HandleError::ActionFailed("fork: no budget wired".into()))?;
 
-        // The fork prefix is built from the most-recent assistant message.
-        let (assistant, origin_session_id) = {
+        // Keep the complete parent history, including lazy instruction bodies.
+        let (history, origin_session_id) = {
             let s = self.session.lock().await;
-            (
-                s.history
-                    .iter()
-                    .rev()
-                    .find(|m| {
-                        matches!(m, lingxi_core::types::ConversationMessage::Assistant { .. })
-                    })
-                    .cloned(),
-                s.session_id,
-            )
+            (s.history.clone(), s.session_id)
         };
-        let Some(assistant) = assistant else {
+        if !history.iter().any(|message| {
+            matches!(
+                message,
+                lingxi_core::types::ConversationMessage::Assistant { .. }
+            )
+        }) {
             return Err(HandleError::ActionFailed(
                 "fork: no assistant turn to fork from".into(),
             ));
-        };
+        }
 
-        let fork_msgs =
-            lingxi_core::host::fork_subagent::build_forked_messages(directive, &assistant);
+        let fork_msgs = lingxi_core::host::fork_subagent::build_forked_context(directive, &history);
         // The parent's rendered system-prompt bytes for a cache-identical child
         // prefix (`None` until the first successful turn).
         let parent_sys = self.current_turn_system_prompt().await;
@@ -844,23 +1071,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
-            // NOTE (deliberate deviation from the plan's `String::new()`): the
-            // ONLY wired async spawner — `BackgroundAgentSpawner::spawn_async` —
-            // forwards `prompt` to the backgrounded LocalAgent and IGNORES
-            // `fork_context_messages` (exactly as the existing async fork
-            // template `AgentTool::dispatch_async` does, setting
-            // `fork_context_messages: None` and `prompt: parsed.prompt`). An
-            // empty prompt would therefore spawn a do-nothing agent. Pass the
-            // directive so the background fork actually receives its task.
-            // `fork_context_messages` is still threaded below so a future
-            // spawner that replays the cache-identical prefix works unchanged.
-            prompt: directive.to_string(),
+            // BackgroundAgentSpawner carries the complete request into
+            // LocalAgent; the runner seeds the fork prefix below. Keep the
+            // directive as task metadata beside that model-facing prefix.
+            prompt: directive.clone(),
+            parent_native_query_depth: None,
             observer: None,
             context_paths: Vec::new(),
-            description: Some(directive.to_string()),
+            description: Some(directive.clone()),
             model: None,
             model_profile: None,
             run_in_background: true,
@@ -874,6 +1096,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             cwd: None,
             worktree: None,
             fork_context_messages: Some(fork_msgs),
+            instruction_context: Some(self.instruction_context_snapshot().await),
             fork_parent_system_prompt: parent_sys,
             schema: None,
             structured_output_mode: Default::default(),
@@ -896,6 +1119,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            // Detached /fork inherits a conversation and is outside the
+            // ordinary Agent handback opt-in, even under an auto parent.
+            handback_opt_in: false,
+            parent_permission_mode: self.permission_mode(),
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
         };
 
         let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(
@@ -912,7 +1144,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .map_err(|e| HandleError::ActionFailed(e.to_string()))?;
 
         Ok(ForkOutcome {
-            name: codename,
+            name: codename.into(),
             agent_id: launch.agent_id.to_string(),
         })
     }
@@ -926,7 +1158,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// resumes it. Returns the system line for the live session (the seam owns
     /// the exact text — it mints the new short id). No forker wired (tests /
     /// non-desktop roots) ⇒ a clear `ActionFailed`.
-    async fn fork_to_background_session(&self, prompt: &str) -> Result<String, HandleError> {
+    async fn fork_to_background_session(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError> {
         let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
             HandleError::ActionFailed("fork: no background-session forker wired".into())
         })?;
@@ -937,18 +1172,26 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // sonnet`, or a cross-provider model) instead of the `DEFAULT_MODEL`
         // seed — the copied assistant lines otherwise carry no `model` for
         // `state_from_messages` to restore.
-        let (history, model) = {
-            let s = self.session.lock().await;
-            (s.history.clone(), s.model.clone())
-        };
+        let (mut conversation, mut model) = self.background_session_snapshot().await;
+        lingxi_core::host::refusal_state::neutralize_fork(&mut conversation.history);
+        if let Some(latch) = self
+            .model_runtime
+            .refusal_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live_latch()
+        {
+            model = latch
+                .previous_app_state_model
+                .clone()
+                .flatten()
+                .unwrap_or_else(|| self.config.model.clone());
+        }
         // The parent's rendered system-prompt bytes (`None` until the first
         // successful turn) so the copy carries a cache-identical prefix.
-        let system_prompt = self
-            .current_turn_system_prompt()
-            .await
-            .map(|s| Arc::from(s.as_str()));
+        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         forker
-            .fork_to_background(&history, system_prompt, prompt, &model)
+            .fork_to_background(&conversation, system_prompt, prompt, &model)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }
@@ -972,7 +1215,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn background_conversation(
         &self,
         snapshot: lingxi_core::host::BackgroundingSnapshot,
-    ) -> Result<String, HandleError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError> {
         let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
             HandleError::ActionFailed(
                 "Cannot open agents — session persistence is disabled, so this conversation cannot be backgrounded."
@@ -980,35 +1223,42 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )
         })?;
 
-        let (mut history, model) = {
-            let session = self.session.lock().await;
-            (session.history.clone(), session.model.clone())
-        };
+        let (mut conversation, model) = self.background_session_snapshot().await;
         let partial = snapshot.partial_text();
         if !partial.is_empty() {
-            history.push(lingxi_core::types::ConversationMessage::Assistant {
-                id: lingxi_core::types::MessageId::new(),
-                content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: partial.to_string(),
-                }],
-                stop_reason: Some("background_requested".to_string()),
-            });
+            conversation
+                .history
+                .push(lingxi_core::types::ConversationMessage::Assistant {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
+                        text: partial.to_string(),
+                        citations: None,
+                    }],
+                    stop_reason: Some("background_requested".to_string()),
+
+                    resumable: None,
+                });
         }
 
-        let system_prompt = self
-            .current_turn_system_prompt()
-            .await
-            .map(|prompt| Arc::from(prompt.as_str()));
+        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let continuation = if matches!(
             snapshot,
             lingxi_core::host::BackgroundingSnapshot::Idle { .. }
         ) {
-            ""
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("")
         } else {
-            "Continue the interrupted turn from the backgrounding boundary. Preserve the user's intent and safely restart any interrupted work."
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "Continue the interrupted turn from the backgrounding boundary. Preserve the user's intent and safely restart any interrupted work.",
+            )
         };
         forker
-            .background_conversation(&history, system_prompt, continuation, &model, &snapshot)
+            .background_conversation(
+                &conversation,
+                system_prompt,
+                &continuation,
+                &model,
+                &snapshot,
+            )
             .await
             .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
@@ -1039,7 +1289,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
-    async fn generate_session_name(&self) -> Result<Option<String>, HandleError> {
+    async fn generate_session_name(
+        &self,
+    ) -> Result<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>, HandleError> {
         self.generate_session_name_query(tokio_util::sync::CancellationToken::new())
             .await
     }
@@ -1081,7 +1333,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `/btw` — delegate to the history-inert inherent
     /// [`ConversationOrchestrator::answer_side_question_query`] with a fresh
     /// (un-cancelled) token, mirroring `generate_recap`'s delegation.
-    async fn answer_side_question(&self, question: &str) -> Result<RecapOutcome, HandleError> {
+    async fn answer_side_question(
+        &self,
+        question: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<RecapOutcome, HandleError> {
         self.answer_side_question_query(question, tokio_util::sync::CancellationToken::new())
             .await
     }
@@ -1090,13 +1345,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// session's transcript (1:1 with claude-code `saveCustomTitle`). The
     /// `sessionId` field is the BARE uuid (the `<uuid>.jsonl` stem the loader
     /// keys `custom_titles` by). No-op Ok when no writer is wired.
-    async fn rename_session(&self, name: String) -> Result<(), HandleError> {
+    async fn rename_session(
+        &self,
+        name: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(());
         };
         let session_id = self.session.lock().await.session_id;
         writer
-            .append_custom_title(&session_id.as_uuid().to_string(), &name)
+            .append_custom_title(&session_id.as_uuid().to_string(), name)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }
@@ -1121,7 +1379,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             let session = self.session.lock().await;
             (session.model.clone(), self.session_cwd.cwd())
         };
-        let files = self.memory.load(&cwd).await;
+        let files = self.instruction_file_snapshot().await.ok()?;
         let active_betas = self.api.active_betas();
         Some(crate::prompt::large_memory_warning_rows(
             &files,
@@ -1156,8 +1414,253 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        if on {
+            let (model, profile) = {
+                let session = self.session.lock().await;
+                (session.model.clone(), session.model_profile.clone())
+            };
+            self.api
+                .validate_fast_enable(&model, profile.as_deref())
+                .await
+                .map_err(|error| {
+                    HandleError::ActionFailed(llm_runtime::error::error_display_text(&error))
+                })?;
+            lingxi_core::host::fast_mode::ModelRejections::for_process().rearm();
+        }
         self.fast_mode.store(on, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn set_mod_ui_selection(&self, selection: Option<lingxi_core::host::ModUiSelection>) {
+        *self
+            .mod_ui_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = selection;
+    }
+
+    async fn mod_describe_command(
+        &self,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        self.apply_mod_command_description(input).await
+    }
+
+    async fn mod_ui_render(
+        &self,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ui_revision: u64,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError> {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return Ok(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                    .expect("null is JSON"),
+            );
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return Ok(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                    .expect("null is JSON"),
+            );
+        };
+        let session_id = self.id().await;
+        let registration_revision = host
+            .begin_mod_ui_render(&session_id, &input, ui_revision)
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let tree = host
+            .dispatch_with_ui_at_session(
+                "ui.render",
+                input.clone(),
+                self,
+                |event| async move {
+                    let event = event.ok_or_else(|| {
+                        hooks::mods::ModError::Hook("ui.render requires an event payload".into())
+                    })?;
+                    let mut reference = Vec::new();
+                    for (index, pointer) in ["/surface", "/component", "/requestId"]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if index > 0 {
+                            reference.push(u16::from(b':'));
+                        }
+                        reference.extend(event.string_units(pointer).ok_or_else(|| {
+                            hooks::mods::ModError::Hook(
+                                "ui.render surface, component, and requestId must be strings"
+                                    .into(),
+                            )
+                        })?);
+                    }
+                    let reference =
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                            String::from_utf16_lossy(&reference),
+                            reference,
+                        )
+                        .expect("render reference is built from UTF-16 units");
+                    let result = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+                        (
+                            "type".to_string(),
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from("engine"),
+                        ),
+                        ("ref".to_string(), reference),
+                    ])
+                    .expect("render result is an object");
+                    Ok(Some(result))
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+                },
+            )
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        host.finish_mod_ui_render(
+            &session_id,
+            &input,
+            ui_revision,
+            registration_revision,
+            &tree,
+        )
+        .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        Ok(tree)
+    }
+
+    async fn mod_ui_control(
+        &self,
+        request: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, HandleError> {
+        let request = hooks::mods::normalize_mod_ui_control_request(request)
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let host = match &self.lifecycle_runtime.hook_registry {
+            Some(registry) => registry.read().await.mod_host(),
+            None => None,
+        };
+        let Some(host) = host else {
+            let response = match request.string_at("/subtype") {
+                Some("ui_render") => {
+                    let mut response = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"tree":null,"rewritten":false,"hooked":false}"#,
+                    )
+                    .expect("render response is JSON");
+                    let props = request.subprojection("/props").unwrap_or_else(|_| {
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                            .expect("null is JSON")
+                    });
+                    response
+                        .set_field("props", props)
+                        .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+                    response
+                }
+                Some("ui_client_module") => {
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                        .expect("null is JSON")
+                }
+                Some(
+                    "ui_message" | "ui_client_fault" | "ui_client_press" | "ui_press" | "ui_input"
+                    | "ui_select",
+                ) => lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"handled":false}"#,
+                )
+                .expect("handled result is JSON"),
+                _ => return Err(HandleError::ActionFailed("Unknown Mod UI control".into())),
+            };
+            return Ok(lingxi_core::host::orchestrator::ModUiControlOutcome {
+                response,
+                render_revision: None,
+                client_runtime_epochs: std::collections::BTreeMap::new(),
+                client_state_token: None,
+            });
+        };
+        host.dispatch_client_ui_control(request, self)
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
+
+    async fn mod_ui_client_operation(
+        &self,
+        operation: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError> {
+        let host = match &self.lifecycle_runtime.hook_registry {
+            Some(registry) => registry.read().await.mod_host(),
+            None => None,
+        }
+        .ok_or_else(|| HandleError::ActionFailed("The session has no Mod Client runtime".into()))?;
+        host.dispatch_client_ui_operation(operation, self)
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
+
+    async fn mod_ui_press(
+        &self,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ui_revision: u64,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError> {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"handled":false}"#,
+            )
+            .expect("handled result is JSON"));
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"handled":false}"#,
+            )
+            .expect("handled result is JSON"));
+        };
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        host.dispatch_ui_press_at_session(
+            input,
+            ui_revision,
+            self,
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+            move |plugin, text| {
+                let output = status_output.clone();
+                async move { output.emit_mod_status(&plugin, text.as_ref()).await }
+            },
+        )
+        .await
+        .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
+
+    async fn mod_ui_clear_press_actions(&self, ui_revision: u64) -> Result<(), HandleError> {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return Ok(());
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return Ok(());
+        };
+        host.clear_mod_ui_press_actions(&self.id().await, ui_revision)
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
+
+    async fn mod_ui_render_generation(&self) -> u64 {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return 0;
+        };
+        registry
+            .read()
+            .await
+            .mod_host()
+            .map_or(0, |host| host.ui_render_generation())
     }
 
     async fn plan_mode(&self) -> bool {
@@ -1212,6 +1715,38 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .clone()
     }
 
+    async fn effort_command_snapshot(
+        &self,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, HandleError> {
+        let session = self.session.lock().await;
+        let mut snapshot = self
+            .api
+            .effort_command_snapshot(&session.model, session.model_profile.as_deref())
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        if let Some(snapshot) = &mut snapshot {
+            snapshot.save_default = self.prompt_is_interactive();
+            if snapshot.user_settings_path.is_none() {
+                snapshot.user_settings_path = self
+                    .config_home
+                    .as_ref()
+                    .map(|home| home.join("settings.json"));
+            }
+        }
+        Ok(snapshot)
+    }
+
+    async fn ultracode_enabled(&self) -> bool {
+        self.model_runtime
+            .ultracode_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    async fn set_ultracode_enabled(&self, enabled: bool) -> Result<(), HandleError> {
+        self.model_runtime
+            .ultracode_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     async fn dynamic_workflows_enabled(&self) -> bool {
         self.dynamic_workflows_gate.enabled()
     }
@@ -1264,17 +1799,40 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
-        let state = self.session.lock().await;
-        let selection = effort
+    async fn set_session_effort(
+        &self,
+        effort: lingxi_core::host::effort_table::SessionEffort,
+    ) -> Result<(), HandleError> {
+        use lingxi_core::host::effort_table::SessionEffort;
+        let _session = self.session.lock().await;
+        self.model_runtime.current_effort_explicit.store(
+            !matches!(effort, SessionEffort::Inherit),
+            std::sync::atomic::Ordering::Release,
+        );
+        let level = match &effort {
+            SessionEffort::Level(serde_json::Value::String(level)) => Some(level.clone()),
+            _ => None,
+        };
+        *self
+            .model_runtime
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = level.clone();
+        *self
+            .model_runtime
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = level
             .map(|id| lingxi_core::host::ReasoningSelection::Level { id })
             .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
-        self.set_reasoning_selection_for_model(
-            &state.model,
-            state.model_profile.as_deref(),
-            selection,
-        );
+        self.api.set_effort(effort);
         Ok(())
+    }
+
+    async fn reasoning_default_settings_path(&self) -> Option<std::path::PathBuf> {
+        self.config_home
+            .as_ref()
+            .map(|home| home.join("settings.json"))
     }
 
     async fn output_styles(&self) -> Option<lingxi_core::host::OutputStyleListing> {
@@ -1638,7 +2196,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 HookInfo {
                     name: h.name.clone(),
                     event: h.events.first().map_or("Unknown", event_str).to_string(),
-                    matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
+                    matcher: h.matcher().cloned(),
                     timeout_ms: h.timeout.map_or(60_000_u64, |d| {
                         u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
                     }),
@@ -1652,7 +2210,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     async_timeout_ms: h
                         .async_timeout
                         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
-                    if_condition: h.if_pattern().map(ToOwned::to_owned),
+                    if_condition: h.if_pattern().cloned(),
                 }
             })
             .collect();
@@ -1699,11 +2257,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         .await
     }
 
-    async fn append_meta_user_message(&self, text: &str) -> Result<(), HandleError> {
-        let msg = lingxi_core::types::ConversationMessage::user_meta(
-            lingxi_core::types::MessageId::new(),
-            text.to_string(),
-        );
+    async fn append_meta_user_message(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), HandleError> {
+        let msg = user_message_from_source(lingxi_core::types::MessageId::new(), text, true)?;
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -1714,31 +2272,28 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn append_slash_command_transcript(
         &self,
-        raw: &str,
-        display: &str,
+        raw: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        display: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<(), HandleError> {
-        let raw = raw.trim();
-        if raw.is_empty() {
+        let raw = compaction::prompt::trim_compact_source_text(raw);
+        if raw.string_units("").is_none_or(|units| units.is_empty()) {
             return Ok(());
         }
 
-        let mut messages = vec![lingxi_core::types::ConversationMessage::User {
-            id: lingxi_core::types::MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::Text {
-                text: raw.to_string(),
-            }],
-            is_meta: false,
-            is_compact_summary: false,
-            is_visible_in_transcript_only: false,
-        }];
-        if !display.trim().is_empty() {
-            messages.push(lingxi_core::types::ConversationMessage::Assistant {
-                id: lingxi_core::types::MessageId::new(),
-                content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: display.to_string(),
-                }],
-                stop_reason: None,
-            });
+        let mut messages = vec![user_message_from_source(
+            lingxi_core::types::MessageId::new(),
+            &raw,
+            false,
+        )?];
+        let display = compaction::prompt::trim_compact_source_text(display);
+        if display
+            .string_units("")
+            .is_some_and(|units| !units.is_empty())
+        {
+            messages.push(assistant_message_from_source(
+                lingxi_core::types::MessageId::new(),
+                &display,
+            )?);
         }
 
         let _turn_guard = self.turn_gate.lock().await;
@@ -1762,7 +2317,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn append_fusion_command_message(
         &self,
         session_id: &str,
-        text: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         is_user: bool,
     ) -> Result<(), HandleError> {
         let target =
@@ -1771,18 +2326,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             })?;
         let _turn_guard = self.turn_gate.lock().await;
         let message = if is_user {
-            lingxi_core::types::ConversationMessage::user(
-                lingxi_core::types::MessageId::new(),
-                text.to_string(),
-            )
+            user_message_from_source(lingxi_core::types::MessageId::new(), text, false)?
         } else {
-            lingxi_core::types::ConversationMessage::Assistant {
-                id: lingxi_core::types::MessageId::new(),
-                content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: text.to_string(),
-                }],
-                stop_reason: None,
-            }
+            assistant_message_from_source(lingxi_core::types::MessageId::new(), text)?
         };
         let uuid = self
             .persist_conversation_message_to_session(target, &message, false)
@@ -1802,7 +2348,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn append_meta_user_message_to_session(
         &self,
         session_id: &str,
-        text: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<(), HandleError> {
         let target =
             lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
@@ -1813,10 +2359,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // one side of a session transition.
         let _turn_guard = self.turn_gate.lock().await;
         let current = self.session.lock().await.session_id;
-        let msg = lingxi_core::types::ConversationMessage::user_meta(
-            lingxi_core::types::MessageId::new(),
-            text.to_string(),
-        );
+        let msg = user_message_from_source(lingxi_core::types::MessageId::new(), text, true)?;
         let persisted_uuid = self
             .persist_model_excluded_meta_to_session(target, &msg)
             .await?;
@@ -1840,7 +2383,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn emit_background_system_notice(&self, body: &str) {
+    async fn emit_background_system_notice(
+        &self,
+        body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         self.output.emit_system_notice(body, false).await;
     }
 
@@ -1939,7 +2485,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn run_turn_streaming_with_cancel(
         &self,
-        prompt: &str,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         // Delegate to the inherent method on `ConversationOrchestrator`
@@ -1963,7 +2509,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn run_queued_turn_streaming(
         &self,
-        prompt: &str,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         cancel: tokio_util::sync::CancellationToken,
         in_human_turn: bool,
     ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
@@ -1983,16 +2529,42 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
 
+    async fn run_queued_turn_streaming_with_row_token(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: tokio_util::sync::CancellationToken,
+        in_human_turn: bool,
+        row_token: String,
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
+        self.run_turn_streaming_with_origin_and_row_token(
+            prompt,
+            Vec::new(),
+            cancel,
+            None,
+            in_human_turn,
+            Some(row_token),
+        )
+        .await
+        .map(|outcome| match outcome {
+            crate::conversation::TurnOutcome::EndTurn => lingxi_core::host::TurnOutcome::EndTurn,
+            crate::conversation::TurnOutcome::Cancelled => {
+                lingxi_core::host::TurnOutcome::Cancelled
+            }
+            crate::conversation::TurnOutcome::MaxTurns => lingxi_core::host::TurnOutcome::MaxTurns,
+        })
+        .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
+
     async fn run_turn_streaming_with_images(
         &self,
-        prompt: &str,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         image_paths: &[std::path::PathBuf],
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         // Delegate to the inherent image-aware streaming entry point.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images(
             self,
-            prompt,
+            prompt.clone(),
             image_paths,
             cancel,
         )
@@ -2011,8 +2583,41 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
     }
 
-    async fn run_async_hook_rewake(&self) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
-        match crate::ConversationOrchestrator::run_async_hook_rewake(self).await {
+    async fn run_turn_streaming_with_images_and_row_token(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+        row_token: String,
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
+        match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images_and_row_token(
+            self,
+            prompt.clone(),
+            image_paths,
+            cancel,
+            row_token,
+        )
+        .await
+        {
+            Ok(crate::conversation::TurnOutcome::EndTurn) => {
+                Ok(lingxi_core::host::TurnOutcome::EndTurn)
+            }
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
+                Ok(lingxi_core::host::TurnOutcome::MaxTurns)
+            }
+            Ok(crate::conversation::TurnOutcome::Cancelled) => {
+                Ok(lingxi_core::host::TurnOutcome::Cancelled)
+            }
+            Err(error) => Err(HandleError::ActionFailed(error.to_string())),
+        }
+    }
+
+    async fn run_async_hook_rewake(
+        &self,
+        generation_cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
+        match crate::ConversationOrchestrator::run_async_hook_rewake(self, generation_cancel).await
+        {
             Ok(crate::conversation::TurnOutcome::EndTurn) => {
                 Ok(lingxi_core::host::TurnOutcome::EndTurn)
             }
@@ -2070,16 +2675,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // The system prompt and tool schemas are the bytes the next main-loop
         // request will advertise. Keep MCP definitions separate from ordinary
         // tools so both renderers can expose the same category split.
-        let system_prompt = self.effective_system_prompt().await;
-        let wire_tools = self.build_wire_tools().await;
+        let system_prompt = self.effective_system_prompt_source().await;
+        let wire_tools = self.build_wire_tools().await.0;
         let (mcp_tools, system_tools): (Vec<_>, Vec<_>) =
             wire_tools.into_iter().partition(is_mcp_wire_tool);
 
-        let cwd = self.session_cwd.cwd();
-        let memory_files = self.memory.load(&cwd).await;
+        let memory_files = self.main_instruction_files().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "instruction context usage snapshot failed");
+            Arc::new(Vec::new())
+        });
         let memory_tokens =
             estimate_bytes_as_tokens(crate::prompt::memory_block::format(&memory_files).len());
-        let system_prompt_tokens = estimate_bytes_as_tokens(system_prompt.len());
+        let system_prompt_tokens = estimate_bytes_as_tokens(
+            system_prompt
+                .string_units("")
+                .map_or(0, |units| units.len()),
+        );
         let system_tool_tokens = estimate_json_tokens(&system_tools);
         let mcp_tool_tokens = estimate_json_tokens(&mcp_tools);
         let message_tokens = compaction::grouping::estimate_tokens_for_range(&history);
@@ -2167,25 +2778,42 @@ fn estimate_bytes_as_tokens(bytes: usize) -> u64 {
         / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN
 }
 
-fn estimate_json_tokens(values: &[serde_json::Value]) -> u64 {
+fn estimate_json_tokens(values: &[lingxi_core::host::SourceToolWireDefinition]) -> u64 {
     values
         .iter()
-        .map(|value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len()))
+        .map(|tool| {
+            let boolean = |value| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(if value {
+                    "true"
+                } else {
+                    "false"
+                })
+                .expect("boolean is JSON")
+            };
+            let declaration = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+                (
+                    "name".to_string(),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(tool.name.clone()),
+                ),
+                ("description".to_string(), tool.description.clone()),
+                ("input_schema".to_string(), tool.input_schema.clone()),
+                ("strict".to_string(), boolean(tool.strict)),
+                ("defer_loading".to_string(), boolean(tool.defer_loading)),
+            ])
+            .expect("tool declaration is a JSON object");
+            declaration.to_json_string().map_or(0, |text| text.len())
+        })
         .map(estimate_bytes_as_tokens)
         .fold(0, u64::saturating_add)
 }
 
-fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
-    value
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|name| {
-            name == "MCP"
-                || name == "McpAuth"
-                || name == "ListMcpResources"
-                || name == "ReadMcpResource"
-                || name.starts_with("mcp__")
-        })
+fn is_mcp_wire_tool(tool: &lingxi_core::host::SourceToolWireDefinition) -> bool {
+    let name = tool.name.as_str();
+    name == "MCP"
+        || name == "McpAuth"
+        || name == "ListMcpResources"
+        || name == "ReadMcpResource"
+        || name.starts_with("mcp__")
 }
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
@@ -2258,8 +2886,20 @@ fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, St
                 |ms| format!("sandboxed JS ({ms}ms budget)"),
             ),
         ),
-        Ex::Agent { prompt, .. } => ("agent".to_string(), prompt.clone()),
-        Ex::Prompt { prompt, .. } => ("prompt".to_string(), prompt.clone()),
+        Ex::Agent { prompt, .. } => (
+            "agent".to_string(),
+            prompt
+                .string_units("")
+                .map(|units| String::from_utf16_lossy(&units))
+                .unwrap_or_default(),
+        ),
+        Ex::Prompt { prompt, .. } => (
+            "prompt".to_string(),
+            prompt
+                .string_units("")
+                .map(|units| String::from_utf16_lossy(&units))
+                .unwrap_or_default(),
+        ),
         // claude-code's content field for an `mcp_tool` hook is server, slash,
         // tool — `y2e` in the 2.1.238 binary at offset 296901596
         // (`case"mcp_tool"` → the server/tool pair). Its label there is
@@ -2564,15 +3204,34 @@ mod tests {
             std::env::temp_dir(),
         )
         .with_session_memory(handle.clone());
-        orch.prompt_runtime
-            .sent_nested_memory
-            .lock()
-            .await
-            .insert(std::path::PathBuf::from("/old-session/nested.md"));
+        let attachment = serde_json::json!({
+            "type": "nested_memory", "path": "/old-session/nested.md",
+            "content": {"path":"/old-session/nested.md", "type":"Project",
+                "content":"old session guidance", "contentDiffersFromDisk":false},
+            "displayPath": "nested.md",
+        });
+        let message = crate::ConversationOrchestrator::nested_memory_attachment_projection(
+            lingxi_core::types::MessageId::new(),
+            &attachment,
+        )
+        .unwrap();
+        orch.persist_model_reminder(message, attachment).await;
+        {
+            let mut session = orch.session.lock().await;
+            session.compacted_user_turns = 4;
+            session
+                .virtual_user_messages
+                .insert(lingxi_core::types::MessageId::new());
+        }
 
         lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .expect("clear session");
+        {
+            let session = orch.session.lock().await;
+            assert_eq!(session.compacted_user_turns, 0);
+            assert!(session.virtual_user_messages.is_empty());
+        }
 
         assert_ne!(
             handle.generation.load(Ordering::Acquire),
@@ -2584,12 +3243,8 @@ mod tests {
         assert_eq!(extractor.pending_tool_calls(), 0);
         drop(extractor);
         assert!(
-            orch.prompt_runtime
-                .sent_nested_memory
-                .lock()
-                .await
-                .is_empty(),
-            "clear must not carry nested-memory sent state into the new session"
+            orch.nested_memory_history().await.nested.is_empty(),
+            "clear must not carry old nested-memory history into the new session"
         );
         assert!(
             handle.in_flight.load(Ordering::Acquire),
@@ -2617,15 +3272,15 @@ mod tests {
         let other_scope =
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&other_session_id), None);
         compaction::invoked_skills::register_scoped(
-            "current",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("current"),
             std::path::Path::new("/current"),
-            "current body",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("current body"),
             current_scope,
         );
         compaction::invoked_skills::register_scoped(
-            "other",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("other"),
             std::path::Path::new("/other"),
-            "other body",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("other body"),
             other_scope,
         );
 
@@ -2658,9 +3313,9 @@ mod tests {
             Some("agent:child"),
         );
         compaction::invoked_skills::register_scoped(
-            "child",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("child"),
             std::path::Path::new("/child"),
-            "child body",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("child body"),
             scope,
         );
 
@@ -2918,6 +3573,7 @@ mod tests {
         );
         let transcript_only = lingxi_core::types::MessageId::new();
         let compact_summary = lingxi_core::types::MessageId::new();
+        let virtual_user = lingxi_core::types::MessageId::new();
         let skill_message = lingxi_core::types::MessageId::new();
         tools.deferral().mark_loaded(["StaleTool"]);
         orch.prompt_runtime
@@ -2953,13 +3609,16 @@ mod tests {
                 main_thread_agent_definition: None,
                 transcript_only_message_ids: vec![transcript_only],
                 compact_summary_message_ids: vec![compact_summary],
+                virtual_user_message_ids: vec![virtual_user],
+                compacted_user_turns: 7,
                 model_context_excluded_message_ids: Vec::new(),
                 loaded_tool_names: vec!["DeferredTool".to_string()],
                 post_compact_skill_attachments: vec![(
                     skill_message,
-                    vec!["body with\n\n---\n\na legal separator".to_string()],
+                    vec!["body with\n\n---\n\na legal separator".into()],
                 )],
                 cumulative_dropped_tokens: 4_321,
+                model_reminder_attachments: Vec::new(),
                 compacted: true,
                 turn_counter: 3,
                 turn_id: "turn-after-compact".to_string(),
@@ -2967,6 +3626,7 @@ mod tests {
                 consecutive_rapid_refills: 1,
                 deferred_tools: Vec::new(),
                 prompt_snapshot: None,
+                context_rendering_hint: None,
             },
         )
         .await
@@ -2977,6 +3637,8 @@ mod tests {
         assert_eq!(session.model_profile.as_deref(), Some("anthropic"));
         assert!(session.transcript_only_messages.contains(&transcript_only));
         assert!(session.compact_summary_messages.contains(&compact_summary));
+        assert!(session.virtual_user_messages.contains(&virtual_user));
+        assert_eq!(session.compacted_user_turns, 7);
         drop(session);
         assert_eq!(
             orch.compaction_runtime
@@ -3013,7 +3675,7 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&skill_message)
                 .cloned(),
-            Some(vec!["body with\n\n---\n\na legal separator".to_string()]),
+            Some(vec!["body with\n\n---\n\na legal separator".into()]),
             "hot resume restores structured skill attachment identity"
         );
         assert_eq!(
@@ -3156,6 +3818,7 @@ mod tests {
             std::env::temp_dir(),
         );
         let definition = agent::AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: "reviewer".to_string(),
             when_to_use: "review code".to_string(),
@@ -3165,7 +3828,7 @@ mod tests {
             permission_mode: agent::AgentPermissionMode::Bubble,
             source: agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             base_dir: std::env::temp_dir(),
-            system_prompt: Some("review carefully".to_string()),
+            system_prompt: Some("review carefully".into()),
             mcp_servers: Vec::new(),
             frontmatter_hooks: vec![hooks::HookDefinition {
                 id: lingxi_core::types::HookId::new(),
@@ -3202,6 +3865,7 @@ mod tests {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         };
 
         lingxi_core::host::OrchestratorHandle::resume_session(
@@ -3265,6 +3929,7 @@ mod tests {
     #[cfg(test)]
     fn resume_definition_with_model(model: agent::AgentModel) -> agent::AgentDefinition {
         agent::AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: "modelful".to_string(),
             when_to_use: "does things".to_string(),
@@ -3274,7 +3939,7 @@ mod tests {
             permission_mode: agent::AgentPermissionMode::Bubble,
             source: agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             base_dir: std::env::temp_dir(),
-            system_prompt: Some("do it".to_string()),
+            system_prompt: Some("do it".into()),
             mcp_servers: Vec::new(),
             frontmatter_hooks: Vec::new(),
             icon: None,
@@ -3290,6 +3955,7 @@ mod tests {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         }
     }
 
@@ -3317,9 +3983,36 @@ mod tests {
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
-        );
+        )
+        .with_model_resolution_context_provider(Arc::new(
+            |model: &str, profile: Option<&str>| {
+                // Installing the provider also refreshes the constructor's
+                // initial route, which has no selected provider profile yet.
+                // The resumed frontmatter alias and its resolved route must
+                // both receive the profile already selected for the session.
+                if matches!(model, "opus" | "configured-resume-opus") {
+                    assert_eq!(profile, Some("resume-profile"));
+                }
+                Ok(agent::model_resolution::ModelResolutionContext {
+                    route: agent::model_resolution::ModelRouteFacts {
+                        model: model.to_owned(),
+                        profile: profile.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    family_defaults: agent::model_resolution::FamilyModelDefaults {
+                        opus: Some("configured-resume-opus".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            },
+        ));
         let sentinel = "sentinel-session-model".to_string();
-        orch.session.lock().await.model = sentinel.clone();
+        {
+            let mut session = orch.session.lock().await;
+            session.model = sentinel.clone();
+            session.model_profile = Some("resume-profile".into());
+        }
 
         let def = resume_definition_with_model(agent::AgentModel::Alias("opus".to_string()));
         orch.restore_main_thread_agent_from_resume(
@@ -3328,13 +4021,75 @@ mod tests {
         )
         .await;
 
-        let expected = agent::model_resolution::resolve_user_specified_model("opus");
+        let expected = "configured-resume-opus";
         let got = orch.session.lock().await.model.clone();
         assert_eq!(
             got, expected,
             "resumed agent's frontmatter model replaces the session model"
         );
         assert_ne!(got, sentinel, "the session model actually changed");
+        assert_eq!(
+            orch.session.lock().await.model_profile.as_deref(),
+            Some("resume-profile"),
+            "the resolved model keeps the profile used to select its route"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_keeps_the_resolved_empty_or_missing_profile() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        for selected_profile in [None, Some(String::new())] {
+            let expected_profile = selected_profile.clone();
+            let orch = crate::ConversationOrchestrator::new(
+                crate::OrchestratorConfig {
+                    model: "initial-wire-model".into(),
+                    apply_resumed_agent_model: true,
+                    ..crate::OrchestratorConfig::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+            .with_model_resolution_context_provider(Arc::new(
+                move |model: &str, profile: Option<&str>| {
+                    if model == "opus" {
+                        assert_eq!(profile, Some("old-profile"));
+                    } else if model == "shared-wire-model" {
+                        assert_eq!(profile, selected_profile.as_deref());
+                    }
+                    Ok(agent::model_resolution::ModelResolutionContext {
+                        route: agent::model_resolution::ModelRouteFacts {
+                            model: model.to_owned(),
+                            profile: selected_profile.clone(),
+                            ..Default::default()
+                        },
+                        family_defaults: agent::model_resolution::FamilyModelDefaults {
+                            opus: Some("shared-wire-model".into()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                },
+            ));
+            orch.session.lock().await.model_profile = Some("old-profile".into());
+            let definition = resume_definition_with_model(agent::AgentModel::Alias("opus".into()));
+            orch.restore_main_thread_agent_from_resume(
+                Some("modelful".into()),
+                Some(serde_json::to_value(definition).unwrap()),
+            )
+            .await;
+            let session = orch.session.lock().await;
+            assert_eq!(session.model, "shared-wire-model");
+            assert_eq!(session.model_profile, expected_profile);
+        }
     }
 
     /// gap218 #43 — the gate. When the user DID pass `--model`
@@ -3486,6 +4241,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ultracode_control_and_effort_selection_remain_independent() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_core::host::effort_table::SessionEffort;
+        use lingxi_core::host::OrchestratorHandle;
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                effort: Some("low".into()),
+                ultracode: true,
+                ..Default::default()
+            },
+            std::sync::Arc::new(MockApiClient::new(Vec::new())),
+            std::sync::Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            std::sync::Arc::new(NoOpPermissionGate),
+            std::sync::Arc::new(MockOutputStream::new()),
+            std::sync::Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        assert!(orch.ultracode_enabled().await);
+        assert_eq!(orch.current_effort().await.as_deref(), Some("low"));
+        orch.set_session_effort(SessionEffort::Level(serde_json::json!("high")))
+            .await
+            .unwrap();
+        assert!(orch.ultracode_enabled().await);
+        orch.set_ultracode_enabled(false).await.unwrap();
+        assert_eq!(orch.current_effort().await.as_deref(), Some("high"));
+        orch.set_session_effort(SessionEffort::Default)
+            .await
+            .unwrap();
+        assert!(!orch.ultracode_enabled().await);
+        assert_eq!(orch.current_effort().await, None);
+    }
+
+    #[tokio::test]
     async fn handle_reads_the_real_plan_store_and_updates_live_effort() {
         use crate::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -3531,9 +4323,12 @@ mod tests {
         assert_eq!(plan.path, std::path::PathBuf::from(path));
         assert_eq!(plan.content, "# Plan\n\n- ship it\n");
 
-        lingxi_core::host::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
-            .await
-            .expect("set effort");
+        lingxi_core::host::OrchestratorHandle::set_session_effort(
+            &orch,
+            lingxi_core::host::effort_table::SessionEffort::Level(serde_json::json!("xhigh")),
+        )
+        .await
+        .expect("set effort");
         assert_eq!(
             lingxi_core::host::OrchestratorHandle::current_effort(&orch)
                 .await

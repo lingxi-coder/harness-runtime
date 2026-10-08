@@ -11,7 +11,7 @@
 //! wire, not a product reference, and rewriting it would name a server that does
 //! not exist.
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, trim_source_text, BundledPromptFn, PromptPart};
 
 pub(crate) const EXPLAIN_USAGE_DESCRIPTION: &str = "Explain where this session's tokens went, with one simple chart in plain language. Use when: explain usage, explain my usage, where did my tokens go, token usage breakdown, what used the most tokens.";
 
@@ -21,14 +21,21 @@ const EXPLAIN_USAGE_BODY: &str = include_str!("explain_usage_body.md");
 pub struct ExplainUsagePromptFn;
 
 impl BundledPromptFn for ExplainUsagePromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         // `let s = e?.trim(); if (s) …` — upstream trims BEFORE testing, so a
         // whitespace-only argument appends nothing.
-        let request = args.trim();
-        if request.is_empty() {
-            EXPLAIN_USAGE_BODY.to_string()
+        let request = trim_source_text(args);
+        if request
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
+            EXPLAIN_USAGE_BODY.into()
         } else {
-            format!("{EXPLAIN_USAGE_BODY}\n\n## User Request\n\n{request}")
+            let prefix = format!("{EXPLAIN_USAGE_BODY}\n\n## User Request\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(&request)])
         }
     }
 }
@@ -36,6 +43,7 @@ impl BundledPromptFn for ExplainUsagePromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn the_body_is_branded_but_keeps_mcp_server_ids() {
@@ -60,13 +68,19 @@ mod tests {
 
     #[test]
     fn a_whitespace_only_request_appends_nothing() {
-        assert_eq!(ExplainUsagePromptFn.build("   \n"), EXPLAIN_USAGE_BODY);
-        assert_eq!(ExplainUsagePromptFn.build(""), EXPLAIN_USAGE_BODY);
+        assert_eq!(
+            ExplainUsagePromptFn.build(&"   \n".into()).string_at(""),
+            Some(EXPLAIN_USAGE_BODY)
+        );
+        assert_eq!(
+            ExplainUsagePromptFn.build(&"".into()).string_at(""),
+            Some(EXPLAIN_USAGE_BODY)
+        );
     }
 
     #[test]
     fn a_request_is_appended_trimmed() {
-        let out = ExplainUsagePromptFn.build("  where did it go?  ");
+        let out = ExplainUsagePromptFn.build(&"  where did it go?  ".into());
         assert!(out.ends_with("\n\n## User Request\n\nwhere did it go?"));
     }
 }

@@ -1,9 +1,9 @@
 use super::*;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use lingxi_core::types::MessageId;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -69,8 +69,11 @@ impl Tool for DeferTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -125,8 +128,12 @@ async fn orch(reg: ToolRegistry, assistant_turns: usize) -> ConversationOrchestr
             s.history
                 .push(lingxi_core::types::ConversationMessage::Assistant {
                     id: MessageId::new(),
-                    content: vec![lingxi_core::types::ContentBlock::Text { text: "ok".into() }],
+                    content: vec![lingxi_core::types::ContentBlock::Text {
+                        text: "ok".into(),
+                        citations: None,
+                    }],
                     stop_reason: None,
+                    resumable: None,
                 });
         }
     }
@@ -158,10 +165,11 @@ async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
         .with_coordinator_mode(mode.clone())
         .with_coordinator_simple_mode_for_test(false);
     assert!(orch.tools.find_by_name("ToolSearch").is_some());
-    assert!(orch
-        .tool_search_usage_reminder_message(false)
-        .await
-        .is_none());
+    assert!(
+        orch.tool_search_usage_reminder_message(false)
+            .await
+            .is_none()
+    );
     mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let msg = orch.tool_search_usage_reminder_message(false).await;
     std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
@@ -172,10 +180,11 @@ async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
         "sorted, no remainder; got: {text}"
     );
     // The mark was recorded ⇒ the next call is inside the interval.
-    assert!(orch
-        .tool_search_usage_reminder_message(false)
-        .await
-        .is_none());
+    assert!(
+        orch.tool_search_usage_reminder_message(false)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

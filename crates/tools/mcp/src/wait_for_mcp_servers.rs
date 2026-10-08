@@ -20,10 +20,10 @@
 //! not in the list" leg). See the `is_enabled` doc below.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as UJP;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use telemetry::pii::Verified;
@@ -34,7 +34,8 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -68,41 +69,35 @@ const DESCRIPTION: &str = concat!(
 
 /// Oracle `k8v` (`cc-238.js @229641990`):
 /// `be({servers:dt(H()).optional().describe("Server names to wait for (default: all pending)")})`.
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "servers": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Server names to wait for (default: all pending)"
-            }
-        }
-    })
+static INPUT_SCHEMA: Lazy<UJP> = Lazy::new(|| {
+    UJP::parse(r#"{"type":"object","properties":{"servers":{"type":"array","items":{"type":"string"},"description":"Server names to wait for (default: all pending)"}}}"#)
+        .expect("generated wait-tool input schema is valid JSON")
 });
 
 /// Oracle `A8v` (`cc-238.js @229642095`). `cached` and `unconfigured` remain
 /// optional in the schema even though the call result includes both arrays.
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "ready":        { "type": "boolean" },
-            "connected":    { "type": "array", "items": { "type": "string" } },
-            "cached":       { "type": "array", "items": { "type": "string" } },
-            "failed":       { "type": "array", "items": { "type": "string" } },
-            "stillPending": { "type": "array", "items": { "type": "string" } },
-            "needsAuth":    { "type": "array", "items": { "type": "string" } },
-            "disabled":     { "type": "array", "items": { "type": "string" } },
-            "unconfigured": { "type": "array", "items": { "type": "string" } },
-            "unknown":      { "type": "array", "items": { "type": "string" } }
-        },
-        "required": [
-            "ready", "connected", "failed", "stillPending",
-            "needsAuth", "disabled", "unknown"
-        ]
-    })
+static OUTPUT_SCHEMA: Lazy<UJP> = Lazy::new(|| {
+    UJP::parse(r#"{"type":"object","properties":{"ready":{"type":"boolean"},"connected":{"type":"array","items":{"type":"string"}},"cached":{"type":"array","items":{"type":"string"}},"failed":{"type":"array","items":{"type":"string"}},"stillPending":{"type":"array","items":{"type":"string"}},"needsAuth":{"type":"array","items":{"type":"string"}},"disabled":{"type":"array","items":{"type":"string"}},"unconfigured":{"type":"array","items":{"type":"string"}},"unknown":{"type":"array","items":{"type":"string"}}},"required":["ready","connected","failed","stillPending","needsAuth","disabled","unknown"]}"#)
+        .expect("generated wait-tool output schema is valid JSON")
 });
+
+fn source_bool(value: bool) -> UJP {
+    UJP::parse(if value { "true" } else { "false" }).expect("boolean literal is valid JSON")
+}
+
+fn source_string_array(values: &[String]) -> UJP {
+    UJP::array(
+        values
+            .iter()
+            .map(|value| UJP::from(value.as_str()))
+            .collect(),
+    )
+    .expect("wait result names form a JSON array")
+}
+
+fn render_source_for_model(buckets: &Buckets, ready: bool) -> UJP {
+    render_for_model(buckets, ready).into()
+}
 
 /// `WaitForMcpServers` tool.
 pub struct WaitForMcpServersTool {
@@ -201,7 +196,8 @@ async fn snapshot_wait_states(registry: &mcp::McpRegistry) -> Vec<(String, WaitS
                 mcp::McpConnectionState::Cached { .. } => WaitState::Cached,
                 mcp::McpConnectionState::Connecting { .. }
                 | mcp::McpConnectionState::Reconnecting { .. } => WaitState::Pending,
-                mcp::McpConnectionState::AwaitingOAuth { .. } => WaitState::NeedsAuth,
+                mcp::McpConnectionState::AwaitingOAuth { .. }
+                | mcp::McpConnectionState::NeedsAuth { .. } => WaitState::NeedsAuth,
                 mcp::McpConnectionState::Failed { config, .. }
                 | mcp::McpConnectionState::Disconnected { config, .. }
                 | mcp::McpConnectionState::Stopped { config } => {
@@ -333,12 +329,20 @@ impl Tool for WaitForMcpServersTool {
         Some("MCP Wait For Servers")
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &UJP {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn output_schema(&self) -> Option<&UJP> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     /// Oracle `maxResultSizeChars:1e4`.
@@ -374,16 +378,16 @@ impl Tool for WaitForMcpServersTool {
     }
 
     /// Oracle `isReadOnly(){return!0}`.
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &UJP) -> bool {
         true
     }
 
     /// Oracle `isConcurrencySafe(){return!1}`.
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &UJP) -> bool {
         false
     }
 
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &UJP, _: &ToolUseContext) -> PermissionResult {
         // Oracle: `async checkPermissions(e){return{behavior:"allow",updatedInput:e}}`.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -395,17 +399,17 @@ impl Tool for WaitForMcpServersTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &UJP, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> UJP {
         DESCRIPTION.into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: UJP,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -419,11 +423,14 @@ impl Tool for WaitForMcpServersTool {
         // explicit list when non-empty, otherwise every currently-pending
         // server.
         let explicit: Vec<String> = input
-            .get("servers")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
+            .array_len("/servers")
+            .map(|length| {
+                (0..length)
+                    .filter_map(|index| {
+                        let index = u32::try_from(index).ok()?;
+                        let units = input.string_units(&format!("/servers/{index}"))?;
+                        String::from_utf16(&units).ok()
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -497,25 +504,33 @@ impl Tool for WaitForMcpServersTool {
 
         emit_pending_call(&self.ctx.bus, &pending_payload).await;
 
-        let model_content = render_for_model(&buckets, ready);
+        let model_content = render_source_for_model(&buckets, ready);
         Ok(ToolCallResult {
-            data: json!({
-                "ready": ready,
-                "connected": buckets.connected,
-                "cached": buckets.cached,
-                "failed": buckets.failed,
-                "stillPending": buckets.still_pending,
-                "needsAuth": buckets.needs_auth,
-                "disabled": buckets.disabled,
-                "unconfigured": buckets.unconfigured,
-                "unknown": buckets.unknown,
-            }),
+            data: UJP::object(vec![
+                ("ready".into(), source_bool(ready)),
+                ("connected".into(), source_string_array(&buckets.connected)),
+                ("cached".into(), source_string_array(&buckets.cached)),
+                ("failed".into(), source_string_array(&buckets.failed)),
+                (
+                    "stillPending".into(),
+                    source_string_array(&buckets.still_pending),
+                ),
+                ("needsAuth".into(), source_string_array(&buckets.needs_auth)),
+                ("disabled".into(), source_string_array(&buckets.disabled)),
+                (
+                    "unconfigured".into(),
+                    source_string_array(&buckets.unconfigured),
+                ),
+                ("unknown".into(), source_string_array(&buckets.unknown)),
+            ])
+            .expect("wait result object fields are unique"),
             model_content: Some(model_content),
             new_messages: vec![],
             context_modifier: None,
             // Oracle: `is_error:!e.ready`.
             is_error: !ready,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

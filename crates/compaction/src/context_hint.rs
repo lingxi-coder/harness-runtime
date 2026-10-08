@@ -121,7 +121,10 @@ impl HttpErrorFacts {
             error_type: None,
             message: err.to_string(),
             request_id: None,
-            is_overloaded: matches!(err, llm_runtime::LlmError::Overloaded { .. }),
+            is_overloaded: matches!(
+                err.classification_source(),
+                llm_runtime::LlmError::Overloaded { .. }
+            ),
         }
     }
 }
@@ -559,23 +562,31 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
                     name: "Read".into(),
-                    input: serde_json::json!({}),
+                    input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({}),
+                    )
+                    .expect("empty object is valid JSON"),
                     provider_id: None,
                 }],
                 stop_reason: None,
+                resumable: None,
             });
             out.push(ConversationMessage::User {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id,
-                    content: "x".repeat(result_len),
-                    is_error: false,
+                    content: "x".repeat(result_len).into(),
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             });
         }
         out

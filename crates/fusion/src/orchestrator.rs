@@ -3863,10 +3863,10 @@ mod outer_err_arm_realized_tokens_tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
-            Ok(Value::Null)
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -3914,8 +3914,12 @@ mod outer_err_arm_realized_tokens_tests {
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: serde_json::to_value(&report).unwrap(),
+                content: Utf16JsonProjection::parse(
+                    &serde_json::to_string(&report).expect("report serializes as JSON"),
+                )
+                .expect("serialized report is valid JSON"),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,
@@ -4154,8 +4158,12 @@ were genuinely dispatched before cancellation, not None or a subset — got \
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
-                content: serde_json::to_value(&report).unwrap(),
+                content: Utf16JsonProjection::parse(
+                    &serde_json::to_string(&report).expect("report serializes as JSON"),
+                )
+                .expect("serialized report is valid JSON"),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,

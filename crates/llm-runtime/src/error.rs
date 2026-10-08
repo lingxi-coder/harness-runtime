@@ -5,6 +5,13 @@ use std::time::Duration;
 /// Public provider-neutral error type for LLM client operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LlmError {
+    /// Exact provider text retained independently of the host recovery classification.
+    #[error("{source}")]
+    ProviderErrorText {
+        source: Box<LlmError>,
+        text: lingxi_llm_client::protocol::ProviderErrorText,
+        native_anthropic_facts: Option<lingxi_llm_client::protocol::NativeAnthropicErrorFacts>,
+    },
     /// Authentication failed or credentials are missing/invalid.
     ///
     /// `message` preserves the PROVIDER's own text (with the SDK status prefix,
@@ -95,6 +102,12 @@ pub enum LlmError {
     /// Provider returned a transient/internal failure.
     #[error("provider internal error")]
     ProviderInternal,
+    /// The provider reported `timeout_error`; not a local transport timeout.
+    #[error("provider timeout: {message}")]
+    ProviderTimeout {
+        message: String,
+        status: Option<u16>,
+    },
     /// Provider reported overload (Anthropic 529 / `overloaded_error`).
     ///
     /// `repeated` is `true` when the caller has seen `consecutive_overloaded >=
@@ -113,6 +126,13 @@ pub enum LlmError {
     Transport {
         /// Transport-layer failure message.
         message: String,
+    },
+    /// The host rejected this prepared request at the logical SDK dispatch boundary.
+    /// `prior_dispatch` is true when an earlier physical attempt in this drive was admitted.
+    #[error("model request was not admitted for dispatch")]
+    RequestDispatchRejected {
+        /// Whether this logical drive admitted an earlier physical attempt.
+        prior_dispatch: bool,
     },
     /// The request did not complete within the timeout.
     ///
@@ -261,6 +281,42 @@ impl MediaDelegationAccounting {
 }
 
 impl LlmError {
+    /// Classification used for retries and policy; retain `self` when propagating the error.
+    #[must_use]
+    pub fn classification_source(&self) -> &Self {
+        match self {
+            Self::ProviderErrorText { source, .. } => source.classification_source(),
+            other => other,
+        }
+    }
+
+    pub fn classification_source_mut(&mut self) -> &mut Self {
+        match self {
+            Self::ProviderErrorText { source, .. } => source.classification_source_mut(),
+            other => other,
+        }
+    }
+
+    #[must_use]
+    pub fn provider_error_text(&self) -> Option<&lingxi_llm_client::protocol::ProviderErrorText> {
+        match self {
+            Self::ProviderErrorText { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn native_anthropic_error_facts(
+        &self,
+    ) -> Option<&lingxi_llm_client::protocol::NativeAnthropicErrorFacts> {
+        match self {
+            Self::ProviderErrorText {
+                native_anthropic_facts,
+                ..
+            } => native_anthropic_facts.as_ref(),
+            _ => None,
+        }
+    }
     /// Build a terminal [`LlmError::TlsCert`] for the given TLS error `code`,
     /// rendering the `YLe` fix hint into `message`.
     ///
@@ -278,7 +334,7 @@ impl LlmError {
     /// `None`. Mirrors reading `JF(e).code` on an `isSSLError` error.
     #[must_use]
     pub fn ssl_code(&self) -> Option<&str> {
-        match self {
+        match self.classification_source() {
             LlmError::TlsCert { code, .. } => Some(code.as_str()),
             _ => None,
         }
@@ -298,6 +354,9 @@ impl LlmError {
     /// numeric status.
     #[must_use]
     pub fn http_status(&self) -> Option<u16> {
+        if let Self::ProviderTimeout { status, .. } = self.classification_source() {
+            return *status;
+        }
         self.provider_message().and_then(api_error_status)
     }
 
@@ -310,7 +369,9 @@ impl LlmError {
     #[must_use]
     pub fn provider_message(&self) -> Option<&str> {
         match self {
+            Self::ProviderErrorText { text, .. } => Some(text.display()),
             LlmError::Authentication { message }
+            | LlmError::ProviderTimeout { message, .. }
             | LlmError::PermissionDenied { message }
             | LlmError::InvalidRequest { message }
             | LlmError::Transport { message }
@@ -358,7 +419,7 @@ pub fn error_display_text(error: &LlmError) -> String {
     if crate::model::stream_watchdog::is_stream_no_response(error) {
         return "No response from API".to_string();
     }
-    if let LlmError::TlsCert { code, .. } = error {
+    if let LlmError::TlsCert { code, .. } = error.classification_source() {
         return match code.as_str() {
             "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
             | "UNABLE_TO_GET_ISSUER_CERT"
@@ -394,19 +455,86 @@ pub fn error_display_text(error: &LlmError) -> String {
     if crate::model::stream_watchdog::is_stream_suspended(error) {
         return "Connection lost while your computer was asleep".to_string();
     }
-    if matches!(error, LlmError::TransportTimeout { .. }) {
+    if matches!(
+        error.classification_source(),
+        LlmError::TransportTimeout { .. }
+    ) {
         return "Request timed out. Check your internet connection and proxy settings".to_string();
     }
     if message == "Connection error." {
         return "Unable to connect to API. Check your internet connection".to_string();
     }
     if message.is_empty() {
-        if matches!(error, LlmError::Authentication { .. }) {
+        if matches!(
+            error.classification_source(),
+            LlmError::Authentication { .. }
+        ) {
             return "No API key is configured for the selected provider".to_string();
         }
         return "API error (status unknown)".to_string();
     }
     api_error_detail(message)
+}
+
+/// User-facing error text with exact JavaScript code units whenever it uses provider text.
+#[must_use]
+pub fn error_display_source(
+    error: &LlmError,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let display = error_display_text(error);
+    let Some(text) = error.provider_error_text() else {
+        return display.into();
+    };
+    if display != api_error_detail(text.display()) {
+        return display.into();
+    }
+    let original = || {
+        Utf16JsonProjection::root_string(
+            text.display().to_owned(),
+            text.utf16_code_units().to_vec(),
+        )
+        .expect("provider text validates its display")
+    };
+    if !text.display().contains("{\"") {
+        return original();
+    }
+    let units = text.utf16_code_units();
+    let status_prefix =
+        units.len() > 4 && units[..3].iter().all(|unit| (48..=57).contains(unit)) && units[3] == 32;
+    let body = if status_prefix { &units[4..] } else { units };
+    let whitespace = |unit: &u16| char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace);
+    let trim = |units: Vec<u16>| {
+        let start = units
+            .iter()
+            .position(|unit| !whitespace(unit))
+            .unwrap_or(units.len());
+        let end = units
+            .iter()
+            .rposition(|unit| !whitespace(unit))
+            .map_or(start, |index| index + 1);
+        units[start..end].to_vec()
+    };
+    let Ok(parsed) = Utf16JsonProjection::parse_utf16_json(&trim(body.to_vec())) else {
+        return original();
+    };
+    let Some(extracted) = parsed
+        .string_units("/error/message")
+        .or_else(|| parsed.string_units("/message"))
+    else {
+        return original();
+    };
+    let mut extracted = trim(extracted);
+    if extracted.is_empty() {
+        return original();
+    }
+    if status_prefix {
+        let mut prefixed = units[..4].to_vec();
+        prefixed.append(&mut extracted);
+        extracted = prefixed;
+    }
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&extracted), extracted)
+        .expect("display derives from the retained units")
 }
 
 /// Oracle `FOu(e)` + `sir`'s `includes('{"')` arm.
@@ -474,7 +602,95 @@ pub fn api_error_status(message: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod api_error_status_tests {
-    use super::error_display_text;
+    use super::{error_display_source, error_display_text};
+
+    fn with_provider_units(source: LlmError, units: Vec<u16>) -> LlmError {
+        LlmError::ProviderErrorText {
+            source: Box::new(source),
+            text: lingxi_llm_client::protocol::ProviderErrorText::new(
+                String::from_utf16_lossy(&units),
+                units,
+            )
+            .unwrap(),
+            native_anthropic_facts: None,
+        }
+    }
+
+    #[test]
+    fn provider_error_source_survives_classification_and_display() {
+        let mut units = "529 provider ".encode_utf16().collect::<Vec<_>>();
+        units.extend([0xd800, 0xd83d, 0xde00]);
+        let mut error =
+            with_provider_units(LlmError::Overloaded { repeated: false }, units.clone());
+        assert!(matches!(
+            error.classification_source(),
+            LlmError::Overloaded { repeated: false }
+        ));
+        assert_eq!(error.http_status(), Some(529));
+        if let LlmError::Overloaded { repeated } = error.classification_source_mut() {
+            *repeated = true;
+        }
+        assert!(matches!(
+            error.classification_source(),
+            LlmError::Overloaded { repeated: true }
+        ));
+        assert_eq!(error_display_source(&error).string_units(""), Some(units));
+        assert_eq!(
+            error_display_source(&error).to_json_string().unwrap(),
+            r#""529 provider \ud800😀""#
+        );
+    }
+
+    #[test]
+    fn provider_json_message_extraction_preserves_isolated_units() {
+        for message in [
+            r#"400 {"error":{"message":" \ud800 end "}}"#,
+            r#"400 {"message":" \ud800 end "}"#,
+        ] {
+            let error = with_provider_units(
+                LlmError::InvalidRequest {
+                    message: message.into(),
+                },
+                message.encode_utf16().collect(),
+            );
+            assert_eq!(
+                error_display_source(&error).to_json_string().unwrap(),
+                r#""400 \ud800 end""#
+            );
+        }
+    }
+
+    #[test]
+    fn provider_source_keeps_fixed_transport_copy_and_absent_message_fallbacks() {
+        let timeout = with_provider_units(
+            LlmError::TransportTimeout {
+                message: "timeout".into(),
+            },
+            vec![0xd800],
+        );
+        assert_eq!(
+            error_display_source(&timeout).string_units(""),
+            Some(
+                "Request timed out. Check your internet connection and proxy settings"
+                    .encode_utf16()
+                    .collect()
+            )
+        );
+        for message in [
+            r#"400 {"error":{}}"#,
+            r#"400 {"error":{"message":null}}"#,
+            r#"400 {"error":{"message":""}}"#,
+        ] {
+            let units = message.encode_utf16().collect::<Vec<_>>();
+            let error = with_provider_units(
+                LlmError::InvalidRequest {
+                    message: message.into(),
+                },
+                units.clone(),
+            );
+            assert_eq!(error_display_source(&error).string_units(""), Some(units));
+        }
+    }
 
     /// `sir` is NOT `Display`: it is what claude-code shows, and the retry
     /// banner consumes it. Every string byte-verified against 2.1.220 with a
@@ -574,7 +790,7 @@ mod api_error_status_tests {
         );
     }
 
-    use super::{api_error_status, LlmError};
+    use super::{LlmError, api_error_status};
 
     #[test]
     fn parses_the_shape_make_message_emits() {

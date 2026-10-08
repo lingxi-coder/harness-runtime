@@ -32,7 +32,11 @@
 
 use crate::model::FrontmatterShell;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use std::fmt;
 use std::sync::Arc;
+
+type UJP = Utf16JsonProjection;
 
 /// Output of a single embedded shell command.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,12 +53,31 @@ pub struct ShellOut {
 ///
 /// All variants surface as TS `MalformedCommandError` (the only error the
 /// caller catches); [`Self::Malformed`] carries the formatted message.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellExpansionError {
     /// Permission denied, execution failure, or interruption — the message is
     /// pre-formatted to match the TS `MalformedCommandError` text.
-    #[error("{0}")]
-    Malformed(String),
+    Malformed(UJP),
+}
+
+impl fmt::Display for ShellExpansionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed(message) => f.write_str(message.string_at("").unwrap_or_default()),
+        }
+    }
+}
+
+impl std::error::Error for ShellExpansionError {}
+
+impl ShellExpansionError {
+    /// Exact source diagnostic; display formatting is reserved for UI/log sinks.
+    #[must_use]
+    pub fn source_message(&self) -> UJP {
+        match self {
+            Self::Malformed(message) => message.clone(),
+        }
+    }
 }
 
 /// Result of a per-command permission check. Mirrors the relevant slice of TS
@@ -67,7 +90,7 @@ pub enum ShellPermissionDecision {
     /// The command is denied; the optional message is folded into the error.
     Deny {
         /// Human-readable reason (TS `permissionResult.message`).
-        message: Option<String>,
+        message: Option<UJP>,
     },
 }
 
@@ -76,7 +99,7 @@ pub enum ShellPermissionDecision {
 /// { command }, …)` call.
 pub trait ShellPermissionGate: Send + Sync {
     /// Decide whether `command` (routed through `shell`) may execute.
-    fn check(&self, command: &str, shell: Option<FrontmatterShell>) -> ShellPermissionDecision;
+    fn check(&self, command: &UJP, shell: Option<FrontmatterShell>) -> ShellPermissionDecision;
 }
 
 /// Runs a single shell command. Injected so the crate stays leaf (no `BashTool`
@@ -93,7 +116,7 @@ pub trait ShellRunner: Send + Sync {
     /// status when known.
     async fn run(
         &self,
-        command: &str,
+        command: &UJP,
         shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError>;
 }
@@ -150,24 +173,24 @@ pub trait ShellExpansionProvider: Send + Sync {
 /// and the trimmed command body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExtractedCommand {
-    /// Byte offset of the whole match (`match[0]`) within `text`.
+    /// UTF-16 code-unit offset of the whole match (`match[0]`) within `text`.
     start: usize,
-    /// Exclusive end byte offset of the whole match.
+    /// Exclusive end code-unit offset of the whole match.
     end: usize,
     /// The matched substring (`match[0]`), used as the literal replacement key.
-    full: String,
-    /// The trimmed command (`match[1]?.trim()`); empty when nothing remains.
-    command: String,
+    full: Vec<u16>,
+    /// The trimmed exact source command (`match[1]?.trim()`).
+    command: UJP,
 }
 
 /// Format combined stdout/stderr exactly like TS `formatBashOutput`.
 fn format_bash_output(stdout: &str, stderr: &str, inline: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let out_trimmed = stdout.trim();
+    let out_trimmed = stdout.trim_matches(lingxi_core::host::effort::javascript_whitespace);
     if !out_trimmed.is_empty() {
         parts.push(out_trimmed.to_string());
     }
-    let err_trimmed = stderr.trim();
+    let err_trimmed = stderr.trim_matches(lingxi_core::host::effort::javascript_whitespace);
     if !err_trimmed.is_empty() {
         if inline {
             parts.push(format!("[stderr: {err_trimmed}]"));
@@ -180,191 +203,251 @@ fn format_bash_output(stdout: &str, stderr: &str, inline: bool) -> String {
 
 /// Format a [`ShellRunError`] into the TS `MalformedCommandError` message for a
 /// given match pattern (port of TS `formatBashError`, non-inline path).
-fn format_bash_error(err: &ShellRunError, pattern: &str) -> ShellExpansionError {
+fn format_bash_error(err: &ShellRunError, pattern: &[u16]) -> ShellExpansionError {
     if let Some(message) = &err.generic_message {
-        // Non-ShellError path: TS `[Error]\n{message}`.
-        return ShellExpansionError::Malformed(format!("[Error]\n{message}"));
+        return malformed_text(&format!("[Error]\n{message}"));
     }
     if err.interrupted {
-        return ShellExpansionError::Malformed(format!(
-            "Shell command interrupted for pattern \"{pattern}\": [Command interrupted]"
-        ));
+        return malformed_with_pattern(
+            "Shell command interrupted for pattern \"",
+            pattern,
+            "\": [Command interrupted]",
+        );
     }
     let output = format_bash_output(&err.stdout, &err.stderr, false);
-    ShellExpansionError::Malformed(format!(
-        "Shell command failed for pattern \"{pattern}\": {output}"
-    ))
+    malformed_with_pattern_and_text(
+        "Shell command failed for pattern \"",
+        pattern,
+        "\": ",
+        &output,
+    )
 }
 
-/// Parse a prompt and execute any embedded shell commands, replacing each match
-/// with the command's output. Faithful port of TS
-/// `executeShellCommandsInPrompt`.
-///
-/// `shell` comes from `.md` frontmatter (the author's choice), never from
-/// settings; `None` means bash. Matches are processed in source order: all block
-/// matches first, then inline matches (mirroring TS
-/// `[...blockMatches, ...inlineMatches]`).
-///
-/// Returns the rewritten text, or [`ShellExpansionError::Malformed`] if any
-/// command is denied or fails.
+/// Execute embedded shell commands while keeping the prompt and extracted
+/// command text in exact UTF-16 units. Only the injected process runner crosses
+/// the host OS command-string boundary.
 pub async fn execute_shell_commands_in_prompt(
-    text: &str,
+    text: &UJP,
     ctx: &ShellExpansionCtx,
-    slash_command_name: &str,
+    slash_command_name: &UJP,
     shell: Option<FrontmatterShell>,
-) -> Result<String, ShellExpansionError> {
-    let mut result = text.to_string();
+) -> Result<UJP, ShellExpansionError> {
+    let source_units = text
+        .string_units("")
+        .expect("shell expansion input must be a root-string projection");
+    let mut result = source_units.to_vec();
 
     // Same ordering as TS: block matches, then (gated) inline matches.
-    let mut matches = extract_block_commands(text);
-    if text.contains("!`") {
-        matches.extend(extract_inline_commands(text));
+    let mut matches = extract_block_commands(&source_units);
+    if source_units
+        .windows(2)
+        .any(|window| window == [b'!' as u16, b'`' as u16])
+    {
+        matches.extend(extract_inline_commands(&source_units));
     }
 
-    for m in &matches {
-        if m.command.is_empty() {
+    for command in &matches {
+        if command
+            .command
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
             continue;
         }
-        // Permission check before executing.
-        match ctx.permission_gate.check(&m.command, shell) {
+        match ctx.permission_gate.check(&command.command, shell) {
             ShellPermissionDecision::Allow => {}
             ShellPermissionDecision::Deny { message } => {
                 let _ = slash_command_name; // mirrors TS debug log; no-op here.
-                let reason = message.unwrap_or_else(|| "Permission denied".to_string());
-                return Err(ShellExpansionError::Malformed(format!(
-                    "Shell command permission check failed for pattern \"{}\": {}",
-                    m.full, reason
-                )));
+                let reason = message.unwrap_or_else(|| UJP::from("Permission denied"));
+                return Err(malformed_with_pattern_and_source(
+                    "Shell command permission check failed for pattern \"",
+                    &command.full,
+                    "\": ",
+                    &reason,
+                ));
             }
         }
 
-        let output = match ctx.runner.run(&m.command, shell).await {
-            Ok(data) => format_bash_output(&data.stdout, &data.stderr, false),
-            Err(e) => return Err(format_bash_error(&e, &m.full)),
+        let output = match ctx.runner.run(&command.command, shell).await {
+            Ok(data) => UJP::from(format_bash_output(&data.stdout, &data.stderr, false)),
+            Err(error) => return Err(format_bash_error(&error, &command.full)),
         };
-
-        // Manual splice replacement of the FIRST occurrence of `m.full`, so
-        // `$`-laden output is inserted verbatim (TS function-replacer note).
-        result = replace_first(&result, &m.full, &output);
+        result = replace_first_units(
+            &result,
+            &command.full,
+            &output.string_units("").unwrap_or_default(),
+        );
     }
 
-    Ok(result)
+    Ok(source_from_units(result))
 }
 
-/// Replace the first occurrence of `needle` in `haystack` with `replacement`,
-/// inserting `replacement` literally (no `$`-interpretation).
-fn replace_first(haystack: &str, needle: &str, replacement: &str) -> String {
-    match haystack.find(needle) {
-        Some(idx) => {
-            let mut out = String::with_capacity(haystack.len() + replacement.len());
-            out.push_str(&haystack[..idx]);
-            out.push_str(replacement);
-            out.push_str(&haystack[idx + needle.len()..]);
-            out
-        }
-        None => haystack.to_string(),
+fn replace_first_units(haystack: &[u16], needle: &[u16], replacement: &[u16]) -> Vec<u16> {
+    if needle.is_empty() {
+        return haystack.to_vec();
     }
+    let Some(index) = haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+    else {
+        return haystack.to_vec();
+    };
+    let mut output = Vec::with_capacity(haystack.len() - needle.len() + replacement.len());
+    output.extend_from_slice(&haystack[..index]);
+    output.extend_from_slice(replacement);
+    output.extend_from_slice(&haystack[index + needle.len()..]);
+    output
 }
 
-/// Extract ` ```! … ``` ` block commands. Mirrors `/```!\s*\n?([\s\S]*?)\n?```/g`.
-fn extract_block_commands(text: &str) -> Vec<ExtractedCommand> {
-    const OPEN: &str = "```!";
-    const FENCE: &str = "```";
-    let bytes = text.as_bytes();
+fn projection_from_units(units: Vec<u16>) -> UJP {
+    let display = String::from_utf16_lossy(&units);
+    UJP::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
+}
+
+fn source_from_units(units: Vec<u16>) -> UJP {
+    projection_from_units(units)
+}
+
+fn malformed_text(text: &str) -> ShellExpansionError {
+    ShellExpansionError::Malformed(UJP::from(text))
+}
+
+fn malformed_with_pattern(prefix: &str, pattern: &[u16], suffix: &str) -> ShellExpansionError {
+    let units = [
+        prefix.encode_utf16().collect::<Vec<_>>(),
+        pattern.to_vec(),
+        suffix.encode_utf16().collect::<Vec<_>>(),
+    ]
+    .concat();
+    ShellExpansionError::Malformed(source_from_units(units))
+}
+
+fn malformed_with_pattern_and_text(
+    prefix: &str,
+    pattern: &[u16],
+    middle: &str,
+    suffix: &str,
+) -> ShellExpansionError {
+    let units = [
+        prefix.encode_utf16().collect::<Vec<_>>(),
+        pattern.to_vec(),
+        middle.encode_utf16().collect::<Vec<_>>(),
+        suffix.encode_utf16().collect::<Vec<_>>(),
+    ]
+    .concat();
+    ShellExpansionError::Malformed(source_from_units(units))
+}
+
+fn malformed_with_pattern_and_source(
+    prefix: &str,
+    pattern: &[u16],
+    middle: &str,
+    suffix: &UJP,
+) -> ShellExpansionError {
+    let units = [
+        prefix.encode_utf16().collect::<Vec<_>>(),
+        pattern.to_vec(),
+        middle.encode_utf16().collect::<Vec<_>>(),
+        suffix.string_units("").unwrap_or_default().to_vec(),
+    ]
+    .concat();
+    ShellExpansionError::Malformed(source_from_units(units))
+}
+
+/// Extract ` ```! … ``` ` block commands using Native regex whitespace and
+/// UTF-16 code-unit spans.
+fn extract_block_commands(text: &[u16]) -> Vec<ExtractedCommand> {
+    const OPEN: &[u16] = &[b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16];
+    const FENCE: &[u16] = &[b'`' as u16, b'`' as u16, b'`' as u16];
     let mut out = Vec::new();
     let mut search_from = 0;
 
-    while let Some(rel) = text[search_from..].find(OPEN) {
-        let open_start = search_from + rel;
-        // `\s*` after `!`: consume whitespace (greedy). The optional `\n?` that
-        // follows is subsumed — any leading newline is whitespace too. The
-        // capture group `([\s\S]*?)` then starts after that whitespace run.
+    while let Some(open_start) = find_units(text, OPEN, search_from) {
         let mut content_start = open_start + OPEN.len();
-        while content_start < bytes.len() && is_ascii_ws(bytes[content_start]) {
+        while content_start < text.len() && is_js_whitespace_unit(text[content_start]) {
             content_start += 1;
         }
-
-        // Lazily find the closing ``` fence.
-        let Some(close_rel) = text[content_start..].find(FENCE) else {
-            // No closing fence: nothing more can match.
+        let Some(close_at) = find_units(text, FENCE, content_start) else {
             break;
         };
-        let close_at = content_start + close_rel;
 
-        // The regex `\n?` before the fence trims one trailing newline from the
-        // capture. `[\s\S]*?` is lazy, so the capture stops just before any
-        // optional `\n` immediately preceding the fence.
         let mut capture_end = close_at;
-        if capture_end > content_start && bytes[capture_end - 1] == b'\n' {
+        if capture_end > content_start && text[capture_end - 1] == b'\n' as u16 {
             capture_end -= 1;
-            // A preceding `\r` is part of the line break in CRLF text; `\n?`
-            // only trims `\n`, so leave `\r` (faithful to the JS regex).
         }
-
-        let captured = &text[content_start..capture_end];
-        let full = &text[open_start..close_at + FENCE.len()];
+        let body = trim_js_whitespace_units(&text[content_start..capture_end]).to_vec();
+        let end = close_at + FENCE.len();
         out.push(ExtractedCommand {
             start: open_start,
-            end: close_at + FENCE.len(),
-            full: full.to_string(),
-            command: captured.trim().to_string(),
+            end,
+            full: text[open_start..end].to_vec(),
+            command: source_from_units(body),
         });
-        search_from = close_at + FENCE.len();
+        search_from = end;
     }
     out
 }
 
-/// Extract inline commands written as a bang immediately followed by a
-/// backtick-quoted command. Mirrors the TS `INLINE_PATTERN` (a start-of-line or
-/// whitespace lookbehind, then the bang, then one-or-more non-backtick chars
-/// between backticks); the lookbehind is emulated by inspecting the preceding
-/// char.
-fn extract_inline_commands(text: &str) -> Vec<ExtractedCommand> {
-    let bytes = text.as_bytes();
+/// Extract inline commands with Native `(?<=^|\\s)!` lookbehind semantics.
+fn extract_inline_commands(text: &[u16]) -> Vec<ExtractedCommand> {
     let mut out = Vec::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        // Find next `!` followed by a backtick.
-        if bytes[i] == b'!' && bytes[i + 1] == b'`' {
-            // Lookbehind (?<=^|\s): preceding char must be start-of-text or a
-            // whitespace char.
-            let preceded_ok = i == 0 || is_inline_ws(bytes[i - 1]);
+    let mut index = 0;
+    while index + 1 < text.len() {
+        if text[index] == b'!' as u16 && text[index + 1] == b'`' as u16 {
+            let preceded_ok = index == 0 || is_js_whitespace_unit(text[index - 1]);
             if preceded_ok {
-                // One-or-more non-backtick chars, then a backtick.
-                let body_start = i + 2;
-                if let Some(rel) = text[body_start..].find('`') {
-                    let body_end = body_start + rel;
+                let body_start = index + 2;
+                if let Some(body_end) = text[body_start..]
+                    .iter()
+                    .position(|unit| *unit == b'`' as u16)
+                    .map(|offset| body_start + offset)
+                {
                     if body_end > body_start {
-                        let captured = &text[body_start..body_end];
-                        let full = &text[i..=body_end];
+                        let end = body_end + 1;
                         out.push(ExtractedCommand {
-                            start: i,
-                            end: body_end + 1,
-                            full: full.to_string(),
-                            command: captured.trim().to_string(),
+                            start: index,
+                            end,
+                            full: text[index..end].to_vec(),
+                            command: source_from_units(
+                                trim_js_whitespace_units(&text[body_start..body_end]).to_vec(),
+                            ),
                         });
-                        i = body_end + 1;
+                        index = end;
                         continue;
                     }
                 }
             }
         }
-        i += 1;
+        index += 1;
     }
     out
 }
 
-/// `\s` for the block scanner — ASCII whitespace as JS regex `\s` recognises it
-/// (space, tab, CR, LF, vertical tab, form feed).
-fn is_ascii_ws(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c)
+fn find_units(haystack: &[u16], needle: &[u16], from: usize) -> Option<usize> {
+    if needle.is_empty() || from > haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset)
 }
 
-/// Whitespace for the inline lookbehind. JS `\s` also matches CR/LF, but the `m`
-/// flag makes `^` match after a line break; either way a `!` at line start (or
-/// after whitespace) qualifies, so the same ASCII-whitespace set is used.
-fn is_inline_ws(b: u8) -> bool {
-    is_ascii_ws(b)
+fn is_js_whitespace_unit(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(lingxi_core::host::effort::javascript_whitespace)
+}
+
+fn trim_js_whitespace_units(input: &[u16]) -> &[u16] {
+    let mut start = 0;
+    let mut end = input.len();
+    while start < end && is_js_whitespace_unit(input[start]) {
+        start += 1;
+    }
+    while end > start && is_js_whitespace_unit(input[end - 1]) {
+        end -= 1;
+    }
+    &input[start..end]
 }
 
 #[cfg(test)]
@@ -372,10 +455,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Records each command it runs and echoes `OUT[<command>]` as stdout.
     struct ScriptRunner {
-        calls: Mutex<Vec<String>>,
+        calls: Mutex<Vec<UJP>>,
     }
+
     impl ScriptRunner {
         fn echoing() -> Self {
             Self {
@@ -383,16 +466,37 @@ mod tests {
             }
         }
     }
+
     #[async_trait]
     impl ShellRunner for ScriptRunner {
         async fn run(
             &self,
-            command: &str,
+            command: &UJP,
             _shell: Option<FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
-            self.calls.lock().unwrap().push(command.to_string());
+            self.calls.lock().unwrap().push(command.clone());
             Ok(ShellOut {
-                stdout: format!("OUT[{command}]"),
+                stdout: format!("OUT[{}]", command.string_at("").unwrap_or_default()),
+                stderr: String::new(),
+                interrupted: false,
+            })
+        }
+    }
+
+    struct FixedRunner {
+        calls: Mutex<Vec<UJP>>,
+    }
+
+    #[async_trait]
+    impl ShellRunner for FixedRunner {
+        async fn run(
+            &self,
+            command: &UJP,
+            _shell: Option<FrontmatterShell>,
+        ) -> Result<ShellOut, ShellRunError> {
+            self.calls.lock().unwrap().push(command.clone());
+            Ok(ShellOut {
+                stdout: "done".into(),
                 stderr: String::new(),
                 interrupted: false,
             })
@@ -401,14 +505,22 @@ mod tests {
 
     struct AllowAll;
     impl ShellPermissionGate for AllowAll {
-        fn check(&self, _c: &str, _s: Option<FrontmatterShell>) -> ShellPermissionDecision {
+        fn check(
+            &self,
+            _command: &UJP,
+            _shell: Option<FrontmatterShell>,
+        ) -> ShellPermissionDecision {
             ShellPermissionDecision::Allow
         }
     }
 
-    struct DenyAll(Option<String>);
+    struct DenyAll(Option<UJP>);
     impl ShellPermissionGate for DenyAll {
-        fn check(&self, _c: &str, _s: Option<FrontmatterShell>) -> ShellPermissionDecision {
+        fn check(
+            &self,
+            _command: &UJP,
+            _shell: Option<FrontmatterShell>,
+        ) -> ShellPermissionDecision {
             ShellPermissionDecision::Deny {
                 message: self.0.clone(),
             }
@@ -425,186 +537,230 @@ mod tests {
         }
     }
 
-    #[test]
-    fn block_extraction_basic() {
-        let cmds = extract_block_commands("before\n```!\necho hi\n```\nafter");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].command, "echo hi");
-        assert_eq!(cmds[0].full, "```!\necho hi\n```");
+    async fn expand(text: &str, ctx: &ShellExpansionCtx) -> Result<UJP, ShellExpansionError> {
+        execute_shell_commands_in_prompt(&UJP::from(text), ctx, &UJP::from("/x"), None).await
     }
 
     #[test]
-    fn block_extraction_inline_spaces() {
-        // ```! echo hi ``` on one line.
-        let cmds = extract_block_commands("```! echo hi ```");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].command, "echo hi");
+    fn block_extraction_uses_js_whitespace_and_preserves_code_units() {
+        let text = "before\n```!\u{00a0}echo hi\n```\nafter";
+        let units = text.encode_utf16().collect::<Vec<_>>();
+        let commands = extract_block_commands(&units);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command.string_at(""), Some("echo hi"));
+        assert_eq!(
+            commands[0].full,
+            "```!\u{00a0}echo hi\n```"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn inline_extraction_lookbehind() {
-        // Leading space => match; mid-token `foo!`bar`` => no match.
-        let cmds = extract_inline_commands("run !`echo hi` and foo!`nope`");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].command, "echo hi");
-        assert_eq!(cmds[0].full, "!`echo hi`");
-    }
-
-    #[test]
-    fn inline_extraction_start_of_text() {
-        let cmds = extract_inline_commands("!`echo hi`");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].command, "echo hi");
+    fn inline_extraction_uses_js_whitespace_lookbehind() {
+        let text = "run\u{2003}!`echo hi` and foo!`nope`";
+        let units = text.encode_utf16().collect::<Vec<_>>();
+        let commands = extract_inline_commands(&units);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command.string_at(""), Some("echo hi"));
+        assert_eq!(
+            commands[0].full,
+            "!`echo hi`".encode_utf16().collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
-    async fn gated_fast_path_skips_inline_scan() {
-        // No "!`" substring => inline pattern not scanned, only block matches.
+    async fn no_marker_preserves_opaque_source_without_running() {
         let runner = Arc::new(ScriptRunner::echoing());
-        let runner_dyn: Arc<dyn ShellRunner> = runner.clone();
-        let ctx = ctx_with(runner_dyn, Arc::new(AllowAll));
-        let out = execute_shell_commands_in_prompt("no shell here", &ctx, "/x", None)
+        let ctx = ctx_with(runner.clone(), Arc::new(AllowAll));
+        let units = [
+            "prefix".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " suffix".encode_utf16().collect(),
+        ]
+        .concat();
+        let text = UJP::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let output = execute_shell_commands_in_prompt(&text, &ctx, &"/x".into(), None)
             .await
             .unwrap();
-        assert_eq!(out, "no shell here");
+        assert_eq!(output.string_units(""), Some(units));
         assert!(runner.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn inline_and_block_replacement() {
+    async fn block_and_inline_replacement_keeps_native_order() {
         let runner = Arc::new(ScriptRunner::echoing());
-        let runner_dyn: Arc<dyn ShellRunner> = runner.clone();
-        let ctx = ctx_with(runner_dyn, Arc::new(AllowAll));
-        let text = "A ```!\nblockcmd\n``` B !`inlinecmd` C";
-        let out = execute_shell_commands_in_prompt(text, &ctx, "/x", None)
+        let ctx = ctx_with(runner.clone(), Arc::new(AllowAll));
+        let output = expand("A ```!\nblockcmd\n``` B !`inlinecmd` C", &ctx)
             .await
             .unwrap();
-        assert_eq!(out, "A OUT[blockcmd] B OUT[inlinecmd] C");
-        // Block first, then inline (source order within each group).
         assert_eq!(
-            *runner.calls.lock().unwrap(),
-            vec!["blockcmd".to_string(), "inlinecmd".to_string()]
+            output.string_at(""),
+            Some("A OUT[blockcmd] B OUT[inlinecmd] C")
+        );
+        assert_eq!(
+            runner
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|value| value.string_at(""))
+                .collect::<Vec<_>>(),
+            [Some("blockcmd"), Some("inlinecmd")]
         );
     }
 
     #[tokio::test]
-    async fn multi_match_replacement_order() {
+    async fn repeated_matches_replace_first_occurrences_in_native_order() {
         let runner = Arc::new(ScriptRunner::echoing());
-        let runner_dyn: Arc<dyn ShellRunner> = runner.clone();
-        let ctx = ctx_with(runner_dyn, Arc::new(AllowAll));
-        let text = "!`one` then !`two` then !`three`";
-        let out = execute_shell_commands_in_prompt(text, &ctx, "/x", None)
+        let ctx = ctx_with(runner.clone(), Arc::new(AllowAll));
+        let output = expand("!`one` then !`two` then !`three`", &ctx)
             .await
             .unwrap();
-        assert_eq!(out, "OUT[one] then OUT[two] then OUT[three]");
         assert_eq!(
-            *runner.calls.lock().unwrap(),
-            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+            output.string_at(""),
+            Some("OUT[one] then OUT[two] then OUT[three]")
+        );
+        assert_eq!(runner.calls.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn source_extraction_retains_surrogates_around_and_inside_shell_command() {
+        let runner = Arc::new(FixedRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let ctx = ctx_with(runner.clone(), Arc::new(AllowAll));
+        let units = [
+            "before".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " !`echo ".encode_utf16().collect(),
+            vec![0xdfff],
+            "` after".encode_utf16().collect(),
+            vec![0xd800],
+        ]
+        .concat();
+        let text = UJP::root_string(String::from_utf16_lossy(&units), units.clone()).unwrap();
+        let output = execute_shell_commands_in_prompt(&text, &ctx, &"/exact�".into(), None)
+            .await
+            .unwrap();
+        let expected = [
+            "before".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " done after".encode_utf16().collect(),
+            vec![0xd800],
+        ]
+        .concat();
+        assert_eq!(output.string_units(""), Some(expected));
+        assert_eq!(
+            runner.calls.lock().unwrap()[0].string_units(""),
+            Some(["echo ".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat())
         );
     }
 
     #[tokio::test]
-    async fn permission_deny_errors() {
+    async fn permission_deny_keeps_exact_matched_pattern_and_reason() {
         let runner = Arc::new(ScriptRunner::echoing());
-        let runner_dyn: Arc<dyn ShellRunner> = runner.clone();
         let ctx = ctx_with(
-            runner_dyn,
-            Arc::new(DenyAll(Some("not allowed".to_string()))),
+            runner.clone(),
+            Arc::new(DenyAll(Some("not allowed".into()))),
         );
-        let err = execute_shell_commands_in_prompt("x !`rm -rf /` y", &ctx, "/danger", None)
-            .await
-            .unwrap_err();
+        let error = expand("x !`rm -rf /` y", &ctx).await.unwrap_err();
         assert_eq!(
-            err,
-            ShellExpansionError::Malformed(
-                "Shell command permission check failed for pattern \"!`rm -rf /`\": not allowed"
-                    .to_string()
-            )
+            error.source_message().string_at(""),
+            Some("Shell command permission check failed for pattern \"!`rm -rf /`\": not allowed")
         );
-        // Denied before run: command never executed.
         assert!(runner.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn permission_deny_default_message() {
-        let runner: Arc<dyn ShellRunner> = Arc::new(ScriptRunner::echoing());
-        let ctx = ctx_with(runner, Arc::new(DenyAll(None)));
-        let err = execute_shell_commands_in_prompt("!`x`", &ctx, "/c", None)
+    async fn permission_diagnostic_retains_unpaired_command_and_reason_units() {
+        let command_units = [
+            "!`run ".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            vec![b'`' as u16],
+        ]
+        .concat();
+        let reason = UJP::root_string("reason�".into(), vec![b'r' as u16, 0xdfff]).unwrap();
+        let text = UJP::root_string(
+            String::from_utf16_lossy(&command_units),
+            command_units.clone(),
+        )
+        .unwrap();
+        let ctx = ctx_with(
+            Arc::new(ScriptRunner::echoing()),
+            Arc::new(DenyAll(Some(reason))),
+        );
+
+        let error = execute_shell_commands_in_prompt(&text, &ctx, &"/x".into(), None)
             .await
             .unwrap_err();
-        assert_eq!(
-            err,
-            ShellExpansionError::Malformed(
-                "Shell command permission check failed for pattern \"!`x`\": Permission denied"
-                    .to_string()
-            )
-        );
+        let expected = [
+            "Shell command permission check failed for pattern \""
+                .encode_utf16()
+                .collect::<Vec<_>>(),
+            command_units,
+            "\": reason".encode_utf16().collect(),
+            vec![0xdfff],
+        ]
+        .concat();
+        assert_eq!(error.source_message().string_units(""), Some(expected));
     }
 
     #[tokio::test]
-    async fn run_failure_formats_error() {
+    async fn execution_failure_and_stderr_keep_existing_formatting() {
         struct FailRunner;
         #[async_trait]
         impl ShellRunner for FailRunner {
             async fn run(
                 &self,
-                _c: &str,
-                _s: Option<FrontmatterShell>,
+                _command: &UJP,
+                _shell: Option<FrontmatterShell>,
             ) -> Result<ShellOut, ShellRunError> {
                 Err(ShellRunError {
                     stdout: String::new(),
-                    stderr: "boom".to_string(),
+                    stderr: "boom".into(),
                     interrupted: false,
                     generic_message: None,
                 })
             }
         }
-        let ctx = ctx_with(Arc::new(FailRunner), Arc::new(AllowAll));
-        let err = execute_shell_commands_in_prompt("!`bad`", &ctx, "/c", None)
-            .await
-            .unwrap_err();
+        let failed = ctx_with(Arc::new(FailRunner), Arc::new(AllowAll));
+        let error = expand("!`bad`", &failed).await.unwrap_err();
         assert_eq!(
-            err,
-            ShellExpansionError::Malformed(
-                "Shell command failed for pattern \"!`bad`\": [stderr]\nboom".to_string()
-            )
+            error.source_message().string_at(""),
+            Some("Shell command failed for pattern \"!`bad`\": [stderr]\nboom")
         );
-    }
 
-    #[tokio::test]
-    async fn stderr_included_in_output() {
         struct StderrRunner;
         #[async_trait]
         impl ShellRunner for StderrRunner {
             async fn run(
                 &self,
-                _c: &str,
-                _s: Option<FrontmatterShell>,
+                _command: &UJP,
+                _shell: Option<FrontmatterShell>,
             ) -> Result<ShellOut, ShellRunError> {
                 Ok(ShellOut {
-                    stdout: "hello".to_string(),
-                    stderr: "warn".to_string(),
+                    stdout: " hello ".into(),
+                    stderr: " warn ".into(),
                     interrupted: false,
                 })
             }
         }
-        let ctx = ctx_with(Arc::new(StderrRunner), Arc::new(AllowAll));
-        let out = execute_shell_commands_in_prompt("!`x`", &ctx, "/c", None)
-            .await
-            .unwrap();
-        assert_eq!(out, "hello\n[stderr]\nwarn");
+        let output = expand(
+            "!`x`",
+            &ctx_with(Arc::new(StderrRunner), Arc::new(AllowAll)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.string_at(""), Some("hello\n[stderr]\nwarn"));
     }
 
     #[tokio::test]
-    async fn empty_inline_command_skipped() {
-        // !`   ` trims to empty -> not run, full span left untouched.
+    async fn empty_command_is_skipped_and_left_verbatim() {
         let runner = Arc::new(ScriptRunner::echoing());
-        let runner_dyn: Arc<dyn ShellRunner> = runner.clone();
-        let ctx = ctx_with(runner_dyn, Arc::new(AllowAll));
-        let out = execute_shell_commands_in_prompt("keep !`   ` keep", &ctx, "/c", None)
-            .await
-            .unwrap();
-        assert_eq!(out, "keep !`   ` keep");
+        let ctx = ctx_with(runner.clone(), Arc::new(AllowAll));
+        let output = expand("keep !`\u{00a0}` keep", &ctx).await.unwrap();
+        assert_eq!(output.string_at(""), Some("keep !`\u{00a0}` keep"));
         assert!(runner.calls.lock().unwrap().is_empty());
     }
 }

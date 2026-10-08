@@ -1,0 +1,28 @@
+{
+  "command": [
+    "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--test",
+    "native_append",
+    "--",
+    "--test-threads=1"
+  ],
+  "cwd": "/private/tmp/mods-current-native-harness-append-gate-v1647",
+  "exit_code": 0,
+  "elapsed_seconds": 2.7,
+  "source_unchanged": true,
+  "source_file_count": 5911,
+  "sdk_source_unchanged": true,
+  "error_count": 0,
+  "test_groups": [
+    {
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "log_sha256": "b7ac3be0c90f34b659dc30ce057f79826a820403fe2a7d1d8ce7823b57ec4a37",
+  "runner_sha256": "f27ec58eea750c223fe2c570fed3773a7b938dd64de1fe81ec9c0e9ac0f0d05f",
+  "scope": "actual stated package/target gate only; no implied whole Runtime/SDK/Native byte acceptance"
+}

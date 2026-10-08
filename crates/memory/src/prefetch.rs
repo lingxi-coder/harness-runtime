@@ -346,6 +346,7 @@ mod tests {
     use super::*;
     use crate::memdir::memdir_path;
     use async_trait::async_trait;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 
     /// A runtime that actually RUNS the spawned future, so the prefetch's
@@ -395,7 +396,12 @@ mod tests {
             }
             Ok(SideQueryResponse {
                 text: None,
-                structured: Some(serde_json::json!({ "filenames": self.names })),
+                structured: Some(
+                    Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({ "filenames": self.names }),
+                    )
+                    .expect("test response is valid JSON"),
+                ),
                 tool_calls: Vec::new(),
                 // Field type (`cost::Usage`) inferred — avoids a dev-dep on `cost`.
                 usage: Default::default(),

@@ -32,14 +32,14 @@ pub mod read_mcp_resource_dir;
 pub mod transform_result;
 pub mod wait_for_mcp_servers;
 pub use large_output::{
-    process_mcp_result, process_mcp_result_with_exact_count, ExactCountOutcome,
+    process_mcp_result_source, process_mcp_result_with_exact_count_source, ExactCountOutcome,
 };
 pub use mcp_tool::{
     build_registered_mcp_tools, configured_permission_ceiling, ListMcpResourcesTool, MCPTool,
     McpAuthTool, ReadMcpResourceTool,
 };
 pub use read_mcp_resource_dir::ReadMcpResourceDirTool;
-pub use transform_result::transform_result_content;
+pub use transform_result::transform_result_content_source;
 pub use wait_for_mcp_servers::WaitForMcpServersTool;
 
 /// Register the MCP tools (call, auth, wait-for-servers) against `reg`.

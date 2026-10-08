@@ -185,7 +185,12 @@ impl ImplicitTeammateSpawner {
         inherit: SubagentInheritance,
     ) -> Result<StartedTeammate, SubagentSpawnError> {
         let name = request.name.as_deref().unwrap_or("");
-        if name.is_empty() || request.prompt.is_empty() {
+        if name.is_empty()
+            || request
+                .prompt
+                .string_units("")
+                .is_some_and(|units| units.is_empty())
+        {
             return Err(error("name and prompt are required for spawn operation"));
         }
         let team_name = self.team.team_name().await.ok_or_else(|| error("Internal error: session team not initialized. This should have happened at startup when agent swarms are enabled."))?;
@@ -371,11 +376,15 @@ fn unique_name<'a>(
 ) -> Result<String, SubagentSpawnError> {
     let name = name.replace('@', "-");
     if name == "main" {
-        return Err(error("\"main\" is a reserved recipient name (SendMessage routes it to the main conversation) — choose another teammate name."));
+        return Err(error(
+            "\"main\" is a reserved recipient name (SendMessage routes it to the main conversation) — choose another teammate name.",
+        ));
     }
     let normalized = agent::catalog::normalize_teammate_recipient(&name);
     if normalized == "main" || normalized == "team-lead" || is_reserved_agent_id(&normalized) {
-        return Err(error("That teammate name is a reserved recipient (\"main\" or \"team-lead\", in any spelling) or has the shape of an agent id, which already addresses an agent directly — choose another teammate name."));
+        return Err(error(
+            "That teammate name is a reserved recipient (\"main\" or \"team-lead\", in any spelling) or has the shape of an agent id, which already addresses an agent directly — choose another teammate name.",
+        ));
     }
     let names: Vec<_> = names.map(str::to_lowercase).collect();
     if !names.contains(&name.to_lowercase()) {
@@ -526,7 +535,7 @@ mod tests {
     }
     #[async_trait]
     impl OutputStream for Harness {
-        async fn emit_text(&self, _: &str) {}
+        async fn emit_text(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
         async fn emit_tool_call(
             &self,
             _: &lingxi_core::types::ToolUseId,
@@ -656,6 +665,7 @@ mod tests {
         let launched = service.spawn(request(), inherit(&h)).await.unwrap();
         let message = lingxi_core::host::mailbox::MailboxMessage {
             content: "finished the inspection".into(),
+            summary: None,
             color: None,
             message_id: "message-1".into(),
             timestamp: std::time::SystemTime::now(),
@@ -672,7 +682,10 @@ mod tests {
         let messages = inbox.drain();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from_name, "researcher");
-        assert_eq!(messages[0].content, "finished the inspection");
+        assert_eq!(
+            messages[0].content.string_units(""),
+            Some("finished the inspection".encode_utf16().collect())
+        );
     }
 
     #[tokio::test]

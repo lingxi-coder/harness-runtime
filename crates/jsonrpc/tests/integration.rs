@@ -13,7 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonrpc::{
-    Connection, InboundHandler, LineCodec, LspCodec, Notification, Request, Response, RouterError,
+    Connection, InboundHandler, JsonPayload, LineCodec, LspCodec, Notification, Request,
+    Response, RouterError,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -65,7 +66,11 @@ struct Echo;
 #[async_trait]
 impl InboundHandler for Echo {
     async fn handle(&self, req: Request) -> Response {
-        Response::success(req.id, req.params.unwrap_or(json!(null)))
+        Response::success(
+            req.id,
+            req.params
+                .unwrap_or_else(|| JsonPayload::parse("null").unwrap()),
+        )
     }
 }
 
@@ -358,7 +363,7 @@ async fn inbound_notification_received_via_broadcast_subscription() {
 
     let n: Notification = sub.recv().await.unwrap();
     assert_eq!(n.method, "ping");
-    assert_eq!(n.params, Some(json!({"k": 1})));
+    assert_eq!(n.params.unwrap().to_value().unwrap(), json!({"k": 1}));
 }
 
 #[tokio::test]
@@ -376,7 +381,7 @@ async fn inbound_request_unknown_method_yields_method_not_found_to_caller() {
     match err {
         jsonrpc::ConnectionError::Router(RouterError::Remote(e)) => {
             assert_eq!(e.code, jsonrpc::METHOD_NOT_FOUND);
-            assert!(e.message.contains("nope"));
+            assert!(e.message.display().contains("nope"));
         }
         other => panic!("expected Remote(MethodNotFound), got: {other:?}"),
     }

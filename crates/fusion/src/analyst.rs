@@ -14,6 +14,7 @@ use lingxi_core::host::{
     WorkflowQueryWatchdog, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
     DEFAULT_IMPLEMENT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_ANALYST_TYPE,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use sidequery::{SideQueryClient, SideQueryError, StrictStructuredQueryResponse};
 // Used only by the tests below. Kept at file scope behind `cfg(test)` so the
@@ -159,7 +160,7 @@ where
                         return Err((
                             AnalystError::Failed("attempt context unavailable".into()),
                             acc,
-                        ))
+                        ));
                     }
                 };
         }
@@ -302,9 +303,16 @@ where
         .first()
         .map(|message| message.text_content())
         .unwrap_or_default();
+    let prompt = format!("{system}\n\nThe panel reports to compare, as JSON:\n\n{user}");
+    let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        prompt.clone(),
+        prompt.encode_utf16().collect(),
+    )
+    .expect("Fusion-generated analyst prompt is a valid root string");
     let mut spawn = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+        parent_native_query_depth: None,
         subagent_type: FUSION_ANALYST_TYPE.to_string(),
-        prompt: format!("{system}\n\nThe panel reports to compare, as JSON:\n\n{user}"),
+        prompt,
         model: Some(analyst.model.clone()),
         model_profile: Some(analyst.profile.clone()),
         schema: Some(schema.to_string()),
@@ -329,7 +337,7 @@ where
                 return Err((
                     AnalystError::Failed("attempt context unavailable".into()),
                     acc,
-                ))
+                ));
             }
         };
     }
@@ -428,15 +436,24 @@ fn cost_usage(usage: &SubagentUsage) -> cost::Usage {
 
 /// The analysis JSON from a subagent's final content, which arrives as the
 /// value itself, a JSON string, or a list of text blocks.
-fn analysis_value(content: &Value) -> Option<Value> {
-    if content.get("consensus").is_some() {
-        return Some(content.clone());
+fn analysis_value(content: &Utf16JsonProjection) -> Option<Value> {
+    if let Some(units) = content.string_units("") {
+        let raw = String::from_utf16(&units).ok()?;
+        return serde_json::from_str(&raw).ok();
+    }
+    // This is an explicit strict-schema parsing boundary. JSON stringification
+    // retains exact source units as escapes, and serde rejects lone-surrogate
+    // escapes instead of replacing them with U+FFFD.
+    let source_json = content.to_json_string().ok()?;
+    let value = serde_json::from_str::<Value>(&source_json).ok()?;
+    if value.get("consensus").is_some() {
+        return Some(value);
     }
     let from_text = |text: &str| serde_json::from_str::<Value>(text).ok();
-    if let Some(raw) = content.as_str() {
+    if let Some(raw) = value.as_str() {
         return from_text(raw);
     }
-    let blocks = content.get("content")?.as_array()?;
+    let blocks = value.get("content")?.as_array()?;
     let text: String = blocks
         .iter()
         .filter_map(|block| block.get("text").and_then(Value::as_str))
@@ -658,7 +675,14 @@ pub(crate) fn scores_match_request(
 }
 
 fn guard_text(raw: &str) -> String {
-    sanitize_blocks(&[raw.replace('\0', "")]).content.join("")
+    let input = raw.replace('\0', "");
+    let units = input.encode_utf16().collect::<Vec<_>>();
+    let sanitized = sanitize_blocks(&[units])
+        .content
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    String::from_utf16(&sanitized).expect("Rust-owned analyst input remains scalar text")
 }
 
 /// The analyst prompt's paragraph on what implement-mode panels carry beyond
@@ -923,6 +947,10 @@ mod tests {
     use super::*;
     use lingxi_core::host::{PanelRunStatus, RiskSeverity};
 
+    fn source_projection(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test JSON is valid")
+    }
+
     async fn analyze_with_test_limits(
         client: Arc<dyn SideQueryClient>,
         config: &FusionRuntimeConfig,
@@ -975,16 +1003,21 @@ mod tests {
     #[test]
     fn analysis_json_comes_out_of_every_shape_a_subagent_returns_it_in() {
         let value = serde_json::json!({ "consensus": [], "scores": {} });
-        assert_eq!(analysis_value(&value), Some(value.clone()));
+        assert_eq!(
+            analysis_value(&source_projection(&value)),
+            Some(value.clone())
+        );
         let text = value.to_string();
         assert_eq!(
-            analysis_value(&Value::String(text.clone())),
+            analysis_value(&source_projection(&Value::String(text.clone()))),
             Some(value.clone())
         );
         let blocks = serde_json::json!({ "content": [{ "type": "text", "text": text }] });
-        assert_eq!(analysis_value(&blocks), Some(value));
+        assert_eq!(analysis_value(&source_projection(&blocks)), Some(value));
         assert_eq!(
-            analysis_value(&serde_json::json!({ "reason": "max_turns_exhausted" })),
+            analysis_value(&source_projection(&serde_json::json!({
+                "reason": "max_turns_exhausted"
+            }))),
             None
         );
     }
@@ -1021,7 +1054,10 @@ mod tests {
         let ids = vec!["P1".to_string(), "P2".to_string()];
         let dims = vec!["coverage".to_string(), "safety".to_string()];
         let schema = analyst_json_schema(&ids, &dims);
-        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(&schema)
+        let source =
+            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&schema)
+                .expect("generated analyst schema is valid JSON");
+        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(&source)
             .expect("analyst schema must be strict-mode compatible");
     }
 
@@ -1050,10 +1086,12 @@ mod tests {
         // The generated schema must itself accept the sample under the strict
         // conversion (closed objects, all-required) before we even ask serde
         // to decode it.
-        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(
-            &analyst_json_schema(&ids, &dims),
-        )
-        .expect("schema must be strict-mode compatible");
+        let schema = analyst_json_schema(&ids, &dims);
+        let source =
+            llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&schema)
+                .expect("generated analyst schema is valid JSON");
+        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(&source)
+            .expect("schema must be strict-mode compatible");
         let analysis: FusionAnalysis =
             serde_json::from_value(sample).expect("sample matches FusionAnalysis");
         assert_eq!(analysis.contradictions[0].severity, RiskSeverity::High);

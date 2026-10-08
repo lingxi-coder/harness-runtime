@@ -3,18 +3,21 @@
 //! Source: src_174624321.js (_s, Se, Ge, validateInput), with summary
 //! coercion from src_160357157.js ($Gt). Both host tools use this surface.
 
-use crate::tool_trait::CoercedInput;
-use serde_json::{json, Value};
+use crate::tool_trait::{
+    CoercedInput, generated_builtin_schema, source_text_projection, source_text_projection_units,
+};
+use lingxi_core::types::utf16_json::{Utf16JsonBuilder, Utf16JsonProjection};
+use serde_json::{Value, json};
 use std::sync::OnceLock;
 
 /// Latest feature-dependent schema; ordinary agents do not require teams.
-pub fn schema(cross_session: bool, teams: bool) -> &'static Value {
-    static SCHEMAS: [OnceLock<Value>; 4] = [const { OnceLock::new() }; 4];
+pub fn schema(cross_session: bool, teams: bool) -> &'static Utf16JsonProjection {
+    static SCHEMAS: [OnceLock<Utf16JsonProjection>; 4] = [const { OnceLock::new() }; 4];
     SCHEMAS[usize::from(cross_session) * 2 + usize::from(teams)]
         .get_or_init(|| build_schema(cross_session, teams))
 }
 
-fn build_schema(cross_session: bool, teams: bool) -> Value {
+fn build_schema(cross_session: bool, teams: bool) -> Utf16JsonProjection {
     let plain = json!({"description": if cross_session {
         "Plain text message content. The recipient's human sees only the FIRST LINE as a one-line preview until they expand it, so make the first line a clear, self-contained sentence saying what this is about — not a greeting, preamble, or bare @-mention."
     } else { "Plain text message content" }, "type":"string"});
@@ -50,45 +53,105 @@ fn build_schema(cross_session: bool, teams: bool) -> Value {
     if cross_session {
         result["properties"]["notify_when_idle"] = json!({"description":"Ask a session ON THIS MACHINE to send you ONE notice when it next goes idle (finishes its turn with nothing queued) or exits — opt-in, one-shot, no polling. With a message: deliver it now AND subscribe. Without a message (omit it): a pure subscription that costs the other session nothing.","type":"boolean"});
     }
-    result
+    generated_builtin_schema(&result)
 }
 
 /// Derive a missing summary before schema validation, or truncate a long one.
-pub fn coerce(input: &Value) -> Option<CoercedInput> {
-    let mut summary = input
-        .get("summary")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+pub fn coerce(input: &Utf16JsonProjection) -> Option<CoercedInput> {
+    let summary = input.string_units("/summary");
     let mut shape_class = None;
-    if summary.as_deref().is_none_or(|s| s.trim().is_empty()) {
-        if let Some(message) = input.get("message").and_then(Value::as_str) {
-            let first = message.trim().split('\n').next().unwrap_or("").trim();
-            if !first.is_empty() {
-                summary = Some(first.to_owned());
-                shape_class = Some("derive_summary");
+    let mut summary_units = match summary {
+        Some(units) if !trim_ecmascript_whitespace(&units).is_empty() => units,
+        _ => {
+            let message = input.string_units("/message")?;
+            let message = trim_ecmascript_whitespace(&message);
+            let first_line = message
+                .split(|unit| *unit == u16::from(b'\n'))
+                .next()
+                .map(trim_ecmascript_whitespace)
+                .unwrap_or_default();
+            if first_line.is_empty() {
+                return None;
             }
+            shape_class = Some("derive_summary");
+            first_line.to_vec()
+        }
+    };
+    if summary_units.len() > 200 {
+        summary_units.truncate(199);
+        summary_units.push(0x2026);
+        shape_class.get_or_insert("truncate_summary");
+    }
+    let shape_class = shape_class?;
+    let summary = source_text_projection_units(&summary_units);
+    let mut fields = Vec::new();
+    let mut summary_replaced = false;
+    for entry in input.object_entries()? {
+        if entry.code_units == "summary".encode_utf16().collect::<Vec<_>>() {
+            fields.push((entry.code_units.to_vec(), summary.clone()));
+            summary_replaced = true;
+        } else {
+            fields.push((
+                entry.code_units.to_vec(),
+                input.subprojection_property_units(entry.code_units).ok()?,
+            ));
         }
     }
-    if let Some(value) = summary.as_mut() {
-        if value.encode_utf16().count() > 200 {
-            *value = value.chars().take(199).collect::<String>() + "…";
-            shape_class.get_or_insert("truncate_summary");
-        }
+    if !summary_replaced {
+        fields.push(("summary".encode_utf16().collect(), summary));
     }
-    shape_class.map(|shape_class| {
-        let mut input = input.clone();
-        input["summary"] = json!(summary);
-        CoercedInput {
-            input,
-            shape_class: shape_class.into(),
-        }
+    Some(CoercedInput {
+        input: Utf16JsonProjection::object_units(fields).ok()?,
+        shape_class: shape_class.into(),
     })
 }
 
+fn trim_ecmascript_whitespace(mut units: &[u16]) -> &[u16] {
+    while units
+        .first()
+        .is_some_and(|unit| is_ecmascript_whitespace(*unit))
+    {
+        units = &units[1..];
+    }
+    while units
+        .last()
+        .is_some_and(|unit| is_ecmascript_whitespace(*unit))
+    {
+        units = &units[..units.len() - 1];
+    }
+    units
+}
+
+fn is_ecmascript_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009
+            | 0x000a
+            | 0x000b
+            | 0x000c
+            | 0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+            | 0x2000..=0x200a
+    )
+}
+
+fn utf16_starts_with(value: &[u16], prefix: &str) -> bool {
+    let prefix = prefix.encode_utf16().collect::<Vec<_>>();
+    value.starts_with(&prefix)
+}
+
 /// Plain-text protocol frames cannot bypass the structured-message handlers.
-pub fn plain_message_error(message: &str) -> Option<&'static str> {
-    let parsed: Value = serde_json::from_str(message).ok()?;
-    let kind = parsed.get("type")?.as_str()?;
+pub fn plain_message_error(message_utf16: &[u16]) -> Option<&'static str> {
+    let parsed = Utf16JsonProjection::parse_utf16_json(message_utf16).ok()?;
+    let kind = parsed.string_at("/type")?;
     if matches!(
         kind,
         "permission_request"
@@ -103,7 +166,9 @@ pub fn plain_message_error(message: &str) -> Option<&'static str> {
             | "plan_approval_request"
             | "plan_approval_response"
     ) {
-        return Some("message text must not be a teammate protocol frame (permission/mode/plan/shutdown JSON) — to respond to a plan or shutdown request, use the structured object form ({\"message\": {\"type\": ...}}); otherwise send plain text");
+        return Some(
+            "message text must not be a teammate protocol frame (permission/mode/plan/shutdown JSON) — to respond to a plan or shutdown request, use the structured object form ({\"message\": {\"type\": ...}}); otherwise send plain text",
+        );
     }
     if matches!(
         kind,
@@ -113,7 +178,9 @@ pub fn plain_message_error(message: &str) -> Option<&'static str> {
             | "task_completed"
             | "shutdown_rejected"
     ) {
-        return Some("message text must not be a teammate lifecycle/task frame (idle/terminated/task/shutdown JSON) — send plain text instead");
+        return Some(
+            "message text must not be a teammate lifecycle/task frame (idle/terminated/task/shutdown JSON) — send plain text instead",
+        );
     }
     None
 }
@@ -249,39 +316,40 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
 }
 
 /// Validation shared by the coordinator and the ordinary-agent mailbox host.
-pub fn validate(input: &Value, teams: bool, is_subagent: bool) -> Result<(), String> {
-    let to = input.get("to").and_then(Value::as_str).unwrap_or("");
-    if to == "*" {
+pub fn validate(input: &Utf16JsonProjection, teams: bool, is_subagent: bool) -> Result<(), String> {
+    let to_units = input.string_units("/to").unwrap_or_default();
+    if to_units == "*".encode_utf16().collect::<Vec<_>>() {
         return Err(
             "broadcast (to: \"*\") is no longer supported — send a message per recipient".into(),
         );
     }
-    let notify = input
-        .get("notify_when_idle")
-        .is_some_and(|value| value == true || value == "true");
-    let message = input.get("message");
+    let notify = input.get_property("notify_when_idle").is_some_and(|value| {
+        value.as_bool() == Some(true)
+            || value.code_units() == Some("true".encode_utf16().collect::<Vec<_>>().as_slice())
+    });
+    let message = input.get_property("message");
     if notify {
-        if message.is_some_and(|value| !value.is_string()) {
+        if message.is_some_and(|value| value.code_units().is_none()) {
             return Err("notify_when_idle cannot ride a structured message — send plain text, or omit the message for a pure subscription".into());
         }
         if is_subagent
-            && message
-                .and_then(Value::as_str)
-                .is_none_or(|text| text.trim().is_empty())
+            && input
+                .string_units("/message")
+                .is_none_or(|units| trim_ecmascript_whitespace(&units).is_empty())
         {
             return Err("notify_when_idle is only available from the main conversation of this session (not from a subagent or teammate).".into());
         }
     }
-    if to.trim().is_empty() {
+    if trim_ecmascript_whitespace(&to_units).is_empty() {
         return Err("to must not be empty".into());
     }
-    if to.contains(['\n', '\r']) {
+    if to_units.iter().any(|unit| matches!(unit, 0x000a | 0x000d)) {
         return Err("must be a single-line recipient name or address".into());
     }
-    if to.chars().count() > 300 {
+    if to_units.len() > 300 {
         return Err("recipient longer than any listed name or address (max 300 characters)".into());
     }
-    if to.contains('@') {
+    if to_units.contains(&u16::from(b'@')) {
         return Err("to must be a bare teammate name — there is only one team per session".into());
     }
     let Some(message) = message else {
@@ -291,35 +359,43 @@ pub fn validate(input: &Value, teams: bool, is_subagent: bool) -> Result<(), Str
             Err("message is required unless notify_when_idle is true".into())
         };
     };
-    if let Some(message) = message.as_str() {
-        if message.trim().is_empty() && !notify {
+    if message.code_units().is_some() {
+        let message_units = input.string_units("/message").unwrap_or_default();
+        if trim_ecmascript_whitespace(&message_units).is_empty() && !notify {
             return Err("message must not be empty".into());
         }
-        return plain_message_error(message).map_or(Ok(()), |error| Err(error.into()));
+        return plain_message_error(&message_units).map_or(Ok(()), |error| Err(error.into()));
     }
     if !teams {
         return Err(
             "Structured team-protocol messages are only available with agent teams enabled.".into(),
         );
     }
-    if to.starts_with("session:") || to.starts_with("uds:") || to.starts_with("bridge:") {
+    if utf16_starts_with(&to_units, "session:")
+        || utf16_starts_with(&to_units, "uds:")
+        || utf16_starts_with(&to_units, "bridge:")
+    {
         return Err("structured messages cannot be sent cross-session — only plain text".into());
     }
-    if message.get("type").and_then(Value::as_str) == Some("shutdown_response") {
-        if to != "team-lead" {
+    if message
+        .get_property("type")
+        .and_then(|value| value.as_str())
+        == Some("shutdown_response")
+    {
+        if to_units != "team-lead".encode_utf16().collect::<Vec<_>>() {
             return Err("shutdown_response must be sent to \"team-lead\"".into());
         }
         let approved = message
-            .get("approve")
-            .is_some_and(|value| value == true || value == "true");
-        if approved && message.get("reason").is_some() {
+            .get_property("approve")
+            .is_some_and(|value| value.as_bool() == Some(true) || value.as_str() == Some("true"));
+        if approved && message.get_property("reason").is_some() {
             return Err("reason is only delivered on rejections (approve: false) — approvals are sent as a silent confirmation with no reason text; omit reason or reject instead".into());
         }
+        let reason_units = input.string_units("/message/reason");
         if !approved
-            && message
-                .get("reason")
-                .and_then(Value::as_str)
-                .is_none_or(|reason| reason.trim().is_empty())
+            && reason_units
+                .as_deref()
+                .is_none_or(|reason| trim_ecmascript_whitespace(reason).is_empty())
         {
             return Err("reason is required when rejecting a shutdown request".into());
         }
@@ -355,6 +431,24 @@ pub fn protocol_timestamp(timestamp: std::time::SystemTime) -> String {
     )
 }
 
+fn source_object(fields: Vec<(&str, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("locally generated SendMessage protocol frame")
+}
+
+fn source_bool(value: bool) -> Utf16JsonProjection {
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_bool(value);
+    builder
+        .finish(root)
+        .expect("boolean protocol value is valid JSON")
+}
+
 /// Ordered nwn envelope; absent pane fields serialize as absent, never null.
 pub fn shutdown_approved(
     request_id: &str,
@@ -362,57 +456,80 @@ pub fn shutdown_approved(
     timestamp: &str,
     pane_id: Option<&str>,
     backend_type: Option<&str>,
-) -> Value {
-    let mut frame = json!({"type":"shutdown_approved","requestId":request_id,"from":from,"timestamp":timestamp});
+) -> Utf16JsonProjection {
+    let mut fields = vec![
+        ("type", source_text_projection("shutdown_approved")),
+        ("requestId", source_text_projection(request_id)),
+        ("from", source_text_projection(from)),
+        ("timestamp", source_text_projection(timestamp)),
+    ];
     if let Some(pane_id) = pane_id {
-        frame["paneId"] = json!(pane_id);
+        fields.push(("paneId", source_text_projection(pane_id)));
     }
     if let Some(backend_type) = backend_type {
-        frame["backendType"] = json!(backend_type);
+        fields.push(("backendType", source_text_projection(backend_type)));
     }
-    frame
+    source_object(fields)
 }
 
 /// Ordered rwn envelope from the same current oracle module.
-pub fn shutdown_rejected(request_id: &str, from: &str, reason: &str, timestamp: &str) -> Value {
-    json!({"type":"shutdown_rejected","requestId":request_id,"from":from,"reason":reason,"timestamp":timestamp})
+pub fn shutdown_rejected(
+    request_id: &str,
+    from: &str,
+    reason: &Utf16JsonProjection,
+    timestamp: &str,
+) -> Utf16JsonProjection {
+    source_object(vec![
+        ("type", source_text_projection("shutdown_rejected")),
+        ("requestId", source_text_projection(request_id)),
+        ("from", source_text_projection(from)),
+        ("reason", reason.clone()),
+        ("timestamp", source_text_projection(timestamp)),
+    ])
 }
 
 /// Ordered twn envelope. Undefined reason is omitted.
 pub fn shutdown_request(
     request_id: &str,
     from: &str,
-    reason: Option<&str>,
+    reason: Option<&Utf16JsonProjection>,
     timestamp: &str,
-) -> Value {
-    let mut frame = json!({"type":"shutdown_request","requestId":request_id,"from":from});
+) -> Utf16JsonProjection {
+    let mut fields = vec![
+        ("type", source_text_projection("shutdown_request")),
+        ("requestId", source_text_projection(request_id)),
+        ("from", source_text_projection(from)),
+    ];
     if let Some(reason) = reason {
-        frame["reason"] = json!(reason);
+        fields.push(("reason", reason.clone()));
     }
-    frame["timestamp"] = json!(timestamp);
-    frame
+    fields.push(("timestamp", source_text_projection(timestamp)));
+    source_object(fields)
 }
 
 /// Current plan response envelope; approved responses carry the leader's live mode.
 pub fn plan_response(
     request_id: &str,
     approved: bool,
-    feedback: Option<&str>,
+    feedback: Option<&Utf16JsonProjection>,
     timestamp: &str,
     permission_mode: Option<&str>,
-) -> Value {
-    let mut frame =
-        json!({"type":"plan_approval_response","requestId":request_id,"approved":approved});
+) -> Utf16JsonProjection {
+    let mut fields = vec![
+        ("type", source_text_projection("plan_approval_response")),
+        ("requestId", source_text_projection(request_id)),
+        ("approved", source_bool(approved)),
+    ];
     if let Some(feedback) = feedback {
-        frame["feedback"] = json!(feedback);
+        fields.push(("feedback", feedback.clone()));
     }
-    frame["timestamp"] = json!(timestamp);
+    fields.push(("timestamp", source_text_projection(timestamp)));
     if approved {
         if let Some(mode) = permission_mode {
-            frame["permissionMode"] = json!(mode);
+            fields.push(("permissionMode", source_text_projection(mode)));
         }
     }
-    frame
+    source_object(fields)
 }
 
 /// Oracle Gs routing field order, omitting unavailable colors like undefined.
@@ -421,29 +538,37 @@ pub fn routing(
     sender_color: Option<&str>,
     target: &str,
     target_color: Option<&str>,
-    summary: Option<&str>,
-    content: Option<&str>,
-) -> Value {
-    let mut frame = json!({"sender":sender});
+    summary: Option<&Utf16JsonProjection>,
+    content: Option<&Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    let mut fields = vec![("sender", source_text_projection(sender))];
     if let Some(color) = sender_color {
-        frame["senderColor"] = json!(color);
+        fields.push(("senderColor", source_text_projection(color)));
     }
-    frame["target"] = json!(target);
+    fields.push(("target", source_text_projection(target)));
     if let Some(color) = target_color {
-        frame["targetColor"] = json!(color);
+        fields.push(("targetColor", source_text_projection(color)));
     }
     if let Some(summary) = summary {
-        frame["summary"] = json!(summary);
+        fields.push(("summary", summary.clone()));
     }
     if let Some(content) = content {
-        frame["content"] = json!(content);
+        fields.push(("content", content.clone()));
     }
-    frame
+    source_object(fields)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_string(value: &str) -> Utf16JsonProjection {
+        source_text_projection(value)
+    }
+
+    fn optional_fixture_string(value: &Value) -> Option<Utf16JsonProjection> {
+        value.as_str().map(source_string)
+    }
 
     #[test]
     fn schemas_and_prompts_match_real_binary_wire_captures_byte_for_byte() {
@@ -456,7 +581,7 @@ mod tests {
             let cross = case["cross_session"].as_bool().unwrap();
             let teams = case["teams"].as_bool().unwrap();
             assert_eq!(
-                serde_json::to_string(schema(cross, teams)).unwrap(),
+                schema(cross, teams).to_json_string().unwrap(),
                 case["input_schema_json"].as_str().unwrap(),
                 "schema flags cross={cross} teams={teams}"
             );
@@ -490,15 +615,19 @@ mod tests {
                 "rejected" => shutdown_rejected(
                     request_id,
                     from,
-                    input["reason"].as_str().unwrap(),
+                    &source_string(input["reason"].as_str().unwrap()),
                     timestamp,
                 ),
                 "request" => {
-                    shutdown_request(request_id, from, input["reason"].as_str(), timestamp)
+                    let reason = optional_fixture_string(&input["reason"]);
+                    shutdown_request(request_id, from, reason.as_ref(), timestamp)
                 }
                 _ => unreachable!(),
             };
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
+            assert_eq!(
+                frame.to_json_string().unwrap(),
+                case["json"].as_str().unwrap()
+            );
         }
         assert_eq!(
             protocol_timestamp(std::time::UNIX_EPOCH),
@@ -522,12 +651,15 @@ mod tests {
             let frame = plan_response(
                 "plan-1@scout",
                 case["approved"].as_bool().unwrap(),
-                case["feedback"].as_str(),
+                optional_fixture_string(&case["feedback"]).as_ref(),
                 "2026-09-08T12:34:56.789Z",
                 case["mode"].as_str(),
             );
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
-            assert!(frame.get("from").is_none());
+            assert_eq!(
+                frame.to_json_string().unwrap(),
+                case["json"].as_str().unwrap()
+            );
+            assert!(frame.at_pointer("/from").is_none());
         }
     }
 
@@ -543,23 +675,71 @@ mod tests {
                 case["senderColor"].as_str(),
                 case["target"].as_str().unwrap(),
                 case["targetColor"].as_str(),
-                case["summary"].as_str(),
-                case["content"].as_str(),
+                optional_fixture_string(&case["summary"]).as_ref(),
+                optional_fixture_string(&case["content"]).as_ref(),
             );
-            assert_eq!(frame.to_string(), case["json"].as_str().unwrap());
+            assert_eq!(
+                frame.to_json_string().unwrap(),
+                case["json"].as_str().unwrap()
+            );
         }
     }
 
     #[test]
+    fn frame_builders_preserve_arbitrary_source_string_units() {
+        let reason = source_text_projection_units(&[b'x' as u16, 0xd800]);
+        let frame = shutdown_rejected("r1", "worker", &reason, "t");
+        assert_eq!(
+            frame.string_units("/reason"),
+            Some(vec![b'x' as u16, 0xd800])
+        );
+
+        let content = source_text_projection_units(&[b'a' as u16, 0xdfff]);
+        let frame = routing("worker", None, "leader", None, None, Some(&content));
+        assert_eq!(
+            frame.string_units("/content"),
+            Some(vec![b'a' as u16, 0xdfff])
+        );
+    }
+
+    #[test]
     fn summaries_derive_first_trimmed_line_and_truncate() {
-        let coerced =
-            coerce(&json!({"to":"worker","message":"  First line\nSecond line"})).unwrap();
-        assert_eq!(coerced.input["summary"], "First line");
+        let coerced = coerce(
+            &Utf16JsonProjection::parse(r#"{"to":"worker","message":"  First line\nSecond line"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(coerced.input.string_at("/summary"), Some("First line"));
         assert_eq!(coerced.shape_class, "derive_summary");
-        let coerced =
-            coerce(&json!({"to":"worker","message":"body","summary":"x".repeat(201)})).unwrap();
-        assert_eq!(coerced.input["summary"], format!("{}…", "x".repeat(199)));
+        let long_summary = "x".repeat(201);
+        let input = Utf16JsonProjection::parse(
+            &serde_json::to_string(&json!({"to":"worker","message":"body","summary":long_summary}))
+                .unwrap(),
+        )
+        .unwrap();
+        let coerced = coerce(&input).unwrap();
+        let expected = format!("{}…", "x".repeat(199));
+        assert_eq!(coerced.input.string_at("/summary"), Some(expected.as_str()));
         assert_eq!(coerced.shape_class, "truncate_summary");
+    }
+
+    #[test]
+    fn summary_coercion_preserves_unpaired_source_units_and_other_fields() {
+        let prefix = r#"{"to":"worker","message":"  "#;
+        let suffix = r#"  \nNext","opaque":""#;
+        let ending = r#""}"#;
+        let mut source: Vec<u16> = prefix.encode_utf16().collect();
+        source.push(0xd800);
+        source.extend(suffix.encode_utf16());
+        source.push(0xdfff);
+        source.extend(ending.encode_utf16());
+        let input = Utf16JsonProjection::parse_utf16_json(&source).unwrap();
+
+        let coerced = coerce(&input).unwrap();
+
+        assert_eq!(coerced.input.string_units("/summary"), Some(vec![0xd800]));
+        assert_eq!(coerced.input.string_units("/opaque"), Some(vec![0xdfff]));
+        assert_eq!(coerced.shape_class, "derive_summary");
     }
 
     #[test]
@@ -567,9 +747,20 @@ mod tests {
         for cross in [false, true] {
             for teams in [false, true] {
                 let value = schema(cross, teams);
-                assert_eq!(value["properties"].get("notify_when_idle").is_some(), cross);
-                assert_eq!(value["properties"]["message"].get("anyOf").is_some(), teams);
-                assert_eq!(value["required"], json!(["to", "message"]));
+                assert_eq!(
+                    value.at_pointer("/properties/notify_when_idle").is_some(),
+                    cross
+                );
+                assert_eq!(
+                    value.at_pointer("/properties/message/anyOf").is_some(),
+                    teams
+                );
+                assert_eq!(
+                    value
+                        .at_pointer("/required")
+                        .and_then(|value| value.array_len()),
+                    Some(2)
+                );
                 assert_eq!(
                     prompt(cross, teams).contains("## Protocol responses"),
                     teams
@@ -581,6 +772,9 @@ mod tests {
 
     #[test]
     fn lifecycle_and_permission_frames_are_rejected_but_prose_is_allowed() {
+        fn as_utf16(message: &str) -> Vec<u16> {
+            message.encode_utf16().collect()
+        }
         for kind in [
             "permission_request",
             "shutdown_approved",
@@ -588,9 +782,54 @@ mod tests {
             "idle_notification",
             "task_assignment",
         ] {
-            assert!(plain_message_error(&json!({"type":kind}).to_string()).is_some());
+            let message = json!({"type":kind}).to_string();
+            assert!(plain_message_error(&as_utf16(&message)).is_some());
         }
-        assert_eq!(plain_message_error("The task is complete."), None);
-        assert_eq!(plain_message_error(r#"{"type":"application-event"}"#), None);
+        assert_eq!(
+            plain_message_error(&as_utf16("The task is complete.")),
+            None
+        );
+        assert_eq!(
+            plain_message_error(&as_utf16(r#"{"type":"application-event"}"#)),
+            None
+        );
+    }
+
+    #[test]
+    fn lone_surrogate_plain_message_is_not_misclassified_as_structured() {
+        let input = Utf16JsonProjection::parse(
+            r#"{"to":"team-lead","message":"status \ud800","notify_when_idle":true}"#,
+        )
+        .unwrap();
+        assert!(validate(&input, true, false).is_ok());
+    }
+
+    #[test]
+    fn structured_shutdown_validation_reads_source_views_without_string_lowering() {
+        let isolated_reason = Utf16JsonProjection::parse(
+            r#"{"to":"team-lead","message":{"type":"shutdown_response","request_id":"r1","approve":false,"reason":"\ud800"}}"#,
+        )
+        .unwrap();
+        assert!(validate(&isolated_reason, true, false).is_ok());
+
+        let empty_reason = Utf16JsonProjection::parse(
+            r#"{"to":"team-lead","message":{"type":"shutdown_response","request_id":"r1","approve":false,"reason":"  \u00a0 "}}"#,
+        )
+        .unwrap();
+        assert!(
+            validate(&empty_reason, true, false)
+                .unwrap_err()
+                .contains("reason is required")
+        );
+
+        let cross_session = Utf16JsonProjection::parse(
+            r#"{"to":"session:other","message":{"type":"shutdown_response","request_id":"r1","approve":false,"reason":"no"}}"#,
+        )
+        .unwrap();
+        assert!(
+            validate(&cross_session, true, false)
+                .unwrap_err()
+                .contains("cross-session")
+        );
     }
 }

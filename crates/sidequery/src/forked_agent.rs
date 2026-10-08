@@ -22,7 +22,7 @@
 //! issues ONE stateless LLM call and returns the assistant text + usage. No tool
 //! loop runs here — its consumers are summarization-shaped (autocompaction and
 //! the post-session memory extraction). When no client is wired, [`run`] returns
-//! the legacy `"[forked-agent-stub]"` sentinel.
+//! [`ForkError::MissingBackend`] without producing text or usage.
 //!
 //! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
 //! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
@@ -36,8 +36,8 @@
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
-use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest};
-use lingxi_core::types::ConversationMessage;
+use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -45,6 +45,11 @@ use thiserror::Error;
 /// Legacy output cap for non-compaction single-turn forks without an override.
 /// Compaction inherits the main model's ordinary request budget instead.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
+
+fn is_empty_instruction_projection(message: &ConversationMessage) -> bool {
+    matches!(message, ConversationMessage::System { content, subtype, .. }
+        if content.string_at("").is_some_and(str::is_empty) && subtype.as_deref() == Some("model_reminder_attachment"))
+}
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
 /// subset of purposes that legitimately fork (full loops), and is carried
@@ -88,12 +93,12 @@ pub struct ForkedAgentRequest {
 #[derive(Debug, Clone)]
 pub struct ForkedAgentResult {
     /// Aggregated final assistant text.
-    pub final_text: String,
+    pub final_text: Utf16JsonProjection,
     /// Tool calls emitted by the one-shot provider response. The runner does
     /// not execute them, but callers such as `/btw` must be able to render an
     /// explicit denial instead of silently turning a tool-only response into
     /// an empty answer.
-    pub tool_calls: Vec<serde_json::Value>,
+    pub tool_calls: Vec<Utf16JsonProjection>,
     /// Token / cost usage for COGS attribution.
     pub usage: cost::Usage,
 }
@@ -101,6 +106,9 @@ pub struct ForkedAgentResult {
 /// Forked-agent failure surface.
 #[derive(Debug, Clone, Error)]
 pub enum ForkError {
+    /// No single-turn model backend has been configured on the runner.
+    #[error("no forked-agent backend configured")]
+    MissingBackend,
     /// The shared [`crate::CacheSafeParamsSlot`] is empty — the parent has
     /// not completed a turn yet.
     #[error("no cache-safe params available")]
@@ -117,10 +125,10 @@ pub enum ForkError {
 ///
 /// When a [`SideQueryClient`] is wired via [`Self::with_side_query_client`],
 /// [`Self::run`] performs a real single-turn forked call (see the module
-/// docs); otherwise it returns the legacy stub sentinel.
+/// docs); otherwise it fails with [`ForkError::MissingBackend`].
 pub struct ForkedAgentRunner {
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
-    /// opts in via [`Self::with_side_query_client`], preserving the stub path.
+    /// configures it via [`Self::with_side_query_client`].
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
     /// Session thinking configuration this runner's forked calls INHERIT
     /// (cc 2.1.198 "Subagents + compaction inherit extended thinking config"
@@ -139,7 +147,7 @@ impl Default for ForkedAgentRunner {
 
 impl ForkedAgentRunner {
     /// Build a runner with no single-turn backend; call
-    /// [`Self::with_side_query_client`] to opt into the real single-turn path.
+    /// [`Self::with_side_query_client`] before running a single-turn request.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -170,6 +178,21 @@ impl ForkedAgentRunner {
     #[must_use]
     pub fn has_side_query_client(&self) -> bool {
         self.side_query.is_some()
+    }
+
+    /// Run a stateless Mod completion through the same provider-backed client
+    /// as the fork runner. The request carries its own model and prompt; no
+    /// parent cache prefix or transcript is read or written.
+    pub async fn query_mod_complete(
+        &self,
+        request: SideQueryRequest,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        let Some((client, _)) = &self.side_query else {
+            return Err(SideQueryError::InvalidResponse(
+                "model.complete client unavailable".into(),
+            ));
+        };
+        client.query(request).await
     }
 
     /// Inherit the SESSION thinking configuration on this runner's forked
@@ -206,24 +229,18 @@ impl ForkedAgentRunner {
     ///    runner never starts a follow-up tool loop.
     /// 4. Issue exactly one [`SideQueryClient::query`] and map its response.
     ///
-    /// When no backend is wired the runner returns the legacy
-    /// `"[forked-agent-stub]"` sentinel, unchanged.
+    /// When no backend is wired the runner fails without producing a result.
     ///
     /// The FULL multi-turn, tool-using subagent loop runs through `AgentTool`
     /// (`StateMachinePool::run_subagent_loop`), not this single-turn runner.
     ///
     /// # Errors
     ///
-    /// Returns [`ForkError::Api`] when the wired
-    /// [`SideQueryClient::query`] call fails.
+    /// Returns [`ForkError::MissingBackend`] when no backend is configured,
+    /// or [`ForkError::Api`] when the wired [`SideQueryClient::query`] fails.
     pub async fn run(&self, req: ForkedAgentRequest) -> Result<ForkedAgentResult, ForkError> {
         let Some((client, model)) = &self.side_query else {
-            // No single-turn backend wired: preserve the legacy stub.
-            return Ok(ForkedAgentResult {
-                final_text: "[forked-agent-stub]".into(),
-                tool_calls: Vec::new(),
-                usage: cost::Usage::default(),
-            });
+            return Err(ForkError::MissingBackend);
         };
 
         let cp = &req.cache_safe_params;
@@ -239,6 +256,9 @@ impl ForkedAgentRunner {
         }
         messages.extend(cp.fork_context_messages.iter().cloned());
         messages.extend(req.prompt_messages.iter().cloned());
+        // Empty announcement projections carry a raw durable cursor, but the
+        // native renderer contributes no API message (or model tokens).
+        messages.retain(|message| !is_empty_instruction_projection(message));
 
         // Inherit the live parent's model so /model switches affect later forks.
         let model = if cp.tool_use_options.main_loop_model.trim().is_empty() {
@@ -267,7 +287,8 @@ impl ForkedAgentRunner {
             // `user_context` / `system_context` were inputs the parent used to
             // render it and must NOT be re-applied here (double-rendering would
             // break the byte-identical layout the cache relies on).
-            system_prompt: Some(cp.system_prompt.to_string()),
+            system_prompt: Some(cp.system_prompt.as_ref().clone()),
+            system_prompt_input: cp.system_prompt_input.clone(),
             messages,
             // Claude Code's `runForkedAgent` invokes `query` with an isolated
             // copy of the parent ToolUseContext. That context retains the
@@ -275,7 +296,9 @@ impl ForkedAgentRunner {
             // `/recap`; tools are part of the prompt-cache key. Execution is
             // controlled independently by the caller's tool policy and, here,
             // by the absence of a follow-up tool loop.
-            tools: cp.tools.clone(),
+            tools: llm_runtime::convert::to_tool_declarations(cp.tools.clone())
+                .map_err(crate::side_query::SideQueryError::Api)
+                .map_err(ForkError::Api)?,
             tool_choice: None,
             output_format: None,
             max_tokens,
@@ -286,7 +309,7 @@ impl ForkedAgentRunner {
             // thinking config wired at the composition root; `None` = legacy.
             thinking: self.session_thinking,
             effort: if req.query_source == QuerySource::Compaction
-                || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question")
+                || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question" || source == "hook_prompt")
             {
                 cp.effort.clone()
             } else {
@@ -302,7 +325,7 @@ impl ForkedAgentRunner {
         let resp = client.query(request).await.map_err(ForkError::Api)?;
 
         Ok(ForkedAgentResult {
-            final_text: resp.text.unwrap_or_default(),
+            final_text: resp.text.unwrap_or_else(|| Utf16JsonProjection::from("")),
             tool_calls: resp.tool_calls,
             usage: resp.usage,
         })
@@ -336,7 +359,7 @@ mod tests {
         ) -> Result<SideQueryResponse, SideQueryError> {
             *self.seen.lock().unwrap() = Some(request);
             Ok(SideQueryResponse {
-                text: Some(self.canned_text.clone()),
+                text: Some(Utf16JsonProjection::from(self.canned_text.clone())),
                 structured: None,
                 tool_calls: Vec::new(),
                 usage: self.canned_usage,
@@ -365,11 +388,15 @@ mod tests {
             Ok(SideQueryResponse {
                 text: None,
                 structured: None,
-                tool_calls: vec![serde_json::json!({
-                    "id": "toolu_1",
-                    "name": "Read",
-                    "input": {"file_path": "README.md"}
-                })],
+                tool_calls: vec![Utf16JsonProjection::object(vec![
+                    ("id".into(), "toolu_1".into()),
+                    ("name".into(), "Read".into()),
+                    (
+                        "input".into(),
+                        Utf16JsonProjection::parse(r#"{"file_path":"README.md"}"#).unwrap(),
+                    ),
+                ])
+                .unwrap()],
                 usage: Usage::default(),
                 stop_reason: Some("tool_use".into()),
                 retry_count: 0,
@@ -405,6 +432,21 @@ mod tests {
         ConversationMessage::user(MessageId::new(), text.into())
     }
 
+    fn source_tool(
+        name: &str,
+        description: &str,
+        input_schema: &str,
+    ) -> lingxi_core::host::SourceToolWireDefinition {
+        lingxi_core::host::SourceToolWireDefinition {
+            name: name.to_owned(),
+            description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(description),
+            input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(input_schema)
+                .unwrap(),
+            strict: false,
+            defer_loading: false,
+        }
+    }
+
     fn request_with(
         prefix: Vec<ConversationMessage>,
         prompt: Vec<ConversationMessage>,
@@ -413,7 +455,8 @@ mod tests {
         ForkedAgentRequest {
             prompt_messages: prompt,
             cache_safe_params: CacheSafeParams {
-                system_prompt: Arc::from("PARENT SYSTEM PROMPT"),
+                system_prompt: Arc::new(Utf16JsonProjection::from("PARENT SYSTEM PROMPT")),
+                system_prompt_input: None,
                 user_context: std::collections::HashMap::new(),
                 system_context: std::collections::HashMap::new(),
                 user_context_message: None,
@@ -431,15 +474,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_without_client_returns_stub() {
-        let runner = ForkedAgentRunner::new();
-        let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
+    async fn run_without_backend_returns_typed_failure_without_a_result() {
+        for runner in [ForkedAgentRunner::new(), ForkedAgentRunner::default()] {
+            assert!(!runner.has_side_query_client());
+            for source in [
+                QuerySource::Compaction,
+                QuerySource::SessionMemoryExtraction,
+            ] {
+                let mut req =
+                    request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
+                req.query_source = source;
+                let error = runner
+                    .run(req)
+                    .await
+                    .expect_err("missing backend cannot produce body, tool calls, or usage");
+                assert!(matches!(&error, ForkError::MissingBackend));
+                assert_eq!(error.to_string(), "no forked-agent backend configured");
+            }
+        }
+    }
 
-        let result = runner.run(req).await.expect("stub run succeeds");
-
-        assert_eq!(result.final_text, "[forked-agent-stub]");
-        // `cost::Usage` does not implement `PartialEq`; assert on its fields.
-        assert_eq!(result.usage.tokens, Usage::default().tokens);
+    #[tokio::test]
+    async fn compaction_request_omits_only_empty_announcement_projections() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into());
+        let placeholder = ConversationMessage::System {
+            id: MessageId::new(),
+            content: String::new().into(),
+            subtype: Some("model_reminder_attachment".into()),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let boundary = ConversationMessage::System {
+            id: MessageId::new(),
+            content: String::new().into(),
+            subtype: Some("compact_boundary".into()),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let prefix = vec![user_msg("history"), placeholder, boundary.clone()];
+        let request = request_with(prefix.clone(), vec![user_msg("summarize")], None);
+        runner.run(request).await.unwrap();
+        let sent = client.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(sent.messages.len(), 3);
+        assert!(!sent.messages.iter().any(is_empty_instruction_projection));
+        assert_eq!(sent.messages[1], boundary);
+        assert_eq!(prefix.len(), 3, "durable input history is not rewritten");
     }
 
     #[tokio::test]
@@ -495,29 +581,26 @@ mod tests {
         );
         req.cache_safe_params.tool_use_options.model_profile = Some("parent-profile".into());
         let parent_tools = vec![
-            serde_json::json!({
-                "name": "Read",
-                "description": "Read the file exactly as requested.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"file_path": {"type": "string"}},
-                    "required": ["file_path"]
-                }
-            }),
-            serde_json::json!({
-                "name": "Bash",
-                "description": "Run a shell command.",
-                "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}},
-                "cache_control": {"type": "ephemeral"}
-            }),
+            source_tool(
+                "Read",
+                "Read the file exactly as requested.",
+                r#"{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}"#,
+            ),
+            source_tool(
+                "Bash",
+                "Run a shell command.",
+                r#"{"type":"object","properties":{"command":{"type":"string"}}}"#,
+            ),
         ];
+        let expected_tools = llm_runtime::convert::to_tool_declarations(parent_tools.clone())
+            .expect("source tool schemas convert");
         req.cache_safe_params.tools = parent_tools.clone();
         req.cache_safe_params.effort = Some(serde_json::json!("high"));
 
         let result = runner.run(req).await.expect("wired run succeeds");
 
         // Response mapping: text -> final_text, usage carried through.
-        assert_eq!(result.final_text, "FORKED SUMMARY");
+        assert_eq!(result.final_text.string_at(""), Some("FORKED SUMMARY"));
         assert_eq!(result.usage.tokens.input, 11);
         assert_eq!(result.usage.tokens.output, 22);
 
@@ -538,12 +621,18 @@ mod tests {
             Some("parent-profile"),
             "the side query must inherit the live parent provider route"
         );
-        assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
+        assert_eq!(
+            sent.system_prompt
+                .as_ref()
+                .and_then(|source| source.string_at(""))
+                .as_deref(),
+            Some("PARENT SYSTEM PROMPT")
+        );
         assert_eq!(sent.max_tokens, 512); // honored override
         assert_eq!(sent.max_retries, 0);
         assert_eq!(sent.effort, Some(serde_json::json!("high")));
         assert_eq!(
-            sent.tools, parent_tools,
+            sent.tools, expected_tools,
             "compaction must preserve the parent's tool prefix and order"
         );
         assert!(
@@ -688,17 +777,16 @@ mod tests {
         // `/btw` is a tool-denied, one-turn fork, but it still needs the
         // parent schemas in the API request to preserve the shared cache key.
         req.query_source = QuerySource::Custom("side_question".into());
-        req.cache_safe_params.tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file.",
-            "input_schema": {"type": "object"}
-        })];
+        req.cache_safe_params.tools =
+            vec![source_tool("Read", "Read a file.", r#"{"type":"object"}"#)];
         req.cache_safe_params.effort = Some(serde_json::json!("high"));
-        let parent_tools = req.cache_safe_params.tools.clone();
+        let parent_tools =
+            llm_runtime::convert::to_tool_declarations(req.cache_safe_params.tools.clone())
+                .expect("source tool schemas convert");
         let result = runner.run(req).await.expect("run succeeds");
 
         // Empty text maps to an empty String, not a panic.
-        assert_eq!(result.final_text, "");
+        assert_eq!(result.final_text.string_at(""), Some(""));
 
         let sent = client.seen.lock().unwrap().clone().unwrap();
         assert_eq!(sent.max_tokens, DEFAULT_FORK_MAX_TOKENS);
@@ -732,9 +820,12 @@ mod tests {
             .await
             .expect("tool-only response is still a decoded result");
 
-        assert_eq!(result.final_text, "");
+        assert_eq!(result.final_text.string_at(""), Some(""));
         assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0]["name"], "Read");
+        assert_eq!(
+            result.tool_calls[0].string_at("/name").as_deref(),
+            Some("Read")
+        );
     }
 
     #[tokio::test]

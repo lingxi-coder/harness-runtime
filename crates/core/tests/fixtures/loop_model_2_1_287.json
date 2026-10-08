@@ -1,0 +1,5505 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "AM wakeup gate",
+      "start": 181693770,
+      "end": 181693889,
+      "sha256": "28770eab157a5899390a467d696e2ff39571377ae403ba61977961b419f0aa9e"
+    },
+    {
+      "label": "S/ny/bzt/L8r/zQe/N8r/m capability lookup",
+      "start": 179147331,
+      "end": 179148108,
+      "sha256": "b950ee16193f68e02b126682a50495d1c3c223a79aea01753022350ba3c56e62"
+    },
+    {
+      "label": "served feature admission",
+      "start": 179147242,
+      "end": 179147290,
+      "sha256": "7d64bd8913284f635db977b083b9ffefb68e95f65102038688a8b7d742612172"
+    },
+    {
+      "label": "baked model catalog",
+      "start": 179126176,
+      "end": 179143678,
+      "sha256": "c00274e499755bf30086402d9dc8d3770a9b402da99ef7e8c6736c45a9867f67"
+    }
+  ],
+  "scope": "Actual native AM and capability lookup including override grammar, served true admission, baked mitigation and Mythos fallback. Canonical first model input and served observations supplied; served/account/catalog acquisition and provider identity projection remain separate.",
+  "cases": [
+    {
+      "model": "claude-3-5-haiku",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": null,
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": null,
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": null,
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": null,
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "custom-model",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "custom-model",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": null,
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5[1m]",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": null,
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": null,
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations,-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "-fable_5_mitigations,fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-*= -fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-mythos-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-*=fable_5_mitigations;claude-fable-5=-fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "*= -fable_5_mitigations;custom-model=fable_5_mitigations",
+      "served": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": " =fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": " =fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "CLAUDE-FABLE-5=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "﻿fable_5_mitigations﻿",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5[1m]=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "claude-fable-5 = fable_5_mitigations =ignored",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "xhigh_effort,",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "xhigh_effort,",
+      "served": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": false,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5[1M]",
+      "environment": "fable_5_mitigations;claude-mythos-*=-fable_5_mitigations",
+      "served": true,
+      "expected": true
+    }
+  ]
+}

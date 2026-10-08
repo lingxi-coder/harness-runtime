@@ -98,7 +98,7 @@ impl XaaError {
 
 impl From<XaaError> for lingxi_core::host::McpError {
     fn from(e: XaaError) -> Self {
-        lingxi_core::host::McpError::OAuth(e.to_string())
+        lingxi_core::host::McpError::OAuth(e.to_string().into())
     }
 }
 

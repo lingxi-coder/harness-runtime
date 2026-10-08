@@ -1,0 +1,10 @@
+{
+  "type": "refusal_continuation",
+  "phase": "begin",
+  "salvage_text": "retained refusal text",
+  "join": "exact",
+  "replaces_uuids": [
+    "assistant-row-0"
+  ],
+  "display_salvage_text": true
+}

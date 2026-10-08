@@ -43,18 +43,21 @@ impl BuiltinCommandHandler for MemoryHandler {
                 );
                 telemetry::emit_command_completed(cmd_evt::MEMORY_COMPLETED, &details);
                 CommandResult::Done {
-                    display: Some(format!(
-                        "Edited {} (exit {}).",
-                        outcome.edited_path.display(),
-                        outcome.exit_code
-                    )),
+                    display: Some(
+                        (format!(
+                            "Edited {} (exit {}).",
+                            outcome.edited_path.display(),
+                            outcome.exit_code
+                        ))
+                        .into(),
+                    ),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::MEMORY_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not edit memory: {msg}")),
+                    display: Some((format!("Could not edit memory: {msg}")).into()),
                 }
             }
         }
@@ -77,8 +80,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "memory".to_string(),
-            raw_args: String::new(),
+            name: "memory".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

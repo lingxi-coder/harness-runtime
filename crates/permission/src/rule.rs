@@ -3,6 +3,7 @@
 //! Rules are evaluated in source-priority order: highest-priority source
 //! wins, deny rules beat allow rules at the same priority.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 
 /// A single permission rule: the tool it targets, the behavior to apply,
@@ -19,13 +20,19 @@ pub struct PermissionRule {
 
 /// The match key for a `PermissionRule`: a tool name plus optional
 /// rule-specific content (for example, a bash command substring).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionRuleValue {
     /// Name of the tool this rule applies to (e.g. `"Bash"`, `"Edit"`).
     pub tool_name: String,
     /// Optional rule-specific content used by tool-aware classifiers
     /// (e.g. a bash command pattern). `None` matches the bare tool.
-    pub rule_content: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rule_content: Option<Utf16JsonProjection>,
 }
 
 impl PermissionRuleValue {
@@ -41,48 +48,91 @@ impl PermissionRuleValue {
     /// - The tool name is run through [`normalize_legacy_tool_name`].
     #[must_use]
     pub fn from_rule_string(rule: &str) -> Self {
-        let chars: Vec<char> = rule.chars().collect();
-        let bare = || Self {
-            tool_name: normalize_legacy_tool_name(rule),
-            rule_content: None,
+        Self::from_rule_projection(&Utf16JsonProjection::from(rule))
+            .expect("UTF-8 rule text has a representable tool name")
+    }
+
+    /// Parse a raw rule-string projection without narrowing content to UTF-8.
+    /// A rule whose tool-name portion contains unpaired UTF-16 units is
+    /// rejected because tool names are typed Rust identifiers in this API.
+    #[must_use]
+    pub fn from_rule_projection(rule: &Utf16JsonProjection) -> Option<Self> {
+        let units = rule.string_units("")?;
+        let bare = || {
+            let tool_name = String::from_utf16(&units).ok()?;
+            Some(Self {
+                tool_name: normalize_legacy_tool_name(&tool_name),
+                rule_content: None,
+            })
         };
-        let Some(open) = find_first_unescaped(&chars, '(') else {
+        let Some(open) = find_first_unescaped_unit(&units, b'(' as u16) else {
             return bare();
         };
-        let Some(close) = find_last_unescaped(&chars, ')') else {
+        let Some(close) = find_last_unescaped_unit(&units, b')' as u16) else {
             return bare();
         };
         // Malformed / content-after-close → treat the whole string as a tool name.
-        if close <= open || close != chars.len() - 1 {
+        if close <= open || close != units.len() - 1 {
             return bare();
         }
-        let tool_name: String = chars[..open].iter().collect();
+        let tool_name = String::from_utf16(&units[..open]).ok()?;
         if tool_name.is_empty() {
             return bare();
         }
-        let raw_content: String = chars[open + 1..close].iter().collect();
+        let raw_content = &units[open + 1..close];
         // `Tool()` / `Tool(*)` are tool-wide.
-        if raw_content.is_empty() || raw_content == "*" {
-            return Self {
+        if raw_content.is_empty() || raw_content == [b'*' as u16] {
+            return Some(Self {
                 tool_name: normalize_legacy_tool_name(&tool_name),
                 rule_content: None,
-            };
+            });
         }
-        Self {
+        let content = unescape_rule_content_units(raw_content);
+        Some(Self {
             tool_name: normalize_legacy_tool_name(&tool_name),
-            rule_content: Some(unescape_rule_content(&raw_content)),
-        }
+            rule_content: Some(root_string_projection(content)),
+        })
     }
 
     /// Serialize back to the `"Tool"` / `"Tool(content)"` rule-string form
     /// (1:1 with claude-code `permissionRuleValueToString`; content parens are
     /// escaped). Round-trips with [`Self::from_rule_string`].
     #[must_use]
-    pub fn to_rule_string(&self) -> String {
-        match self.rule_content.as_deref() {
-            None | Some("") => self.tool_name.clone(),
-            Some(content) => format!("{}({})", self.tool_name, escape_rule_content(content)),
+    pub fn to_rule_projection(&self) -> Utf16JsonProjection {
+        let mut units: Vec<u16> = self.tool_name.encode_utf16().collect();
+        if let Some(content) = &self.rule_content {
+            if let Some(content_units) = content.string_units("") {
+                units.push(b'(' as u16);
+                units.extend(escape_rule_content_units(&content_units));
+                units.push(b')' as u16);
+            }
         }
+        root_string_projection(units)
+    }
+
+    /// UTF-8 display form for existing UI/log boundaries. Source serialization
+    /// must use [`Self::to_rule_projection`] instead.
+    #[must_use]
+    pub fn to_rule_string(&self) -> String {
+        self.to_rule_projection()
+            .string_at("")
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Exact content units, if this is a content rule.
+    #[must_use]
+    pub fn rule_content_units(&self) -> Option<Vec<u16>> {
+        self.rule_content.as_ref()?.string_units("")
+    }
+
+    /// Exact UTF-8 view for string-only semantic helpers. Returns `None` for
+    /// source strings containing unpaired UTF-16 units.
+    #[must_use]
+    pub fn rule_content_text(&self) -> Option<&str> {
+        let content = self.rule_content.as_ref()?;
+        let value = content.at_pointer("")?;
+        crate::source_input::exact_string(value)
     }
 }
 
@@ -109,40 +159,61 @@ pub fn normalize_legacy_tool_name(name: &str) -> String {
 
 /// Escape rule content for `Tool(content)` storage (claude-code
 /// `escapeRuleContent`). Order matters: backslashes first, then parens.
-fn escape_rule_content(content: &str) -> String {
-    content
-        .replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
+fn escape_rule_content_units(content: &[u16]) -> Vec<u16> {
+    let mut escaped = Vec::with_capacity(content.len());
+    for unit in content {
+        if *unit == b'\\' as u16 || *unit == b'(' as u16 || *unit == b')' as u16 {
+            escaped.push(b'\\' as u16);
+        }
+        escaped.push(*unit);
+    }
+    escaped
 }
 
-/// Reverse of [`escape_rule_content`] (claude-code `unescapeRuleContent`):
+/// Reverse of [`escape_rule_content_units`] (claude-code `unescapeRuleContent`):
 /// parens first, then backslashes.
-fn unescape_rule_content(content: &str) -> String {
-    content
-        .replace("\\(", "(")
-        .replace("\\)", ")")
-        .replace("\\\\", "\\")
+fn unescape_rule_content_units(content: &[u16]) -> Vec<u16> {
+    let mut units = content.to_vec();
+    for escaped in [b'(' as u16, b')' as u16, b'\\' as u16] {
+        let mut output = Vec::with_capacity(units.len());
+        let mut index = 0;
+        while index < units.len() {
+            if units[index] == b'\\' as u16 && units.get(index + 1).copied() == Some(escaped) {
+                output.push(escaped);
+                index += 2;
+            } else {
+                output.push(units[index]);
+                index += 1;
+            }
+        }
+        units = output;
+    }
+    units
+}
+
+fn root_string_projection(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display is derived from exact UTF-16 units")
 }
 
 /// Index of the FIRST `target` char preceded by an EVEN number of backslashes
 /// (i.e. not escaped). claude-code `findFirstUnescapedChar`.
-fn find_first_unescaped(chars: &[char], target: char) -> Option<usize> {
-    (0..chars.len()).find(|&i| chars[i] == target && is_unescaped(chars, i))
+fn find_first_unescaped_unit(units: &[u16], target: u16) -> Option<usize> {
+    (0..units.len()).find(|&i| units[i] == target && is_unescaped_unit(units, i))
 }
 
 /// Index of the LAST unescaped `target` char. claude-code `findLastUnescapedChar`.
-fn find_last_unescaped(chars: &[char], target: char) -> Option<usize> {
-    (0..chars.len())
+fn find_last_unescaped_unit(units: &[u16], target: u16) -> Option<usize> {
+    (0..units.len())
         .rev()
-        .find(|&i| chars[i] == target && is_unescaped(chars, i))
+        .find(|&i| units[i] == target && is_unescaped_unit(units, i))
 }
 
 /// `true` if the char at `i` is preceded by an even number of `\`.
-fn is_unescaped(chars: &[char], i: usize) -> bool {
+fn is_unescaped_unit(units: &[u16], i: usize) -> bool {
     let mut backslashes = 0usize;
     let mut j = i;
-    while j > 0 && chars[j - 1] == '\\' {
+    while j > 0 && units[j - 1] == b'\\' as u16 {
         backslashes += 1;
         j -= 1;
     }
@@ -411,7 +482,7 @@ mod tests {
         let r = PermissionRule {
             value: PermissionRuleValue {
                 tool_name: "Bash".to_string(),
-                rule_content: Some("ls".to_string()),
+                rule_content: Some("ls".into()),
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,
@@ -449,7 +520,7 @@ mod tests {
     fn parse_tool_with_content() {
         let v = parse("Bash(npm install)");
         assert_eq!(v.tool_name, "Bash");
-        assert_eq!(v.rule_content.as_deref(), Some("npm install"));
+        assert_eq!(v.rule_content_text(), Some("npm install"));
     }
 
     #[test]
@@ -464,7 +535,7 @@ mod tests {
         // claude-code doc example: Bash(python -c "print\(1\)")
         let v = parse(r#"Bash(python -c "print\(1\)")"#);
         assert_eq!(v.tool_name, "Bash");
-        assert_eq!(v.rule_content.as_deref(), Some(r#"python -c "print(1)""#));
+        assert_eq!(v.rule_content_text(), Some(r#"python -c "print(1)""#));
     }
 
     #[test]
@@ -509,5 +580,33 @@ mod tests {
             .to_rule_string(),
             "Read"
         );
+    }
+
+    #[test]
+    fn source_rule_content_keeps_isolated_utf16_units_through_parse_and_serialize() {
+        let source = Utf16JsonProjection::parse(r#""Edit(\ud800)""#).unwrap();
+        let rule = PermissionRuleValue::from_rule_projection(&source).unwrap();
+        assert_eq!(rule.tool_name, "Edit");
+        assert_eq!(rule.rule_content_units(), Some(vec![0xd800]));
+
+        let serialized = rule.to_rule_projection();
+        assert_eq!(
+            serialized.string_units(""),
+            Some(vec![
+                b'E' as u16,
+                b'd' as u16,
+                b'i' as u16,
+                b't' as u16,
+                b'(' as u16,
+                0xd800,
+                b')' as u16,
+            ])
+        );
+        assert_eq!(serialized.to_json_string().unwrap(), r#""Edit(\ud800)""#);
+
+        let encoded = serde_json::to_string(&rule).unwrap();
+        assert!(encoded.contains(r#""rule_content":"\ud800""#));
+        let decoded: PermissionRuleValue = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, rule);
     }
 }

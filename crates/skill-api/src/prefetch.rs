@@ -41,6 +41,7 @@
 
 use crate::registry::SkillRegistry;
 use lingxi_core::host::RuntimeSpawner;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -54,7 +55,7 @@ pub struct DiscoveredSkill {
     /// `- {name}: {description}` line key. Also the per-session dedup key.
     pub name: String,
     /// One-line skill description rendered after the name.
-    pub description: String,
+    pub description: Utf16JsonProjection,
     /// Optional short id (`shortId?`). UI/transcript-only (`AttachmentMessage.tsx`
     /// `${name} [${shortId}]`); NEVER part of the model-facing block.
     pub short_id: Option<String>,
@@ -339,21 +340,36 @@ const WRITE_PIVOT_TOOL_NAMES: &[&str] = &["Edit", "Write", "MultiEdit", "Noteboo
 /// `skill_listing`; byte-equivalent to the TS `wrapMessagesInSystemReminder([…])`
 /// of one `isMeta` user message).
 #[must_use]
-pub fn render_skill_discovery_block(skills: &[DiscoveredSkill]) -> Option<String> {
+pub fn render_skill_discovery_block(skills: &[DiscoveredSkill]) -> Option<Utf16JsonProjection> {
     if skills.is_empty() {
         return None; // TS `if (attachment.skills.length === 0) return []`
     }
-    let lines = skills
-        .iter()
-        .map(|s| format!("- {}: {}", s.name, s.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let body = format!(
-        "Skills relevant to your task:\n\n{lines}\n\n\
-         These skills encode project-specific conventions. \
-         Invoke via Skill(\"<name>\") for complete instructions."
+
+    let mut units = "<system-reminder>\nSkills relevant to your task:\n\n"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    for (index, skill) in skills.iter().enumerate() {
+        if index > 0 {
+            units.push(b'\n' as u16);
+        }
+        units.extend("- ".encode_utf16());
+        units.extend(skill.name.encode_utf16());
+        units.extend(": ".encode_utf16());
+        units.extend(
+            skill
+                .description
+                .string_units("")
+                .expect("discovered skill descriptions are root strings"),
+        );
+    }
+    units.extend(
+        "\n\nThese skills encode project-specific conventions. Invoke via Skill(\"<name>\") for complete instructions.\n</system-reminder>"
+            .encode_utf16(),
     );
-    Some(format!("<system-reminder>\n{body}\n</system-reminder>"))
+    Some(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("rendered skill discovery block is a source string"),
+    )
 }
 
 #[cfg(test)]
@@ -406,7 +422,7 @@ mod tests {
                 triggers: triggers.iter().map(|s| (*s).into()).collect(),
                 ..Default::default()
             },
-            content: String::new(),
+            content: String::new().into(),
             source: SkillSource::Bundled,
             loaded_from: LoadedFrom::Bundled,
             plugin_id: None,
@@ -423,15 +439,42 @@ mod tests {
         ])
         .expect("non-empty renders Some");
         assert_eq!(
-            out,
-            "<system-reminder>\n\
+            out.string_at(""),
+            Some(
+                "<system-reminder>\n\
              Skills relevant to your task:\n\n\
              - git-commit: Commit staged changes\n\
              - rebase: Interactive rebase helper\n\n\
              These skills encode project-specific conventions. \
              Invoke via Skill(\"<name>\") for complete instructions.\n\
              </system-reminder>"
+            )
         );
+    }
+
+    #[test]
+    fn render_block_preserves_unpaired_surrogates_in_descriptions() {
+        let description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&[b'A' as u16, 0xd800, b'B' as u16]),
+            vec![b'A' as u16, 0xd800, b'B' as u16],
+        )
+        .expect("valid source string projection");
+        let out = render_skill_discovery_block(&[DiscoveredSkill {
+            name: "mcp-skill".into(),
+            description,
+            short_id: None,
+        }])
+        .expect("one skill renders");
+
+        let mut expected = "<system-reminder>\nSkills relevant to your task:\n\n- mcp-skill: A"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend(
+            "B\n\nThese skills encode project-specific conventions. Invoke via Skill(\"<name>\") for complete instructions.\n</system-reminder>"
+                .encode_utf16(),
+        );
+        assert_eq!(out.string_units(""), Some(expected));
     }
 
     // (D.2) 0 skills ⇒ None (TS `return []`).
@@ -507,7 +550,7 @@ mod tests {
         let out = src.discover("please commit my changes").await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "git-commit");
-        assert_eq!(out[0].description, "Commit helper");
+        assert_eq!(out[0].description.string_at(""), Some("Commit helper"));
         assert_eq!(out[0].short_id, None);
     }
 

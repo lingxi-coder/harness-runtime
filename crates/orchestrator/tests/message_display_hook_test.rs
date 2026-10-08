@@ -193,9 +193,9 @@ fn single_text_turn() -> Vec<llm_runtime::HistoryEvent> {
 fn orch_with(
     hooks: Arc<HookExecutorImpl>,
     api: Arc<MockStreamingApiClient>,
-) -> (ConversationOrchestrator, Arc<MockOutputStream>) {
+) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         api,
@@ -205,7 +205,7 @@ fn orch_with(
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
     (orch, output)
 }
 

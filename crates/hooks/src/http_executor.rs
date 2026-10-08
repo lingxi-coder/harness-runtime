@@ -22,12 +22,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{HttpMethod, HttpRequest};
 use regex::Regex;
 
 use crate::definition::{HookDefinition, HookExecutor};
-use crate::hook_payload::parse_response;
-use crate::response::{HookOutcome, HookResponse, HookResult};
+use crate::hook_payload::parse_response_projection;
+use crate::response::{ExactHookText, HookOutcome, HookResponse, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 
 /// Interpolate a single header VALUE, substituting `$VAR` / `${VAR}` references
@@ -332,8 +333,8 @@ impl HttpExecutor {
                 return HttpExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Error,
-                        stdout: String::new(),
-                        stderr: format!("Hook {} failed: {msg}", hook.id),
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!("Hook {} failed: {msg}", hook.id)),
                         exit_code: None,
                         response: None,
                     },
@@ -349,8 +350,11 @@ impl HttpExecutor {
                 return HttpExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Error,
-                        stdout: String::new(),
-                        stderr: format!("Hook {} failed: SSRF guard rejected url: {}", hook.id, e),
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!(
+                            "Hook {} failed: SSRF guard rejected url: {}",
+                            hook.id, e
+                        )),
                         exit_code: None,
                         response: None,
                     },
@@ -419,12 +423,12 @@ impl HttpExecutor {
                 return HttpExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Timeout,
-                        stdout: String::new(),
-                        stderr: format!(
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!(
                             "Hook {} failed: timeout after {}ms",
                             hook.id,
                             effective_timeout.as_millis()
-                        ),
+                        )),
                         exit_code: None,
                         response: None,
                     },
@@ -435,8 +439,11 @@ impl HttpExecutor {
                 return HttpExecutionOutcome {
                     result: HookResult {
                         outcome: HookOutcome::Error,
-                        stdout: String::new(),
-                        stderr: format!("Hook {} failed: http error: {e}", hook.id),
+                        stdout: ExactHookText::default(),
+                        stderr: ExactHookText::from_text(format!(
+                            "Hook {} failed: http error: {e}",
+                            hook.id
+                        )),
                         exit_code: None,
                         response: None,
                     },
@@ -448,10 +455,13 @@ impl HttpExecutor {
         // 5. Parse body if any. Even on non-2xx status, attempt to parse
         //    because some hooks return JSON + non-2xx to mean "advisory".
         let success = (200..300).contains(&raw.status);
-        let parsed: Option<HookResponse> = if raw.body.is_empty() {
+        let stdout = ExactHookText::from_text(raw.body);
+        let parsed: Option<HookResponse> = if stdout.is_empty() {
             None
         } else {
-            parse_response(&raw.body, expected_event).ok()
+            Utf16JsonProjection::parse_utf16_json(&stdout.utf16_code_units)
+                .ok()
+                .and_then(|projection| parse_response_projection(&projection, expected_event).ok())
         };
 
         HttpExecutionOutcome {
@@ -461,8 +471,8 @@ impl HttpExecutor {
                 } else {
                     HookOutcome::Error
                 },
-                stdout: raw.body,
-                stderr: String::new(),
+                stdout,
+                stderr: ExactHookText::default(),
                 exit_code: None,
                 response: parsed,
             },
@@ -667,6 +677,47 @@ mod tests {
             .expect("domain request should pin vetted addresses");
         assert_eq!(pinned.domain, "hook.example.com");
         assert_eq!(pinned.addrs, vec!["93.184.216.34:443".parse().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn response_projection_preserves_escaped_unpaired_surrogate() {
+        let body = r#"{"systemMessage":"\ud800"}"#;
+        let http = Arc::new(MockHttp {
+            recorded: Mutex::new(Vec::new()),
+            response_status: 200,
+            response_body: body.to_string(),
+            error_to_return: Mutex::new(None),
+            resolved: Mutex::new(Vec::new()),
+        });
+        let exec = HttpExecutor::new(http, test_ssrf_guard(), Duration::from_secs(5));
+        let hook = make_http_hook("https://hook.example.com/pre");
+
+        let outcome = exec
+            .execute(
+                &hook,
+                "https://hook.example.com/pre",
+                &HashMap::new(),
+                "{}",
+                "PreToolUse",
+            )
+            .await;
+
+        assert!(matches!(outcome.result.outcome, HookOutcome::Success));
+        assert_eq!(outcome.result.stdout.display, body);
+        assert_eq!(
+            outcome.result.stdout.utf16_code_units,
+            body.encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            outcome
+                .result
+                .response
+                .expect("response projection parses")
+                .system_message
+                .expect("systemMessage is retained")
+                .utf16_code_units,
+            [0xD800]
+        );
     }
 
     #[tokio::test]
@@ -920,11 +971,11 @@ mod tests {
         );
         // Byte-exact CC block message embedded in stderr.
         assert!(
-            outcome.result.stderr.contains(
+            outcome.result.stderr.display.contains(
                 "HTTP hook blocked: https://evil.example.com/exfil does not match any pattern in allowedHttpHookUrls"
             ),
             "stderr = {:?}",
-            outcome.result.stderr
+            outcome.result.stderr.display
         );
         assert_eq!(
             http.recorded.lock().unwrap().len(),

@@ -36,6 +36,7 @@ use lingxi_core::host::share::SharingService;
 use lingxi_core::host::subagent_spawn::SubagentSpawner;
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::worktree::WorktreeManager;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -573,11 +574,11 @@ pub trait TaskLifecycleHookFirer: Send + Sync {
     async fn fire_task_created(
         &self,
         task_id: &str,
-        subject: &str,
-        description: Option<&str>,
+        subject: &Utf16JsonProjection,
+        description: Option<&Utf16JsonProjection>,
         teammate_name: Option<&str>,
         team_name: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Utf16JsonProjection> {
         let _ = (task_id, subject, description, teammate_name, team_name);
         Ok(())
     }
@@ -590,11 +591,11 @@ pub trait TaskLifecycleHookFirer: Send + Sync {
         &self,
         task_id: &str,
         status: &str,
-        subject: &str,
-        description: Option<&str>,
+        subject: &Utf16JsonProjection,
+        description: Option<&Utf16JsonProjection>,
         teammate_name: Option<&str>,
         team_name: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Utf16JsonProjection> {
         let _ = (
             task_id,
             status,
@@ -801,7 +802,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PermissionGate for LiveReadDenyGate {
-        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Allow
         }
 

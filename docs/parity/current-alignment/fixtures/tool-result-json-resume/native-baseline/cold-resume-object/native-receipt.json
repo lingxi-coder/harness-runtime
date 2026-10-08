@@ -1,0 +1,90 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "e223f0c8ffb4e3b405cec5964c4b29631ca2c0352a2a957fe0bbc48f90c01d9c",
+  "fixture_sha256": {
+    "cases.json": "3b84972a440afb4d9c0337fea4ff29f07ec2b12d2411074b0d00bc5cee8d0503"
+  },
+  "fixed_input": {
+    "session_id": "00000000-0000-4000-8000-000000002947",
+    "tool_use_id": "toolu_native_json_resume_fixture",
+    "tool_use_name": "Bash",
+    "tool_result_content_kind": "object",
+    "json_stringify_utf16_units": 50007,
+    "json_stringify_units_49999_50000": [
+      "U+D83D",
+      "U+DE00"
+    ],
+    "tail_pair_at": 50003
+  },
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "phase_results": [
+    {
+      "phase": "initial",
+      "exit_code": 0,
+      "timed_out": false
+    },
+    {
+      "phase": "resume",
+      "exit_code": 0,
+      "timed_out": false
+    }
+  ],
+  "requests": [
+    {
+      "method": "POST",
+      "phase": "initial",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 124730,
+      "request_sha256": "a83ca0fb7aaa49e2db4646cfa5f4782b3c5ecb0f93a62855cce0e1bdbf0007f6",
+      "raw_request_path": "run-output/tool-result-json-resume-6fj2a40i/requests/request-1.full.raw.json"
+    },
+    {
+      "method": "POST",
+      "phase": "resume",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 175410,
+      "request_sha256": "051921d7ebd59ce8dd2b330e4ac12db7717323f7e6ed9c0dc5ea229aa83c73bd",
+      "raw_request_path": "run-output/tool-result-json-resume-6fj2a40i/requests/request-2.full.raw.json"
+    }
+  ],
+  "resume_request": {
+    "raw_result_content_path": "model-tool-result-content.raw.json",
+    "raw_result_content_bytes": 50055,
+    "raw_result_content_sha256": "9116513181209c00d7ce1d9be366acc5484a944d26ec44781ad5fecfc15a9bdb",
+    "content_kind": "str",
+    "visible_result_utf16_units": 50049,
+    "visible_result_unit_at_49998_49999": [
+      "U+0061",
+      "U+000A"
+    ],
+    "ends_with_explicit_omitted_count": true,
+    "omitted_character_count": 6,
+    "visible_result_suffix": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n[6 more characters of this tool result not shown]"
+  },
+  "input_jsonl_row": {
+    "path": "resume-input-tool-result-session-row.raw.jsonl",
+    "bytes": 50926,
+    "sha256": "7cf08645bf6a723921019b1737029cd0ae2ae3ada7dd37fbfc9a46b57670533c",
+    "message_content_kind": "object"
+  },
+  "post_resume_session_row": {
+    "path": "post-resume-tool-result-session-row.raw.jsonl",
+    "bytes": 50926,
+    "sha256": "7cf08645bf6a723921019b1737029cd0ae2ae3ada7dd37fbfc9a46b57670533c",
+    "message_content_kind": "dict"
+  },
+  "checks": {
+    "synthetic_jsonl_object_tool_result_reached_public_resume": true,
+    "resume_request_was_loopback_dummy_key_only": true,
+    "native_resume_completed": true,
+    "persisted_session_retains_object_tool_result": true,
+    "native_json_string_cut_and_omitted_count_match": true
+  },
+  "scope": "Public Native 2.1.293 --resume after a fixed synthetic JSONL object-valued tool_result is inserted into an isolated session created by the public CLI. This tests cold-resume projection only; the tool_result row itself is controlled fixture input, not emitted by a Native tool execution."
+}

@@ -34,6 +34,7 @@
 //!   still produced by [`render_tool_use_message`] so the copy is pinned here.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -42,7 +43,9 @@ use serde_json::{json, Value};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -113,8 +116,8 @@ fn finding_schema() -> Value {
 /// `Edit` input schema (`p0i=we(()=>ci({file_path:…}))`, `cc-238.js @226392438`),
 /// which this port already renders with `additionalProperties:false`
 /// (`tools/file/src/edit.rs:322`) — so the closed form is used here too.
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -131,12 +134,12 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "required": ["findings"]
-    })
+    }))
 });
 
 /// Oracle `iGv` (`cc-238.js @229541090`) — the output schema (`be(...)` ⇒ strict).
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -156,7 +159,7 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "required": ["count", "findings"]
-    })
+    }))
 });
 
 /// `n === 1 ? word : word + 's'` — port of the oracle's `Et()`
@@ -210,8 +213,8 @@ impl Tool for ReportFindingsTool {
         REPORT_FINDINGS_TOOL_NAME
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("report code-review findings as a structured list")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("report code-review findings as a structured list".into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
@@ -220,12 +223,118 @@ impl Tool for ReportFindingsTool {
         Some("Code review")
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        let invalid = || invalid_tool_input("ReportFindings returned invalid output");
+        let count = output
+            .subprojection("/count")
+            .ok()
+            .filter(|_| output.number_at("/count").is_some())
+            .ok_or_else(invalid)?;
+        let mut fields = vec![("count".to_owned(), count)];
+        if let Some(level) = output.get_property("level") {
+            let value = level.as_str().ok_or_else(invalid)?;
+            if !["low", "medium", "high", "xhigh", "max"].contains(&value) {
+                return Err(invalid());
+            }
+            fields.push((
+                "level".to_owned(),
+                output.subprojection("/level").map_err(|_| invalid())?,
+            ));
+        }
+        let findings_count = output.array_len("/findings").ok_or_else(invalid)?;
+        let mut findings = Vec::with_capacity(findings_count);
+        for index in 0..findings_count {
+            let pointer = format!("/findings/{index}");
+            let view = output
+                .at_pointer(&pointer)
+                .filter(|value| value.object_entries().is_some())
+                .ok_or_else(invalid)?;
+            let mut finding_fields = Vec::new();
+            for key in [
+                "file",
+                "line",
+                "summary",
+                "short_summary",
+                "failure_scenario",
+                "category",
+                "verdict",
+                "outcome",
+            ] {
+                let Some(value) = view.get_property(key) else {
+                    if matches!(key, "file" | "summary" | "failure_scenario") {
+                        return Err(invalid());
+                    }
+                    continue;
+                };
+                match key {
+                    "file" | "summary" | "failure_scenario" | "short_summary" | "category" => {
+                        let Some(text) = value.code_units() else {
+                            return Err(invalid());
+                        };
+                        if (key == "short_summary" && text.len() > 60)
+                            || (key == "category" && text.len() > 40)
+                        {
+                            return Err(invalid());
+                        }
+                    }
+                    "line" => {
+                        if !value
+                            .as_number()
+                            .is_some_and(|number| number.fract() == 0.0)
+                        {
+                            return Err(invalid());
+                        }
+                    }
+                    "verdict" => {
+                        if !value
+                            .as_str()
+                            .is_some_and(|text| matches!(text, "CONFIRMED" | "PLAUSIBLE"))
+                        {
+                            return Err(invalid());
+                        }
+                    }
+                    "outcome" => {
+                        if !value.as_str().is_some_and(|text| {
+                            matches!(text, "fixed" | "skipped" | "no_change_needed")
+                        }) {
+                            return Err(invalid());
+                        }
+                    }
+                    _ => {}
+                }
+                finding_fields.push((
+                    key.to_owned(),
+                    output
+                        .subprojection(&format!("{pointer}/{key}"))
+                        .map_err(|_| invalid())?,
+                ));
+            }
+            findings.push(Utf16JsonProjection::object(finding_fields).map_err(|_| invalid())?);
+        }
+        fields.push((
+            "findings".to_owned(),
+            Utf16JsonProjection::array(findings).map_err(|_| invalid())?,
+        ));
+        Utf16JsonProjection::object(fields).map_err(|_| invalid())
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -242,15 +351,19 @@ impl Tool for ReportFindingsTool {
         MAX_RESULT_SIZE_CHARS
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // Oracle: no `checkPermissions` key ⇒ `es()` default
         // `(e,t)=>Promise.resolve({behavior:"allow",updatedInput:e})`.
         PermissionResult::Allow {
@@ -263,17 +376,21 @@ impl Tool for ReportFindingsTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        DESCRIPTION.to_string()
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        DESCRIPTION.to_string().into()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -281,32 +398,40 @@ impl Tool for ReportFindingsTool {
         // level:t,findings:e}}}` — a pure echo. `findings` is schema-required;
         // an absent array degrades to empty rather than erroring, matching the
         // destructure of a validated input.
+        let count = input.array_len("/findings").unwrap_or_default();
         let findings = input
-            .get("findings")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let count = findings.len();
-
-        let mut data = serde_json::Map::new();
-        data.insert("count".into(), json!(count));
+            .subprojection("/findings")
+            .unwrap_or_else(|_| generated_builtin_result(&json!([])));
+        let mut data = vec![("count".to_owned(), generated_builtin_result(&json!(count)))];
         // JS `{level: undefined}` is dropped by JSON.stringify — omit when absent.
-        if let Some(level) = input.get("level") {
-            if !level.is_null() {
-                data.insert("level".into(), level.clone());
-            }
+        if input
+            .get_property("level")
+            .is_some_and(|level| !level.is_null())
+        {
+            data.push((
+                "level".to_owned(),
+                input
+                    .subprojection("/level")
+                    .expect("present level subtree"),
+            ));
         }
-        data.insert("findings".into(), Value::Array(findings));
+        data.push(("findings".to_owned(), findings));
+        let data = Utf16JsonProjection::object(data).expect("ReportFindings output is valid JSON");
 
         Ok(ToolCallResult {
-            data: Value::Object(data),
-            model_content: Some(render_tool_result(count)),
+            data,
+            model_content: Some(source_text_projection(&render_tool_result(count))),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    ToolError::InvalidInput(source_text_projection(&message.into()))
 }
 
 #[cfg(test)]
@@ -314,6 +439,14 @@ mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    fn fixture(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -328,19 +461,56 @@ mod tests {
         ReportFindingsTool::new(shell_test_ctx(dummy_out()))
     }
 
+    #[tokio::test]
+    async fn output_parser_retains_unpaired_finding_strings() {
+        let file_units = vec![b'f' as u16, 0xD800, b'.' as u16, b'r' as u16, b's' as u16];
+        let summary_units = vec![b's' as u16, 0xDC00];
+        let output = Utf16JsonProjection::object(vec![
+            ("count".into(), generated_builtin_result(&json!(1))),
+            (
+                "findings".into(),
+                Utf16JsonProjection::array(vec![Utf16JsonProjection::object(vec![
+                    (
+                        "file".into(),
+                        tool_api::tool_trait::source_text_projection_units(&file_units),
+                    ),
+                    (
+                        "summary".into(),
+                        tool_api::tool_trait::source_text_projection_units(&summary_units),
+                    ),
+                    (
+                        "failure_scenario".into(),
+                        source_text_projection("scenario"),
+                    ),
+                ])
+                .unwrap()])
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let parsed = tool().parse_output(&output).await.expect("valid findings");
+        assert_eq!(parsed.string_units("/findings/0/file"), Some(file_units));
+        assert_eq!(
+            parsed.string_units("/findings/0/summary"),
+            Some(summary_units)
+        );
+    }
+
     #[test]
     fn name_and_metadata_byte_exact() {
         let t = tool();
         assert_eq!(t.name(), "ReportFindings");
         assert_eq!(
-            t.search_hint(),
+            t.search_hint().as_ref().and_then(|hint| hint.string_at("")),
             Some("report code-review findings as a structured list")
         );
         assert_eq!(t.user_facing_name(), Some("Code review"));
         assert_eq!(t.max_result_size_chars(), 256);
         assert!(t.strict());
-        assert!(t.is_read_only(&json!({})));
-        assert!(t.is_concurrency_safe(&json!({})));
+        let input = fixture(json!({}));
+        assert!(t.is_read_only(&input));
+        assert!(t.is_concurrency_safe(&input));
         // `es()` default `isEnabled:()=>!0` — advertised in every session.
         assert!(t.is_enabled(&ToolStaticContext::default()));
         // No `shouldDefer` in the oracle object ⇒ loaded up front.
@@ -352,21 +522,27 @@ mod tests {
         let t = tool();
         let d = t
             .description(
-                &json!({}),
+                &fixture(json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
             )
             .await;
-        let p = t.prompt(&PromptOptions::default()).await;
+        let prompt = t.prompt(&PromptOptions::default()).await;
+        let p = prompt
+            .string_at("")
+            .expect("generated prompt is a root string");
         assert_eq!(d, p);
-        assert_eq!(d, "Report code-review findings as a typed list so the host UI can render them. Use this only when the active code-review instructions tell you to report findings with this tool; otherwise follow whatever output format those instructions specify. When reporting a review's results, call it once with the verified findings ranked most-severe first (empty array if nothing survived verification) and do not also print the findings as text. When re-reporting after applying fixes (only if the apply instructions ask for it), set `outcome` on each finding to what actually happened.");
+        assert_eq!(
+            d,
+            "Report code-review findings as a typed list so the host UI can render them. Use this only when the active code-review instructions tell you to report findings with this tool; otherwise follow whatever output format those instructions specify. When reporting a review's results, call it once with the verified findings ranked most-severe first (empty array if nothing survived verification) and do not also print the findings as text. When re-reporting after applying fixes (only if the apply instructions ask for it), set `outcome` on each finding to what actually happened."
+        );
     }
 
     #[test]
     fn input_schema_matches_the_oracle_zod() {
         let t = tool();
-        let s = t.input_schema();
+        let s = test_value(t.input_schema());
         assert_eq!(s["type"], json!("object"));
         // Closed object, matching the port's rendering of the oracle's `ci(...)`
         // constructor for `Edit` (`tools/file/src/edit.rs`).
@@ -397,7 +573,9 @@ mod tests {
         // Unicode in the descriptions is byte-exact (U+2264, U+2192).
         assert_eq!(
             item["properties"]["short_summary"]["description"],
-            json!("Compressed label for compact UI (≤60 chars): the claim alone, no rationale or consequence clause")
+            json!(
+                "Compressed label for compact UI (≤60 chars): the claim alone, no rationale or consequence clause"
+            )
         );
         assert_eq!(
             item["properties"]["failure_scenario"]["description"],
@@ -408,7 +586,7 @@ mod tests {
     #[test]
     fn output_schema_matches_the_oracle_zod() {
         let t = tool();
-        let s = t.output_schema().expect("outputSchema is defined");
+        let s = test_value(t.output_schema().expect("outputSchema is defined"));
         assert_eq!(s["additionalProperties"], json!(false));
         assert_eq!(s["required"], json!(["count", "findings"]));
         assert_eq!(s["properties"]["count"]["type"], json!("number"));
@@ -425,23 +603,29 @@ mod tests {
         let t = tool();
         let out = t
             .call(
-                json!({
+                fixture(json!({
                     "level": "high",
                     "findings": [{
                         "file": "src/a.rs",
                         "summary": "off-by-one",
                         "failure_scenario": "len==0 → panic"
                     }]
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("echo call cannot fail");
-        assert_eq!(out.data["count"], json!(1));
-        assert_eq!(out.data["level"], json!("high"));
-        assert_eq!(out.data["findings"].as_array().map(Vec::len), Some(1));
-        assert_eq!(out.model_content.as_deref(), Some("1 finding reported."));
+        let data = test_value(&out.data);
+        assert_eq!(data["count"], json!(1));
+        assert_eq!(data["level"], json!("high"));
+        assert_eq!(data["findings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            out.model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("1 finding reported.")
+        );
         assert!(!out.is_error);
     }
 
@@ -449,12 +633,18 @@ mod tests {
     async fn absent_level_is_omitted_like_json_stringify() {
         let t = tool();
         let out = t
-            .call(json!({ "findings": [] }), fresh_ctx(), fresh_tx())
+            .call(fixture(json!({ "findings": [] })), fresh_ctx(), fresh_tx())
             .await
             .expect("echo call cannot fail");
-        assert!(out.data.get("level").is_none());
-        assert_eq!(out.data["count"], json!(0));
-        assert_eq!(out.model_content.as_deref(), Some("No findings reported."));
+        let data = test_value(&out.data);
+        assert!(data.get("level").is_none());
+        assert_eq!(data["count"], json!(0));
+        assert_eq!(
+            out.model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("No findings reported.")
+        );
     }
 
     #[test]

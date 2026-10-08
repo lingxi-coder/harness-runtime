@@ -10,12 +10,38 @@ use crate::definition::{
 };
 use crate::display::{AgentColor, AgentDisplay};
 use lingxi_core::host::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentSpawnError, SubagentSpawnRequest,
+    AgentOfferCandidate, SubagentInheritance, SubagentListingEntry, SubagentSpawnError,
+    SubagentSpawnRequest,
 };
-use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{AgentId, ContentBlock, ConversationMessage, MessageId};
 use permission::PermissionMode;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+fn source_text_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text is paired with exact UTF-16 source units")
+}
+
+fn append_source_text(
+    base: &Utf16JsonProjection,
+    suffix: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let mut units = base
+        .string_units("")
+        .expect("system prompt is a JSON string");
+    units.extend(
+        suffix
+            .string_units("")
+            .expect("system prompt suffix is a JSON string"),
+    );
+    source_text_from_units(units)
+}
+
+fn append_generated_system_text(base: &Utf16JsonProjection, suffix: &str) -> Utf16JsonProjection {
+    append_source_text(base, &Utf16JsonProjection::from(suffix))
+}
 
 /// Unicode `Pd` (dash punctuation) — the exact set `tools/agent`'s
 /// `is_pd_dash` (agent.rs) enumerates, mirrored here because the two crates
@@ -148,7 +174,7 @@ pub fn tools_description(def: &AgentDefinition) -> String {
 /// load order is nondeterministic — plugin load races, MCP async connect —
 /// matching TS `getAgentListingDeltaAttachment`'s sort, attachments.ts:1543).
 #[must_use]
-pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
+pub fn agent_listing_candidates(defs: &[AgentDefinition]) -> Vec<AgentOfferCandidate> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
         if def.agent_type == lingxi_core::host::FUSION_PANEL_TYPE {
@@ -193,20 +219,65 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
         // Later-wins: a same-typed definition later in the slice overrides.
         by_type.insert(def.agent_type.clone(), def);
     }
-    let mut entries: Vec<SubagentListingEntry> = by_type
+    let mut entries: Vec<AgentOfferCandidate> = by_type
         .into_values()
-        .map(|def| SubagentListingEntry {
-            tools_description: tools_description(def),
-            agent_type: def.agent_type.clone(),
-            when_to_use: def.when_to_use.clone(),
-            // `whenToUseLean` rides along unresolved: which of the two texts a
-            // line renders is `U2n`'s decision, taken per RENDER against the
-            // model being rendered for, not per catalog build.
-            when_to_use_lean: crate::builtins::when_to_use_lean(def).map(str::to_string),
+        .map(|def| {
+            let source = crate::handle::agent_source_to_claude_str(def.source);
+            let provider = match def.source {
+                AgentSource::BuiltIn => Some(serde_json::json!({
+                    "plugin": "engine",
+                    "tier": "core",
+                })),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+                    Some(serde_json::json!({"plugin":"policy","tier":"prepend"}))
+                }
+                AgentSource::Settings(_) | AgentSource::Flag | AgentSource::AdditionalDirectory => {
+                    let plugin = source.strip_suffix("Settings").unwrap_or(source);
+                    Some(serde_json::json!({"plugin":plugin,"tier":"user"}))
+                }
+                // Installed identity and seat tier are stamped by
+                // PluginManager from the same facts used by
+                // `command.describe.provider`. `agent_type` contains only
+                // the display namespace, so never infer the provider from it.
+                // Native `mRo` falls back to `cQ(source)` when the definition
+                // has no `plugin` property. For `source === "plugin"`, that
+                // exact fallback is `{ plugin: "plugin", tier: "user" }`.
+                AgentSource::Plugin => Some(
+                    def.offer_provider
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({"plugin":"plugin","tier":"user"})),
+                ),
+            };
+            AgentOfferCandidate {
+                source: source.to_string(),
+                provider,
+                listing: SubagentListingEntry {
+                    tools_description: tools_description(def),
+                    agent_type: def.agent_type.clone(),
+                    when_to_use: def.when_to_use.clone(),
+                    // `whenToUseLean` rides along unresolved: which of the two
+                    // texts a line renders is `U2n`'s decision, taken per
+                    // RENDER against the model being rendered for, not per
+                    // catalog build.
+                    when_to_use_lean: crate::builtins::when_to_use_lean(def).map(str::to_string),
+                },
+            }
         })
         .collect();
-    entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+    entries.sort_by(|a, b| a.listing.agent_type.cmp(&b.listing.agent_type));
     entries
+}
+
+/// The raw model-facing listing before any `agent.offer` decision. Kept as the
+/// compatibility view for callers that only need rendered rows; filtering is
+/// a separate host operation so dispatch continues to resolve against the raw
+/// execution catalog.
+#[must_use]
+pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
+    agent_listing_candidates(defs)
+        .into_iter()
+        .map(|candidate| candidate.listing)
+        .collect()
 }
 
 /// claude 2.1.238 `NJa` (@290291941) — filter a definition slice down to the
@@ -307,28 +378,28 @@ pub(super) fn rule_tool_name(rule: &str) -> &str {
 #[must_use]
 pub(crate) fn apply_spawn_rewrite(
     request: &SubagentSpawnRequest,
-    modified_input: Option<&serde_json::Value>,
-) -> Result<Option<SubagentSpawnRequest>, String> {
-    let Some(updated) = modified_input.and_then(serde_json::Value::as_object) else {
+    modified_input: Option<&Utf16JsonProjection>,
+) -> Result<Option<SubagentSpawnRequest>, Utf16JsonProjection> {
+    let Some(updated) = modified_input.filter(|input| input.object_entries().is_some()) else {
         return Ok(None);
     };
     let mut rewritten = request.clone();
     let mut changed = Vec::new();
-    if let Some(value) = updated.get("agent_type").and_then(|v| v.as_str()) {
+    if let Some(value) = strict_source_string(updated, "/agent_type") {
         if value != rewritten.subagent_type {
-            rewritten.subagent_type = value.to_string();
+            rewritten.subagent_type = value;
             changed.push("agent_type");
         }
     }
-    if let Some(value) = updated.get("model") {
-        let next = value.as_str().map(ToString::to_string);
+    if updated.contains_property("model") {
+        let next = strict_source_string(updated, "/model");
         if next != rewritten.model {
             rewritten.model = next;
             changed.push("model");
         }
     }
-    if let Some(value) = updated.get("cwd") {
-        let next = value.as_str().map(ToString::to_string);
+    if updated.contains_property("cwd") {
+        let next = strict_source_string(updated, "/cwd");
         if next != rewritten.cwd {
             rewritten.cwd = next;
             changed.push("cwd");
@@ -346,11 +417,11 @@ pub(crate) fn apply_spawn_rewrite(
     // self-contradictory — the worktree IS the working directory. Upstream
     // refuses rather than silently picking one, and so does this.
     if rewritten.cwd != request.cwd && rewritten.isolation.as_deref() == Some("worktree") {
-        return Err(
+        return Err(Utf16JsonProjection::from(
             "A plugin's agent.spawn hook set cwd on a spawn isolated in a worktree; \
              cwd and isolation: \"worktree\" are mutually exclusive."
                 .to_string(),
-        );
+        ));
     }
     if changed.is_empty() {
         return Ok(None);
@@ -363,6 +434,10 @@ pub(crate) fn apply_spawn_rewrite(
         "agent.spawn: rewritten by a hook"
     );
     Ok(Some(rewritten))
+}
+
+fn strict_source_string(source: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    String::from_utf16(&source.string_units(pointer)?).ok()
 }
 
 impl PoolSubagentSpawner {
@@ -382,7 +457,7 @@ impl PoolSubagentSpawner {
         &self,
         subagent_type: &str,
         parent_model: Option<&str>,
-    ) -> AgentDefinition {
+    ) -> Result<AgentDefinition, crate::model_resolution::ModelResolutionError> {
         self.resolve_definition_with_profile(subagent_type, parent_model, None, None)
             .await
     }
@@ -391,8 +466,8 @@ impl PoolSubagentSpawner {
         subagent_type: &str,
         parent_model: Option<&str>,
         _parent_model_profile: Option<&str>,
-        parent_provider_first_party: Option<bool>,
-    ) -> AgentDefinition {
+        parent_context: Option<&crate::model_resolution::ModelResolutionContext>,
+    ) -> Result<AgentDefinition, crate::model_resolution::ModelResolutionError> {
         let mut def = self.lookup_definition(subagent_type).await;
         // An explicit `parent_model` (the request override) wins; otherwise fall
         // back to the spawner's own live/boot default. `None` on BOTH ⇒ the model
@@ -409,11 +484,27 @@ impl PoolSubagentSpawner {
             def.model = crate::model_resolution::resolve_builtin_explore_model(
                 &def,
                 parent_model,
-                parent_provider_first_party.unwrap_or(self.session_provider_first_party),
+                parent_context.is_some_and(|context| {
+                    context.route.provider
+                        == Some(crate::model_resolution::ModelProviderKind::FirstParty)
+                }),
             );
-            def.model = AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
+            let context = parent_context.cloned().unwrap_or_else(|| {
+                crate::model_resolution::ModelResolutionContext {
+                    route: crate::model_resolution::ModelRouteFacts {
+                        model: parent_model.to_string(),
+                        ..crate::model_resolution::ModelRouteFacts::default()
+                    },
+                    ..crate::model_resolution::ModelResolutionContext::default()
+                }
+            });
+            def.model = AgentModel::Explicit(self.resolve_model_pref(
+                &def.model,
+                parent_model,
+                &context,
+            )?);
         }
-        def
+        Ok(def)
     }
     /// Look up the [`AgentDefinition`] for `subagent_type` by precedence.
     ///
@@ -508,6 +599,7 @@ impl PoolSubagentSpawner {
     /// `max_turns: 1`, so a fallback agent can still run a tool-using loop.
     pub(super) fn fallback_definition(subagent_type: &str) -> AgentDefinition {
         AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: subagent_type.into(),
             when_to_use: String::new(),
@@ -536,6 +628,7 @@ impl PoolSubagentSpawner {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         }
     }
     /// Resolve a spawn's advertised tool schemas + dispatch allow-list from the
@@ -555,9 +648,48 @@ impl PoolSubagentSpawner {
         // every drop/filter, exactly like every other MCP tool. Empty when the
         // definition declared no `mcpServers` or no builder is wired.
         agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
-    ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
+    ) -> Result<
+        (
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+            Vec<String>,
+        ),
+        SubagentSpawnError,
+    > {
+        self.resolve_tools_with_handback(
+            agent_def,
+            depth,
+            agent_mcp_tools,
+            None,
+            crate::tool_resolver::HandbackToolGates::default(),
+        )
+        .await
+        .map(|(schemas, allowed, _)| (schemas, allowed))
+    }
+    pub(super) async fn resolve_tools_with_handback(
+        &self,
+        agent_def: &AgentDefinition,
+        // The resolved subagent's own recursion depth — gates its `Agent` tool
+        // against Claude's configured maximum spawn depth. Threaded from
+        // `request.depth`.
+        depth: u32,
+        // §24b — this spawn's per-agent MCP tools (claude `Agr`'s `Fe`),
+        // already connected + built by [`Self::mcp_tool_builder`]. Appended by
+        // [`crate::tool_resolver::AgentToolResolver::resolve`] step (4) AFTER
+        // every drop/filter, exactly like every other MCP tool. Empty when the
+        // definition declared no `mcpServers` or no builder is wired.
+        agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
+        supplied: Option<&Arc<dyn tool_api::Tool>>,
+        gates: crate::tool_resolver::HandbackToolGates,
+    ) -> Result<
+        (
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+            Vec<String>,
+            bool,
+        ),
+        SubagentSpawnError,
+    > {
         let Some(registry) = self.tool_registry.get() else {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), false));
         };
         // Delegate to the shared resolver (single source of truth, also used by
         // the in-process teammate handler). The tool-wide deny names come from the
@@ -565,9 +697,10 @@ impl PoolSubagentSpawner {
         // regression-safe). The `default_model` only anchors the model-gated tool
         // prompt for an `AgentModel::Inherit` def; on the production spawn path the
         // def's model is already resolved to `Explicit` (so the param is inert
-        // there), hence the LIVE default (provider else boot snapshot) is a
-        // faithful anchor for the direct-call / Inherit case without needing the
-        // per-request override threaded here.
+        // there). The resolved current selection anchors direct-call / Inherit
+        // cases; when a configured live route is unavailable, no boot snapshot
+        // is substituted. This prompt-only argument is not the spawn admission
+        // route, which is resolved separately from the request's parent facts.
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
         let default_model = self.resolved_default_model();
@@ -575,7 +708,7 @@ impl PoolSubagentSpawner {
             .coordinator_mode
             .get()
             .is_some_and(|mode| mode.is_enabled());
-        crate::tool_resolver::resolve_subagent_tools(
+        crate::tool_resolver::resolve_subagent_tools_with_handback(
             registry.as_ref(),
             agent_def,
             denied,
@@ -583,6 +716,8 @@ impl PoolSubagentSpawner {
             depth,
             coordinator_mode,
             agent_mcp_tools,
+            supplied,
+            gates,
         )
         .await
         .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
@@ -611,11 +746,14 @@ impl PoolSubagentSpawner {
         def: AgentDefinition,
         prompt: &str,
         fork_context_messages: Option<Vec<ConversationMessage>>,
-        fork_parent_system_prompt: Option<String>,
+        fork_parent_system_prompt: Option<Utf16JsonProjection>,
     ) -> SubagentContext {
+        let prompt =
+            Utf16JsonProjection::root_string(prompt.to_owned(), prompt.encode_utf16().collect())
+                .expect("Rust prompt text is a valid root-string projection");
         Self::make_subagent_context_with_id(
             def,
-            prompt,
+            &prompt,
             fork_context_messages,
             fork_parent_system_prompt,
             AgentId::new(),
@@ -623,41 +761,61 @@ impl PoolSubagentSpawner {
     }
     pub(super) fn make_subagent_context_with_id(
         def: AgentDefinition,
-        prompt: &str,
+        prompt: &Utf16JsonProjection,
         fork_context_messages: Option<Vec<ConversationMessage>>,
-        fork_parent_system_prompt: Option<String>,
+        fork_parent_system_prompt: Option<Utf16JsonProjection>,
         agent_id: AgentId,
     ) -> SubagentContext {
         // System prompt: fork path uses the parent's rendered bytes verbatim
         // (no trailer); non-fork path = agent body + the `Notes:` trailer
         // (claude `enhanceSystemPromptWithEnvDetails`). A `None` body on the
         // non-fork path stays `None` (no body, no trailer).
-        let rendered_system_prompt: Option<Arc<str>> = match &fork_parent_system_prompt {
-            Some(parent) => Some(Arc::from(parent.as_str())),
-            None => def.system_prompt.as_deref().map(|body| {
-                Arc::from(format!(
-                    "{body}\n\n{}\n\n{}",
-                    Self::SUBAGENT_CONSENT_PARAGRAPH,
-                    Self::SUBAGENT_NOTES_TRAILER
-                ))
-            }),
-        };
+        let rendered_system_prompt: Option<Arc<Utf16JsonProjection>> =
+            match &fork_parent_system_prompt {
+                Some(parent) => Some(Arc::new(parent.clone())),
+                None => def.system_prompt.as_ref().map(|body| {
+                    Arc::new(append_generated_system_text(
+                        body,
+                        &format!(
+                            "\n\n{}\n\n{}",
+                            Self::SUBAGENT_CONSENT_PARAGRAPH,
+                            Self::SUBAGENT_NOTES_TRAILER
+                        ),
+                    ))
+                }),
+            };
         // Fork path seeds prompt_messages EMPTY (the directive lives in the fork
         // prefix); non-fork path seeds it with the task prompt user message.
         let is_fork = fork_context_messages.is_some();
         let prompt_messages = if is_fork {
             vec![]
         } else {
-            vec![ConversationMessage::user(
-                MessageId::new(),
-                prompt.to_string(),
-            )]
+            let utf16_code_units = prompt
+                .string_units("")
+                .expect("SubagentSpawnRequest.prompt is a root string");
+            vec![ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&utf16_code_units),
+                    utf16_code_units,
+                    citations: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
+            }]
         };
         SubagentContext {
+            native_query_depth: 1,
             task_registry: None,
             refusal_fallback_chain: Vec::new(),
             agent_id,
             parent_agent_id: None,
+            agent_spawn_provenance: Default::default(),
             agent_name: None,
             team_name: None,
             agent_definition: def,
@@ -679,6 +837,9 @@ impl PoolSubagentSpawner {
             resumed_history: None,
             rendered_system_prompt,
             mobile_runtime_environment_reminder: None,
+            instruction_context: Default::default(),
+            instruction_context_is_override: false,
+            instruction_provider: None,
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -688,6 +849,7 @@ impl PoolSubagentSpawner {
             },
             // Set by `build_subagent_context` from `request.model_profile`.
             model_profile: None,
+            server_fallback_model_enforcement: None,
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
             // `inherit.budget` just before pool allocation. `tool_schemas` +
             // `allowed_tools` are overwritten by `spawn` from `resolve_tools`
@@ -698,6 +860,7 @@ impl PoolSubagentSpawner {
             tool_schemas: vec![],
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
             schema: None,
+            structured_output_validator: None,
             // Overwritten by `build_subagent_context` from `request.structured_output_mode`.
             structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
             structured_output_parse_retries: 0,
@@ -723,14 +886,14 @@ impl PoolSubagentSpawner {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback: None,
+            handback_restore_start: None,
         }
     }
     /// Resolve the full subagent catalog (built-ins overlaid by the file
-    /// catalog, claude-code later-wins precedence) into listing entries for
-    /// the dynamic Agent tool prompt. Delegates to the crate-level
-    /// [`crate::agent_listing_entries`] free fn (shared with the
-    /// `agent_listing_delta` attachment path) after snapshotting the catalog.
-    pub(super) async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
+    /// catalog, claude-code later-wins precedence) with the origin metadata
+    /// needed by the model-facing `agent.offer` pass.
+    pub(super) async fn listing_candidates(&self) -> Vec<AgentOfferCandidate> {
         // Snapshot built-ins + any wired catalog into one slice, then run the
         // shared merge. Built-ins are listed first; the shared fn applies
         // later-wins precedence so a same-named catalog entry overrides them.
@@ -738,7 +901,16 @@ impl PoolSubagentSpawner {
         if let Some(catalog) = self.agent_catalog.get() {
             defs.extend(catalog.read().await.iter().cloned());
         }
-        crate::agent_listing_entries(&defs)
+        crate::agent_listing_candidates(&defs)
+    }
+
+    /// Render-only view retained for callers that do not own Mod filtering.
+    pub(super) async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
+        self.listing_candidates()
+            .await
+            .into_iter()
+            .map(|candidate| candidate.listing)
+            .collect()
     }
     /// Build the child [`SubagentContext`] for a spawn: definition resolution +
     /// caller model override + inheritance (tool invoker / budget / api seam) +
@@ -756,6 +928,10 @@ impl PoolSubagentSpawner {
     /// AND a builder is wired) — the caller runs them
     /// ([`crate::agent_mcp_tools::run_agent_mcp_cleanups`]) once the spawn's
     /// run concludes, mirroring claude `Agr`'s `cleanup` closure.
+    pub(crate) fn initial_native_query_depth(parent_depth: Option<u32>) -> u32 {
+        parent_depth.map_or(1, |depth| depth.saturating_add(2))
+    }
+
     pub(super) async fn build_subagent_context(
         &self,
         request: &SubagentSpawnRequest,
@@ -829,11 +1005,14 @@ impl PoolSubagentSpawner {
             .await;
 
         if matches!(aggregate.decision, Some(hooks::HookDecision::Block)) {
-            return Err(SubagentSpawnError::DeniedByHook(
-                aggregate
-                    .reason
-                    .unwrap_or_else(|| "no reason given".to_string()),
-            ));
+            let reason = aggregate.reason.map_or_else(
+                || Utf16JsonProjection::from("no reason given"),
+                |reason| {
+                    Utf16JsonProjection::root_string(reason.display, reason.utf16_code_units)
+                        .expect("hook reason display matches its source units")
+                },
+            );
+            return Err(SubagentSpawnError::DeniedByHook(reason));
         }
 
         // `modified_input` carries the rewrite, reusing the same field every
@@ -854,10 +1033,12 @@ impl PoolSubagentSpawner {
             if next.subagent_type != request.subagent_type {
                 if let Some(gate) = self.permission_gate.get() {
                     if let Some(source) = gate.agent_type_deny(&next.subagent_type).await {
-                        return Err(SubagentSpawnError::DeniedByHook(format!(
-                            "an agent.spawn hook rewrote this spawn to agent type \"{}\", which \
+                        return Err(SubagentSpawnError::DeniedByHook(Utf16JsonProjection::from(
+                            format!(
+                                "an agent.spawn hook rewrote this spawn to agent type \"{}\", which \
                              a permission rule denies ({source}). Dispatch it directly.",
-                            next.subagent_type
+                                next.subagent_type
+                            ),
                         )));
                     }
                 }
@@ -905,7 +1086,9 @@ impl PoolSubagentSpawner {
         // `AgentTool`, claude `AgentTool.tsx:418`) else the spawner's boot/live
         // default. Computed ONCE and threaded into definition + model-override +
         // tool resolution so all three agree on the same anchor.
-        let parent_selection = self.effective_parent_selection(request);
+        let parent_selection = self
+            .effective_parent_selection(request)
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         let has_explicit_provider_model = request
             .model
             .as_deref()
@@ -934,9 +1117,10 @@ impl PoolSubagentSpawner {
                     .and_then(|selection| selection.model_profile.as_deref()),
                 parent_selection
                     .as_ref()
-                    .map(|selection| selection.provider_first_party),
+                    .map(|selection| &selection.model_resolution_context),
             )
-            .await;
+            .await
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         // Per-spawn system-prompt override (workflow xBp / DBp): replace the
         // resolved definition's body with the caller's override BEFORE the Notes
         // trailer is appended by `make_subagent_context`.
@@ -974,10 +1158,15 @@ impl PoolSubagentSpawner {
             // prefix) is Claude-shaped and would mangle a foreign concrete id, so
             // it is BYPASSED here: the model is used verbatim as `Explicit`. The
             // `profile` (set just below from `request.model_profile`) selects the
-            // provider in `messages_create_*_in`.
+            // provider in the typed streaming request.
             if request.model_profile.is_some() {
-                let (resolved, accepted) =
-                    self.resolve_provider_model_pref(model_pref, parent_model.as_deref())?;
+                let (resolved, accepted) = self.resolve_provider_model_pref(
+                    model_pref,
+                    parent_model.as_deref(),
+                    parent_selection
+                        .as_ref()
+                        .map(|selection| &selection.model_resolution_context),
+                )?;
                 def.model = AgentModel::Explicit(resolved);
                 if !accepted {
                     accepted_request_model_profile = None;
@@ -986,7 +1175,18 @@ impl PoolSubagentSpawner {
                 let requested = AgentModel::Alias(model_pref.to_string());
                 def.model = match parent_model.as_deref() {
                     Some(parent) => {
-                        AgentModel::Explicit(self.resolve_model_pref(&requested, parent))
+                        let context = parent_selection
+                            .as_ref()
+                            .map(|selection| &selection.model_resolution_context)
+                            .ok_or_else(|| {
+                                SubagentSpawnError::Runtime(
+                                    "model route context is unavailable for the selected parent route".into(),
+                                )
+                            })?;
+                        AgentModel::Explicit(
+                            self.resolve_model_pref(&requested, parent, context)
+                                .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?,
+                        )
                     }
                     None => requested,
                 };
@@ -1002,6 +1202,14 @@ impl PoolSubagentSpawner {
         }
         let is_fork_spawn =
             request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
+        let parent_permission_mode = request
+            .parent_permission_mode
+            .clone()
+            .or_else(|| inherit.tool_invoker.permission_mode());
+        let parent_mode = parent_permission_mode
+            .as_deref()
+            .and_then(crate::permission_mode::parse_wire_mode)
+            .unwrap_or(self.permission_mode);
         let effective_permission_mode = if is_fork_spawn {
             None
         } else {
@@ -1014,7 +1222,7 @@ impl PoolSubagentSpawner {
             // back-compat — is never applied.
             crate::permission_mode::effective_child_mode(
                 None,
-                self.permission_mode,
+                parent_mode,
                 def.permission_mode,
                 self.spawn_bypass_gates.get().copied().unwrap_or_default(),
                 &mut |m| tracing::warn!("{m}"),
@@ -1033,6 +1241,14 @@ impl PoolSubagentSpawner {
             request.fork_parent_system_prompt.clone(),
             restored_agent_id.unwrap_or_default(),
         );
+        ctx.structured_output_validator = self.structured_output_validator.clone();
+        ctx.agent_spawn_provenance = request.agent_spawn_provenance.clone();
+        ctx.native_query_depth =
+            Self::initial_native_query_depth(request.parent_native_query_depth);
+        ctx.instruction_context = request.instruction_context.clone().unwrap_or_default();
+        ctx.instruction_context_is_override =
+            ctx.agent_definition.is_fork() && request.instruction_context.is_some();
+        ctx.instruction_provider = self.instruction_provider.clone();
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = origin_session_id;
         // Hand the child the refusal-fallback chain. Upstream's subagents share
@@ -1055,7 +1271,10 @@ impl PoolSubagentSpawner {
                 // isolated agent forms absolute paths under it.
                 let cwd_override = request.cwd.as_deref().map(std::path::Path::new);
                 let env = render(&model_id, cwd_override);
-                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{env}")));
+                ctx.rendered_system_prompt = Some(Arc::new(append_generated_system_text(
+                    body,
+                    &format!("\n\n{env}"),
+                )));
             }
         }
         // Per-spawn system-prompt addendum (workflow HBp/IBp NOTE): appended
@@ -1064,7 +1283,7 @@ impl PoolSubagentSpawner {
         // agent() call.
         if let Some(addendum) = &request.system_prompt_addendum {
             if let Some(body) = ctx.rendered_system_prompt.as_ref() {
-                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}{addendum}")));
+                ctx.rendered_system_prompt = Some(Arc::new(append_source_text(body, addendum)));
             }
         }
         // (CLI-15) `--append-subagent-system-prompt <prompt>`: the operator's
@@ -1073,7 +1292,10 @@ impl PoolSubagentSpawner {
         // function in the same process).
         if let Some(suffix) = append_subagent_system_prompt_suffix() {
             if let Some(body) = ctx.rendered_system_prompt.as_ref() {
-                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{suffix}")));
+                ctx.rendered_system_prompt = Some(Arc::new(append_generated_system_text(
+                    body,
+                    &format!("\n\n{suffix}"),
+                )));
             }
         }
         // Hand the child the parent's tool invoker + budget enforcer + our model
@@ -1088,7 +1310,7 @@ impl PoolSubagentSpawner {
         ctx.budget = Some(child_budget);
         ctx.api_client.clone_from(&self.api_client);
         // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
-        // this as the `profile` arg of the api client's `messages_create_*_in`
+        // this in the typed streaming request's `profile` field
         // methods so the round-trip targets the candidate's resolved provider.
         let resolved_model = crate::runner::resolve_model(&ctx);
         ctx.model_profile = accepted_request_model_profile.or_else(|| {
@@ -1097,6 +1319,10 @@ impl PoolSubagentSpawner {
                 .filter(|selection| selection.model == resolved_model)
                 .and_then(|selection| selection.model_profile.clone())
         });
+        ctx.server_fallback_model_enforcement = self
+            .model_restriction
+            .as_ref()
+            .map(|(enforcement, _)| (*enforcement).clone());
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
         ctx.hook_executor = self.hook_executor.get();
@@ -1180,9 +1406,104 @@ impl PoolSubagentSpawner {
             std::mem::take(&mut agent_mcp.cleanups),
             ctx.agent_definition.agent_type.clone(),
         );
-        let (tool_schemas, allowed_tools) = self
-            .resolve_tools(&ctx.agent_definition, request.depth, &agent_mcp.tools)
+        let handback_gates = crate::tool_resolver::HandbackToolGates {
+            opt_in: request.handback_opt_in,
+            feature_enabled: request.handback_enabled,
+            parent_auto: parent_permission_mode.as_deref() == Some("auto"),
+            child_auto: effective_permission_mode.unwrap_or(parent_mode) == PermissionMode::Auto,
+            exact_tools: matches!(
+                ctx.agent_definition.tools,
+                AgentToolPolicy::All {
+                    use_exact_tools: true
+                }
+            ),
+            structured_output: request.schema.is_some(),
+            fork: is_fork_spawn,
+            observer: request.query_source_label.as_deref()
+                == Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE),
+        };
+        let mut handback_runtime = ctx
+            .task_registry
+            .clone()
+            .filter(|_| {
+                request.handback_opt_in
+                    || request.restored_handback_state.is_some()
+                    || !request.restored_handback_history.is_empty()
+            })
+            .map(|registry| {
+                crate::handback::HandbackRuntime::new(
+                    registry,
+                    ctx.agent_id,
+                    ctx.parent_agent_id,
+                    request
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| ctx.agent_definition.agent_type.clone()),
+                    ctx.agent_definition.agent_type.clone(),
+                    request.restored_handback_state.clone(),
+                )
+            });
+        let handback_supplied = handback_runtime.take().map(|runtime| Arc::new(runtime));
+        let handback_tool = handback_supplied.as_ref().map(|runtime| {
+            Arc::new(crate::handback::SubagentHandbackTool(runtime.clone()))
+                as Arc<dyn tool_api::Tool>
+        });
+        let (tool_schemas, allowed_tools, handback_active) = self
+            .resolve_tools_with_handback(
+                &ctx.agent_definition,
+                request.depth,
+                &agent_mcp.tools,
+                handback_tool.as_ref(),
+                handback_gates,
+            )
             .await?;
+        // Preserve potential eligibility across a live mode switch. Aliases and
+        // forbidden launch kinds remain excluded when the child later resumes.
+        drop(handback_tool);
+        if let Some(mut runtime) = handback_supplied {
+            let collision = !handback_active
+                && allowed_tools
+                    .iter()
+                    .any(|name| name == lingxi_core::host::handback::HANDBACK_TOOL_NAME);
+            Arc::get_mut(&mut runtime)
+                .expect("tool resolver released private tool instance")
+                .eligible = handback_gates.opt_in
+                && handback_gates.feature_enabled.unwrap_or(true)
+                && !handback_gates.exact_tools
+                && !handback_gates.structured_output
+                && !handback_gates.fork
+                && !handback_gates.observer
+                && !collision;
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .spawn_bypass_gates = self.spawn_bypass_gates.get().copied().unwrap_or_default();
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .ends_turn_enabled = request.handback_ends_turn_enabled;
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .sender_id = request
+                .name
+                .clone()
+                .unwrap_or_else(|| ctx.agent_id.to_string());
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .restored_history =
+                tokio::sync::Mutex::new(request.restored_handback_history.clone());
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .report_output = ctx
+                .transcript_fs
+                .clone()
+                .zip(ctx.transcript_subdir.parent())
+                .map(
+                    |(fs, session_dir)| crate::handback_output::HandbackReportOutput {
+                        fs,
+                        session_dir: session_dir.to_path_buf(),
+                    },
+                );
+            ctx.handback = Some(runtime);
+        }
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
@@ -1253,6 +1574,7 @@ impl PoolSubagentSpawner {
         ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
         ctx.query_source_label = request.query_source_label.clone();
         ctx.model_attempt = request.model_attempt.clone();
+        ctx.handback_restore_start = request.restore_handback_start.clone();
         // G011: thread the caller's correlation id (Fusion's `{run_id}:p{index}`)
         // onto the child so its transcript can be matched back to a run.
         ctx.correlation_id = request.correlation_id.clone();
@@ -1266,5 +1588,21 @@ impl PoolSubagentSpawner {
         ctx.persistent = persistent;
         ctx.is_async = persistent;
         Ok((ctx, mcp_guard.take()))
+    }
+}
+
+#[cfg(test)]
+mod native_query_depth_tests {
+    use super::AgentSpawner;
+
+    #[test]
+    fn child_depth_is_separate_from_agent_spawn_depth() {
+        assert_eq!(AgentSpawner::initial_native_query_depth(None), 1);
+        assert_eq!(AgentSpawner::initial_native_query_depth(Some(0)), 2);
+        assert_eq!(AgentSpawner::initial_native_query_depth(Some(4)), 6);
+        assert_eq!(
+            AgentSpawner::initial_native_query_depth(Some(u32::MAX)),
+            u32::MAX
+        );
     }
 }

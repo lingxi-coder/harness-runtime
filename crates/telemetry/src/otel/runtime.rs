@@ -1,22 +1,23 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use opentelemetry::Context;
+use opentelemetry::KeyValue;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::{
     FutureExt as _, Span as _, TraceContextExt, Tracer as _, TracerProvider as _,
 };
-use opentelemetry::Context;
-use opentelemetry::KeyValue;
 use opentelemetry_otlp::{
     Compression, Protocol as OtlpWireProtocol, WithExportConfig, WithHttpConfig,
 };
 use opentelemetry_prometheus::exporter as prometheus_exporter;
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{
     BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
 };
@@ -25,15 +26,15 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
 };
-use opentelemetry_sdk::Resource;
 use prometheus::{Encoder, Registry, TextEncoder};
 
 use super::code_language::language_for_path;
 use super::config::{ExporterKind, OtelConfig, OtlpExporterConfig, OtlpProtocol};
 use super::git_ops::git_counter_hits;
 use super::metrics;
-use super::record::{truncate_content, AttrValue, Attributes};
+use super::record::{AttrValue, Attributes, truncate_content};
 use crate::sink::{AnalyticsValue, LogEventMetadata};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 
 static ACTIVE_RUNTIME: OnceLock<RwLock<Option<Arc<OtelRuntime>>>> = OnceLock::new();
 
@@ -618,7 +619,8 @@ pub fn emit_user_prompt_log(prompt: &str, prompt_id: &str, message_uuid: &str) {
                 "prompt_length",
                 AttrValue::from(prompt.encode_utf16().count().to_string()),
             ),
-            ("prompt", AttrValue::from(body)),
+            ("prompt", AttrValue::from(body.clone())),
+            ("prompt_text", AttrValue::from(body)),
             ("prompt.id", AttrValue::from(prompt_id.to_string())),
             ("message.uuid", AttrValue::from(message_uuid.to_string())),
         ]);
@@ -661,7 +663,7 @@ pub fn record_tool_permission_decision(
     decision: &str,
     source: &str,
     is_mcp: bool,
-    tool_input: Option<&serde_json::Value>,
+    tool_input: Option<&Utf16JsonProjection>,
 ) {
     with_runtime(|runtime| {
         if CODE_EDIT_TOOLS.contains(&tool_name) {
@@ -709,16 +711,17 @@ pub fn record_tool_permission_decision(
 }
 
 /// Build the bounded tool-detail object used by `tool_decision`/`tool_result`.
-fn tool_parameters(tool_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
-    let input = input?.as_object()?;
-    let mut out = serde_json::Map::new();
+fn tool_parameters(tool_name: &str, input: Option<&Utf16JsonProjection>) -> Option<String> {
+    let input = input?;
+    input.object_entries()?;
+    let mut out = Vec::new();
     let copy_string =
-        |out: &mut serde_json::Map<String, serde_json::Value>, out_key: &str, input_key: &str| {
-            if let Some(value) = input.get(input_key).and_then(serde_json::Value::as_str) {
-                out.insert(
+        |out: &mut Vec<(String, Utf16JsonProjection)>, out_key: &str, input_key: &str| {
+            if let Some(value) = input.string_at(&format!("/{input_key}")) {
+                out.push((
                     out_key.to_string(),
-                    serde_json::Value::String(redact_secret_value(out_key, value)),
-                );
+                    redact_secret_value(out_key, value).into(),
+                ));
             }
         };
 
@@ -727,17 +730,31 @@ fn tool_parameters(tool_name: &str, input: Option<&serde_json::Value>) -> Option
             copy_string(&mut out, "bash_command", "command");
             copy_string(&mut out, "full_command", "command");
             copy_string(&mut out, "description", "description");
-            if let Some(timeout) = input.get("timeout").and_then(serde_json::Value::as_u64) {
-                out.insert("timeout".into(), serde_json::Value::from(timeout));
+            if let Some(timeout) = input
+                .at_pointer("/timeout")
+                .and_then(JsonValueView::as_number)
+                .filter(|value| {
+                    value.is_finite()
+                        && *value >= 0.0
+                        && value.fract() == 0.0
+                        && *value < u64::MAX as f64
+                })
+            {
+                out.push((
+                    "timeout".into(),
+                    Utf16JsonProjection::parse(&timeout.to_string())
+                        .expect("numeric timeout is valid JSON"),
+                ));
             }
             if let Some(disabled) = input
-                .get("dangerouslyDisableSandbox")
-                .and_then(serde_json::Value::as_bool)
+                .at_pointer("/dangerouslyDisableSandbox")
+                .and_then(JsonValueView::as_bool)
             {
-                out.insert(
+                out.push((
                     "dangerouslyDisableSandbox".into(),
-                    serde_json::Value::Bool(disabled),
-                );
+                    Utf16JsonProjection::parse(if disabled { "true" } else { "false" })
+                        .expect("boolean is valid JSON"),
+                ));
             }
         }
         "Skill" => {
@@ -750,18 +767,16 @@ fn tool_parameters(tool_name: &str, input: Option<&serde_json::Value>) -> Option
     }
     if let Some(rest) = tool_name.strip_prefix("mcp__") {
         if let Some((server, tool)) = rest.split_once("__") {
-            out.insert(
-                "mcp_server_name".into(),
-                serde_json::Value::String(server.to_string()),
-            );
-            out.insert(
-                "mcp_tool_name".into(),
-                serde_json::Value::String(tool.to_string()),
-            );
+            out.push(("mcp_server_name".into(), server.into()));
+            out.push(("mcp_tool_name".into(), tool.into()));
         }
     }
 
-    (!out.is_empty()).then(|| serde_json::Value::Object(out).to_string())
+    if out.is_empty() {
+        return None;
+    }
+    out.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Utf16JsonProjection::object(out).ok()?.to_json_string().ok()
 }
 
 /// claude-code `ua(name)`: the tool name as it appears in a `claude_code.events`
@@ -2545,10 +2560,12 @@ mod tests {
         assert!(debug.histograms.iter().any(|sample| {
             sample.instrument == metrics::LLM_REQUEST && (sample.value - 250.0).abs() < f64::EPSILON
         }));
-        assert!(debug
-            .logs
-            .iter()
-            .any(|sample| sample.event_name == "tengu_api_success"));
+        assert!(
+            debug
+                .logs
+                .iter()
+                .any(|sample| sample.event_name == "tengu_api_success")
+        );
         clear_runtime();
     }
 
@@ -2580,10 +2597,12 @@ mod tests {
         Runtime::new().unwrap().block_on(task);
 
         let debug = snapshot(&runtime);
-        assert!(debug
-            .counters
-            .iter()
-            .any(|sample| { sample.instrument == metrics::TOOL_BLOCKED_ON_USER }));
+        assert!(
+            debug
+                .counters
+                .iter()
+                .any(|sample| { sample.instrument == metrics::TOOL_BLOCKED_ON_USER })
+        );
         assert!(debug.counters.iter().any(|sample| {
             sample.instrument == metrics::BASH_SUBPROCESS
                 && sample.attributes.get("status") == Some(&AttrValue::from("completed"))
@@ -2591,10 +2610,12 @@ mod tests {
         assert!(debug.histograms.iter().any(|sample| {
             sample.instrument == metrics::MCP_RPC && (sample.value - 77.0).abs() < f64::EPSILON
         }));
-        assert!(debug
-            .counters
-            .iter()
-            .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN));
+        assert!(
+            debug
+                .counters
+                .iter()
+                .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN)
+        );
         clear_runtime();
     }
 
@@ -2618,10 +2639,12 @@ mod tests {
         };
         Runtime::new().unwrap().block_on(task);
         let debug_off = snapshot(&runtime_off);
-        assert!(debug_off
-            .logs
-            .iter()
-            .all(|sample| !sample.attributes.contains_key("prompt")));
+        assert!(
+            debug_off
+                .logs
+                .iter()
+                .all(|sample| !sample.attributes.contains_key("prompt"))
+        );
         clear_runtime();
 
         let runtime_on = install_test_runtime(local_runtime_with_logs(true));
@@ -2666,6 +2689,10 @@ mod tests {
             Some(&AttrValue::from("<REDACTED>"))
         );
         assert_eq!(
+            record.attributes.get("prompt_text"),
+            record.attributes.get("prompt")
+        );
+        assert_eq!(
             record.attributes.get("prompt.id"),
             Some(&AttrValue::from("prompt-1"))
         );
@@ -2682,6 +2709,10 @@ mod tests {
         assert_eq!(
             record.attributes.get("prompt"),
             Some(&AttrValue::from("hello [REDACTED]"))
+        );
+        assert_eq!(
+            record.attributes.get("prompt_text"),
+            record.attributes.get("prompt")
         );
         clear_runtime();
     }
@@ -2749,10 +2780,12 @@ mod tests {
             Some(&AttrValue::from("sdk"))
         );
         // The tengu passthrough record is still emitted alongside.
-        assert!(debug
-            .logs
-            .iter()
-            .any(|sample| sample.event_name == "tengu_api_success"));
+        assert!(
+            debug
+                .logs
+                .iter()
+                .any(|sample| sample.event_name == "tengu_api_success")
+        );
         clear_runtime();
     }
 
@@ -2935,6 +2968,12 @@ mod tests {
         clear_runtime();
         let runtime = install_test_runtime(local_runtime_with_tool_details());
 
+        let input_json = serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer sk-secret' https://example.invalid",
+            "description": "safe summary",
+            "timeout": 10_000
+        });
+        let input = Utf16JsonProjection::from_serde_value(&input_json).unwrap();
         record_tool_permission_decision(
             "Bash",
             "toolu_details",
@@ -2942,11 +2981,7 @@ mod tests {
             "accept",
             "user_temporary",
             false,
-            Some(&serde_json::json!({
-                "command": "curl -H 'Authorization: Bearer sk-secret' https://example.invalid",
-                "description": "safe summary",
-                "timeout": 10_000
-            })),
+            Some(&input),
         );
 
         let debug = snapshot(&runtime);

@@ -5,9 +5,11 @@
 #![forbid(unsafe_code)]
 
 pub use lingxi_core::host::permission_gate::{
-    AutoModePrompt, HandoffReview, MatchedAskRule, PermissionAbort, PermissionCheckContext,
-    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionOutcome,
-    PermissionRequestSource, PermissionResolution, PromptWorker,
+    AutoModePrompt, ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
+    ClassifierOnlyReviewRequest, HandoffReview, MatchedAskRule, ModToolCheckDecision,
+    ModToolCheckVerdict, PermissionAbort, PermissionCheckContext, PermissionDecision,
+    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionRequestSource,
+    PermissionResolution, PromptWorker,
 };
 pub use lingxi_core::host::prompting_gate::{
     PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,

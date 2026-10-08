@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use jsonrpc::Connection;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use lsp::{LspClient, LspPathMapper};
 use lsp_types::Url;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -433,7 +433,9 @@ struct MobileWorkspaceDiagnosticsSource {
 
 #[async_trait]
 impl NewDiagnosticsSource for MobileWorkspaceDiagnosticsSource {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.inner.take_new_diagnostics_block().await
     }
 
@@ -678,6 +680,9 @@ impl LspTransport for MobileLinuxLspTransport {
         root_uri: &str,
     ) -> Result<LspServerCapabilities, LspError> {
         let (_, client, config) = self.lookup_entry(conn.connection_id).await?;
+        client
+            .register_workspace_configuration(config.settings.clone())
+            .await;
         let capabilities = client.initialize(root_uri, &config).await?;
         Ok(LspServerCapabilities {
             text_document_sync: capabilities
@@ -704,8 +709,8 @@ impl LspTransport for MobileLinuxLspTransport {
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
-    ) -> Result<Value, LspError> {
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         let (_, client, _) = self.lookup_entry(conn.connection_id).await?;
         client.request(method, params).await
     }
@@ -714,7 +719,7 @@ impl LspTransport for MobileLinuxLspTransport {
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
+        params: Utf16JsonProjection,
     ) -> Result<(), LspError> {
         let (_, client, _) = self.lookup_entry(conn.connection_id).await?;
         client.notify(method, params).await
@@ -781,7 +786,7 @@ impl LspTransport for MobileLinuxLspTransport {
 mod tests {
     use super::*;
     use lsp::DiagnosticEntry;
-    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use lsp_types::{DiagnosticSeverity, Position, Range};
 
     #[test]
     fn auto_mode_accepts_only_managed_local_app_workspace_shape() {
@@ -851,12 +856,11 @@ mod tests {
                 uri,
                 DiagnosticEntry {
                     version: Some(1),
-                    diagnostics: vec![Diagnostic {
-                        range: Range::new(Position::new(0, 0), Position::new(0, 1)),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        message: "seeded".into(),
-                        ..Diagnostic::default()
-                    }],
+                    diagnostics: vec![lsp::SourceDiagnostic::new(
+                        Range::new(Position::new(0, 0), Position::new(0, 1)),
+                        Some(DiagnosticSeverity::ERROR),
+                        "seeded".into(),
+                    )],
                 },
             )
             .await;

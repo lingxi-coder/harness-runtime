@@ -1,0 +1,14 @@
+{
+  "native_version": "2.1.293",
+  "session_id": "00000000-0000-4000-8000-000000002943",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Use the only available MCP tool once, then finish with the fixed final response.",
+  "mcp_server_name": "fixture",
+  "mcp_tool_name": "emit_payload",
+  "mcp_tool_input": {"mode": "source-units"},
+  "mcp_primary_text_prefix": "primary-",
+  "mcp_primary_text_units_suffix": [55296, 937],
+  "mcp_secondary_text": "secondary-content-block",
+  "structured_content": {"ok": true, "label": "structured-\ud800Ω"},
+  "model_final_text": "MCP fixture completed."
+}

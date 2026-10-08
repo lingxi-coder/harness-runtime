@@ -1,0 +1,228 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "a5d39673f037c3b0f1e1e02e793c65514712717c41e9767bf4e21547605d3602",
+  "module_sha256": "9b9c39e0be3ab3da7ef6bfc261ffa554099728de4a687f111589c9bad0a70e74",
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<fixture-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--no-session-persistence",
+    "--tools",
+    "",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f02",
+    "Return the fixed confirmation text."
+  ],
+  "model_request_is_fixed_loopback_stub": true,
+  "real_model_or_external_network": false,
+  "isolated_home_config_tmp": true,
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 41245,
+      "request_sha256": "d4bd233541ff68611199c02f31e4acfa6a2d7ba92039210ca97694c55ee95197"
+    }
+  ],
+  "marker_count": 1,
+  "marker_source": "config/debug/00000000-0000-4000-8000-000000002f02.txt",
+  "unicode_oracle_raw": {
+    "path": "unicode-oracle.raw.json",
+    "bytes": 1907,
+    "sha256": "dca125cc2e8ca1f1acd1a74564bd83e2d44775195c5e64eea1f59b37564c872c"
+  },
+  "bun_version": null,
+  "process_bun_version": null,
+  "process_node_version": null,
+  "process_global_available": false,
+  "bun_global_available": false,
+  "claude_code_exports": [
+    "atom",
+    "derive",
+    "memberOf",
+    "read",
+    "update"
+  ],
+  "width_provider": null,
+  "width_import_error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope",
+  "string_width_available": false,
+  "segmenter_available": true,
+  "samples": [
+    {
+      "name": "lone-high",
+      "text": "\ud800",
+      "codeUnits": [
+        55296
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\ud800",
+            "codeUnits": [
+              55296
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "lone-low",
+      "text": "\udc00",
+      "codeUnits": [
+        56320
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\udc00",
+            "codeUnits": [
+              56320
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "lone-high-combining-acute",
+      "text": "\ud800\u0301",
+      "codeUnits": [
+        55296,
+        769
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\ud800\u0301",
+            "codeUnits": [
+              55296,
+              769
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "replacement-combining-acute",
+      "text": "\ufffd\u0301",
+      "codeUnits": [
+        65533,
+        769
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\ufffd\u0301",
+            "codeUnits": [
+              65533,
+              769
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "lone-high-zwj-grinning",
+      "text": "\ud800\u200d\ud83d\ude00",
+      "codeUnits": [
+        55296,
+        8205,
+        55357,
+        56832
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\ud800\u200d",
+            "codeUnits": [
+              55296,
+              8205
+            ]
+          },
+          {
+            "index": 2,
+            "text": "\ud83d\ude00",
+            "codeUnits": [
+              55357,
+              56832
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "woman-technologist-zwj",
+      "text": "\ud83d\udc69\u200d\ud83d\udcbb",
+      "codeUnits": [
+        55357,
+        56425,
+        8205,
+        55357,
+        56507
+      ],
+      "width": {
+        "error": "No Bun.stringWidth or globalThis.stringWidth in plugin module scope"
+      },
+      "graphemes": {
+        "values": [
+          {
+            "index": 0,
+            "text": "\ud83d\udc69\u200d\ud83d\udcbb",
+            "codeUnits": [
+              55357,
+              56425,
+              8205,
+              55357,
+              56507
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 24,
+    "sha256": "7385c48a30df893e8930b245c407de68fbc554cac4f1f541cb2d070a2af78c96"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

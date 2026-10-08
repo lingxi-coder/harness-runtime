@@ -1569,25 +1569,20 @@ mod retry_watchdog_tests {
     use super::*;
     use crate::LlmError;
 
-    // ── oMe(): CLAUDE_CODE_RETRY_WATCHDOG truthiness (dual-read) ──
-
     #[test]
-    fn watchdog_flag_truthiness_and_dual_read() {
-        // Truthy values enable.
-        assert!(retry_watchdog_from_values(Some("1"), None));
-        assert!(retry_watchdog_from_values(Some("true"), None));
-        assert!(retry_watchdog_from_values(Some("YES"), None));
-        assert!(retry_watchdog_from_values(Some("on"), None));
-        // The CLAUDE_CODE_ alias is honored when LINGXI_ is absent.
-        assert!(retry_watchdog_from_values(None, Some("true")));
-        // LINGXI_ wins over the CLAUDE_ alias.
-        assert!(!retry_watchdog_from_values(Some("0"), Some("1")));
-        assert!(retry_watchdog_from_values(Some("1"), Some("0")));
-        // Opt-in: absent / falsy → OFF.
-        assert!(!retry_watchdog_from_values(None, None));
-        assert!(!retry_watchdog_from_values(Some("0"), None));
-        assert!(!retry_watchdog_from_values(Some("false"), None));
-        assert!(!retry_watchdog_from_values(Some(""), None));
+    fn watchdog_flag_uses_current_typed_boolean_rules() {
+        for value in ["1", "true", "YES", "on", "\u{feff}true\u{feff}"] {
+            assert!(retry_watchdog_from_value(Some(value)), "{value:?}");
+        }
+        for value in [
+            None,
+            Some("0"),
+            Some("false"),
+            Some(""),
+            Some("\u{0085}true\u{0085}"),
+        ] {
+            assert!(!retry_watchdog_from_value(value), "{value:?}");
+        }
     }
 
     // ── pDs(): resolve_max_retries matrix ──
@@ -1726,6 +1721,44 @@ mod retry_watchdog_tests {
                 "iter {i}: 429 under watchdog must retry, got {step:?}"
             );
         }
+    }
+
+    #[test]
+    fn watchdog_capacity_backoff_and_ordinary_retry_counts_are_independent() {
+        let ctl = RetryControl {
+            max_retries: 1,
+            watchdog: true,
+            ..RetryControl::default()
+        };
+        let mut state = RetryState::default();
+        for error in [
+            LlmError::Overloaded { repeated: false },
+            LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            },
+        ] {
+            assert!(matches!(
+                next_step_with_backoff(&mut state, &ctl, &error, 0, Some(10)),
+                DriveStep::RetryAfter(_)
+            ));
+        }
+        assert_eq!(state.attempt, 0);
+        assert_eq!(state.watchdog_capacity_waits, 2);
+        let DriveStep::RetryAfter(delay) =
+            next_step_with_backoff(&mut state, &ctl, &LlmError::ProviderInternal, 0, Some(10))
+        else {
+            panic!("the ordinary retry budget must remain available");
+        };
+        // Ese's ordinary error ladder uses $t+B: two capacity waits advance
+        // the delay to 40ms, but do not spend the one ordinary retry.
+        assert!(delay.as_millis() >= 40 && delay.as_millis() < 50);
+        assert_eq!(state.attempt, 1);
+        assert_eq!(
+            next_step_with_backoff(&mut state, &ctl, &LlmError::ProviderInternal, 0, Some(10)),
+            DriveStep::Terminal
+        );
+        assert_eq!(state.watchdog_capacity_waits, 2);
     }
 
     #[test]

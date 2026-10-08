@@ -42,6 +42,7 @@
 //! and so structurally cannot wrongly add `Agent` to a child based on it.
 
 use crate::definition::{AgentDefinition, AgentModel, AgentPermissionMode, AgentToolPolicy};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
@@ -50,6 +51,55 @@ use tool_api::Tool;
 /// Stateless utility that computes the effective tool set for an agent
 /// spawn from the agent definition plus the surrounding tool sets.
 pub struct AgentToolResolver;
+
+/// Trusted run gates for the ordinary Agent final-report tool. Shared resolver
+/// callers must opt in explicitly; an Auto mode alone grants no contract.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandbackToolGates {
+    pub opt_in: bool,
+    pub feature_enabled: Option<bool>,
+    pub parent_auto: bool,
+    pub child_auto: bool,
+    pub exact_tools: bool,
+    pub structured_output: bool,
+    pub fork: bool,
+    pub observer: bool,
+}
+
+/// Inject the host-supplied instance after ordinary filtering. A foreign tool
+/// claiming its canonical name or alias disables the contract. The same Arc
+/// already offered remains a single declaration.
+pub fn inject_handback_tool(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    supplied: Option<&Arc<dyn Tool>>,
+    gates: HandbackToolGates,
+) -> bool {
+    if !gates.opt_in
+        || !gates.feature_enabled.unwrap_or(true)
+        || !gates.parent_auto
+        || !gates.child_auto
+        || gates.exact_tools
+        || gates.structured_output
+        || gates.fork
+        || gates.observer
+    {
+        return false;
+    }
+    let Some(supplied) = supplied else {
+        return false;
+    };
+    let canonical = supplied.name();
+    if tools.iter().any(|tool| {
+        !Arc::ptr_eq(tool, supplied)
+            && (tool.name() == canonical || tool.aliases().contains(&canonical))
+    }) {
+        return false;
+    }
+    if !tools.iter().any(|tool| Arc::ptr_eq(tool, supplied)) {
+        tools.push(supplied.clone());
+    }
+    true
+}
 
 /// Coordinator workers must not be able to route through the generic MCP
 /// dispatcher or inspect MCP auth state, even when those base-list tools do
@@ -383,7 +433,56 @@ pub async fn resolve_subagent_tools(
     // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
     // every caller that has none (byte-identical legacy).
     agent_mcp_tools: &[Arc<dyn Tool>],
-) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
+) -> Result<
+    (
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+        Vec<String>,
+    ),
+    ToolResolutionError,
+> {
+    resolve_subagent_tools_with_handback(
+        registry,
+        agent_def,
+        tool_wide_deny,
+        default_model,
+        depth,
+        coordinator_mode,
+        agent_mcp_tools,
+        None,
+        HandbackToolGates::default(),
+    )
+    .await
+    .map(|(schemas, allowed, _)| (schemas, allowed))
+}
+
+/// Ordinary Agent variant, injecting its private final-report tool only after
+/// the full ordinary policy pipeline has finished.
+pub async fn resolve_subagent_tools_with_handback(
+    registry: &tool_api::ToolRegistry,
+    agent_def: &AgentDefinition,
+    tool_wide_deny: &[String],
+    default_model: Option<&str>,
+    // The resolved subagent's own recursion depth — gates its `Agent` tool
+    // against Claude's configured maximum. Threaded from the spawn request.
+    depth: u32,
+    // Whether this spawn is a coordinator worker. Coordinator workers hide
+    // `role:"comms"` MCP tools while ordinary sessions retain them.
+    coordinator_mode: bool,
+    // §24b — this spawn's already-connected per-agent MCP tools (claude
+    // `Agr`'s `Fe`), passed straight through to
+    // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
+    // every caller that has none (byte-identical legacy).
+    agent_mcp_tools: &[Arc<dyn Tool>],
+    supplied: Option<&Arc<dyn Tool>>,
+    handback_gates: HandbackToolGates,
+) -> Result<
+    (
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+        Vec<String>,
+        bool,
+    ),
+    ToolResolutionError,
+> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
@@ -422,6 +521,7 @@ pub async fn resolve_subagent_tools(
             return Err(ToolResolutionError::EmptyExplicitToolSet(names.join(", ")));
         }
     }
+    let handback_enabled = inject_handback_tool(&mut resolved, supplied, handback_gates);
     let allowed: Vec<String> = resolved
         .iter()
         .flat_map(|t| {
@@ -433,16 +533,26 @@ pub async fn resolve_subagent_tools(
         AgentModel::Explicit(id) | AgentModel::Alias(id) => Some(id.clone()),
         AgentModel::Inherit => default_model.map(str::to_string),
     };
+    let bash_precommit_skills = if resolved
+        .iter()
+        .any(|tool| tool.name() == "Skill" || tool.aliases().contains(&"Skill"))
+    {
+        registry.bash_precommit_skills().await
+    } else {
+        tool_api::tool_trait::BashPrecommitSkills::default()
+    };
     let schemas = tool_api::wire::tools_to_wire(
         &resolved,
         &PromptOptions {
             include_examples: true,
             model,
             model_profile: None,
+            bash_precommit_skills,
+            bash_precommit_session_generation: registry.bash_precommit_session_generation(),
         },
     )
     .await;
-    Ok((schemas, allowed))
+    Ok((schemas, allowed, handback_enabled))
 }
 
 /// Add the tool capabilities every in-process teammate receives regardless of
@@ -503,6 +613,7 @@ mod tests {
     /// resolver inspects).
     struct StubTool {
         name: &'static str,
+        aliases: &'static [&'static str],
         role: Option<&'static str>,
         enabled: bool,
     }
@@ -512,9 +623,24 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn input_schema(&self) -> &Value {
-            static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-            SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+        fn aliases(&self) -> &[&str] {
+            self.aliases
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: std::sync::OnceLock<Utf16JsonProjection> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                Utf16JsonProjection::parse(r#"{"type":"object"}"#).expect("resolver stub schema")
+            })
+        }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            use tool_api::tool_trait::{
+                ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+            };
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             self.enabled
@@ -525,15 +651,15 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &Value) -> bool {
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &Value,
+            _input: &Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -545,15 +671,26 @@ mod tests {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _input: &Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
             self.name.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            self.name.into()
+        async fn prompt(&self, opts: &PromptOptions) -> String {
+            if self.name == "Bash" {
+                format!(
+                    "Bash {:?} generation={}",
+                    opts.bash_precommit_skills, opts.bash_precommit_session_generation
+                )
+            } else {
+                self.name.into()
+            }
         }
         async fn call(
             &self,
-            _input: Value,
+            _input: Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -564,14 +701,88 @@ mod tests {
     fn tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool {
             name,
+            aliases: &[],
             role: None,
             enabled: true,
         })
     }
 
+    #[test]
+    fn handback_injection_matches_pinned_spawn_conjunction() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/subagent_handback_2_1_286.json"
+        ))
+        .unwrap();
+        for case in fixture["dependency_mocked_spawn_cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let supplied = tool("SubagentHandback");
+            let mut offered = input["pool"]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            if entry["native_handback"] == true {
+                                supplied.clone()
+                            } else if entry["aliases"][0] == "SubagentHandback" {
+                                Arc::new(StubTool {
+                                    name: "foreign",
+                                    aliases: &["SubagentHandback"],
+                                    role: None,
+                                    enabled: true,
+                                }) as Arc<dyn Tool>
+                            } else if entry["aliases"][0] == "handback" {
+                                Arc::new(StubTool {
+                                    name: "foreign",
+                                    aliases: &["handback"],
+                                    role: None,
+                                    enabled: true,
+                                }) as Arc<dyn Tool>
+                            } else {
+                                tool("SubagentHandback")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec![tool("Read")]);
+            let enabled = inject_handback_tool(
+                &mut offered,
+                (input["tool_supplied"] != false).then_some(&supplied),
+                HandbackToolGates {
+                    opt_in: if input["omit_opt_in"] == true {
+                        false
+                    } else if input.get("opt_in").is_some() {
+                        input["opt_in"].as_bool() == Some(true)
+                    } else {
+                        true
+                    },
+                    feature_enabled: input["flags"]["tengu_lively_waffle"].as_bool(),
+                    parent_auto: input["parent_mode"].as_str().unwrap_or("auto") == "auto",
+                    child_auto: input["child_mode"].as_str().unwrap_or("auto") == "auto",
+                    exact_tools: input["exact_tools"] == true,
+                    structured_output: input["structured_output"] == true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                enabled,
+                case["expected"]["enabled"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::json!(offered.iter().map(|tool| tool.name()).collect::<Vec<_>>()),
+                case["expected"]["tools"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     fn comms_tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool {
             name,
+            aliases: &[],
             role: Some("comms"),
             enabled: true,
         })
@@ -583,6 +794,7 @@ mod tests {
         registry.register_builtin(tool("Read"));
         registry.register_builtin(Arc::new(StubTool {
             name: "LSP",
+            aliases: &[],
             role: None,
             enabled: false,
         }));
@@ -593,7 +805,7 @@ mod tests {
                 .expect("disabled LSP must not block the builder");
         assert_eq!(allowed, vec!["Read"]);
         assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0]["name"], "Read");
+        assert_eq!(schemas[0].name, "Read");
         let only_disabled = agent_def(AgentToolPolicy::Explicit(vec!["LSP".into()]));
         assert!(matches!(
             resolve_subagent_tools(&registry, &only_disabled, &[], None, 0, false, &[],).await,
@@ -627,6 +839,68 @@ mod tests {
         names.iter().map(|n| tool(n)).collect()
     }
 
+    #[tokio::test]
+    async fn subagent_precommit_skills_follow_live_catalog_and_effective_skill_tool() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tool_api::tool_trait::BashPrecommitSkills;
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("Bash"));
+        registry.register_builtin(tool("Skill"));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let provider_enabled = enabled.clone();
+        registry.set_bash_precommit_skills_provider(move || {
+            let enabled = provider_enabled.clone();
+            async move {
+                BashPrecommitSkills {
+                    custom_verify: enabled.load(Ordering::Relaxed),
+                    ..Default::default()
+                }
+            }
+        });
+        let definition = agent_def(all_policy());
+        let description = |schemas: Vec<lingxi_core::host::SourceToolWireDefinition>| {
+            let source = schemas
+                .into_iter()
+                .find(|tool| tool.name == "Bash")
+                .unwrap()
+                .description
+                .to_json_string()
+                .unwrap();
+            serde_json::from_str::<String>(&source).unwrap()
+        };
+        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        assert!(description(schemas).contains("custom_verify: true"));
+
+        let blocked = agent_def(AgentToolPolicy::Except(vec!["Skill".into()]));
+        let (schemas, _) = resolve_subagent_tools(&registry, &blocked, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        assert!(description(schemas).contains("custom_verify: false"));
+        let (schemas, _) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &["Skill".into()],
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(description(schemas).contains("custom_verify: false"));
+
+        enabled.store(false, Ordering::Relaxed);
+        registry.reset_bash_precommit_prompt_session();
+        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        let prompt = description(schemas);
+        assert!(prompt.contains("custom_verify: false"));
+        assert!(prompt.contains("generation=1"));
+    }
+
     fn names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
         tools.iter().map(|t| t.name().to_string()).collect()
     }
@@ -635,6 +909,7 @@ mod tests {
     /// defaults.
     fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
         AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
@@ -660,6 +935,7 @@ mod tests {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         }
     }
 

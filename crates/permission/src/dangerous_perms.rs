@@ -27,6 +27,7 @@ use crate::rule::{
     normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,
     PermissionRuleValue,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Canonical tool names (claude-code `tools/{BashTool,PowerShellTool}/toolName.ts`,
 /// `tools/AgentTool/constants.ts`). Kept as local literals so the predicates
@@ -69,7 +70,10 @@ fn matches_pattern_shape(content: &str, pattern: &str) -> bool {
 /// 2. Standalone wildcard (`*`).
 /// 3. A dangerous interpreter pattern in any of the rule-shape variants.
 #[must_use]
-pub fn is_dangerous_bash_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
+pub fn is_dangerous_bash_permission(
+    tool_name: &str,
+    rule_content: &Option<Utf16JsonProjection>,
+) -> bool {
     // Only check Bash rules (and the Android mobile `Shell` tool, which runs the
     // same mksh/sh-compatible command patterns — a dangerous `Shell(python:*)`
     // allow rule would bypass the auto-mode classifier just like `Bash(python:*)`).
@@ -80,8 +84,13 @@ pub fn is_dangerous_bash_permission(tool_name: &str, rule_content: &Option<Strin
     // Tool-level allow (Bash with no content, or Bash(*)) — allows ALL commands.
     let raw = match rule_content {
         None => return true,
-        Some(c) if c.is_empty() => return true,
-        Some(c) => c,
+        Some(c) => match exact_rule_content(c) {
+            Some(c) if c.is_empty() => return true,
+            Some(c) => c,
+            // Treat content that cannot be analyzed by the UTF-8 danger
+            // classifier conservatively: keep the allow rule out of Auto mode.
+            None => return true,
+        },
     };
 
     // Whitespace/star-only content (`Bash(**)`, `Bash( * )`) — 2.1.211 `Qqr`'s
@@ -151,7 +160,10 @@ fn is_python_dash_m_exempt(pattern: &str, content: &str) -> bool {
 /// `.exe`-on-first-word variant (`python` → `python.exe`, `npm run` →
 /// `npm.exe run`) so a rule like `PowerShell(npm.exe run:*)` matches `npm run`.
 #[must_use]
-pub fn is_dangerous_powershell_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
+pub fn is_dangerous_powershell_permission(
+    tool_name: &str,
+    rule_content: &Option<Utf16JsonProjection>,
+) -> bool {
     if tool_name != POWERSHELL_TOOL_NAME {
         return false;
     }
@@ -159,8 +171,11 @@ pub fn is_dangerous_powershell_permission(tool_name: &str, rule_content: &Option
     // Tool-level allow (PowerShell with no content, or PowerShell(*)).
     let raw = match rule_content {
         None => return true,
-        Some(c) if c.is_empty() => return true,
-        Some(c) => c,
+        Some(c) => match exact_rule_content(c) {
+            Some(c) if c.is_empty() => return true,
+            Some(c) => c,
+            None => return true,
+        },
     };
 
     // Whitespace/star-only content (`PowerShell(**)`, `PowerShell( * )`) —
@@ -208,7 +223,10 @@ pub fn is_dangerous_powershell_permission(tool_name: &str, rule_content: &Option
 /// classifier can evaluate the sub-agent's prompt, defeating delegation-attack
 /// prevention. The tool name is normalized (`Task` → `Agent`) first.
 #[must_use]
-pub fn is_dangerous_task_permission(tool_name: &str, _rule_content: &Option<String>) -> bool {
+pub fn is_dangerous_task_permission(
+    tool_name: &str,
+    _rule_content: &Option<Utf16JsonProjection>,
+) -> bool {
     normalize_legacy_tool_name(tool_name) == AGENT_TOOL_NAME
 }
 
@@ -222,7 +240,10 @@ pub fn is_dangerous_task_permission(tool_name: &str, _rule_content: &Option<Stri
 /// should use [`is_dangerous_classifier_permission_with_flag`] instead — this
 /// wrapper is equivalent to passing `classify_all_shell = false`.
 #[must_use]
-pub fn is_dangerous_classifier_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
+pub fn is_dangerous_classifier_permission(
+    tool_name: &str,
+    rule_content: &Option<Utf16JsonProjection>,
+) -> bool {
     // The ant-only `Tmux` special-case (`permissionSetup.ts:276-279`) is omitted
     // for external parity.
     is_dangerous_bash_permission(tool_name, rule_content)
@@ -256,7 +277,7 @@ pub fn is_dangerous_classifier_permission(tool_name: &str, rule_content: &Option
 #[must_use]
 pub fn is_dangerous_classifier_permission_with_flag(
     tool_name: &str,
-    rule_content: &Option<String>,
+    rule_content: &Option<Utf16JsonProjection>,
     classify_all_shell: bool,
 ) -> bool {
     if classify_all_shell
@@ -326,8 +347,16 @@ pub fn find_dangerous_classifier_permissions_with_flag(
         {
             // `Bash(python:*)` when content is set, else `Bash(*)` for tool-wide.
             let rule_string = match &rule.value.rule_content {
-                Some(content) if !content.is_empty() => {
-                    format!("{}({})", rule.value.tool_name, content)
+                Some(content)
+                    if content
+                        .string_units("")
+                        .is_some_and(|units| !units.is_empty()) =>
+                {
+                    format!(
+                        "{}({})",
+                        rule.value.tool_name,
+                        content.string_at("").unwrap_or_default()
+                    )
                 }
                 _ => format!("{}(*)", rule.value.tool_name),
             };
@@ -343,6 +372,10 @@ pub fn find_dangerous_classifier_permissions_with_flag(
     dangerous
 }
 
+fn exact_rule_content(content: &Utf16JsonProjection) -> Option<&str> {
+    crate::source_input::exact_string(content.at_pointer("")?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,8 +383,8 @@ mod tests {
     // Always-`Some` by design: builds the `Some(content)` arg the predicates
     // take, mirroring a `Tool(content)` rule (vs `&None` for a tool-wide rule).
     #[allow(clippy::unnecessary_wraps)]
-    fn content(s: &str) -> Option<String> {
-        Some(s.to_string())
+    fn content(s: &str) -> Option<Utf16JsonProjection> {
+        Some(s.into())
     }
 
     // ── isDangerousBashPermission ──
@@ -736,7 +769,7 @@ mod tests {
         PermissionRule {
             value: PermissionRuleValue {
                 tool_name: tool.to_string(),
-                rule_content: content.map(str::to_string),
+                rule_content: content.map(Utf16JsonProjection::from),
             },
             behavior: PermissionBehavior::Allow,
             source,

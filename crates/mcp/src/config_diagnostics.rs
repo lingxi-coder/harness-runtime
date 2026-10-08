@@ -562,6 +562,16 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
             issues.push("alwaysLoad: expected boolean".to_string());
         }
     }
+    if crate::json_config::bare_elicitation_is_schema_key_for(Some(ty)) {
+        if let Some(bare) = object.get("bareElicitationCapability") {
+            if !bare.is_boolean() {
+                issues.push(format!(
+                    "bareElicitationCapability: expected boolean, received {}",
+                    json_type_name(bare)
+                ));
+            }
+        }
+    }
     // §11 — `discoveryCache: q().optional()` is declared by `OAn`/`sGt`
     // (`sse` / `http` / `streamable-http`) ONLY, and with NO `.catch`, so a
     // present-but-non-boolean value fails `safeParse` there and is an
@@ -892,6 +902,20 @@ mod tests {
             w[0].message,
             "Skipped \u{2014} invalid MCP server config for \"bad\": url: expected string, received undefined"
         );
+    }
+
+    #[test]
+    fn malformed_bare_elicitation_flag_is_reported_only_where_declared() {
+        for ty in ["stdio", "http", "sse", "streamable-http", "ws"] {
+            let warnings = only(
+                &json!({"mcpServers":{"srv":{"type":ty,"command":"mcp-test","url":"https://mcp.test","bareElicitationCapability":"true"}}}),
+            );
+            assert_eq!(warnings.len(), 1, "{ty}: {warnings:?}");
+            assert_eq!(warnings[0].message, "Skipped \u{2014} invalid MCP server config for \"srv\": bareElicitationCapability: expected boolean, received string");
+        }
+        for ty in ["sdk", "claudeai-proxy"] {
+            assert!(only(&json!({"mcpServers":{"srv":{"type":ty,"name":"sdk-client","id":"connector","url":"https://mcp.test","bareElicitationCapability":"true"}}})).is_empty(), "{ty}");
+        }
     }
 
     /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` carries NO `url`.

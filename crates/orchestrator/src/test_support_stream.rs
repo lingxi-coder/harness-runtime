@@ -22,7 +22,7 @@ use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
     HistoryMessageDelta, HistoryResponse, LlmError,
 };
-use serde_json::Value;
+use lingxi_llm_client::protocol::JsonPayload;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -35,12 +35,17 @@ pub struct CapturedStreamCall {
     /// Provider profile name threaded from `SessionState::model_profile`
     /// (`None` when no profile is active on the session).
     pub profile: Option<String>,
+    /// Per-request override supplied by a `turn.step` hook, if any.
+    pub effort_override: Option<String>,
     /// Assembled system prompt (`None` if omitted).
-    pub system: Option<String>,
+    pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     /// Conversation history snapshot at the time of the call.
     pub messages: Vec<ConversationMessage>,
     /// Wire tool definitions advertised on this call (`build_wire_tools`).
-    pub tools: Vec<Value>,
+    pub tools: Vec<llm_runtime::ToolDeclaration>,
+    /// Sanitized Native query source used for provider cache policy.
+    pub query_source: String,
+    pub skip_global_cache_for_system_prompt: bool,
 }
 
 /// Mock streaming client. Yields the next per-turn script of events each
@@ -113,16 +118,30 @@ impl StreamingApiClient for MockStreamingApiClient {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<Value>,
+        tools: Vec<llm_runtime::ToolDeclaration>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if request_dispatch_admission
+            .as_ref()
+            .is_some_and(|admission| !admission.is_admitted())
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false,
+            });
+        }
         self.captured.lock().await.push(CapturedStreamCall {
             model: model.to_string(),
             profile: profile.map(str::to_string),
-            system: system.map(str::to_string),
+            effort_override: None,
+            system: system.cloned(),
             messages,
             tools,
+            query_source: query_source.to_string(),
+            skip_global_cache_for_system_prompt,
         });
         // One-shot connect-phase error (see `with_open_error`).
         if let Some(e) = self.open_error.lock().await.take() {
@@ -134,6 +153,36 @@ impl StreamingApiClient for MockStreamingApiClient {
         })?;
         let s = stream::iter(next).boxed();
         Ok(s)
+    }
+
+    async fn stream_with_effort_override(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<llm_runtime::ToolDeclaration>,
+        effort: Option<&str>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let stream = self
+            .stream(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                query_source,
+                skip_global_cache_for_system_prompt,
+                request_dispatch_admission,
+            )
+            .await?;
+        if let Some(last) = self.captured.lock().await.last_mut() {
+            last.effort_override = effort.map(str::to_owned);
+        }
+        Ok(stream)
     }
 }
 
@@ -175,9 +224,11 @@ pub fn message_start(id: &str, model: &str) -> HistoryEvent {
             content: Vec::new(),
             stop_reason: None,
             stop_details: None,
+            resumable: None,
             usage: default_usage(),
             cost: None,
-            provider_metadata: serde_json::Value::Null,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+                .expect("null is valid JSON"),
         }),
     }
 }
@@ -196,9 +247,11 @@ pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> HistoryE
             content: Vec::new(),
             stop_reason: None,
             stop_details: None,
+            resumable: None,
             usage,
             cost: None,
-            provider_metadata: serde_json::Value::Null,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+                .expect("null is valid JSON"),
         }),
     }
 }
@@ -211,6 +264,7 @@ pub fn content_block_start_text(index: u32) -> HistoryEvent {
         content_block: LlmContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     }
 }
@@ -225,7 +279,7 @@ pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> Hi
         content_block: LlmContentBlock::ToolCall {
             id: id.to_string(),
             name: name.to_string(),
-            input: Value::Object(serde_json::Map::new()),
+            input: JsonPayload::parse("{}").expect("empty object is valid JSON"),
         },
     }
 }
@@ -247,7 +301,7 @@ pub fn input_json_delta(index: u32, partial: &str) -> HistoryEvent {
     HistoryEvent::ContentBlockDelta {
         index,
         delta: HistoryContentDelta::InputJsonDelta {
-            partial_json: partial.to_string(),
+            partial_json: partial.to_string().into(),
         },
     }
 }
@@ -265,6 +319,7 @@ pub fn message_delta_stop(stop_reason: &str) -> HistoryEvent {
         delta: HistoryMessageDelta {
             stop_reason: Some(stop_reason.to_string()),
             stop_details: None,
+            resumable: None,
         },
         usage: None,
     }
@@ -303,6 +358,7 @@ pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> History
         delta: HistoryMessageDelta {
             stop_reason: Some(stop_reason.to_string()),
             stop_details: None,
+            resumable: None,
         },
         usage: Some(usage),
     }
@@ -362,7 +418,16 @@ mod tests {
             message_stop(),
         ]]);
         let s = mock
-            .stream("claude-opus-4-7", None, None, Vec::new(), Vec::new())
+            .stream(
+                "claude-opus-4-7",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                "sdk",
+                false,
+                None,
+            )
             .await
             .expect("first turn");
         let collected: Vec<_> = s.collect().await;
@@ -374,7 +439,16 @@ mod tests {
         assert!(matches!(collected[1], Ok(HistoryEvent::MessageStop)));
 
         let result = mock
-            .stream("claude-opus-4-7", None, None, Vec::new(), Vec::new())
+            .stream(
+                "claude-opus-4-7",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                "sdk",
+                false,
+                None,
+            )
             .await;
         // `Result::expect_err` requires `Ok` to be `Debug`; `BoxStream`
         // is not. Match on the result instead.
@@ -388,7 +462,17 @@ mod tests {
     async fn captured_calls_record_model_and_system() {
         let mock = MockStreamingApiClient::with_turns(vec![scripted![message_stop()]]);
         let result = mock
-            .stream("claude-opus-4-7", None, Some("sys"), Vec::new(), Vec::new())
+            .stream(
+                "claude-opus-4-7",
+                None,
+                Some(&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("sys"),
+                )),
+                Vec::new(),
+                Vec::new(),
+                "sdk", false,
+                None,
+            )
             .await;
         // `Result::expect` requires Ok = `BoxStream` to be Debug;
         // it is not. Discriminate via `is_ok` instead.
@@ -396,6 +480,9 @@ mod tests {
         let calls = mock.captured_calls().await;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].model, "claude-opus-4-7");
-        assert_eq!(calls[0].system.as_deref(), Some("sys"));
+        assert_eq!(
+            calls[0].system.as_ref().map(|system| system.display_text()),
+            Some("sys".to_owned())
+        );
     }
 }

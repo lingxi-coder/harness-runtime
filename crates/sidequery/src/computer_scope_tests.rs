@@ -50,6 +50,10 @@ fn user(text: &str) -> ConversationMessage {
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     }
 }
 
@@ -91,6 +95,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,
+                    system_prompt_input: None,
                     messages: messages.clone(),
                     tools: vec![],
                     tool_choice: None,
@@ -168,9 +173,16 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
         None,
     ));
     let client = Arc::new(ProviderSideQueryClient::from_service(service));
-    let tools = vec![
-        json!({"name":"computer","description":"Manage desktop","input_schema":{"type":"object"}}),
-    ];
+    let tools = vec![lingxi_core::host::SourceToolWireDefinition {
+        name: "computer".into(),
+        description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Manage desktop"),
+        input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"type":"object"}"#,
+        )
+        .unwrap(),
+        strict: false,
+        defer_loading: false,
+    }];
     let prefix = vec![user("early context")];
     let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "model".into());
     scope_computer_request(
@@ -197,8 +209,9 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                     model: "model".into(),
                     profile: Some("test".into()),
                     system_prompt: None,
+                    system_prompt_input: None,
                     messages: prefix.clone(),
-                    tools: tools.clone(),
+                    tools: llm_runtime::convert::to_tool_declarations(tools.clone()).unwrap(),
                     tool_choice: None,
                     output_format: None,
                     max_tokens: 512,
@@ -216,7 +229,10 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                 .run(ForkedAgentRequest {
                     prompt_messages: vec![user("summarize all context")],
                     cache_safe_params: CacheSafeParams {
-                        system_prompt: Arc::from("Summarize"),
+                        system_prompt: Arc::new(
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from("Summarize"),
+                        ),
+                        system_prompt_input: None,
                         user_context: Default::default(),
                         system_context: Default::default(),
                         user_context_message: None,
@@ -243,7 +259,7 @@ async fn session_compaction_fork_and_estimation_keep_their_own_function_catalog(
                 })
                 .await
                 .unwrap();
-            assert_eq!(result.final_text, "summary");
+            assert_eq!(result.final_text.string_at(""), Some("summary"));
             let requests = transport.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0]["tools"][0]["name"], "computer");

@@ -8,7 +8,7 @@
 //!      `BuiltinToolContext::read_file_state` — what a composition root does,
 //!   2. a REAL `FileReadTool` call on a nested source file, which is what marks
 //!      it as touched,
-//!   3. `nested_memory_reminder_message()`, the method both turn drivers call,
+//!   3. `nested_memory_reminder_messages()`, the method both turn drivers call,
 //!   4. a REAL `FileReadTool` call on the surfaced memory file, which must now
 //!      return the seeded stub instead of the bytes.
 //!
@@ -119,7 +119,7 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
 
     // Nothing touched yet → nothing to discover from.
     assert!(
-        orch.nested_memory_reminder_message().await.is_none(),
+        orch.nested_memory_reminder_messages().await.is_empty(),
         "no touched file, no nested memory"
     );
 
@@ -135,8 +135,10 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
 
     // ── (3) THE PRODUCTION SEAM — what both turn drivers call ───────────────
     let reminder = orch
-        .nested_memory_reminder_message()
+        .nested_memory_reminder_messages()
         .await
+        .into_iter()
+        .next()
         .expect("the LINGXI.md governing pkg/ must surface");
     let text = reminder.text_content();
     assert!(

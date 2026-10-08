@@ -39,7 +39,7 @@ async fn run_turn_with_cancel_returns_end_turn_on_normal_completion() {
     let resp = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "Hi!".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -59,7 +59,7 @@ async fn run_turn_with_cancel_returns_cancelled_when_token_fires_before_turn() {
     let resp = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "Should not see this".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -89,14 +89,14 @@ async fn run_turn_with_cancel_injects_max_tokens_recovery_nudge() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "partial".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("max_tokens"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

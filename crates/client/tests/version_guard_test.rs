@@ -248,6 +248,12 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::Error", "error");
     put("ClientEvent::Error.kind", "ErrorKindDto");
     put("ClientEvent::Error.message", "String");
+    put("ClientEvent::TerminalApiError", "terminal_api_error");
+    put(
+        "ClientEvent::TerminalApiError.api_error_status",
+        "Option<u16>",
+    );
+    put("ClientEvent::TerminalApiError.terminal_reason", "String");
 
     put("ClientEvent::MessageIdentity", "message_identity");
     put("ClientEvent::MessageIdentity.message_id", "String");
@@ -258,9 +264,37 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SystemNotice", "system_notice");
     put("ClientEvent::SystemNotice.message", "String");
     put("ClientEvent::SystemNotice.is_error", "bool");
+    put("ClientEvent::UiLog", "ui_log");
+    put("ClientEvent::UiLog.plugin", "String");
+    put("ClientEvent::UiLog.text", "ClientTextDto");
+    put("ClientEvent::UiToast", "ui_toast");
+    put("ClientEvent::UiToast.plugin", "String");
+    put("ClientEvent::UiToast.text", "ClientTextDto");
+    put("ClientEvent::UiToast.timeout_ms", "u64");
+    put("ClientEvent::UiStatus", "ui_status");
+    put("ClientEvent::UiStatus.plugin", "String");
+    put("ClientEvent::UiStatus.text", "Option<ClientTextDto>");
+    put("ClientEvent::UiControlResult", "ui_control_result");
+    put("ClientEvent::UiControlResult.request_id", "String");
+    put(
+        "ClientEvent::UiControlResult.response_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::UiControlResult.metadata_json",
+        "Option<String>",
+    );
+    put("ClientEvent::UiControlResult.error", "Option<String>");
+    put("ClientEvent::UiClientFrame", "ui_client_frame");
+    put("ClientEvent::UiClientFrame.runtime_id", "String");
+    put("ClientEvent::UiClientFrame.frame_json", "String");
+    put("ClientEvent::UiInvalidate", "ui_invalidate");
+    put("ClientEvent::UiInvalidate.instances_json", "Option<String>");
+    put("ClientEvent::UiInvalidate.uuid", "String");
+    put("ClientEvent::UiInvalidate.session_id", "String");
 
     put("ClientEvent::TextDelta", "text_delta");
-    put("ClientEvent::TextDelta.text", "String");
+    put("ClientEvent::TextDelta.text", "ClientTextDto");
 
     put("ClientEvent::ToolUseStarted", "tool_use_started");
     put("ClientEvent::ToolUseStarted.id", "String");
@@ -352,7 +386,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SessionAgentTranscript.agent_id", "String");
     put(
         "ClientEvent::SessionAgentTranscript.messages",
-        "Vec<MessageDto>",
+        "Vec<SessionAgentMessageRowDto>",
     );
     put(
         "ClientEvent::SessionAgentTranscript.next_message_index",
@@ -371,7 +405,20 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SessionAgentMessage.session_id", "String");
     put("ClientEvent::SessionAgentMessage.agent_id", "String");
     put("ClientEvent::SessionAgentMessage.message_index", "u64");
+    put("ClientEvent::SessionAgentMessage.message_uuid", "String");
     put("ClientEvent::SessionAgentMessage.message", "MessageDto");
+    put(
+        "ClientEvent::SessionAgentMessage.api_error_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::SessionAgentTombstone",
+        "session_agent_tombstone",
+    );
+    put("ClientEvent::SessionAgentTombstone.session_id", "String");
+    put("ClientEvent::SessionAgentTombstone.agent_id", "String");
+    put("ClientEvent::SessionAgentTombstone.message_uuid", "String");
+    put("ClientEvent::SessionAgentTombstone.display_only", "bool");
 
     put("ClientEvent::SessionList", "session_list");
     put("ClientEvent::SessionList.sessions", "Vec<SessionRowDto>");
@@ -496,7 +543,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientEvent::SlashCommandResult", "slash_command_result");
     put("ClientEvent::SlashCommandResult.turn_id", "Option<u64>");
-    put("ClientEvent::SlashCommandResult.display", "String");
+    put("ClientEvent::SlashCommandResult.display", "ClientTextDto");
     put("ClientEvent::SlashCommandResult.is_error", "bool");
 
     put("ClientEvent::MemoryEntries", "memory_entries");
@@ -643,6 +690,98 @@ fn current_contract_index() -> ContractIndex {
     put(
         "ClientEvent::AudioCapabilitiesChanged.capabilities",
         "AudioCapabilitySnapshotDto",
+    );
+    put(
+        "ClientEvent::UserTranscriptRowIdentity",
+        "user_transcript_row_identity",
+    );
+    put("ClientEvent::UserTranscriptRowIdentity.row_token", "String");
+    put("ClientEvent::UserTranscriptRowIdentity.uuid", "String");
+    put(
+        "ClientEvent::AssistantTranscriptRowUuids",
+        "assistant_transcript_row_uuids",
+    );
+    put(
+        "ClientEvent::AssistantTranscriptRowUuids.message_id",
+        "String",
+    );
+    put(
+        "ClientEvent::AssistantTranscriptRowUuids.uuids",
+        "Vec<Option<String>>",
+    );
+    put("ClientEvent::QueryModelChange", "query_model_change");
+    put("ClientEvent::QueryModelChange.to_model", "String");
+    put("ClientEvent::AssistantBlockStart", "assistant_block_start");
+    put("ClientEvent::AssistantBlockStart.block_key", "u64");
+    put(
+        "ClientEvent::AssistantBlockIdentity",
+        "assistant_block_identity",
+    );
+    put("ClientEvent::AssistantBlockIdentity.block_key", "u64");
+    put("ClientEvent::AssistantBlockIdentity.message_uuid", "String");
+    put("ClientEvent::Tombstone", "tombstone");
+    put(
+        "ClientEvent::Tombstone.message",
+        "ServerFallbackTombstoneMessageDto",
+    );
+    put("ClientEvent::Tombstone.display_only", "bool");
+    put("ClientEvent::RefusalContinuation", "refusal_continuation");
+    put(
+        "ClientEvent::RefusalContinuation.phase",
+        "RefusalContinuationPhaseDto",
+    );
+    put("ClientEvent::RefusalContinuation.salvage_text", "String");
+    put(
+        "ClientEvent::RefusalContinuation.join",
+        "RefusalContinuationJoinDto",
+    );
+    put(
+        "ClientEvent::RefusalContinuation.replaces_uuids",
+        "Vec<String>",
+    );
+    put(
+        "ClientEvent::RefusalContinuation.display_salvage_text",
+        "bool",
+    );
+    put("RefusalContinuationPhaseDto::Begin", "begin");
+    put("RefusalContinuationJoinDto::Exact", "exact");
+    put("ServerFallbackTombstoneMessageDto.uuid", "String");
+    put("ServerFallbackTombstoneMessageDto.message_type", "String");
+    put(
+        "ServerFallbackTombstoneMessageDto.message",
+        "ServerFallbackProviderMessageDto",
+    );
+    put(
+        "ServerFallbackTombstoneMessageDto.is_api_error_message",
+        "Option<bool>",
+    );
+    put(
+        "ServerFallbackTombstoneMessageDto.supersedes_uuids",
+        "Option<Vec<String>>",
+    );
+    put("ServerFallbackProviderMessageDto.id", "Option<String>");
+    put("ServerFallbackProviderMessageDto.model", "Option<String>");
+    put(
+        "ServerFallbackProviderMessageDto.stop_reason",
+        "Option<String>",
+    );
+    put(
+        "ServerFallbackProviderMessageDto.stop_details_json",
+        "Option<String>",
+    );
+    put(
+        "ServerFallbackProviderMessageDto.usage_json",
+        "Option<String>",
+    );
+    put("ServerFallbackProviderMessageDto.content_json", "String");
+    put("ServerFallbackTombstoneMessageDto.timestamp", "String");
+    put(
+        "ServerFallbackTombstoneMessageDto.request_id",
+        "Option<String>",
+    );
+    put(
+        "ServerFallbackTombstoneMessageDto.request_ref_json",
+        "Option<String>",
     );
 
     put("AudioOperationIdDto.id", "String");
@@ -1040,6 +1179,34 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RequestExit", "request_exit");
 
+    put("ClientCommand::UiRender", "ui_render");
+    put("ClientCommand::UiRender.request_id", "String");
+    put("ClientCommand::UiRender.request_json", "String");
+    put("ClientCommand::UiClientModule", "ui_client_module");
+    put("ClientCommand::UiClientModule.request_id", "String");
+    put("ClientCommand::UiClientModule.plugin", "String");
+    put("ClientCommand::UiMessage", "ui_message");
+    put("ClientCommand::UiMessage.request_id", "String");
+    put("ClientCommand::UiMessage.request_json", "String");
+    put("ClientCommand::UiClientFault", "ui_client_fault");
+    put("ClientCommand::UiClientFault.request_id", "String");
+    put("ClientCommand::UiClientFault.request_json", "String");
+    put("ClientCommand::UiClientPress", "ui_client_press");
+    put("ClientCommand::UiClientPress.request_id", "String");
+    put("ClientCommand::UiClientPress.request_json", "String");
+    put("ClientCommand::UiPress", "ui_press");
+    put("ClientCommand::UiPress.request_id", "String");
+    put("ClientCommand::UiPress.request_json", "String");
+    put("ClientCommand::UiInput", "ui_input");
+    put("ClientCommand::UiInput.request_id", "String");
+    put("ClientCommand::UiInput.request_json", "String");
+    put("ClientCommand::UiSelect", "ui_select");
+    put("ClientCommand::UiSelect.request_id", "String");
+    put("ClientCommand::UiSelect.request_json", "String");
+    put("ClientCommand::UiClientOperation", "ui_client_operation");
+    put("ClientCommand::UiClientOperation.request_id", "String");
+    put("ClientCommand::UiClientOperation.operation_json", "String");
+
     put("ClientCommand::UpdateSettings", "update_settings");
     put(
         "ClientCommand::UpdateSettings.destination",
@@ -1255,7 +1422,7 @@ fn current_contract_index() -> ContractIndex {
     put("MessageDto.blocks", "Vec<MessageBlockDto>");
 
     put("MessageBlockDto::Text", "text");
-    put("MessageBlockDto::Text.text", "String");
+    put("MessageBlockDto::Text.text", "ClientTextDto");
 
     put("MessageBlockDto::Thinking", "thinking");
     put("MessageBlockDto::Thinking.thinking", "String");
@@ -1644,6 +1811,10 @@ fn current_contract_index() -> ContractIndex {
     put("SessionAgentSummaryDto.status", "String");
     put("SessionAgentSummaryDto.latest_activity", "Option<String>");
     put("SessionAgentSummaryDto.updated_at_ms", "Option<u64>");
+    put("SessionAgentMessageRowDto.message_index", "u64");
+    put("SessionAgentMessageRowDto.message_uuid", "String");
+    put("SessionAgentMessageRowDto.message", "MessageDto");
+    put("SessionAgentMessageRowDto.api_error_json", "Option<String>");
 
     put("SlashCommandDto.name", "String");
     put("SlashCommandDto.description", "String");
@@ -2051,6 +2222,40 @@ fn current_contract_index() -> ContractIndex {
     put("AppAgentProfileProposalDto.current_revision", "u64");
     put("AppAgentProfileProposalDto.instructions", "String");
     put("AppAgentProfileProposalDto.reason", "String");
+
+    put("AppAgentTerminalErrorDto.api_error_status", "Option<u16>");
+    put("AppAgentTerminalErrorDto.terminal_reason", "String");
+    put("AppAgentTurnResponseDto.cancelled", "bool");
+    put("AppAgentTurnResponseDto.session_id", "String");
+    put("AppAgentTurnResponseDto.stream_id", "Option<String>");
+    put("AppAgentTurnResponseDto.text", "ClientTextDto");
+    put("AppAgentTurnResponseDto.turn_id", "String");
+    put(
+        "AppAgentTurnResponseDto.terminal_error",
+        "Option<AppAgentTerminalErrorDto>",
+    );
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError",
+        "terminal_api_error",
+    );
+    put("AppBridgeStreamFrameDto::TerminalApiError.app_id", "String");
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError.request_id",
+        "String",
+    );
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError.stream_id",
+        "String",
+    );
+    put("AppBridgeStreamFrameDto::TerminalApiError.seq", "u64");
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError.api_error_status",
+        "Option<u16>",
+    );
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError.terminal_reason",
+        "String",
+    );
 
     put("AppUiActionKindDto::Inspect", "inspect");
     put("AppUiActionKindDto::Click", "click");
@@ -2603,6 +2808,15 @@ fn current_contract_index() -> ContractIndex {
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[test]
+fn exact_client_text_keeps_the_protocol_json_string_shape() {
+    let text = client::protocol::text::ClientTextDto::from_code_units(vec![b't' as u16, 0xd800]);
+    let encoded = serde_json::to_string(&text).unwrap();
+    assert_eq!(encoded, r#""t\ud800""#);
+    let decoded: client::protocol::text::ClientTextDto = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.code_units, [b't' as u16, 0xd800]);
+}
+
 /// Removing a field is a BREAKING change ⇒ the classifier returns `Breaking`,
 /// which (per the guard) forces a MAJOR `CLIENT_PROTOCOL_VERSION` bump.
 ///
@@ -2880,20 +3094,23 @@ fn contract_index_covers_every_dto() {
     };
     use client::protocol::error::ClientError;
     use client::protocol::events::{
-        ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+        ClientEvent, CostDto, ErrorKindDto, RefusalContinuationJoinDto,
+        RefusalContinuationPhaseDto, ServerFallbackProviderMessageDto,
+        ServerFallbackTombstoneMessageDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
         TurnRecoveryStateDto,
     };
     use client::protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto,
-        StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        MemoryTierDto, SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
+        SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client::protocol::local_apps::{
-        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
-        AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
-        AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-        AppDataFieldTypeDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
+        AppAgentTerminalErrorDto, AppAgentTurnResponseDto, AppAuthorizationDecisionDto,
+        AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto, AppCapabilityKindDto,
+        AppCapabilityRequestDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
+        AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto,
+        AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
         AppDependencyChangeKindDto, AppDependencySnapshotDto, AppDetailsDto, AppErrorCodeDto,
         AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
         AppRuntimeProfileBindingDto, AppRuntimeProfileDto, AppRuntimeProfileStatusDto,
@@ -2906,6 +3123,7 @@ fn contract_index_covers_every_dto() {
         PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto,
         WorkerInfoDto,
     };
+    use client::protocol::text::ClientTextDto;
     use client::protocol::tool_display::{
         CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto,
         PlanTaskStateDto, StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolResultDisplayDto,
@@ -2914,14 +3132,47 @@ fn contract_index_covers_every_dto() {
 
     // Touch every type so removing a type breaks this compile. The values are
     // intentionally minimal; this is a coverage anchor, not a round-trip test.
+    let _text = ClientTextDto::default();
     let _ev: Vec<ClientEvent> = vec![
         ClientEvent::Error {
             kind: ErrorKindDto::Internal,
             message: String::new(),
         },
+        ClientEvent::TerminalApiError {
+            api_error_status: Some(413),
+            terminal_reason: "image_error".into(),
+        },
         ClientEvent::SystemNotice {
-            message: String::new(),
+            message: String::new().into(),
             is_error: false,
+        },
+        ClientEvent::UiLog {
+            plugin: String::new(),
+            text: ClientTextDto::default(),
+        },
+        ClientEvent::UiToast {
+            plugin: String::new(),
+            text: ClientTextDto::default(),
+            timeout_ms: 4000,
+        },
+        ClientEvent::UiStatus {
+            plugin: String::new(),
+            text: None,
+        },
+        ClientEvent::UiControlResult {
+            request_id: String::new(),
+            response_json: None,
+            metadata_json: None,
+            error: Some(String::new()),
+        },
+        ClientEvent::UiClientFrame {
+            runtime_id: String::new(),
+            frame_json: String::new(),
+        },
+        ClientEvent::UiInvalidate {
+            instances_json: None,
+            uuid: String::new(),
+            session_id: String::new(),
         },
         ClientEvent::ProviderCredentialStatus {
             operation_id: 0,
@@ -3015,6 +3266,49 @@ fn contract_index_covers_every_dto() {
                 readiness: Vec::new(),
                 max_payload_bytes: 0,
             },
+        },
+        ClientEvent::UserTranscriptRowIdentity {
+            row_token: String::new(),
+            uuid: String::new(),
+        },
+        ClientEvent::AssistantTranscriptRowUuids {
+            message_id: String::new(),
+            uuids: Vec::new(),
+        },
+        ClientEvent::QueryModelChange {
+            to_model: String::new(),
+        },
+        ClientEvent::AssistantBlockStart { block_key: 0 },
+        ClientEvent::AssistantBlockIdentity {
+            block_key: 0,
+            message_uuid: String::new(),
+        },
+        ClientEvent::Tombstone {
+            message: ServerFallbackTombstoneMessageDto {
+                uuid: String::new(),
+                message_type: String::new(),
+                timestamp: String::new(),
+                request_id: None,
+                request_ref_json: None,
+                message: ServerFallbackProviderMessageDto {
+                    id: None,
+                    model: None,
+                    stop_reason: None,
+                    stop_details_json: None,
+                    usage_json: None,
+                    content_json: "[]".into(),
+                },
+                is_api_error_message: None,
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        },
+        ClientEvent::RefusalContinuation {
+            phase: RefusalContinuationPhaseDto::Begin,
+            salvage_text: String::new(),
+            join: RefusalContinuationJoinDto::Exact,
+            replaces_uuids: Vec::new(),
+            display_salvage_text: true,
         },
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
@@ -3198,6 +3492,42 @@ fn contract_index_covers_every_dto() {
                 max_payload_bytes: 0,
             },
         },
+        ClientCommand::UiRender {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiClientModule {
+            request_id: String::new(),
+            plugin: String::new(),
+        },
+        ClientCommand::UiMessage {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiClientFault {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiClientPress {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiPress {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiInput {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiSelect {
+            request_id: String::new(),
+            request_json: String::new(),
+        },
+        ClientCommand::UiClientOperation {
+            request_id: String::new(),
+            operation_json: String::new(),
+        },
     ];
     // Every operation result and error variant must remain constructible.
     let _audio_results: Vec<AudioOperationResultDto> = vec![
@@ -3307,7 +3637,7 @@ fn contract_index_covers_every_dto() {
         loop_wakeup: None,
         role: String::new(),
         blocks: vec![MessageBlockDto::Text {
-            text: String::new(),
+            text: String::new().into(),
         }],
         images: Vec::new(),
     };
@@ -3391,6 +3721,17 @@ fn contract_index_covers_every_dto() {
             latest_activity: None,
             updated_at_ms: None,
         },
+        SessionAgentMessageRowDto {
+            message_index: 0,
+            message_uuid: String::new(),
+            message: MessageDto {
+                role: String::new(),
+                blocks: vec![],
+                images: vec![],
+                loop_wakeup: None,
+            },
+            api_error_json: None,
+        },
         SlashCommandDto {
             name: String::new(),
             description: String::new(),
@@ -3446,7 +3787,7 @@ fn contract_index_covers_every_dto() {
             task_id: String::new(),
             task_type: String::new(),
             status: TaskStatusDto::Pending,
-            description: String::new(),
+            description: client::protocol::text::ClientTextDto::default(),
             can_resume: false,
             started_at_ms: None,
             error: None,
@@ -3486,7 +3827,7 @@ fn contract_index_covers_every_dto() {
         ClientEvent::AppOperationFailed {
             app_id: None,
             code: AppErrorCodeDto::NotFound,
-            message: String::new(),
+            message: client::protocol::text::ClientTextDto::default(),
             request_id: None,
         },
         ClientCommand::ListApps,
@@ -3607,6 +3948,18 @@ fn contract_index_covers_every_dto() {
         error: None,
         error_code: None,
     };
+    let _agent_terminal_error = AppAgentTerminalErrorDto {
+        api_error_status: Some(413),
+        terminal_reason: "image_error".into(),
+    };
+    let _agent_turn_response = AppAgentTurnResponseDto {
+        cancelled: false,
+        session_id: String::new(),
+        stream_id: None,
+        text: ClientTextDto::default(),
+        turn_id: String::new(),
+        terminal_error: None,
+    };
     let _app_ui_target = AppUiTargetDto {
         element_id: None,
         role: None,
@@ -3691,6 +4044,17 @@ fn contract_index_covers_every_dto() {
                 stream_id: String::new(),
                 seq: 0,
                 data_json: String::new(),
+            },
+            frame_json: String::new(),
+        },
+        AppEventDto::AppBridgeStreamFrame {
+            frame: client::protocol::local_apps::AppBridgeStreamFrameDto::TerminalApiError {
+                app_id: String::new(),
+                request_id: String::new(),
+                stream_id: String::new(),
+                seq: 0,
+                api_error_status: Some(413),
+                terminal_reason: "image_error".into(),
             },
             frame_json: String::new(),
         },

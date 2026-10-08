@@ -5,6 +5,21 @@ use super::*;
 mod tests {
     use super::*;
 
+    fn source_value(value: &Value) -> Utf16JsonProjection {
+        generated_builtin_result(value)
+    }
+
+    fn source_text(text: &str) -> Utf16JsonProjection {
+        source_text_projection(text)
+    }
+
+    fn display_root(value: &Utf16JsonProjection) -> String {
+        value
+            .string_at("")
+            .expect("test projection is a root string")
+            .to_owned()
+    }
+
     /// Process-global lock shared by every test that mutates the env vars the
     /// file-backed [`TodoStore`] resolves at call time (`LINGXI_CONFIG_DIR`,
     /// `LINGXI_TASK_LIST_ID`) or the swarm gate
@@ -21,6 +36,18 @@ mod tests {
         assert_eq!(TASK_UPDATE_TOOL_NAME, "TaskUpdate");
         assert_eq!(TASK_STOP_TOOL_NAME, "TaskStop");
         assert_eq!(TASK_OUTPUT_TOOL_NAME, "TaskOutput");
+    }
+
+    #[test]
+    fn task_update_source_string_field_accepts_unpaired_units() {
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xD800]), vec![0xD800])
+                .expect("source string is valid JSON");
+        let input = Utf16JsonProjection::object(vec![("description".into(), source)])
+            .expect("task update object is valid JSON");
+
+        let description = source_string_field(&input, "description").expect("string field exists");
+        assert_eq!(description.string_units(""), Some(vec![0xD800]));
     }
 
     // ── retrieval_status (TaskOutputTool.tsx `call` lines 219-281) ───────────
@@ -49,20 +76,41 @@ mod tests {
     fn parse_timeout_ms_handles_floats_and_clamps() {
         // T30: TS `z.number().min(0).max(600000).default(30000)`.
         // Absent → default 30000.
-        assert_eq!(parse_timeout_ms(&json!({})), 30_000);
+        assert_eq!(parse_timeout_ms(&source_value(&json!({}))), 30_000);
         // An integer JSON number parses as-is.
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1234 })), 1234);
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": 1234 }))),
+            1234
+        );
         // A FLOAT JSON number must parse (the old `as_u64` path dropped these and
         // silently fell back to the 30s default).
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1234.0 })), 1234);
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1500.9 })), 1500);
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": 1234.0 }))),
+            1234
+        );
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": 1500.9 }))),
+            1500
+        );
         // Above the max is clamped DOWN to 600000 (zod `.max(600000)`).
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": 999_999 })), 600_000);
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": 600_000.5 })), 600_000);
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": 999_999 }))),
+            600_000
+        );
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": 600_000.5 }))),
+            600_000
+        );
         // Below the min is clamped UP to 0 (zod `.min(0)`).
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": -50 })), 0);
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": -50 }))),
+            0
+        );
         // A non-numeric value falls back to the default.
-        assert_eq!(parse_timeout_ms(&json!({ "timeout": "nope" })), 30_000);
+        assert_eq!(
+            parse_timeout_ms(&source_value(&json!({ "timeout": "nope" }))),
+            30_000
+        );
     }
 
     #[test]
@@ -245,10 +293,12 @@ mod tests {
         )
         .await;
         assert_eq!(
-            message,
-            "No task found with ID: nope. Did you mean: buddy@alpha?. \
+            message.string_at(""),
+            Some(
+                "No task found with ID: nope. Did you mean: buddy@alpha?. \
 Running teammates: buddy@alpha, pal@alpha. \
 Running background agents: a1b2c3d4e (survey the crate)"
+            )
         );
     }
 
@@ -261,7 +311,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             Arc::new(RosterRegistry(Default::default()));
         let message =
             super::task_stop_not_found_message(&roster_ctx(), &registry, "nope", None, None).await;
-        assert_eq!(message, "No task found with ID: nope");
+        assert_eq!(message.string_at(""), Some("No task found with ID: nope"));
     }
 
     /// `SWn` @3695814 is NOT `Mut`: TaskOutput appends only the background-agent
@@ -278,7 +328,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         let message =
             super::task_output_not_found_message(&roster_ctx(), &registry, "nope", None).await;
         assert_eq!(
-            message, "No task found with ID: nope. Running background agents: a1b2c3d4e",
+            message.string_at(""),
+            Some("No task found with ID: nope. Running background agents: a1b2c3d4e"),
             "no teammates clause, and the id is not sanitized",
         );
         // The raw-id half, made observable: TaskStop would collapse this,
@@ -286,7 +337,28 @@ Running background agents: a1b2c3d4e (survey the crate)"
         let empty: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> =
             Arc::new(RosterRegistry(Default::default()));
         let raw = super::task_output_not_found_message(&roster_ctx(), &empty, "a  b", None).await;
-        assert_eq!(raw, "No task found with ID: a  b");
+        assert_eq!(raw.string_at(""), Some("No task found with ID: a  b"));
+    }
+
+    #[tokio::test]
+    async fn task_output_not_found_preserves_background_roster_utf16_units() {
+        use std::sync::Arc;
+        let lone_surrogate =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""agent-\ud800""#)
+                .unwrap();
+        let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> = Arc::new(
+            RosterRegistry(lingxi_core::host::task_registry::TaskNotFoundRosters {
+                background_agents: vec![lone_surrogate.clone()],
+                ..Default::default()
+            }),
+        );
+        let message =
+            super::task_output_not_found_message(&roster_ctx(), &registry, "missing", None).await;
+        let mut expected = "No task found with ID: missing. Running background agents: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend_from_slice(lone_surrogate.string_units("").unwrap());
+        assert_eq!(message.string_units(""), Some(expected.as_slice()));
     }
 
     // ── Input coercion / steering (claude-code POe / Cce / yDn) ──────────
@@ -613,56 +685,56 @@ Running background agents: a1b2c3d4e (survey the crate)"
     fn mk_task(id: &str, subject: &str, status: TodoState) -> TodoTask {
         TodoTask {
             id: id.into(),
-            subject: subject.into(),
-            description: "desc".into(),
+            subject: source_text(subject),
+            description: source_text("desc"),
             active_form: None,
             owner: None,
             status,
             blocks: Vec::new(),
             blocked_by: Vec::new(),
-            metadata: Map::new(),
+            metadata: None,
         }
     }
 
     #[test]
     fn render_task_get_missing_and_present() {
-        assert_eq!(render_task_get(None), "Task not found");
+        assert_eq!(render_task_get(None).string_at(""), Some("Task not found"));
         let mut t = mk_task("1", "Do thing", TodoState::InProgress);
         t.blocked_by = vec!["2".into(), "3".into()];
         t.blocks = vec!["4".into()];
         assert_eq!(
-            render_task_get(Some(&t)),
-            "Task #1: Do thing\nStatus: in_progress\nDescription: desc\nBlocked by: #2, #3\nBlocks: #4"
+            render_task_get(Some(&t)).string_at(""),
+            Some("Task #1: Do thing\nStatus: in_progress\nDescription: desc\nBlocked by: #2, #3\nBlocks: #4")
         );
         let bare = mk_task("5", "Bare", TodoState::Pending);
         assert_eq!(
-            render_task_get(Some(&bare)),
-            "Task #5: Bare\nStatus: pending\nDescription: desc"
+            render_task_get(Some(&bare)).string_at(""),
+            Some("Task #5: Bare\nStatus: pending\nDescription: desc")
         );
     }
 
     #[test]
     fn render_task_list_empty_and_rows() {
-        assert_eq!(render_task_list(&[]), "No tasks found");
+        assert_eq!(render_task_list(&[]).string_at(""), Some("No tasks found"));
         let rows = vec![
             TaskListRow {
                 id: "1".into(),
-                subject: "First".into(),
+                subject: source_text("First"),
                 status: TodoState::Pending,
                 owner: Some("alice".into()),
                 blocked_by: vec!["2".into()],
             },
             TaskListRow {
                 id: "2".into(),
-                subject: "Second".into(),
+                subject: source_text("Second"),
                 status: TodoState::Completed,
                 owner: None,
                 blocked_by: Vec::new(),
             },
         ];
         assert_eq!(
-            render_task_list(&rows),
-            "#1 [pending] First (alice) [blocked by #2]\n#2 [completed] Second"
+            render_task_list(&rows).string_at(""),
+            Some("#1 [pending] First (alice) [blocked by #2]\n#2 [completed] Second")
         );
     }
 
@@ -732,7 +804,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             .get(id)
             .await
             .expect("task persisted under the host config home");
-        assert_eq!(stored.subject, "Build local app");
+        assert_eq!(stored.subject.string_at(""), Some("Build local app"));
         assert!(config_home.join("tasks/default").is_dir());
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -778,7 +850,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         fn task(subject: &str, status: TodoState) -> TodoTask {
-            let mut t = TodoTask::new(subject.into(), "desc".into(), None, Map::new());
+            let mut t = TodoTask::new(source_text(subject), source_text("desc"), None, None);
             t.status = status;
             t
         }
@@ -982,7 +1054,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         fn task(subject: &str, status: TodoState) -> TodoTask {
-            let mut t = TodoTask::new(subject.into(), "the description".into(), None, Map::new());
+            let mut t = TodoTask::new(
+                source_text(subject),
+                source_text("the description"),
+                None,
+                None,
+            );
             t.status = status;
             t
         }
@@ -1710,6 +1787,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(
@@ -1728,6 +1806,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(p, TASK_LIST_PROMPT_SWARM);
@@ -1746,6 +1825,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(
@@ -1764,6 +1844,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
@@ -1826,7 +1907,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
         fn task_stop_search_hint_and_user_facing_name() {
             // T21/T22: TaskStopTool.ts:41 searchHint, :46 userFacingName.
             let tool = TaskStopTool::new(bctx());
-            assert_eq!(tool.search_hint(), Some("kill a running background task"));
+            assert_eq!(
+                tool.search_hint(),
+                Some(Utf16JsonProjection::from("kill a running background task"))
+            );
             assert_eq!(tool.user_facing_name(), Some("Stop Task"));
         }
 
@@ -1836,7 +1920,9 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let tool = TaskOutputTool::new(bctx());
             assert_eq!(
                 tool.search_hint(),
-                Some("read output/logs from a background task")
+                Some(Utf16JsonProjection::from(
+                    "read output/logs from a background task"
+                ))
             );
             assert_eq!(tool.user_facing_name(), Some("Task Output"));
         }
@@ -2010,7 +2096,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     // T24: the blocking reason is prefixed `TaskCreated hook
                     // feedback:\n` (claude-code `getTaskCreatedHookMessage`).
                     assert_eq!(
-                        s, "TaskCreated hook feedback:\ncreation blocked by policy",
+                        s.string_at(""),
+                        Some("TaskCreated hook feedback:\ncreation blocked by policy"),
                         "the hook reason surfaces with the TaskCreated feedback prefix"
                     )
                 }
@@ -2126,10 +2213,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let store = TodoStore::for_list(&list);
             let id = store
                 .create(TodoTask::new(
-                    "Ship it".into(),
-                    "the description".into(),
+                    source_text("Ship it"),
+                    source_text("the description"),
                     None,
-                    Map::new(),
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -2180,10 +2267,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let store = TodoStore::for_list(&list);
             let id = store
                 .create(TodoTask::new(
-                    "Ship it".into(),
-                    "desc".into(),
+                    source_text("Ship it"),
+                    source_text("desc"),
                     None,
-                    Map::new(),
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -2218,10 +2305,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let store = TodoStore::for_list(&list);
             let id = store
                 .create(TodoTask::new(
-                    "Ship it".into(),
-                    "desc".into(),
+                    source_text("Ship it"),
+                    source_text("desc"),
                     None,
-                    Map::new(),
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -2255,10 +2342,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let store = TodoStore::for_list(&list);
             let id = store
                 .create(TodoTask::new(
-                    "Ship it".into(),
-                    "desc".into(),
+                    source_text("Ship it"),
+                    source_text("desc"),
                     None,
-                    Map::new(),
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -2296,19 +2383,33 @@ Running background agents: a1b2c3d4e (survey the crate)"
     #[test]
     fn metadata_internal_truthiness_follows_js() {
         let mut m = Map::new();
-        assert!(!metadata_internal_truthy(&m));
+        assert!(!metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), json!(true));
-        assert!(metadata_internal_truthy(&m));
+        assert!(metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), json!(false));
-        assert!(!metadata_internal_truthy(&m));
+        assert!(!metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), json!(0));
-        assert!(!metadata_internal_truthy(&m));
+        assert!(!metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), json!(""));
-        assert!(!metadata_internal_truthy(&m));
+        assert!(!metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), json!("yes"));
-        assert!(metadata_internal_truthy(&m));
+        assert!(metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m.clone())
+        ))));
         m.insert("_internal".into(), Value::Null);
-        assert!(!metadata_internal_truthy(&m));
+        assert!(!metadata_internal_truthy(Some(&source_value(
+            &Value::Object(m)
+        ))));
     }
 
     // ── Product-A V2 schemas ─────────────────────────────────────────────
@@ -2491,6 +2592,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 // A `local_bash` task carries a distinct command; TaskStop must
                 // prefer this over `description` (claude-code stopTask.ts:97).
                 command: Some("echo hi > out.txt".into()),
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -2503,6 +2605,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 description: "run the agent".into(),
                 // Non-bash tasks have no command; TaskStop falls back to description.
                 command: None,
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -2544,7 +2647,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 done,
                 error: error.map(str::to_string),
                 prompt: Some("do the thing".into()),
-                result: result.map(str::to_string),
+                result: result.map(Utf16JsonProjection::from),
                 harness_head: None,
                 output_path: None,
                 mcp: None,
@@ -2560,7 +2663,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         fn err_msg(e: ToolError) -> String {
             match e {
-                ToolError::InvalidInput(s) | ToolError::Internal(s) => s,
+                ToolError::InvalidInput(s) | ToolError::Internal(s) => s
+                    .string_at("")
+                    .expect("tool errors carry root-string source")
+                    .to_owned(),
                 other => panic!("unexpected error variant: {other:?}"),
             }
         }
@@ -2670,6 +2776,38 @@ Running background agents: a1b2c3d4e (survey the crate)"
             );
             assert_eq!(res.data["task_type"], "local_agent");
             assert_eq!(res.data["command"], "run the agent");
+        }
+
+        #[tokio::test]
+        async fn task_stop_preserves_exact_source_command_and_message() {
+            let description =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xD800]), vec![0xD800])
+                    .expect("source description is valid");
+            let reg = MockRegistry::with_record(Some(TaskRecord {
+                task_id: "a12345678".into(),
+                task_type: "local_agent".into(),
+                status: "running".into(),
+                description: description.clone(),
+                command: None,
+                ..Default::default()
+            }));
+            let tool = TaskStopTool::new(bctx(reg));
+            let result = Tool::call(
+                &tool,
+                source_value(&json!({ "task_id": "a12345678" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("stop succeeds");
+
+            assert_eq!(result.data.string_units("/command"), Some(vec![0xD800]));
+            let mut expected = "Successfully stopped task: a12345678 ("
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            expected.push(0xD800);
+            expected.push(u16::from(b')'));
+            assert_eq!(result.data.string_units("/message"), Some(expected));
         }
 
         #[tokio::test]
@@ -2982,6 +3120,54 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         #[tokio::test]
+        async fn task_output_preserves_agent_result_utf16_through_model_content() {
+            let units = vec![u16::from(b'A'), 0xD800, u16::from(b'Z')];
+            let result =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .expect("source text is valid");
+            let reg = MockRegistry::with_record(Some(agent_rec("completed")));
+            reg.push_chunk(TaskOutputChunk {
+                task_id: "a12345678".into(),
+                content: "raw transcript".into(),
+                total_lines: 1,
+                truncated: false,
+                status: Some("completed".into()),
+                done: true,
+                result: Some(result),
+                ..Default::default()
+            });
+            let tool = TaskOutputTool::new(bctx(reg));
+            let output = Tool::call(
+                &tool,
+                source_value(&json!({ "task_id": "a12345678", "block": false })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("source output succeeds");
+
+            assert_eq!(
+                output.data.string_units("/task/result"),
+                Some(units.clone())
+            );
+            assert_eq!(
+                output.data.string_units("/task/output"),
+                Some(units.clone())
+            );
+            let content = output
+                .data
+                .string_units("/content")
+                .expect("content is string");
+            let output_start = "<output>\n".encode_utf16().collect::<Vec<_>>();
+            let mut expected = output_start;
+            expected.extend_from_slice(&units);
+            expected.extend("\n</output>".encode_utf16());
+            assert!(content
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()));
+        }
+
+        #[tokio::test]
         async fn task_output_agent_success_returns_clean_text_not_json_blob() {
             // A successful local_agent task whose on-disk spool is the raw
             // pretty-JSON transcript blob, but whose chunk also carries the
@@ -3108,7 +3294,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let event = rx.try_recv().expect("waiting progress");
             assert_eq!(event.tool_use_id, expected_id);
             assert_eq!(
-                event.data,
+                serde_json::from_str::<Value>(
+                    &event.data.to_json_string().expect("progress source JSON"),
+                )
+                .expect("progress JSON"),
                 json!({
                     "type": "waiting_for_task", "taskDescription": "echo hi", "taskType": "local_bash"
                 })
@@ -3315,8 +3504,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         fn render_task_output_null_task_is_status_only() {
             // The `task: null` (timeout) branch renders just the status line.
             assert_eq!(
-                render_task_output("timeout", None),
-                "<retrieval_status>timeout</retrieval_status>"
+                render_task_output("timeout", None).string_at(""),
+                Some("<retrieval_status>timeout</retrieval_status>")
             );
         }
 
@@ -3324,14 +3513,15 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         #[test]
         fn semantic_bool_coerces_string_literals() {
-            assert_eq!(semantic_bool(&json!(true)), Some(true));
-            assert_eq!(semantic_bool(&json!(false)), Some(false));
-            assert_eq!(semantic_bool(&json!("true")), Some(true));
-            assert_eq!(semantic_bool(&json!("false")), Some(false));
+            let view = |value: Value| source_value(&value).at_pointer("").unwrap();
+            assert_eq!(semantic_bool(view(json!(true))), Some(true));
+            assert_eq!(semantic_bool(view(json!(false))), Some(false));
+            assert_eq!(semantic_bool(view(json!("true"))), Some(true));
+            assert_eq!(semantic_bool(view(json!("false"))), Some(false));
             // Anything else passes through to the inner schema (→ None here).
-            assert_eq!(semantic_bool(&json!("FALSE")), None);
-            assert_eq!(semantic_bool(&json!("maybe")), None);
-            assert_eq!(semantic_bool(&json!(1)), None);
+            assert_eq!(semantic_bool(view(json!("FALSE"))), None);
+            assert_eq!(semantic_bool(view(json!("maybe"))), None);
+            assert_eq!(semantic_bool(view(json!(1))), None);
         }
 
         #[tokio::test]
@@ -3386,6 +3576,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 description: "echo hi".into(),
                 command: Some("echo hi > out.txt".into()),
                 owner_agent_id: owner.map(str::to_string),
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -3393,7 +3584,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         async fn stop_as(
             caller: Option<lingxi_core::types::AgentId>,
             record: TaskRecord,
-        ) -> Result<ToolCallResult, ToolError> {
+        ) -> Result<TestTaskCallResult, ToolError> {
             let reg = MockRegistry::with_record(Some(record));
             let mut ctx = fresh_ctx();
             ctx.agent_id = caller;
@@ -3498,7 +3689,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// time, plus the elicitation line while the dialog is open.
         #[test]
         fn an_mcp_task_renders_a_metadata_block() {
-            let block = render_mcp_task_output(&mcp_meta(), "running");
+            let rendered = render_mcp_task_output(&mcp_meta(), "running");
+            let block = display_root(&rendered);
             assert_eq!(
                 block,
                 "server: acme\n\
@@ -3514,7 +3706,8 @@ waiting on the user: an elicitation dialog is open"
         /// and the elicitation line goes away with the running status.
         #[test]
         fn a_killed_mcp_task_reports_the_server_status_when_stopped() {
-            let block = render_mcp_task_output(&mcp_meta(), "killed");
+            let rendered = render_mcp_task_output(&mcp_meta(), "killed");
+            let block = display_root(&rendered);
             assert!(
                 block.contains("server status when stopped: input required"),
                 "got: {block}"
@@ -3529,10 +3722,29 @@ waiting on the user: an elicitation dialog is open"
         fn a_blank_mcp_status_message_is_dropped() {
             let mut meta = mcp_meta();
             meta.status_message = Some("   \n  ".into());
-            let block = render_mcp_task_output(&meta, "running");
+            let block = display_root(&render_mcp_task_output(&meta, "running"));
             assert!(!block.contains("status message"), "got: {block}");
             meta.status_message = None;
-            assert!(!render_mcp_task_output(&meta, "running").contains("status message"));
+            assert!(
+                !display_root(&render_mcp_task_output(&meta, "running")).contains("status message")
+            );
+        }
+
+        #[test]
+        fn mcp_task_output_preserves_source_status_message_units() {
+            let units = vec![u16::from(b'A'), 0xD800, u16::from(b'Z')];
+            let mut meta = mcp_meta();
+            meta.status_message = Some(
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .expect("status text is a source string"),
+            );
+            let rendered = render_mcp_task_output(&meta, "running");
+            let rendered_units = rendered.string_units("").expect("render is root text");
+            let mut expected = "status message: ".encode_utf16().collect::<Vec<_>>();
+            expected.extend(units);
+            assert!(rendered_units
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()));
         }
 
         /// TO-06 wiring: the block the registry resolved has to REPLACE the
@@ -3545,6 +3757,7 @@ waiting on the user: an elicitation dialog is open"
                 task_type: "mcp_task".into(),
                 status: "completed".into(),
                 description: "deploy".into(),
+                agent_facts: None,
                 ..Default::default()
             };
             let reg = MockRegistry::with_record(Some(record));
@@ -3579,13 +3792,50 @@ waiting on the user: an elicitation dialog is open"
             );
         }
 
+        #[tokio::test]
+        async fn task_output_preserves_exact_task_record_description() {
+            let description =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xD800]), vec![0xD800])
+                    .expect("source description is valid");
+            let record = TaskRecord {
+                task_id: "a12345678".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                description,
+                ..Default::default()
+            };
+            let reg = MockRegistry::with_record(Some(record));
+            reg.push_chunk(TaskOutputChunk {
+                task_id: "a12345678".into(),
+                content: "agent transcript".into(),
+                total_lines: 1,
+                truncated: false,
+                status: Some("completed".into()),
+                done: true,
+                ..Default::default()
+            });
+            let tool = TaskOutputTool::new(bctx(reg));
+            let result = Tool::call(
+                &tool,
+                source_value(&json!({ "task_id": "a12345678", "block": false })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("output succeeds");
+            assert_eq!(
+                result.data.string_units("/task/description"),
+                Some(vec![0xD800])
+            );
+        }
+
         /// `omitOutputPath` picks the other truncation header — there is no
         /// spool path worth naming for a synthetic block.
         #[test]
         fn the_omit_path_truncation_header_reports_what_survived() {
             let max = max_task_output_length();
-            let out = format!("{}TAILEND", "C".repeat(max + 500));
-            let formatted = format_task_output(&out, "k12345678", None, true);
+            let out = source_text(&format!("{}TAILEND", "C".repeat(max + 500)));
+            let formatted = display_root(&format_task_output(&out, "k12345678", None, true));
             assert!(
                 formatted.starts_with("[Truncated to the last "),
                 "got: {}",
@@ -3594,7 +3844,7 @@ waiting on the user: an elicitation dialog is open"
             assert!(!formatted.contains("Full output:"), "no path is named");
             assert!(formatted.ends_with("TAILEND"));
             assert!(
-                formatted.chars().count() <= max,
+                formatted.encode_utf16().count() <= max,
                 "the result must stay inside the cap"
             );
         }
@@ -3680,8 +3930,11 @@ waiting on the user: an elicitation dialog is open"
         #[test]
         fn format_task_output_passthrough_under_limit() {
             // `output.length <= maxLen` ⇒ returned verbatim, no header.
-            let out = "hello world\nsecond line\n";
-            assert_eq!(format_task_output(out, "b12345678", None, false), out);
+            let out = source_text("hello world\nsecond line\n");
+            assert_eq!(
+                format_task_output(&out, "b12345678", None, false).string_at(""),
+                Some("hello world\nsecond line\n")
+            );
         }
 
         #[test]
@@ -3695,13 +3948,18 @@ waiting on the user: an elicitation dialog is open"
             assert_eq!(out.chars().count(), total);
 
             // With NO resolved path the header falls back to the bare filename.
-            let formatted = format_task_output(&out, "b12345678", None, false);
+            let formatted = display_root(&format_task_output(
+                &source_text(&out),
+                "b12345678",
+                None,
+                false,
+            ));
             assert!(formatted.starts_with("[Truncated. Full output: b12345678.output]\n\n"));
             // The leading marker was truncated away; the tail is preserved.
             assert!(!formatted.contains("HEADMARKER"));
             assert!(formatted.ends_with("TAILEND"));
-            // header + tail exactly fills `maxLen` chars (TS slice arithmetic).
-            assert_eq!(formatted.chars().count(), max);
+            // Header plus tail exactly fills Native String.length units.
+            assert_eq!(formatted.encode_utf16().count(), max);
         }
 
         #[test]
@@ -3712,7 +3970,12 @@ waiting on the user: an elicitation dialog is open"
             let max = max_task_output_length();
             let out = format!("{}TAILEND", "C".repeat(max + 200));
             let abs = "/private/tmp/claude-501/-Users-me-proj/sess-abc/tasks/b12345678.output";
-            let formatted = format_task_output(&out, "b12345678", Some(abs), false);
+            let formatted = display_root(&format_task_output(
+                &source_text(&out),
+                "b12345678",
+                Some(abs),
+                false,
+            ));
             assert!(
                 formatted.starts_with(&format!("[Truncated. Full output: {abs}]\n\n")),
                 "absolute path is used verbatim in the header; got {:?}",
@@ -3725,7 +3988,7 @@ waiting on the user: an elicitation dialog is open"
             assert!(!formatted.starts_with("[Truncated. Full output: b12345678.output]"));
             assert!(formatted.ends_with("TAILEND"));
             // The full byte length budget still holds with the longer header.
-            assert_eq!(formatted.chars().count(), max);
+            assert_eq!(formatted.encode_utf16().count(), max);
         }
 
         #[test]
@@ -3739,7 +4002,7 @@ waiting on the user: an elicitation dialog is open"
                 task_type: "local_bash".into(),
                 status: "completed".into(),
                 description: "echo hi".into(),
-                output: out,
+                output: source_text(&out),
                 exit_code: Some(0),
                 error: None,
                 output_path: None,
@@ -3747,7 +4010,7 @@ waiting on the user: an elicitation dialog is open"
                 harness_head: None,
                 omit_output_path: false,
             };
-            let rendered = render_task_output("success", Some(&view));
+            let rendered = display_root(&render_task_output("success", Some(&view)));
             assert!(rendered.contains("<output>\n[Truncated. Full output: b12345678.output]\n\n"));
             assert!(rendered.trim_end().ends_with("TAILEND\n</output>"));
         }
@@ -3772,7 +4035,7 @@ waiting on the user: an elicitation dialog is open"
                 harness_head: None,
                 omit_output_path: false,
             };
-            let rendered = render_task_output("success", Some(&view));
+            let rendered = display_root(&render_task_output("success", Some(&view)));
             assert!(
                 rendered
                     .contains("[harness: subagent output matched instruction-shaped pattern(s): "),
@@ -3786,6 +4049,35 @@ waiting on the user: an elicitation dialog is open"
 
         /// The same body under `local_bash` is passed through verbatim — a shell
         /// spool is the user's own output, not a report addressed to the model.
+        #[test]
+        fn task_output_renderer_keeps_lone_surrogates_in_utf16_content() {
+            let units = vec![u16::from(b'A'), 0xD800, u16::from(b'Z')];
+            let output =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .expect("source text is valid");
+            let view = TaskOutputView {
+                task_id: "a12345678".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                description: "research".into(),
+                output,
+                exit_code: None,
+                error: None,
+                output_path: None,
+                is_raw_transcript: true,
+                harness_head: None,
+                omit_output_path: false,
+            };
+            let rendered = render_task_output("success", Some(&view));
+            let actual = rendered
+                .string_units("")
+                .expect("rendered content is root string");
+            let mut expected = "<retrieval_status>success</retrieval_status>\n\n<task_id>a12345678</task_id>\n\n<task_type>local_agent</task_type>\n\n<status>completed</status>\n\n<output>\n".encode_utf16().collect::<Vec<_>>();
+            expected.extend_from_slice(&units);
+            expected.extend("\n</output>".encode_utf16());
+            assert_eq!(actual, expected);
+        }
+
         #[test]
         fn bash_output_is_passed_through_verbatim() {
             let view = TaskOutputView {
@@ -3803,7 +4095,7 @@ waiting on the user: an elicitation dialog is open"
                 harness_head: None,
                 omit_output_path: false,
             };
-            let rendered = render_task_output("success", Some(&view));
+            let rendered = display_root(&render_task_output("success", Some(&view)));
             assert!(
                 !rendered.contains("[harness: subagent output matched"),
                 "got: {rendered}"
@@ -3835,7 +4127,7 @@ waiting on the user: an elicitation dialog is open"
                 harness_head: None,
                 omit_output_path: false,
             };
-            let rendered = render_task_output("success", Some(&view));
+            let rendered = display_root(&render_task_output("success", Some(&view)));
             assert!(
                 !rendered.contains("[harness: subagent output matched"),
                 "got: {rendered}"
@@ -3858,7 +4150,7 @@ waiting on the user: an elicitation dialog is open"
                 task_type: "local_bash".into(),
                 status: "completed".into(),
                 description: "echo hi".into(),
-                output: out,
+                output: source_text(&out),
                 exit_code: Some(0),
                 error: None,
                 output_path: Some(abs.into()),
@@ -3866,7 +4158,7 @@ waiting on the user: an elicitation dialog is open"
                 harness_head: None,
                 omit_output_path: false,
             };
-            let rendered = render_task_output("success", Some(&view));
+            let rendered = display_root(&render_task_output("success", Some(&view)));
             assert!(
                 rendered.contains(&format!("<output>\n[Truncated. Full output: {abs}]\n\n")),
                 "the threaded absolute path reaches the rendered header"

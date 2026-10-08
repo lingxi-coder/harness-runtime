@@ -295,6 +295,8 @@ pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[must_use]
 pub fn fresh_ctx() -> ToolUseContext {
     ToolUseContext {
+        agent_spawn_provenance: Default::default(),
+        native_query_depth: None,
         options: ToolUseOptions {
             debug: false,
             verbose: false,
@@ -309,11 +311,17 @@ pub fn fresh_ctx() -> ToolUseContext {
         messages: vec![],
         tool_use_id: None,
         assistant_message_id: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
         agent_id: None,
+        nested_memory_triggers: Arc::default(),
         agent_name: None,
         team_name: None,
         origin_session_id: None,
+        instruction_context: None,
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+        trusted_effective_permission_mode: None,
+        classifier_only_review: None,
         content_replacement_state: None,
         session: None,
         subagent_registry: None,

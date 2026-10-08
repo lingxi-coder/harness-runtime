@@ -8,7 +8,7 @@
 //! 4. Enforces [`MAX_LSP_FILE_SIZE_BYTES`] (10 MB) on the file size.
 //! 5. Converts 1-based positions to 0-based on the LSP wire.
 //! 6. Issues the appropriate `textDocument/...` request and returns the
-//!    raw JSON `result` for the caller to format.
+//!    raw `Utf16JsonProjection` result for the caller to format.
 //!
 //! Reference: `claude-code/src/tools/LSPTool/LSPTool.ts`,
 //! specifically `MAX_LSP_FILE_SIZE_BYTES = 10_000_000` (line 53) and the
@@ -17,15 +17,15 @@
 use crate::client::LspClient;
 use crate::open_file_tracker::{DocumentSync, OpenFileTracker};
 use crate::path_mapper::LspDocumentPath;
+use jsonrpc::JsonPayload;
 use lingxi_core::host::LspServerConfig;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp_types::{
-    CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, DocumentSymbolParams, Position, ReferenceContext, ReferenceParams,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
-    WorkspaceSymbolParams,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::borrow::Cow;
 use std::path::Path;
 use std::path::PathBuf;
@@ -71,8 +71,9 @@ pub struct LspOperationResult {
     /// File the operation was performed on (URI string form; empty for
     /// workspace-symbol).
     pub file_uri: String,
-    /// Raw JSON `result` (decoded by caller into operation-specific shapes).
-    pub raw: Value,
+    /// Raw JSON `result`, retaining arbitrary LSP strings as exact UTF-16.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub raw: Utf16JsonProjection,
 }
 
 /// Failures the operations can produce.
@@ -107,6 +108,49 @@ pub enum LspOperationError {
     /// Underlying LSP transport / server error.
     #[error("{0}")]
     Lsp(#[from] lingxi_core::host::LspError),
+}
+
+fn generated_params<T: Serialize>(params: T) -> Result<Utf16JsonProjection, LspOperationError> {
+    let json = serde_json::to_string(&params).map_err(|error| {
+        LspOperationError::Lsp(lingxi_core::host::LspError::Transport(format!(
+            "serialize LSP operation params: {error}"
+        )))
+    })?;
+    Utf16JsonProjection::parse(&json).map_err(|error| {
+        LspOperationError::Lsp(lingxi_core::host::LspError::Transport(format!(
+            "project LSP operation params: {error}"
+        )))
+    })
+}
+
+fn generated_json_payload<T: Serialize>(params: &T) -> Result<JsonPayload, LspOperationError> {
+    JsonPayload::from_serializable(params).map_err(|error| {
+        LspOperationError::Lsp(lingxi_core::host::LspError::Transport(format!(
+            "serialize generated LSP notification params: {error}"
+        )))
+    })
+}
+
+fn source_object(
+    fields: Vec<(String, Utf16JsonProjection)>,
+) -> Result<Utf16JsonProjection, LspOperationError> {
+    Utf16JsonProjection::object(fields).map_err(|error| {
+        LspOperationError::Lsp(lingxi_core::host::LspError::Transport(format!(
+            "project LSP operation params: {error}"
+        )))
+    })
+}
+
+fn first_hierarchy_item(raw: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let root = raw.at_pointer("")?;
+    if root.array_len()? == 0 || root.get_index(0)?.object_entries().is_none() {
+        return None;
+    }
+    raw.subprojection("/0").ok()
+}
+
+fn empty_array_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("[]").expect("static empty array is valid JSON")
 }
 
 /// Convert a 1-based UI position to the 0-based LSP wire position.
@@ -243,14 +287,14 @@ pub(crate) async fn sync_document_text(
             client
                 .notify(
                     "textDocument/didOpen",
-                    json!({
+                    generated_params(json!({
                         "textDocument": {
                             "uri": document.uri,
                             "languageId": language_id,
                             "version": version,
                             "text": text,
                         }
-                    }),
+                    }))?,
                 )
                 .await?;
             for (server_name, evicted_uri) in evicted {
@@ -260,10 +304,9 @@ pub(crate) async fn sync_document_text(
                     tracker.connection_for_server(server_name).await
                 };
                 if let Some(owner) = owner {
-                    if let Err(error) = owner.notify(
-                        "textDocument/didClose",
-                        json!({ "textDocument": { "uri": evicted_uri } }),
-                    ) {
+                    let params =
+                        generated_json_payload(&json!({ "textDocument": { "uri": evicted_uri } }))?;
+                    if let Err(error) = owner.notify("textDocument/didClose", params) {
                         tracing::warn!(
                             target: "lingxi_lsp::client",
                             server = %server_name,
@@ -278,16 +321,16 @@ pub(crate) async fn sync_document_text(
             client
                 .notify(
                     "textDocument/didChange",
-                    json!({
+                    generated_params(json!({
                         "textDocument": { "uri": document.uri, "version": version },
                         "contentChanges": [{ "text": text }],
-                    }),
+                    }))?,
                 )
                 .await?;
             client
                 .notify(
                     "textDocument/didSave",
-                    json!({ "textDocument": { "uri": document.uri } }),
+                    generated_params(json!({ "textDocument": { "uri": document.uri } }))?,
                 )
                 .await?;
         }
@@ -317,7 +360,9 @@ pub async fn hover<D: LspDocumentArg + ?Sized>(
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
     };
-    let raw: Value = client.request("textDocument/hover", params).await?;
+    let raw = client
+        .request("textDocument/hover", generated_params(params)?)
+        .await?;
     Ok(LspOperationResult {
         operation: LspOperation::Hover,
         file_uri: uri.to_string(),
@@ -345,7 +390,9 @@ pub async fn go_to_definition<D: LspDocumentArg + ?Sized>(
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
     };
-    let raw: Value = client.request("textDocument/definition", params).await?;
+    let raw = client
+        .request("textDocument/definition", generated_params(params)?)
+        .await?;
     Ok(LspOperationResult {
         operation: LspOperation::GoToDefinition,
         file_uri: uri.to_string(),
@@ -384,7 +431,9 @@ pub async fn find_references<D: LspDocumentArg + ?Sized>(
             include_declaration,
         },
     };
-    let raw: Value = client.request("textDocument/references", params).await?;
+    let raw = client
+        .request("textDocument/references", generated_params(params)?)
+        .await?;
     Ok(LspOperationResult {
         operation: LspOperation::FindReferences,
         file_uri: uri.to_string(),
@@ -412,7 +461,9 @@ pub async fn completion<D: LspDocumentArg + ?Sized>(
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
     };
-    let raw: Value = client.request("textDocument/completion", params).await?;
+    let raw = client
+        .request("textDocument/completion", generated_params(params)?)
+        .await?;
     Ok(LspOperationResult {
         operation: LspOperation::Completion,
         file_uri: uri.to_string(),
@@ -439,8 +490,8 @@ pub async fn document_symbol<D: LspDocumentArg + ?Sized>(
         work_done_progress_params: WorkDoneProgressParams::default(),
         partial_result_params: lsp_types::PartialResultParams::default(),
     };
-    let raw: Value = client
-        .request("textDocument/documentSymbol", params)
+    let raw = client
+        .request("textDocument/documentSymbol", generated_params(params)?)
         .await?;
     Ok(LspOperationResult {
         operation: LspOperation::DocumentSymbol,
@@ -458,14 +509,13 @@ pub async fn document_symbol<D: LspDocumentArg + ?Sized>(
 /// JSON-RPC transport / server errors only.
 pub async fn workspace_symbol(
     client: &LspClient,
-    query: Option<String>,
+    query: Option<Utf16JsonProjection>,
 ) -> Result<LspOperationResult, LspOperationError> {
-    let params = WorkspaceSymbolParams {
-        query: query.unwrap_or_default(),
-        work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: lsp_types::PartialResultParams::default(),
-    };
-    let raw: Value = client.request("workspace/symbol", params).await?;
+    let params = source_object(vec![(
+        "query".to_string(),
+        query.unwrap_or_else(|| Utf16JsonProjection::from("")),
+    )])?;
+    let raw = client.request("workspace/symbol", params).await?;
     Ok(LspOperationResult {
         operation: LspOperation::WorkspaceSymbol,
         file_uri: String::new(),
@@ -493,8 +543,8 @@ pub async fn go_to_implementation<D: LspDocumentArg + ?Sized>(
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
     };
-    let raw: Value = client
-        .request("textDocument/implementation", params)
+    let raw = client
+        .request("textDocument/implementation", generated_params(params)?)
         .await?;
     Ok(LspOperationResult {
         operation: LspOperation::GoToImplementation,
@@ -526,8 +576,11 @@ pub async fn prepare_call_hierarchy<D: LspDocumentArg + ?Sized>(
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
-    let raw: Value = client
-        .request("textDocument/prepareCallHierarchy", params)
+    let raw = client
+        .request(
+            "textDocument/prepareCallHierarchy",
+            generated_params(params)?,
+        )
         .await?;
     Ok(LspOperationResult {
         operation: LspOperation::PrepareCallHierarchy,
@@ -551,21 +604,15 @@ pub async fn incoming_calls<D: LspDocumentArg + ?Sized>(
 ) -> Result<LspOperationResult, LspOperationError> {
     let prepare =
         prepare_call_hierarchy(client, tracker, config, document, line, character).await?;
-    let items: Vec<CallHierarchyItem> =
-        serde_json::from_value(prepare.raw.clone()).unwrap_or_default();
-    let Some(item) = items.into_iter().next() else {
+    let Some(item) = first_hierarchy_item(&prepare.raw) else {
         return Ok(LspOperationResult {
             operation: LspOperation::IncomingCalls,
             file_uri: prepare.file_uri,
-            raw: json!([]),
+            raw: empty_array_projection(),
         });
     };
-    let params = CallHierarchyIncomingCallsParams {
-        item,
-        work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: lsp_types::PartialResultParams::default(),
-    };
-    let raw: Value = client
+    let params = source_object(vec![("item".to_string(), item)])?;
+    let raw = client
         .request("callHierarchy/incomingCalls", params)
         .await?;
     Ok(LspOperationResult {
@@ -590,21 +637,15 @@ pub async fn outgoing_calls<D: LspDocumentArg + ?Sized>(
 ) -> Result<LspOperationResult, LspOperationError> {
     let prepare =
         prepare_call_hierarchy(client, tracker, config, document, line, character).await?;
-    let items: Vec<CallHierarchyItem> =
-        serde_json::from_value(prepare.raw.clone()).unwrap_or_default();
-    let Some(item) = items.into_iter().next() else {
+    let Some(item) = first_hierarchy_item(&prepare.raw) else {
         return Ok(LspOperationResult {
             operation: LspOperation::OutgoingCalls,
             file_uri: prepare.file_uri,
-            raw: json!([]),
+            raw: empty_array_projection(),
         });
     };
-    let params = CallHierarchyOutgoingCallsParams {
-        item,
-        work_done_progress_params: WorkDoneProgressParams::default(),
-        partial_result_params: lsp_types::PartialResultParams::default(),
-    };
-    let raw: Value = client
+    let params = source_object(vec![("item".to_string(), item)])?;
+    let raw = client
         .request("callHierarchy/outgoingCalls", params)
         .await?;
     Ok(LspOperationResult {

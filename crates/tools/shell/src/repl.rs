@@ -20,8 +20,8 @@ use telemetry::tengu::tool::{REPL_COMPLETED, REPL_FAILED, REPL_STARTED};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
@@ -112,15 +112,15 @@ impl REPLTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "language": { "type": "string", "enum": ["python", "node", "ruby"] },
             "code":     { "type": "string" }
         },
         "required": ["language", "code"]
-    })
+    }))
 });
 
 #[async_trait]
@@ -128,8 +128,15 @@ impl Tool for REPLTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -137,17 +144,21 @@ impl Tool for REPLTool {
     fn max_result_size_chars(&self) -> usize {
         MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-02 default)".into(),
@@ -158,56 +169,62 @@ impl Tool for REPLTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        let lang = input.get("language").and_then(Value::as_str).unwrap_or("?");
+    async fn description(
+        &self,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
+        let lang = input.string_at("/language").unwrap_or("?");
         format!("Running {lang} REPL")
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        "Execute a code snippet in python, node, or ruby.".into()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "Execute a code snippet in python, node, or ruby.",
+        )
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let lang = input
-            .get("language")
-            .and_then(Value::as_str)
+            .string_at("/language")
             .ok_or_else(|| ValidationError("missing `language`".into()))?;
         if !matches!(lang, "python" | "node" | "ruby") {
-            return Err(ValidationError(format!(
-                "unsupported REPL language: {lang}"
-            )));
+            return Err(ValidationError(
+                format!("unsupported REPL language: {lang}").into(),
+            ));
         }
         input
-            .get("code")
-            .and_then(Value::as_str)
+            .string_at("/code")
             .ok_or_else(|| ValidationError("missing `code`".into()))?;
         Ok(())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use lingxi_core::host::sandbox::ProcessCommand as SbxCommand;
 
         let lang = input
-            .get("language")
-            .and_then(Value::as_str)
+            .string_at("/language")
             .ok_or_else(|| ToolError::InvalidInput("missing language".into()))?
             .to_string();
         let code = input
-            .get("code")
-            .and_then(Value::as_str)
+            .string_at("/code")
             .ok_or_else(|| ToolError::InvalidInput("missing code".into()))?;
 
-        let (exe, args, stdin_payload) = lang_exec(&lang, code)
-            .ok_or_else(|| ToolError::InvalidInput(format!("unsupported REPL language: {lang}")))?;
+        let (exe, args, stdin_payload) = lang_exec(&lang, code).ok_or_else(|| {
+            ToolError::InvalidInput(format!("unsupported REPL language: {lang}").into())
+        })?;
 
         let mut meta_start: LogEventMetadata = HashMap::new();
         meta_start.insert("language".into(), AnalyticsValue::String(lang.clone()));
@@ -241,26 +258,27 @@ impl Tool for REPLTool {
                 self.ctx.bus.log_event(REPL_COMPLETED, meta).await;
 
                 Ok(ToolCallResult {
-                    data: json!({
+                    data: tool_api::tool_trait::generated_builtin_result(&json!({
                         "language":  lang,
                         "exit_code": out.exit_code,
                         "stdout":    stdout_final,
                         "stderr":    stderr_clean,
                         "is_error":  is_error,
                         "truncated": truncated,
-                    }),
+                    })),
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(e) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert("language".into(), AnalyticsValue::String(lang));
                 self.ctx.bus.log_event(REPL_FAILED, meta).await;
-                Err(ToolError::Io(format!("{e}")))
+                Err(ToolError::Io(format!("{e}").into()))
             }
         }
     }
@@ -268,6 +286,26 @@ impl Tool for REPLTool {
 
 #[cfg(test)]
 mod tests {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    fn source_json_value(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
+    }
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            source_json_value(json!($($tokens)*))
+        };
+    }
+
+    fn data_value(value: &Utf16JsonProjection) -> serde_json::Value {
+        serde_json::from_str(&value.to_json_string().expect("test data serializes"))
+            .expect("test data is JSON")
+    }
+
+    fn model_text(value: &Option<Utf16JsonProjection>) -> Option<&str> {
+        value.as_ref()?.string_at("")
+    }
+
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
@@ -361,7 +399,7 @@ mod tests {
         let tool = REPLTool::new(ctx);
         let r = tool
             .validate_input(
-                &json!({"language": "rust", "code": "fn main(){}"}),
+                &source_json!({"language": "rust", "code": "fn main(){}"}),
                 &fresh_ctx(),
             )
             .await;
@@ -380,13 +418,13 @@ mod tests {
         let tool = REPLTool::new(ctx);
         let r = tool
             .call(
-                json!({"language": "python", "code": "print('hi')"}),
+                source_json!({"language": "python", "code": "print('hi')"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(r.data["stdout"], "hi\n");
-        assert_eq!(r.data["language"], "python");
+        assert_eq!(data_value(&r.data)["stdout"], "hi\n");
+        assert_eq!(data_value(&r.data)["language"], "python");
     }
 }

@@ -233,7 +233,13 @@ pub fn lower_hook_info(info: &HookInfo) -> HookDto {
     HookDto {
         name: info.name.clone(),
         event: info.event.clone(),
-        matcher: info.matcher.clone(),
+        matcher: info.matcher.as_ref().map(|source| {
+            crate::protocol::text::ClientTextDto::from_code_units(
+                source
+                    .string_units("")
+                    .expect("hook matcher is a root-string projection"),
+            )
+        }),
         timeout_ms: info.timeout_ms,
         hook_type: Some(info.hook_type.clone()),
         source: Some(info.source.clone()),
@@ -244,7 +250,13 @@ pub fn lower_hook_info(info: &HookInfo) -> HookDto {
         priority: Some(info.priority),
         async_rewake: Some(info.async_rewake),
         async_timeout_ms: info.async_timeout_ms,
-        if_condition: info.if_condition.clone(),
+        if_condition: info.if_condition.as_ref().map(|source| {
+            crate::protocol::text::ClientTextDto::from_code_units(
+                source
+                    .string_units("")
+                    .expect("hook if condition is a root-string projection"),
+            )
+        }),
     }
 }
 
@@ -337,7 +349,8 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         task_id: rec.task_id.clone(),
         task_type: rec.task_type.clone(),
         status: lower_task_status(&rec.status),
-        description: rec.description.clone(),
+        description: crate::protocol::text::ClientTextDto::from_projection(&rec.description)
+            .expect("TaskRecord.description is a root-string projection"),
         // The reduced task record intentionally keeps no script/checkpoint
         // paths. The concrete mobile command performs the stronger metadata
         // validation before launching; this flag is only an affordance hint.

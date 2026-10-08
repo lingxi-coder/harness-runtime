@@ -39,7 +39,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use client::protocol::ask_user_question::{
-    AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto,
+    AskOptionDto, AskQuestionDto, AskUserQuestionAnswerDto, AskUserQuestionAnswersDto,
+    AskUserQuestionRequestDto,
 };
 use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto,
@@ -49,7 +50,7 @@ use client::protocol::audio::{
 use client::protocol::commands::{
     AppCreateModeDto, ClientCommand, HookAdminCommandDto, ImageRefDto, ListingKindDto,
     McpAdminCommandDto, PermissionBehaviorDto, PluginAdminCommandDto, PromptModeDto,
-    ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
+    ProviderCredentialSecretDto, SkillAdminCommandDto, UiSurfaceDto, WritableScopeDto,
 };
 use client::protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -62,15 +63,17 @@ use client::protocol::controls::{
 };
 use client::protocol::error::ClientError;
 use client::protocol::events::{
-    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, RefusalContinuationJoinDto,
+    RefusalContinuationPhaseDto, ServerFallbackProviderMessageDto,
+    ServerFallbackTombstoneMessageDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
     TurnRecoveryStateDto,
 };
 use client::protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
     ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client::protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
@@ -96,6 +99,7 @@ use client::protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolutionDto, PermissionResolved,
     PermissionResponseDto, WorkerInfoDto,
 };
+use client::protocol::text::ClientTextDto;
 use client::protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
     StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolIconDto, ToolResultDisplayDto,
@@ -214,10 +218,74 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/terminal_api_error.json",
+            ClientEvent::TerminalApiError {
+                api_error_status: Some(413),
+                terminal_reason: "image_error".into(),
+            },
+        ),
+        (
             "event/system_notice.json",
             ClientEvent::SystemNotice {
-                message: "Conversation changes could not be saved.".to_string(),
+                message: "Conversation changes could not be saved.".into(),
                 is_error: true,
+            },
+        ),
+        (
+            "event/ui_log.json",
+            ClientEvent::UiLog {
+                plugin: "review".to_string(),
+                text: "Found a mismatch".into(),
+            },
+        ),
+        (
+            "event/ui_toast.json",
+            ClientEvent::UiToast {
+                plugin: "review".to_string(),
+                text: "Found a mismatch".into(),
+                timeout_ms: 4000,
+            },
+        ),
+        (
+            "event/ui_status.json",
+            ClientEvent::UiStatus {
+                plugin: "review".to_string(),
+                text: None,
+            },
+        ),
+        (
+            "event/ui_control_result.json",
+            ClientEvent::UiControlResult {
+                request_id: "render-1".into(),
+                response_json: Some(
+                    r#"{"tree":{},"props":{},"rewritten":false,"hooked":true}"#.into(),
+                ),
+                metadata_json: Some(r#"{"renderRevision":7}"#.into()),
+                error: None,
+            },
+        ),
+        (
+            "event/ui_control_result_error.json",
+            ClientEvent::UiControlResult {
+                request_id: "module-2".into(),
+                response_json: None,
+                metadata_json: None,
+                error: Some("module unavailable".into()),
+            },
+        ),
+        (
+            "event/ui_client_frame.json",
+            ClientEvent::UiClientFrame {
+                runtime_id: "runtime-1".into(),
+                frame_json: r#"{"type":"ui.render","tree":{}}"#.into(),
+            },
+        ),
+        (
+            "event/ui_invalidate.json",
+            ClientEvent::UiInvalidate {
+                instances_json: Some("[]".into()),
+                uuid: "event-1".into(),
+                session_id: "session-1".into(),
             },
         ),
         (
@@ -258,7 +326,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         (
             "event/text_delta.json",
             ClientEvent::TextDelta {
-                text: "Hello, world.".to_string(),
+                text: "Hello, world.".into(),
             },
         ),
         (
@@ -452,7 +520,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         loop_wakeup: None,
                         role: "user".to_string(),
                         blocks: vec![MessageBlockDto::Text {
-                            text: "Resume me.".to_string(),
+                            text: "Resume me.".into(),
                         }],
                         images: Vec::new(),
                     },
@@ -489,7 +557,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentTranscript {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-                messages: vec![canonical_message()],
+                messages: vec![SessionAgentMessageRowDto {
+                    message_index: 0,
+                    message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                    message: canonical_message(),
+                    api_error_json: None,
+                }],
                 next_message_index: 1,
                 revision: 1,
             },
@@ -515,8 +588,21 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentMessage {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-                message_index: 0,
-                message: canonical_message(),
+                row: SessionAgentMessageRowDto {
+                    message_index: 0,
+                    message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                    message: canonical_message(),
+                    api_error_json: None,
+                },
+            },
+        ),
+        (
+            "event/session_agent_tombstone.json",
+            ClientEvent::SessionAgentTombstone {
+                session_id: "22222222-2222-4222-8222-222222222222".into(),
+                agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                display_only: true,
             },
         ),
         (
@@ -812,7 +898,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/slash_command_result.json",
             ClientEvent::SlashCommandResult {
                 turn_id: Some(12),
-                display: "Switched model to opus".to_string(),
+                display: "Switched model to opus".into(),
                 is_error: false,
             },
         ),
@@ -1263,7 +1349,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 event: AppEventDto::LocalAppOperationFailed {
                     app_id: None,
                     code: LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable,
-                    message: "The verified builtin bundle root is missing.".to_string(),
+                    message: ClientTextDto::from_utf8("The verified builtin bundle root is missing."),
                     request_id: Some("plugin-read-1".to_string()),
                 },
             },
@@ -1273,7 +1359,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::AppOperationFailed {
                 app_id: Some("habits-1a2b".to_string()),
                 code: AppErrorCodeDto::NotYetAvailable,
-                message: "app runtime lands in phase 4".to_string(),
+                message: ClientTextDto::from_utf8("app runtime lands in phase 4"),
                 // Non-default on purpose: a `None` here would drop the key
                 // from the golden, so a rename of the field could not be
                 // caught by this snapshot.
@@ -1312,12 +1398,16 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 request: AskUserQuestionRequestDto {
                     request_id: 9,
                     questions: vec![AskQuestionDto {
-                        question: "Which database should the app use?".to_string(),
-                        header: "Storage".to_string(),
+                        question: ClientTextDto::from_utf8(
+                            "Which database should the app use?",
+                        ),
+                        header: ClientTextDto::from_utf8("Storage"),
                         options: vec![AskOptionDto {
-                            label: "SQLite".to_string(),
-                            description: "Local, file-backed, zero setup.".to_string(),
-                            preview: Some("app.sqlite".to_string()),
+                            label: ClientTextDto::from_utf8("SQLite"),
+                            description: ClientTextDto::from_utf8(
+                                "Local, file-backed, zero setup.",
+                            ),
+                            preview: Some(ClientTextDto::from_utf8("app.sqlite")),
                         }],
                         multi_select: false,
                     }],
@@ -1405,6 +1495,70 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     }],
                     max_payload_bytes: 12_533_760,
                 },
+            },
+        ),
+        (
+            "event/query_model_change.json",
+            ClientEvent::QueryModelChange {
+                to_model: "claude-sonnet-4".into(),
+            },
+        ),
+        (
+            "event/assistant_block_start.json",
+            ClientEvent::AssistantBlockStart { block_key: 7 },
+        ),
+        (
+            "event/assistant_block_identity.json",
+            ClientEvent::AssistantBlockIdentity {
+                block_key: 7,
+                message_uuid: "assistant-row-1".into(),
+            },
+        ),
+        (
+            "event/user_transcript_row_identity.json",
+            ClientEvent::UserTranscriptRowIdentity {
+                row_token: "pending-user-row".into(),
+                uuid: "persisted-user-row".into(),
+            },
+        ),
+        (
+            "event/assistant_transcript_row_uuids.json",
+            ClientEvent::AssistantTranscriptRowUuids {
+                message_id: "assistant-turn-1".into(),
+                uuids: vec![Some("assistant-text-row-1".into()), None],
+            },
+        ),
+        (
+            "event/tombstone.json",
+            ClientEvent::Tombstone {
+                message: ServerFallbackTombstoneMessageDto {
+                    uuid: "assistant-row-1".into(),
+                    message_type: "assistant".into(),
+                    timestamp: "2026-10-03T12:00:00.000Z".into(),
+                    request_id: Some("request-1".into()),
+                    request_ref_json: Some(r#"{"route":"native"}"#.into()),
+                    message: ServerFallbackProviderMessageDto {
+                        id: Some("provider-message-1".into()),
+                        model: Some("claude-opus-4".into()),
+                        stop_reason: Some("tool_use".into()),
+                        stop_details_json: Some(r#"{"category":"cyber"}"#.into()),
+                        usage_json: Some(r#"{"input_tokens":5,"output_tokens":2}"#.into()),
+                        content_json: r#"[{"type":"text","text":"superseded"}]"#.into(),
+                    },
+                    is_api_error_message: Some(false),
+                    supersedes_uuids: Some(vec!["assistant-row-0".into()]),
+                },
+                display_only: true,
+            },
+        ),
+        (
+            "event/refusal_continuation.json",
+            ClientEvent::RefusalContinuation {
+                phase: RefusalContinuationPhaseDto::Begin,
+                salvage_text: "retained refusal text".into(),
+                join: RefusalContinuationJoinDto::Exact,
+                replaces_uuids: vec!["assistant-row-0".into()],
+                display_salvage_text: true,
             },
         ),
     ]
@@ -1606,6 +1760,82 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ("command/force_compact.json", ClientCommand::ForceCompact),
         ("command/clear_session.json", ClientCommand::ClearSession),
         (
+            "command/ui_attach.json",
+            ClientCommand::UiAttach {
+                surface: UiSurfaceDto::Desktop,
+                client_id: "electron-window-1".to_string(),
+            },
+        ),
+        (
+            "command/ui_detach.json",
+            ClientCommand::UiDetach {
+                client_id: "electron-window-1".to_string(),
+            },
+        ),
+        (
+            "command/ui_render.json",
+            ClientCommand::UiRender {
+                request_id: "render-1".into(),
+                request_json: r#"{"subtype":"ui_render"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_module.json",
+            ClientCommand::UiClientModule {
+                request_id: "module-1".into(),
+                plugin: "review".into(),
+            },
+        ),
+        (
+            "command/ui_message.json",
+            ClientCommand::UiMessage {
+                request_id: "message-1".into(),
+                request_json: r#"{"subtype":"ui_message"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_fault.json",
+            ClientCommand::UiClientFault {
+                request_id: "fault-1".into(),
+                request_json: r#"{"subtype":"ui_client_fault"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_press.json",
+            ClientCommand::UiClientPress {
+                request_id: "press-1".into(),
+                request_json: r#"{"subtype":"ui_client_press"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_press.json",
+            ClientCommand::UiPress {
+                request_id: "parent-press-1".into(),
+                request_json: r#"{"subtype":"ui_press"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_input.json",
+            ClientCommand::UiInput {
+                request_id: "parent-input-1".into(),
+                request_json: r#"{"subtype":"ui_input"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_select.json",
+            ClientCommand::UiSelect {
+                request_id: "parent-select-1".into(),
+                request_json: r#"{"subtype":"ui_select"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_operation.json",
+            ClientCommand::UiClientOperation {
+                request_id: "operation-1".into(),
+                operation_json: r#"{"subtype":"mount"}"#.into(),
+            },
+        ),
+        (
             "command/task_list.json",
             ClientCommand::TaskList {
                 request_id: None,
@@ -1758,16 +1988,18 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            // Exactly ONE answer entry: `answers` is a `HashMap`, which
-            // `to_string_pretty` writes in (randomly seeded) iteration order —
-            // two or more entries would make the golden bytes non-deterministic.
+            // Ordered pairs serialize as the established JSON answer object.
             "command/answer_ask_user_question.json",
             ClientCommand::AnswerAskUserQuestion {
                 request_id: 9,
-                answers: HashMap::from([(
-                    "Which database should the app use?".to_string(),
-                    "SQLite".to_string(),
-                )]),
+                answers: AskUserQuestionAnswersDto {
+                    pairs: vec![AskUserQuestionAnswerDto {
+                        question: ClientTextDto::from_utf8(
+                            "Which database should the app use?",
+                        ),
+                        answer: ClientTextDto::from_utf8("SQLite"),
+                    }],
+                },
             },
         ),
         (
@@ -2310,7 +2542,7 @@ fn canonical_message() -> MessageDto {
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {
-                text: "Here is the plan.".to_string(),
+                text: "Here is the plan.".into(),
             },
             MessageBlockDto::Thinking {
                 thinking: "I should read the file first.".to_string(),
@@ -2475,7 +2707,7 @@ fn canonical_task_row() -> TaskRowDto {
         task_id: "b12345678".to_string(),
         task_type: "bash".to_string(),
         status: TaskStatusDto::Running,
-        description: "run the test suite".to_string(),
+        description: ClientTextDto::from_utf8("run the test suite"),
         can_resume: false,
         started_at_ms: None,
         error: None,

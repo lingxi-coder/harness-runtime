@@ -24,6 +24,7 @@
 //! none of these paths are reachable by the model in this build.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -34,8 +35,10 @@ use tool_api::artifact_gate;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, PromptOptions, Tool, ToolCallResult,
+    ToolError, ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+    ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -91,8 +94,8 @@ const PROMPT: &str = r#"Render an HTML or Markdown file to an Artifact — a def
 **Never publish**: pages that impersonate a real person or organization (their name, branding, byline, or domain); fabricated records, receipts, or reviews presented as genuine; forms or flows that collect credentials or payment details under false pretenses; or content targeting a private individual. This applies whether you authored the page or the user supplied it, and regardless of claimed purpose ("it's a prop", "for testing") when the page would function as the real thing. If publishing is refused, do not suggest other ways to host or distribute the page."#;
 
 /// Binary `XHd` — the input schema (`strictObject`, every field optional).
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -105,12 +108,12 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "url": { "type": "string", "description": DESC_URL },
             "force": { "type": "boolean", "description": DESC_FORCE }
         }
-    })
+    }))
 });
 
 /// Binary `aOy` = `E.union([iOy, sOy])` — publish-result | list-result.
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "anyOf": [
             {
                 "type": "object",
@@ -154,7 +157,7 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "required": ["artifacts"]
             }
         ]
-    })
+    }))
 });
 
 /// `Artifact` — render an HTML/Markdown file to a claude.ai web page (binary `eIs`).
@@ -171,8 +174,149 @@ impl ArtifactTool {
 }
 
 /// `e?.action==="list"` — the only concurrency-safe / read-only action.
-fn is_list_action(input: &Value) -> bool {
-    input.get("action").and_then(Value::as_str) == Some("list")
+fn is_list_action(input: &Utf16JsonProjection) -> bool {
+    input.string_at("/action") == Some("list")
+}
+
+fn artifact_string_field(
+    source: &Utf16JsonProjection,
+    pointer: &str,
+    key: &str,
+) -> Option<Utf16JsonProjection> {
+    let path = if pointer.is_empty() {
+        format!("/{key}")
+    } else {
+        format!("{pointer}/{key}")
+    };
+    let value = source.subprojection(&path).ok()?;
+    value.string_units("").is_some().then_some(value)
+}
+
+fn native_text_field(source: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    source
+        .string_units(pointer)
+        .map(|units| String::from_utf16_lossy(&units))
+}
+
+fn parse_artifact_publish_output(source: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    if source.at_pointer("")?.object_entries().is_none() {
+        return None;
+    }
+    let mut fields = vec![
+        ("url".to_owned(), artifact_string_field(source, "", "url")?),
+        (
+            "path".to_owned(),
+            artifact_string_field(source, "", "path")?,
+        ),
+    ];
+    for key in ["title", "version"] {
+        if source.get_property(key).is_some() {
+            fields.push((key.to_owned(), artifact_string_field(source, "", key)?));
+        }
+    }
+    if source.get_property("capabilities").is_some() {
+        fields.push((
+            "capabilities".to_owned(),
+            source.subprojection("/capabilities").ok()?,
+        ));
+    }
+    if source.get_property("stored").is_some() {
+        let stored = source.subprojection("/stored").ok()?;
+        if stored.at_pointer("")?.object_entries().is_none() {
+            return None;
+        }
+        let mut stored_fields = vec![(
+            "contract".to_owned(),
+            artifact_string_field(&stored, "", "contract")?,
+        )];
+        if let Some(capabilities) = stored.get_property("capabilities") {
+            if capabilities.object_entries().is_none() {
+                return None;
+            }
+            stored_fields.push((
+                "capabilities".to_owned(),
+                stored.subprojection("/capabilities").ok()?,
+            ));
+        }
+        fields.push((
+            "stored".to_owned(),
+            Utf16JsonProjection::object(stored_fields).ok()?,
+        ));
+    }
+    if source.get_property("warnings").is_some() {
+        let count = source.array_len("/warnings")?;
+        for index in 0..count {
+            if source.string_units(&format!("/warnings/{index}")).is_none() {
+                return None;
+            }
+        }
+        fields.push((
+            "warnings".to_owned(),
+            source.subprojection("/warnings").ok()?,
+        ));
+    }
+    if source.get_property("contract").is_some() {
+        fields.push((
+            "contract".to_owned(),
+            artifact_string_field(source, "", "contract")?,
+        ));
+    }
+    if let Some(updated) = source.get_property("updated") {
+        if updated.as_bool().is_none() {
+            return None;
+        }
+        fields.push(("updated".to_owned(), source.subprojection("/updated").ok()?));
+    }
+    Utf16JsonProjection::object(fields).ok()
+}
+
+fn parse_artifact_list_output(source: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    if source.at_pointer("")?.object_entries().is_none() {
+        return None;
+    }
+    let count = source.array_len("/artifacts")?;
+    let mut artifacts = Vec::with_capacity(count);
+    for index in 0..count {
+        let pointer = format!("/artifacts/{index}");
+        if source.at_pointer(&pointer)?.object_entries().is_none() {
+            return None;
+        }
+        let mut item = vec![
+            (
+                "title".to_owned(),
+                artifact_string_field(source, &pointer, "title")?,
+            ),
+            (
+                "url".to_owned(),
+                artifact_string_field(source, &pointer, "url")?,
+            ),
+        ];
+        let updated_path = format!("{pointer}/updatedAt");
+        if source.at_pointer(&updated_path).is_some() {
+            item.push((
+                "updatedAt".to_owned(),
+                source
+                    .subprojection(&updated_path)
+                    .ok()
+                    .filter(|value| value.string_units("").is_some())?,
+            ));
+        }
+        artifacts.push(Utf16JsonProjection::object(item).ok()?);
+    }
+    let mut fields = vec![(
+        "artifacts".to_owned(),
+        Utf16JsonProjection::array(artifacts).ok()?,
+    )];
+    if let Some(truncated) = source.get_property("truncated") {
+        if truncated.as_bool().is_none() {
+            return None;
+        }
+        fields.push((
+            "truncated".to_owned(),
+            source.subprojection("/truncated").ok()?,
+        ));
+    }
+    Utf16JsonProjection::object(fields).ok()
 }
 
 #[async_trait]
@@ -181,20 +325,37 @@ impl Tool for ArtifactTool {
         ARTIFACT_TOOL_NAME
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some(SEARCH_HINT)
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some(SEARCH_HINT.into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
         Some(ARTIFACT_TOOL_NAME)
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        parse_artifact_publish_output(output)
+            .or_else(|| parse_artifact_list_output(output))
+            .ok_or_else(|| invalid_tool_input("Artifact returned invalid output"))
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -210,28 +371,29 @@ impl Tool for ArtifactTool {
         16_000
     }
 
-    fn is_concurrency_safe(&self, input: &Value) -> bool {
+    fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
         is_list_action(input)
     }
 
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         is_list_action(input)
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
         // Binary `getPath({file_path:e}){return e?$i(e):Ct()}` — the target file
         // (resolved) or the cwd. We return the raw file_path when present; the
         // cwd fallback is left to the permission engine's default.
         input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
+            .string_units("/file_path")
+            .filter(|units| !units.is_empty())
+            // Native filesystem paths are encoded at this OS boundary; Node's
+            // UTF-8 path conversion replaces unpaired UTF-16 units with U+FFFD.
+            .map(|units| PathBuf::from(String::from_utf16_lossy(&units)))
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // PARITY: binary `validateInput` (errorCodes 1-8). The pure, structural
@@ -240,9 +402,10 @@ impl Tool for ArtifactTool {
         // checks need the Stage-2 helper ports + backend and are deferred. The
         // Rust `ValidationError` carries the model-facing message (the numeric
         // errorCode is CC-internal telemetry).
-        let action = input.get("action").and_then(Value::as_str);
-        let file_path = input.get("file_path").and_then(Value::as_str);
-        let favicon = input.get("favicon").and_then(Value::as_str);
+        let action = input.string_at("/action");
+        let file_path = native_text_field(input, "/file_path");
+        let has_file_path = input.string_units("/file_path").is_some();
+        let has_favicon = input.string_units("/favicon").is_some();
 
         if action == Some("list") {
             // errorCode 8: `list` takes only `limit`.
@@ -255,39 +418,39 @@ impl Tool for ArtifactTool {
                 "force",
             ]
             .into_iter()
-            .filter(|k| input.get(*k).is_some_and(|v| !v.is_null()))
+            .filter(|k| input.get_property(k).is_some_and(|v| !v.is_null()))
             .collect();
             if !extras.is_empty() {
-                return Err(ValidationError(format!(
+                return Err(ValidationError(source_text_projection(&format!(
                     "action \"list\" takes only `limit` \u{2014} remove {}. To publish or update an artifact, omit `action`.",
                     extras.join(", ")
-                )));
+                ))));
             }
             return Ok(());
         }
 
         // errorCode 7: publish requires file_path + favicon.
-        if file_path.is_none() || favicon.is_none() {
-            let missing: Vec<&str> = [("file_path", file_path), ("favicon", favicon)]
+        if !has_file_path || !has_favicon {
+            let missing: Vec<&str> = [("file_path", has_file_path), ("favicon", has_favicon)]
                 .into_iter()
-                .filter(|(_, v)| v.is_none())
+                .filter(|(_, present)| !present)
                 .map(|(k, _)| k)
                 .collect();
-            return Err(ValidationError(format!(
+            return Err(ValidationError(source_text_projection(&format!(
                 "{} required to publish",
                 missing.join(" and ")
-            )));
+            ))));
         }
 
         // errorCode 8: `limit` is a list-only field.
-        if input.get("limit").is_some_and(|v| !v.is_null()) {
-            return Err(ValidationError(
-                "`limit` applies only to action \"list\"".to_string(),
-            ));
+        if input.get_property("limit").is_some_and(|v| !v.is_null()) {
+            return Err(ValidationError(source_text_projection(
+                "`limit` applies only to action \"list\"",
+            )));
         }
 
         // errorCode 1: only .html / .htm / .md render.
-        let name = file_path.unwrap_or("");
+        let name = file_path.as_deref().unwrap_or("");
         let ext = std::path::Path::new(name)
             .extension()
             .and_then(|e| e.to_str())
@@ -299,9 +462,9 @@ impl Tool for ArtifactTool {
             } else {
                 ext
             };
-            return Err(ValidationError(format!(
+            return Err(ValidationError(source_text_projection(&format!(
                 "unsupported file type: {shown} \u{2014} use .html or .md"
-            )));
+            ))));
         }
 
         // NOTE (Stage-2): favicon-entity (errorCode 6), artifact-URL env match
@@ -310,7 +473,11 @@ impl Tool for ArtifactTool {
         Ok(())
     }
 
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // PARITY: binary `checkPermissions`. The share-status probe + capabilities
         // read-back + list-already-approved app-state read are Stage-2; the
         // byte-exact ASK/DENY wording for the reachable branches is ported here.
@@ -333,9 +500,10 @@ impl Tool for ArtifactTool {
             };
         }
 
-        let file_path = input.get("file_path").and_then(Value::as_str);
-        let favicon = input.get("favicon").and_then(Value::as_str);
-        if file_path.is_none() || favicon.is_none() {
+        let file_path = native_text_field(input, "/file_path");
+        let has_file_path = input.string_units("/file_path").is_some();
+        let has_favicon = input.string_units("/favicon").is_some();
+        if !has_file_path || !has_favicon {
             return PermissionResult::Deny {
                 reason: PermissionDecisionReason::Other {
                     reason: "Publish input missing required fields".into(),
@@ -356,8 +524,9 @@ impl Tool for ArtifactTool {
                 title: ARTIFACT_TOOL_NAME.into(),
                 message: format!(
                     "Claude wants to publish {} to a private page on claude.ai",
-                    file_path.unwrap_or("")
-                ),
+                    file_path.as_deref().unwrap_or("")
+                )
+                .into(),
                 options: vec![],
             },
             pending_classifier_check: None,
@@ -365,17 +534,21 @@ impl Tool for ArtifactTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        PROMPT.to_string()
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        PROMPT.to_string().into()
     }
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -390,11 +563,24 @@ impl Tool for ArtifactTool {
     }
 }
 
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, shell_test_ctx};
+
+    fn fixture(value: Value) -> Utf16JsonProjection {
+        generated_builtin_result(&value)
+    }
+
+    fn test_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().unwrap()).unwrap()
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -427,16 +613,16 @@ mod tests {
         assert_eq!(t.name(), "Artifact");
         assert_eq!(t.user_facing_name(), Some("Artifact"));
         assert_eq!(
-            t.search_hint(),
+            t.search_hint().as_ref().and_then(|hint| hint.string_at("")),
             Some("render an HTML or Markdown file to a claude.ai web page")
         );
         assert_eq!(t.max_result_size_chars(), 16_000);
         assert!(!t.should_defer());
         // isConcurrencySafe / isReadOnly == (action === "list").
-        assert!(t.is_concurrency_safe(&json!({"action": "list"})));
-        assert!(t.is_read_only(&json!({"action": "list"})));
-        assert!(!t.is_concurrency_safe(&json!({"file_path": "x.html"})));
-        assert!(!t.is_read_only(&json!({"file_path": "x.html"})));
+        assert!(t.is_concurrency_safe(&fixture(json!({"action": "list"}))));
+        assert!(t.is_read_only(&fixture(json!({"action": "list"}))));
+        assert!(!t.is_concurrency_safe(&fixture(json!({"file_path": "x.html"}))));
+        assert!(!t.is_read_only(&fixture(json!({"file_path": "x.html"}))));
     }
 
     #[test]
@@ -455,7 +641,10 @@ mod tests {
         let _g = guard();
         let t = tool();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let p = rt.block_on(t.prompt(&PromptOptions::default()));
+        let prompt = rt.block_on(t.prompt(&PromptOptions::default()));
+        let p = prompt
+            .string_at("")
+            .expect("generated prompt is a root string");
         assert_eq!(p.len(), 4742, "prompt byte length");
         assert!(p.starts_with("Render an HTML or Markdown file to an Artifact \u{2014} a default-private web page hosted on claude.ai"));
         assert!(
@@ -465,7 +654,7 @@ mod tests {
         // Paragraphs are joined by `\n\n`.
         assert_eq!(p.split("\n\n").count(), 13);
         let d = rt.block_on(t.description(
-            &Value::Null,
+            &fixture(Value::Null),
             &DescriptionOptions {
                 is_non_interactive_session: false,
             },
@@ -480,7 +669,7 @@ mod tests {
     fn input_schema_shape() {
         let _g = guard();
         let t = tool();
-        let s = t.input_schema();
+        let s = test_value(t.input_schema());
         assert_eq!(s["additionalProperties"], json!(false));
         let props = &s["properties"];
         assert_eq!(props["action"]["enum"], json!(["publish", "list"]));
@@ -493,6 +682,45 @@ mod tests {
         assert!(s.get("required").is_none());
     }
 
+    #[test]
+    fn output_parser_retains_unpaired_string_units() {
+        let lone = source_text_projection_units(&[0xD800]);
+        let output = Utf16JsonProjection::object(vec![
+            ("url".into(), lone.clone()),
+            ("path".into(), lone.clone()),
+            (
+                "warnings".into(),
+                Utf16JsonProjection::array(vec![lone.clone()]).unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let parsed = parse_artifact_publish_output(&output).expect("valid artifact output");
+        assert_eq!(parsed.string_units("/url"), Some(vec![0xD800]));
+        assert_eq!(parsed.string_units("/path"), Some(vec![0xD800]));
+        assert_eq!(parsed.string_units("/warnings/0"), Some(vec![0xD800]));
+    }
+
+    #[tokio::test]
+    async fn native_file_path_boundary_encodes_unpaired_units_without_rejecting() {
+        let _g = guard();
+        let t = tool();
+        let mut units = "/tmp/page".encode_utf16().collect::<Vec<_>>();
+        units.push(0xD800);
+        units.extend(".html".encode_utf16());
+        let input = Utf16JsonProjection::object(vec![
+            ("file_path".into(), source_text_projection_units(&units)),
+            ("favicon".into(), source_text_projection("x")),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            t.get_path(&input),
+            Some(PathBuf::from(String::from_utf16_lossy(&units)))
+        );
+        assert!(t.validate_input(&input, &fresh_ctx()).await.is_ok());
+    }
+
     #[tokio::test]
     async fn validate_input_error_messages() {
         let _g = guard();
@@ -501,55 +729,79 @@ mod tests {
 
         // list with extra keys → byte-exact removal message.
         let e = t
-            .validate_input(&json!({"action": "list", "file_path": "x.html"}), &ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            e.0,
-            "action \"list\" takes only `limit` \u{2014} remove file_path. To publish or update an artifact, omit `action`."
-        );
-
-        // missing both required.
-        let e = t.validate_input(&json!({}), &ctx).await.unwrap_err();
-        assert_eq!(e.0, "file_path and favicon required to publish");
-
-        // missing favicon only.
-        let e = t
-            .validate_input(&json!({"file_path": "x.html"}), &ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(e.0, "favicon required to publish");
-
-        // limit on a publish call.
-        let e = t
             .validate_input(
-                &json!({"file_path": "x.html", "favicon": "📊", "limit": 5}),
+                &fixture(json!({"action": "list", "file_path": "x.html"})),
                 &ctx,
             )
             .await
             .unwrap_err();
-        assert_eq!(e.0, "`limit` applies only to action \"list\"");
+        assert_eq!(
+            e.0.string_at(""),
+            Some("action \"list\" takes only `limit` \u{2014} remove file_path. To publish or update an artifact, omit `action`.")
+        );
 
-        // unsupported extension.
+        // missing both required.
         let e = t
-            .validate_input(&json!({"file_path": "notes.txt", "favicon": "📊"}), &ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(e.0, "unsupported file type: .txt \u{2014} use .html or .md");
-
-        // no extension → "(none)".
-        let e = t
-            .validate_input(&json!({"file_path": "README", "favicon": "📊"}), &ctx)
+            .validate_input(&fixture(json!({})), &ctx)
             .await
             .unwrap_err();
         assert_eq!(
-            e.0,
-            "unsupported file type: (none) \u{2014} use .html or .md"
+            e.0.string_at(""),
+            Some("file_path and favicon required to publish")
+        );
+
+        // missing favicon only.
+        let e = t
+            .validate_input(&fixture(json!({"file_path": "x.html"})), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(e.0.string_at(""), Some("favicon required to publish"));
+
+        // limit on a publish call.
+        let e = t
+            .validate_input(
+                &fixture(json!({"file_path": "x.html", "favicon": "📊", "limit": 5})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.0.string_at(""),
+            Some("`limit` applies only to action \"list\"")
+        );
+
+        // unsupported extension.
+        let e = t
+            .validate_input(
+                &fixture(json!({"file_path": "notes.txt", "favicon": "📊"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.0.string_at(""),
+            Some("unsupported file type: .txt \u{2014} use .html or .md")
+        );
+
+        // no extension → "(none)".
+        let e = t
+            .validate_input(
+                &fixture(json!({"file_path": "README", "favicon": "📊"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.0.string_at(""),
+            Some("unsupported file type: (none) \u{2014} use .html or .md")
         );
 
         // a valid .html publish passes the ported structural checks.
         assert!(t
-            .validate_input(&json!({"file_path": "page.html", "favicon": "📊"}), &ctx)
+            .validate_input(
+                &fixture(json!({"file_path": "page.html", "favicon": "📊"})),
+                &ctx
+            )
             .await
             .is_ok());
     }
@@ -560,21 +812,26 @@ mod tests {
         let t = tool();
         let ctx = fresh_ctx();
 
-        match t.check_permissions(&json!({"action": "list"}), &ctx).await {
+        match t
+            .check_permissions(&fixture(json!({"action": "list"})), &ctx)
+            .await
+        {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
-                prompt.message,
-                "Claude wants to list your published artifacts (titles and links from your earlier sessions)"
+                prompt.message.string_at(""),
+                Some("Claude wants to list your published artifacts (titles and links from your earlier sessions)")
             ),
             other => panic!("expected Ask, got {other:?}"),
         }
 
         match t
-            .check_permissions(&json!({"file_path": "x.html"}), &ctx)
+            .check_permissions(&fixture(json!({"file_path": "x.html"})), &ctx)
             .await
         {
             PermissionResult::Deny { explanation, .. } => {
                 assert_eq!(
-                    explanation.as_deref(),
+                    explanation
+                        .as_ref()
+                        .and_then(|message| message.string_at("")),
                     Some("file_path and favicon are required to publish")
                 );
             }
@@ -582,12 +839,15 @@ mod tests {
         }
 
         match t
-            .check_permissions(&json!({"file_path": "page.html", "favicon": "📊"}), &ctx)
+            .check_permissions(
+                &fixture(json!({"file_path": "page.html", "favicon": "📊"})),
+                &ctx,
+            )
             .await
         {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
-                prompt.message,
-                "Claude wants to publish page.html to a private page on claude.ai"
+                prompt.message.string_at(""),
+                Some("Claude wants to publish page.html to a private page on claude.ai")
             ),
             other => panic!("expected Ask, got {other:?}"),
         }

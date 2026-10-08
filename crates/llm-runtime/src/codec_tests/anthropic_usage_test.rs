@@ -78,6 +78,12 @@ fn interrupted_stream_retains_observed_one_hour_cache_tokens_as_partial() {
         usage.report.state,
         lingxi_llm_client::protocol::UsageState::Partial
     );
-    assert!(usage.provider_metadata.get("input_tokens").is_none());
-    assert!(usage.provider_metadata.get("output_tokens").is_none());
+    assert!(usage
+        .provider_metadata
+        .payload_at("/input_tokens")
+        .is_none());
+    assert!(usage
+        .provider_metadata
+        .payload_at("/output_tokens")
+        .is_none());
 }

@@ -29,15 +29,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 use crate::post_compact::SkillRestoreCandidate;
 
 /// One registry row — `{skillName, skillPath, content, invokedAt, agentId}`.
 #[derive(Debug, Clone)]
 struct InvokedSkillEntry {
-    skill_name: String,
+    skill_name: Utf16JsonProjection,
     skill_path: PathBuf,
-    content: String,
-    content_exact_utf16: Option<Vec<u16>>,
+    content: Utf16JsonProjection,
     invoked_at_ms: i64,
     insertion_order: u64,
     session_id: Option<String>,
@@ -65,7 +66,7 @@ impl<'a> InvokedSkillScopeRef<'a> {
 }
 
 /// The process-global registry (`Pt.invokedSkills`), keyed `"{agentId}:{name}"`.
-static REGISTRY: Lazy<Mutex<HashMap<String, InvokedSkillEntry>>> =
+static REGISTRY: Lazy<Mutex<HashMap<Vec<u16>, InvokedSkillEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Native v2.1.261 `le.record` uses Map.set (byte 156638452), retaining the
@@ -74,7 +75,7 @@ static REGISTRY: Lazy<Mutex<HashMap<String, InvokedSkillEntry>>> =
 // must not inherit HashMap's randomized iteration order.
 static NEXT_INSERTION_ORDER: AtomicU64 = AtomicU64::new(0);
 
-fn lock() -> std::sync::MutexGuard<'static, HashMap<String, InvokedSkillEntry>> {
+fn lock() -> std::sync::MutexGuard<'static, HashMap<Vec<u16>, InvokedSkillEntry>> {
     REGISTRY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -88,14 +89,21 @@ fn lock() -> std::sync::MutexGuard<'static, HashMap<String, InvokedSkillEntry>> 
 /// `session:...|agent:...|skill:...` prefix so two orchestrators or a leader
 /// and subagent can invoke the same skill name without colliding.
 #[must_use]
-pub fn registry_key(scope: InvokedSkillScopeRef<'_>, skill_name: &str) -> String {
-    match scope.session_id {
+pub fn registry_key(scope: InvokedSkillScopeRef<'_>, skill_name: &Utf16JsonProjection) -> Vec<u16> {
+    let prefix = match scope.session_id {
         Some(session_id) => format!(
-            "session:{session_id}|agent:{}|skill:{skill_name}",
+            "session:{session_id}|agent:{}|skill:",
             scope.agent_id.unwrap_or("")
         ),
-        None => format!("{}:{}", scope.agent_id.unwrap_or(""), skill_name),
-    }
+        None => format!("{}:", scope.agent_id.unwrap_or("")),
+    };
+    let mut key = prefix.encode_utf16().collect::<Vec<_>>();
+    key.extend(
+        skill_name
+            .string_units("")
+            .expect("invoked skill name must be a root JSON string"),
+    );
+    key
 }
 
 /// `Date.now()` in ms since the Unix epoch (saturating for the pre-1970 edge).
@@ -113,7 +121,12 @@ fn now_ms() -> i64 {
 /// The Skill tool calls this at invocation time with the expanded skill content
 /// the model receives; `agent_id` is `None` for the main thread (every `LingXi`
 /// orchestrator runs as the main thread → key `":{name}"`).
-pub fn register(skill_name: &str, skill_path: &Path, content: &str, agent_id: Option<&str>) {
+pub fn register(
+    skill_name: &Utf16JsonProjection,
+    skill_path: &Path,
+    content: &Utf16JsonProjection,
+    agent_id: Option<&str>,
+) {
     register_scoped(
         skill_name,
         skill_path,
@@ -124,9 +137,9 @@ pub fn register(skill_name: &str, skill_path: &Path, content: &str, agent_id: Op
 
 /// Register a skill under the provided conversation/session + agent scope.
 pub fn register_scoped(
-    skill_name: &str,
+    skill_name: &Utf16JsonProjection,
     skill_path: &Path,
-    content: &str,
+    content: &Utf16JsonProjection,
     scope: InvokedSkillScopeRef<'_>,
 ) {
     let key = registry_key(scope, skill_name);
@@ -136,10 +149,9 @@ pub fn register_scoped(
         |entry| entry.insertion_order,
     );
     let entry = InvokedSkillEntry {
-        skill_name: skill_name.to_string(),
+        skill_name: skill_name.clone(),
         skill_path: skill_path.to_path_buf(),
-        content: content.to_string(),
-        content_exact_utf16: None,
+        content: content.clone(),
         invoked_at_ms: now_ms(),
         insertion_order,
         session_id: scope.session_id.map(str::to_string),
@@ -174,7 +186,6 @@ pub fn filter_for_scope(scope: InvokedSkillScopeRef<'_>) -> Vec<SkillRestoreCand
             name: e.skill_name.clone(),
             path: e.skill_path.clone(),
             content: e.content.clone(),
-            content_exact_utf16: e.content_exact_utf16.clone(),
             invoked_at_ms: e.invoked_at_ms,
         })
         .collect()
@@ -229,14 +240,11 @@ impl Drop for InvokedSkillSessionGuard {
 }
 
 /// `n_n(key, content)` — overwrite an existing entry's content. A no-op when the
-/// key is absent (`if(r)…`, exactly like the binary). `content == ""` clears the
-/// stored skill body so a later compaction won't re-attach it. When
-/// `content_exact_utf16` is `Some`, the entry preserves the exact JS UTF-16
-/// wire image that produced `content`.
-pub fn write_back(key: &str, content: &str, content_exact_utf16: Option<&[u16]>) {
+/// key is absent (`if(r)…`, exactly like the binary). An empty root string clears
+/// the stored body so a later compaction won't re-attach it.
+pub fn write_back(key: &[u16], content: &Utf16JsonProjection) {
     if let Some(e) = lock().get_mut(key) {
-        e.content = content.to_string();
-        e.content_exact_utf16 = content_exact_utf16.map(ToOwned::to_owned);
+        e.content = content.clone();
     }
 }
 
@@ -250,20 +258,13 @@ pub fn reset_for_test() {
     NEXT_INSERTION_ORDER.store(0, Ordering::Relaxed);
 }
 
-/// Test-only: the stored content for `key`, or `None` if absent. Lets tests
+/// Test-only: the stored source content for `key`, or `None` if absent. Lets tests
 /// assert the `n_n` write-back / clear behaviour of [`write_back`] and
 /// [`crate::restore_post_compact_skills`].
 #[doc(hidden)]
 #[must_use]
-pub fn content_for_test(key: &str) -> Option<String> {
+pub fn content_for_test(key: &[u16]) -> Option<Utf16JsonProjection> {
     lock().get(key).map(|e| e.content.clone())
-}
-
-/// Test-only: the stored exact UTF-16 sidecar for `key`, or `None`.
-#[doc(hidden)]
-#[must_use]
-pub fn content_exact_utf16_for_test(key: &str) -> Option<Vec<u16>> {
-    lock().get(key).and_then(|e| e.content_exact_utf16.clone())
 }
 
 /// Test-only serial lock guarding the process-global registry so tests across
@@ -290,29 +291,46 @@ mod tests {
         g
     }
 
+    fn source(text: &str) -> Utf16JsonProjection {
+        text.into()
+    }
+
+    fn units(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    fn text(value: &Utf16JsonProjection) -> &str {
+        value.string_at("").expect("root string")
+    }
+
     #[test]
     fn register_sets_key_and_filter_by_agent() {
         let _g = guard();
-        register("deploy", Path::new("/skills/deploy"), "deploy body", None);
         register(
-            "build",
+            &source("deploy"),
+            Path::new("/skills/deploy"),
+            &source("deploy body"),
+            None,
+        );
+        register(
+            &source("build"),
             Path::new("/skills/build"),
-            "build body",
+            &source("build body"),
             Some("agent:x"),
         );
 
         // Main-thread filter (None) sees only the `:deploy` row.
         let main = filter_for_agent(None);
         assert_eq!(main.len(), 1);
-        assert_eq!(main[0].key, ":deploy");
-        assert_eq!(main[0].name, "deploy");
-        assert_eq!(main[0].content, "deploy body");
+        assert_eq!(main[0].key, units(":deploy"));
+        assert_eq!(text(&main[0].name), "deploy");
+        assert_eq!(text(&main[0].content), "deploy body");
         assert_eq!(main[0].path, PathBuf::from("/skills/deploy"));
 
         // Agent filter sees only its own row.
         let agent = filter_for_agent(Some("agent:x"));
         assert_eq!(agent.len(), 1);
-        assert_eq!(agent[0].key, "agent:x:build");
+        assert_eq!(agent[0].key, units("agent:x:build"));
     }
 
     #[test]
@@ -320,7 +338,7 @@ mod tests {
         let _g = guard();
         let expected = (0..12).map(|i| format!("skill-{i}")).collect::<Vec<_>>();
         for name in &expected {
-            register(name, Path::new("/s"), "body", None);
+            register(&source(name), Path::new("/s"), &source("body"), None);
         }
         // Force the millisecond collision that the native Map + stable sort
         // handles without relying on wall-clock scheduling in this test.
@@ -329,8 +347,11 @@ mod tests {
         }
         let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(
-            restored.iter().map(|skill| &skill.name).collect::<Vec<_>>(),
-            expected.iter().collect::<Vec<_>>()
+            restored
+                .iter()
+                .map(|skill| text(&skill.name))
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
         );
     }
 
@@ -338,10 +359,15 @@ mod tests {
     fn overwriting_a_skill_preserves_its_map_position_on_timestamp_ties() {
         let _g = guard();
         for name in ["first", "second", "third"] {
-            register(name, Path::new("/s"), "body", None);
+            register(&source(name), Path::new("/s"), &source("body"), None);
         }
-        register("first", Path::new("/updated"), "updated", None);
-        write_back(":second", "persisted", None);
+        register(
+            &source("first"),
+            Path::new("/updated"),
+            &source("updated"),
+            None,
+        );
+        write_back(&units(":second"), &source("persisted"));
         for entry in lock().values_mut() {
             entry.invoked_at_ms = 42;
         }
@@ -349,56 +375,55 @@ mod tests {
         assert_eq!(
             restored
                 .iter()
-                .map(|skill| skill.name.as_str())
+                .map(|skill| text(&skill.name))
                 .collect::<Vec<_>>(),
             ["first", "second", "third"]
         );
-        assert_eq!(restored[0].content, "updated");
-        assert_eq!(restored[1].content, "persisted");
+        assert_eq!(text(&restored[0].content), "updated");
+        assert_eq!(text(&restored[1].content), "persisted");
     }
 
     #[test]
     fn register_overwrites_same_key() {
         let _g = guard();
-        register("s", Path::new("/s"), "first", None);
-        register("s", Path::new("/s"), "second", None);
+        register(&source("s"), Path::new("/s"), &source("first"), None);
+        register(&source("s"), Path::new("/s"), &source("second"), None);
         let rows = filter_for_agent(None);
         assert_eq!(rows.len(), 1, "same key overwrites, not appends");
-        assert_eq!(rows[0].content, "second");
+        assert_eq!(text(&rows[0].content), "second");
     }
 
     #[test]
     fn write_back_overwrites_and_clears() {
         let _g = guard();
-        register("s", Path::new("/s"), "body", None);
-        write_back(":s", "truncated", Some(&[0x0074, 0xD83D]));
-        assert_eq!(content_for_test(":s").as_deref(), Some("truncated"));
-        assert_eq!(
-            content_exact_utf16_for_test(":s"),
-            Some(vec![0x0074, 0xD83D])
-        );
-        // "" clears the content.
-        write_back(":s", "", None);
-        assert_eq!(content_for_test(":s").as_deref(), Some(""));
-        assert_eq!(content_exact_utf16_for_test(":s"), None);
+        register(&source("s"), Path::new("/s"), &source("body"), None);
+        let exact =
+            Utf16JsonProjection::root_string("t�".to_string(), vec![0x0074, 0xD83D]).unwrap();
+        write_back(&units(":s"), &exact);
+        assert_eq!(content_for_test(&units(":s")), Some(exact));
+        write_back(&units(":s"), &source(""));
+        assert_eq!(text(&content_for_test(&units(":s")).unwrap()), "");
     }
 
     #[test]
     fn write_back_absent_key_is_noop() {
         let _g = guard();
-        write_back(":missing", "x", None);
-        assert!(content_for_test(":missing").is_none());
+        write_back(&units(":missing"), &source("x"));
+        assert!(content_for_test(&units(":missing")).is_none());
     }
 
     #[test]
     fn registry_key_uses_empty_prefix_for_main_thread() {
         assert_eq!(
-            registry_key(InvokedSkillScopeRef::new(None, None), "foo"),
-            ":foo"
+            registry_key(InvokedSkillScopeRef::new(None, None), &source("foo")),
+            units(":foo")
         );
         assert_eq!(
-            registry_key(InvokedSkillScopeRef::new(None, Some("agent:a")), "foo"),
-            "agent:a:foo"
+            registry_key(
+                InvokedSkillScopeRef::new(None, Some("agent:a")),
+                &source("foo")
+            ),
+            units("agent:a:foo")
         );
     }
 
@@ -409,26 +434,41 @@ mod tests {
         let other_session_main = InvokedSkillScopeRef::new(Some("sess:b"), None);
         let session_a_agent = InvokedSkillScopeRef::new(Some("sess:a"), Some("agent:x"));
 
-        register_scoped("build", Path::new("/sa"), "main a", session_a_main);
-        register_scoped("build", Path::new("/sb"), "main b", other_session_main);
-        register_scoped("build", Path::new("/sx"), "agent a", session_a_agent);
+        register_scoped(
+            &source("build"),
+            Path::new("/sa"),
+            &source("main a"),
+            session_a_main,
+        );
+        register_scoped(
+            &source("build"),
+            Path::new("/sb"),
+            &source("main b"),
+            other_session_main,
+        );
+        register_scoped(
+            &source("build"),
+            Path::new("/sx"),
+            &source("agent a"),
+            session_a_agent,
+        );
 
         let rows = filter_for_scope(session_a_main);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].content, "main a");
+        assert_eq!(text(&rows[0].content), "main a");
         assert_eq!(
             rows[0].key,
-            registry_key(session_a_main, "build"),
+            registry_key(session_a_main, &source("build")),
             "scoped key must be stable for write-back"
         );
 
         let rows = filter_for_scope(other_session_main);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].content, "main b");
+        assert_eq!(text(&rows[0].content), "main b");
 
         let rows = filter_for_scope(session_a_agent);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].content, "agent a");
+        assert_eq!(text(&rows[0].content), "agent a");
     }
 
     #[test]
@@ -436,8 +476,8 @@ mod tests {
         let _g = guard();
         let session_a = InvokedSkillScopeRef::new(Some("sess:a"), None);
         let session_b = InvokedSkillScopeRef::new(Some("sess:b"), None);
-        register_scoped("build", Path::new("/a"), "a", session_a);
-        register_scoped("build", Path::new("/b"), "b", session_b);
+        register_scoped(&source("build"), Path::new("/a"), &source("a"), session_a);
+        register_scoped(&source("build"), Path::new("/b"), &source("b"), session_b);
 
         clear_session("sess:a");
 
@@ -450,8 +490,8 @@ mod tests {
         let _g = guard();
         let session_a = InvokedSkillScopeRef::new(Some("sess:a"), None);
         let session_b = InvokedSkillScopeRef::new(Some("sess:b"), None);
-        register_scoped("build", Path::new("/a"), "a", session_a);
-        register_scoped("build", Path::new("/b"), "b", session_b);
+        register_scoped(&source("build"), Path::new("/a"), &source("a"), session_a);
+        register_scoped(&source("build"), Path::new("/b"), &source("b"), session_b);
 
         let owner = InvokedSkillSessionGuard::new("sess:a".to_string());
         owner.replace("sess:b".to_string());
@@ -470,32 +510,39 @@ mod tests {
         // the registry (`if(!c&&u!==a.content)n_n(s,u)`).
         let _g = guard();
         let big = "x".repeat(40_000); // caps to ~5_000 tokens
-        register("trunc", Path::new("/t"), &big, None);
+        register(&source("trunc"), Path::new("/t"), &source(&big), None);
         let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(restored.len(), 1);
-        let stored = content_for_test(":trunc").expect("row present");
+        let stored = content_for_test(&units(":trunc")).expect("row present");
         assert!(
-            stored.ends_with(SKILL_TRUNCATION_MARKER),
+            text(&stored).ends_with(SKILL_TRUNCATION_MARKER),
             "truncated content persisted to the registry"
         );
         assert_eq!(stored, restored[0].content);
-        assert_eq!(
-            content_exact_utf16_for_test(":trunc"),
-            restored[0].content_exact_utf16
+        assert_ne!(
+            text(&stored),
+            big,
+            "the full body no longer occupies the row"
         );
-        assert_ne!(stored, big, "the full body no longer occupies the row");
     }
 
     #[test]
     fn restore_does_not_write_back_short_content() {
         // Short content is returned verbatim (`u===a.content`) → no write-back.
         let _g = guard();
-        register("short", Path::new("/s"), "tiny body", None);
+        register(
+            &source("short"),
+            Path::new("/s"),
+            &source("tiny body"),
+            None,
+        );
         let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].content, "tiny body");
-        assert_eq!(content_for_test(":short").as_deref(), Some("tiny body"));
-        assert_eq!(content_exact_utf16_for_test(":short"), None);
+        assert_eq!(text(&restored[0].content), "tiny body");
+        assert_eq!(
+            text(&content_for_test(&units(":short")).unwrap()),
+            "tiny body"
+        );
     }
 
     #[test]
@@ -504,17 +551,16 @@ mod tests {
         // writes back — the registry keeps the FULL (untruncated) body.
         let _g = guard();
         let big = "x".repeat(40_000);
-        register("bm", Path::new("/b"), &big, None);
-        let already = [AttachedSkillContent::Body(big.clone())];
+        register(&source("bm"), Path::new("/b"), &source(&big), None);
+        let already = [AttachedSkillContent::Body(source(&big))];
         let restored = restore_post_compact_skills(filter_for_agent(None), &already);
         assert_eq!(restored.len(), 1);
-        assert!(restored[0].content.ends_with(SKILL_TRUNCATION_MARKER));
+        assert!(text(&restored[0].content).ends_with(SKILL_TRUNCATION_MARKER));
         assert_eq!(
-            content_for_test(":bm").as_deref(),
-            Some(big.as_str()),
+            text(&content_for_test(&units(":bm")).unwrap()),
+            big.as_str(),
             "body match → no write-back; registry unchanged"
         );
-        assert_eq!(content_exact_utf16_for_test(":bm"), None);
     }
 
     #[test]
@@ -523,13 +569,18 @@ mod tests {
         // the overflowed row's content is CLEARED (`n_n(s,"")`).
         let _g = guard();
         for i in 0..6 {
-            register(&format!("s{i}"), Path::new("/s"), &"x".repeat(40_000), None);
+            register(
+                &source(&format!("s{i}")),
+                Path::new("/s"),
+                &source(&"x".repeat(40_000)),
+                None,
+            );
         }
         let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(restored.len(), 5, "5 fit, 6th overflows");
         let cleared: Vec<String> = (0..6)
             .map(|i| format!(":s{i}"))
-            .filter(|k| content_for_test(k).as_deref() == Some(""))
+            .filter(|k| content_for_test(&units(k)).is_some_and(|value| text(&value).is_empty()))
             .collect();
         assert_eq!(cleared.len(), 1, "exactly the overflowed row is cleared");
     }
@@ -538,27 +589,24 @@ mod tests {
     fn restore_sorts_by_invoked_at_desc() {
         // DESC by invokedAt: the most recently invoked skill leads the result.
         let _g = guard();
-        register("old", Path::new("/o"), "old body", None);
+        register(&source("old"), Path::new("/o"), &source("old body"), None);
         std::thread::sleep(std::time::Duration::from_millis(3));
-        register("new", Path::new("/n"), "new body", None);
+        register(&source("new"), Path::new("/n"), &source("new body"), None);
         let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(restored.len(), 2);
-        assert_eq!(restored[0].name, "new", "most recent first");
-        assert_eq!(restored[1].name, "old");
+        assert_eq!(text(&restored[0].name), "new", "most recent first");
+        assert_eq!(text(&restored[1].name), "old");
     }
 
     #[test]
-    fn restore_preserves_exact_utf16_sidecar_across_repeated_compactions() {
+    fn restore_preserves_exact_utf16_across_repeated_compactions() {
         let _g = guard();
         let big = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
-        register("repeat", Path::new("/r"), &big, None);
+        register(&source("repeat"), Path::new("/r"), &source(&big), None);
 
         let first = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(first.len(), 1);
-        let first_exact = first[0]
-            .content_exact_utf16
-            .clone()
-            .expect("first restore must persist exact utf16 sidecar");
+        let first_exact = first[0].content.string_units("").unwrap();
         assert!(
             first_exact
                 .windows(2)
@@ -568,6 +616,35 @@ mod tests {
 
         let second = restore_post_compact_skills(filter_for_agent(None), &[]);
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].content_exact_utf16, Some(first_exact));
+        assert_eq!(second[0].content.string_units("").unwrap(), first_exact);
+    }
+
+    #[test]
+    fn skill_name_and_body_keep_unpaired_units_and_distinct_keys() {
+        let _g = guard();
+        let scope = InvokedSkillScopeRef::new(Some("sess"), None);
+        let replacement =
+            Utf16JsonProjection::root_string("�a".into(), vec![0xD800, 0x0061]).unwrap();
+        let other = Utf16JsonProjection::root_string("�a".into(), vec![0xD801, 0x0061]).unwrap();
+        let body =
+            Utf16JsonProjection::root_string("x�y".into(), vec![0x0078, 0xDFFF, 0x0079]).unwrap();
+        register_scoped(&replacement, Path::new("/one"), &body, scope);
+        register_scoped(&other, Path::new("/two"), &source("other"), scope);
+        let restored = restore_post_compact_skills(filter_for_scope(scope), &[]);
+        assert_eq!(restored.len(), 2);
+        let first = restored
+            .iter()
+            .find(|skill| skill.name.string_units("").unwrap() == vec![0xD800, 0x0061])
+            .expect("first exact key survives");
+        let second = restored
+            .iter()
+            .find(|skill| skill.name.string_units("").unwrap() == vec![0xD801, 0x0061])
+            .expect("second exact key survives");
+        assert_eq!(first.name.string_units("").unwrap(), vec![0xD800, 0x0061]);
+        assert_eq!(
+            first.content.string_units("").unwrap(),
+            vec![0x0078, 0xDFFF, 0x0079]
+        );
+        assert_eq!(second.name.string_units("").unwrap(), vec![0xD801, 0x0061]);
     }
 }

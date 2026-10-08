@@ -30,6 +30,7 @@ use lingxi_core::host::{
     WorktreeManager, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
 };
 use lingxi_core::types::AgentId;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::worktree::PosixWorktreeManager;
 use serde_json::{json, Value};
 use sidequery::{
@@ -207,8 +208,12 @@ impl SubagentSpawner for EditingPanels {
             });
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
-            content: serde_json::to_value(panel_report(&format!("done by {model}"))).unwrap(),
+            content: Utf16JsonProjection::from_serde_value(
+                &serde_json::to_value(panel_report(&format!("done by {model}"))).unwrap(),
+            )
+            .expect("panel report fixture converts to source"),
             usage: usage.clone(),
             total_tool_use_count: 3,
             total_duration_ms: 1,

@@ -31,6 +31,7 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use lingxi_core::host::{Clock, FileSystem};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use crate::schedule::parse_cron;
 use crate::scheduler::{
@@ -64,7 +65,7 @@ pub async fn lock_cron_file() -> tokio::sync::MutexGuard<'static, ()> {
 pub trait CronJobFirer: Send + Sync {
     /// Fire `prompt` for job `id`. `Ok(result_text)` on success; `Err(message)`
     /// on failure (surfaced as [`FireStatus::Failed`]).
-    async fn fire(&self, id: &str, prompt: &str) -> Result<String, String>;
+    async fn fire(&self, id: &str, prompt: &Utf16JsonProjection) -> Result<String, String>;
 
     /// Cancel and join host-owned execution resources after the outer firing
     /// future is dropped. Errors retain scheduler ownership for a later retry.
@@ -100,7 +101,7 @@ pub struct FiredJob {
     /// The job id that fired.
     pub id: String,
     /// The prompt that was run.
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
     /// The final assistant text, if the firer produced any.
     pub result_text: Option<String>,
     /// Terminal status.
@@ -198,7 +199,9 @@ pub async fn run_due_jobs(
     let now_ms = system_time_to_epoch_ms(now);
     let mut fired = Vec::with_capacity(due_ids.len());
     for id in due_ids {
-        let prompt = tasks.get(&id).map(|t| t.prompt.clone()).unwrap_or_default();
+        let Some(prompt) = tasks.get(&id).map(|task| task.prompt.clone()) else {
+            continue;
+        };
         let (status, result_text) = match firer.fire(&id, &prompt).await {
             Ok(text) => (FireStatus::Ok, Some(text)),
             Err(message) => (FireStatus::Failed(message), None),
@@ -229,7 +232,7 @@ pub async fn run_due_jobs(
 
         fired.push(FiredJob {
             id,
-            prompt,
+            prompt: prompt.clone(),
             result_text,
             status,
         });
@@ -378,7 +381,7 @@ pub fn next_fire_epoch_ms_for_task(
     let task = CronTaskDef {
         id: id.to_string(),
         schedule,
-        prompt: String::new(),
+        prompt: Utf16JsonProjection::from(""),
         agent_type: None,
         last_run,
         enabled: true,
@@ -587,7 +590,7 @@ mod tests {
     // ---- Recording firer ----
     struct RecordingFirer {
         canned: String,
-        calls: StdMutex<Vec<(String, String)>>,
+        calls: StdMutex<Vec<(String, Utf16JsonProjection)>>,
     }
     impl RecordingFirer {
         fn new(canned: &str) -> Self {
@@ -596,17 +599,17 @@ mod tests {
                 calls: StdMutex::new(Vec::new()),
             }
         }
-        fn calls(&self) -> Vec<(String, String)> {
+        fn calls(&self) -> Vec<(String, Utf16JsonProjection)> {
             self.calls.lock().unwrap().clone()
         }
     }
     #[async_trait]
     impl CronJobFirer for RecordingFirer {
-        async fn fire(&self, id: &str, prompt: &str) -> Result<String, String> {
+        async fn fire(&self, id: &str, prompt: &Utf16JsonProjection) -> Result<String, String> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((id.to_string(), prompt.to_string()));
+                .push((id.to_string(), prompt.clone()));
             Ok(self.canned.clone())
         }
     }
@@ -640,15 +643,42 @@ mod tests {
 
         assert_eq!(fired.len(), 1, "the due recurring job fires");
         assert_eq!(fired[0].id, "d11111111");
-        assert_eq!(fired[0].prompt, "hello");
+        assert_eq!(fired[0].prompt, Utf16JsonProjection::from("hello"));
         assert_eq!(fired[0].result_text.as_deref(), Some("done"));
         assert_eq!(fired[0].status, FireStatus::Ok);
-        assert_eq!(firer.calls(), vec![("d11111111".into(), "hello".into())]);
+        assert_eq!(
+            firer.calls(),
+            vec![("d11111111".into(), Utf16JsonProjection::from("hello"))]
+        );
 
         // lastFiredAt (epoch ms) was written back; the job is still present.
         let after = parse_tasks(&fs.get(PATH).await.unwrap());
         assert_eq!(after.tasks.len(), 1);
         assert_eq!(after.tasks[0].last_fired_at, Some(NOW * 1000));
+    }
+
+    #[tokio::test]
+    async fn lone_surrogate_prompt_reaches_firer_and_result_unchanged() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dlone0001","cron":"* * * * *","prompt":"\ud800x","createdAt":{created_ms}}}]}}"#
+        );
+        let fs = file_with(&body);
+        let firer = RecordingFirer::new("done");
+        let expected = Utf16JsonProjection::parse(r#""\ud800x""#).unwrap();
+
+        let fired = run_due_jobs(
+            Path::new(PATH),
+            fs,
+            FixedClock::at_secs(NOW),
+            &firer,
+            Some(crate::scheduler::DEFAULT_RECURRING_MAX_AGE),
+        )
+        .await;
+
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].prompt, expected);
+        assert_eq!(firer.calls()[0].1, expected);
     }
 
     #[tokio::test]

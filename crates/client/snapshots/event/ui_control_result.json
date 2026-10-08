@@ -1,0 +1,6 @@
+{
+  "type": "ui_control_result",
+  "request_id": "render-1",
+  "response_json": "{\"tree\":{},\"props\":{},\"rewritten\":false,\"hooked\":true}",
+  "metadata_json": "{\"renderRevision\":7}"
+}

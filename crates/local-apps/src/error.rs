@@ -1,13 +1,29 @@
 //! Typed error surface for the local-apps core.
 //!
-//! Follows the repo error convention (`thiserror` enums with `String`
-//! payloads, like `mobile_linux_api::MobileLinuxError`). Every variant maps to exactly
-//! one wire-level [`AppErrorCode`] so the engine can surface failures as a
-//! typed `AppOperationFailed { code, message }` client event.
+//! Every variant maps to exactly one wire-level [`AppErrorCode`] so the engine
+//! can surface failures as a typed `AppOperationFailed { code, message }`
+//! client event. LSP diagnostic messages use a source projection because they
+//! originate in arbitrary server text.
 
 use lingxi_core::host::FsError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text derives from the exact UTF-16 units")
+}
+
+fn prefixed_source(prefix: &str, source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        source
+            .string_units("")
+            .expect("LSP diagnostic message is a root string"),
+    );
+    source_from_units(units)
+}
 
 /// Stable machine-readable failure codes carried on `AppOperationFailed`
 /// client events. Extensible in later phases; each [`AppError`] variant maps
@@ -76,8 +92,10 @@ pub enum AppError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     /// Recent LSP diagnostics blocked the operation.
-    #[error("lsp diagnostics failed: {0}")]
-    LspDiagnosticsFailed(String),
+    #[error("lsp diagnostics failed: {}", .0.string_at("").unwrap_or_default())]
+    LspDiagnosticsFailed(
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")] Utf16JsonProjection,
+    ),
     /// Underlying I/O failure.
     #[error("io error: {0}")]
     Io(String),
@@ -107,6 +125,33 @@ impl AppError {
             Self::Io(_) => AppErrorCode::Io,
             Self::LlmUnavailable(_) => AppErrorCode::LlmUnavailable,
             Self::LlmOutputRejected(_) => AppErrorCode::LlmOutputRejected,
+        }
+    }
+
+    /// Source-native model/client message for this error.
+    ///
+    /// LSP diagnostic text remains exact UTF-16. Other variants contain
+    /// host-generated or already-typed Rust strings and retain their current
+    /// display wording when projected.
+    #[must_use]
+    pub fn source_message(&self) -> Utf16JsonProjection {
+        match self {
+            Self::NotFound(value) => format!("app not found: {value}").into(),
+            Self::RevisionConflict { expected, actual } => {
+                format!("revision conflict: expected {expected}, actual {actual}").into()
+            }
+            Self::InteractionInvalid(value) => format!("interaction invalid: {value}").into(),
+            Self::WorkflowStateInvalid(value) => format!("workflow state invalid: {value}").into(),
+            Self::RuntimeBusy(value) => format!("runtime busy: {value}").into(),
+            Self::NotYetAvailable(value) => format!("not yet available: {value}").into(),
+            Self::StorageCorrupt(value) => format!("storage corrupt: {value}").into(),
+            Self::InvalidRequest(value) => format!("invalid request: {value}").into(),
+            Self::LspDiagnosticsFailed(source) => {
+                prefixed_source("lsp diagnostics failed: ", source)
+            }
+            Self::Io(value) => format!("io error: {value}").into(),
+            Self::LlmUnavailable(value) => format!("llm unavailable: {value}").into(),
+            Self::LlmOutputRejected(value) => format!("llm output rejected: {value}").into(),
         }
     }
 
@@ -216,5 +261,31 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         let err = AppError::from_fs("read", &FsError::Io("boom".into()));
         assert_eq!(err.code(), AppErrorCode::Io);
+    }
+
+    #[test]
+    fn lsp_diagnostic_error_retains_exact_text_through_message_and_serde() {
+        let diagnostic = Utf16JsonProjection::parse(r#""vite: failed \ud800""#)
+            .expect("LSP message is valid JSON string source");
+        let error = AppError::LspDiagnosticsFailed(diagnostic.clone());
+        let mut expected = "lsp diagnostics failed: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend(diagnostic.string_units("").unwrap());
+        assert_eq!(
+            error.source_message().string_units(""),
+            Some(expected.clone())
+        );
+
+        let serialized = serde_json::to_string(&error).expect("serialize source error");
+        assert!(serialized.contains(r#"\ud800"#));
+        let restored: AppError = serde_json::from_str(&serialized).expect("restore source error");
+        let AppError::LspDiagnosticsFailed(restored) = restored else {
+            panic!("expected LSP diagnostic error");
+        };
+        assert_eq!(
+            restored.string_units(""),
+            Some(diagnostic.string_units("").unwrap())
+        );
     }
 }

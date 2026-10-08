@@ -1,0 +1,257 @@
+{
+  "worker_entry": "crates/hooks/src/mods_worker.mjs (production source, direct JSONL entry)",
+  "runner_sha256": "b064801cc21b7b522fdc9ccede02eb70d28250e01a758f6a2d30f00f38024fa5",
+  "worker_sha256": "204f083bc469800223b8e9babdfbabff673a197a45c56d3ef8a4ccf9e90d46aa",
+  "fixture_module_sha256": "6f9e91ee386f83f367c470d028febfffbbff17666e77b8a04f935ad9f8664e04",
+  "native_receipt_sha256": "43725ed5d52c9128ca34ca192531105ae13471fc974c4cb8ad2a4c046a4becb3",
+  "driver_node_version": "v25.2.1",
+  "platform": "darwin",
+  "cwd_from_repository_root": "docs/parity/current-alignment/fixtures/mod-middleware",
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "worker_runtime": "bun",
+  "worker_runtime_version": "1.3.11",
+  "worker_runtime_executable_sha256": "1d77af7bfd811aebb7d37bec496a5eed14fe227ded3ab7866d2f39786e8107b6",
+  "worker_runtime_source": "explicit LINGXI_MOD_BUN_EXECUTABLE",
+  "output_directory_from_fixture": "run-output/harness-worker",
+  "worker_exit_code": 0,
+  "stdout_bytes": 8943,
+  "stdout_sha256": "986c2bd403448947620c8f470211e88907fa5ccfe4036ef8b7a6101a58915244",
+  "stderr_bytes": 0,
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "dispatch_frames_bytes": 2046,
+  "dispatch_frames_sha256": "7dcfd15ec40dfe22777bf6fb23dadc7b618ed633d59c3764443451adfa2bea68",
+  "core_replies_bytes": 756,
+  "core_replies_sha256": "e02902497b562599e06a654c5d18d7935b837e2d97fbdebb8740ab1246efb564",
+  "lifecycle_frames_bytes": 2531,
+  "lifecycle_frames_sha256": "dafce870a1a77cf9874fcbe6fa7faf567259b8d6d71b630967b3269cb9cd890b",
+  "driver_trace_bytes": 8890,
+  "driver_trace_sha256": "9aaa602695006e16ca45b7da889cd8e4e574e6d180be31de10ba143a23023959",
+  "comparisons": [
+    {
+      "case": "rewrite",
+      "native_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "native-prefix:fixture-input"
+            }
+          ]
+        },
+        "uuid": "rewrite"
+      },
+      "worker_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "native-prefix:fixture-input"
+            }
+          ]
+        },
+        "uuid": "rewrite"
+      },
+      "worker_next_inputs": [
+        {
+          "message": {
+            "type": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "native-prefix:fixture-input"
+              }
+            ]
+          },
+          "door": "user",
+          "origin": {
+            "kind": "core"
+          },
+          "uuid": "rewrite"
+        }
+      ],
+      "result_equal_at_worker_dispatch_seam": true,
+      "native_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"native-prefix:fixture-input\"}]},\"uuid\":\"rewrite\"}",
+      "worker_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"native-prefix:fixture-input\"}]},\"uuid\":\"rewrite\"}",
+      "result_object_raw_bytes_equal": true,
+      "note": "worker dispatch result is intermediate; retained-row final result is covered by the Cargo test gate"
+    },
+    {
+      "case": "direct",
+      "native_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "direct"
+      },
+      "worker_result": {
+        "uuid": "direct",
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "native-direct-return"
+            }
+          ]
+        }
+      },
+      "worker_next_inputs": [],
+      "result_equal_at_worker_dispatch_seam": false,
+      "native_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"direct\"}",
+      "worker_result_object_raw_json": "{\"uuid\":\"direct\",\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"native-direct-return\"}]}}",
+      "result_object_raw_bytes_equal": false,
+      "note": "worker dispatch result is intermediate; retained-row final result is covered by the Cargo test gate"
+    },
+    {
+      "case": "cancel",
+      "native_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "cancel"
+      },
+      "worker_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "cancel"
+      },
+      "worker_next_inputs": [
+        {
+          "message": {
+            "type": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "fixture-input"
+              }
+            ]
+          },
+          "door": "user",
+          "origin": {
+            "kind": "core"
+          },
+          "uuid": "cancel"
+        }
+      ],
+      "result_equal_at_worker_dispatch_seam": true,
+      "native_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"cancel\"}",
+      "worker_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"cancel\"}",
+      "result_object_raw_bytes_equal": true,
+      "note": "worker dispatch result is intermediate; retained-row final result is covered by the Cargo test gate"
+    },
+    {
+      "case": "throw",
+      "native_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "throw"
+      },
+      "worker_result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "throw"
+      },
+      "worker_next_inputs": [
+        {
+          "message": {
+            "type": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "fixture-input"
+              }
+            ]
+          },
+          "door": "user",
+          "origin": {
+            "kind": "core"
+          },
+          "uuid": "throw"
+        }
+      ],
+      "result_equal_at_worker_dispatch_seam": true,
+      "native_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"throw\"}",
+      "worker_result_object_raw_json": "{\"message\":{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fixture-input\"}]},\"uuid\":\"throw\"}",
+      "result_object_raw_bytes_equal": true,
+      "note": "worker dispatch result is intermediate; retained-row final result is covered by the Cargo test gate"
+    }
+  ],
+  "lifecycle_gate": {
+    "unload": {
+      "requestId": 7,
+      "result": "unloaded"
+    },
+    "after_unload": {
+      "requestId": 8,
+      "result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "fixture-input"
+            }
+          ]
+        },
+        "uuid": "rewrite"
+      }
+    },
+    "after_reload": {
+      "requestId": 11,
+      "result": {
+        "message": {
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "native-prefix:fixture-input"
+            }
+          ]
+        },
+        "uuid": "rewrite"
+      }
+    },
+    "native_public_boundary": {
+      "test_process_exits_after_tests": true,
+      "explicit_module_unload_observed": false,
+      "note": "Native plugin-test exposes no explicit unload trigger in this fixture; process exit is not an unload callback"
+    }
+  },
+  "scope": "actual worker dispatch and core continuation seam only; full raw stdout includes a machine-local absolute path in prepare frames and is kept under ignored run-output; checked dispatch fragments are verbatim protocol lines; not the Rust ModHost transcript consumer or whole Mods parity"
+}

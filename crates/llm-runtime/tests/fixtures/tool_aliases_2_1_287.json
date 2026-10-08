@@ -1,0 +1,100 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "start": 178265896,
+      "end": 178266261,
+      "sha256": "770851b232958185875bc8d1c90ef8440e03c9b32c993305dcfedd17b580f001"
+    }
+  ],
+  "scope": "Exact current native c/Zl/TZe table and Object.hasOwn normalization. This proves name normalization; catalog membership and tool execution are separate callers.",
+  "aliases": {
+    "Task": "Agent",
+    "KillShell": "TaskStop",
+    "KillBash": "TaskStop",
+    "ListPeers": "ListAgents",
+    "Brief": "SendUserMessage",
+    "ListMcpResources": "ListMcpResourcesTool",
+    "ReadMcpResource": "ReadMcpResourceTool",
+    "ReadMcpResourceDir": "ReadMcpResourceDirTool"
+  },
+  "cases": [
+    {
+      "input": "Task",
+      "expected": "Agent"
+    },
+    {
+      "input": "KillShell",
+      "expected": "TaskStop"
+    },
+    {
+      "input": "KillBash",
+      "expected": "TaskStop"
+    },
+    {
+      "input": "ListPeers",
+      "expected": "ListAgents"
+    },
+    {
+      "input": "Brief",
+      "expected": "SendUserMessage"
+    },
+    {
+      "input": "ListMcpResources",
+      "expected": "ListMcpResourcesTool"
+    },
+    {
+      "input": "ReadMcpResource",
+      "expected": "ReadMcpResourceTool"
+    },
+    {
+      "input": "ReadMcpResourceDir",
+      "expected": "ReadMcpResourceDirTool"
+    },
+    {
+      "input": "AgentOutputTool",
+      "expected": "AgentOutputTool"
+    },
+    {
+      "input": "BashOutputTool",
+      "expected": "BashOutputTool"
+    },
+    {
+      "input": "AgentOutput",
+      "expected": "AgentOutput"
+    },
+    {
+      "input": "BashOutput",
+      "expected": "BashOutput"
+    },
+    {
+      "input": "TaskOutput",
+      "expected": "TaskOutput"
+    },
+    {
+      "input": "Read",
+      "expected": "Read"
+    },
+    {
+      "input": "__proto__",
+      "expected": "__proto__"
+    },
+    {
+      "input": "constructor",
+      "expected": "constructor"
+    },
+    {
+      "input": "toString",
+      "expected": "toString"
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "mcp__custom__tool",
+      "expected": "mcp__custom__tool"
+    }
+  ]
+}

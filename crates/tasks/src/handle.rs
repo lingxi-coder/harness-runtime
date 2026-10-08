@@ -10,14 +10,16 @@
 //! `TASK_STATUSES`).
 
 use crate::id::TaskType;
-use crate::registry::TaskRegistry;
+use crate::registry::{AgentWaitNotificationClaim, TaskRegistry};
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
 use lingxi_core::host::task_registry::{
-    MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
-    TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
+    AgentTaskFacts, AgentTerminalSnapshot, AgentTerminalWaitOutcome, AgentTerminalWaitReason,
+    FieldPresence, MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk,
+    TaskRecord, TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use std::path::PathBuf;
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
@@ -39,6 +41,52 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
             )));
         }
     })
+}
+
+/// Native `pae` → `kfo`/`n5r` result extraction for an Agent task transcript:
+/// scan assistant rows from newest to oldest, concatenate only text blocks
+/// without separators, and return the first non-empty exact UTF-16 string
+/// without trimming.
+fn native_agent_transcript_text(
+    messages: &[lingxi_core::types::ConversationMessage],
+) -> Utf16JsonProjection {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    for message in messages.iter().rev() {
+        let ConversationMessage::Assistant { content, .. } = message else {
+            continue;
+        };
+        let mut units = Vec::new();
+        for block in content {
+            match block {
+                ContentBlock::Text { text, .. } => units.extend(text.encode_utf16()),
+                ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => units.extend(utf16_code_units.iter().copied()),
+                _ => {}
+            }
+        }
+        if !units.is_empty() {
+            let display = String::from_utf16_lossy(&units);
+            return Utf16JsonProjection::root_string(display, units)
+                .expect("transcript display text is paired with valid JSON source units");
+        }
+    }
+    Utf16JsonProjection::from("")
+}
+
+fn agent_wait_deadline(
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<tokio::time::Instant>, TaskRegistryError> {
+    match timeout {
+        None => Ok(None),
+        Some(timeout) => tokio::time::Instant::now()
+            .checked_add(timeout)
+            .map(Some)
+            .ok_or_else(|| {
+                TaskRegistryError::InvalidInput("Agent wait timeout is out of range".into())
+            }),
+    }
 }
 
 pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
@@ -84,8 +132,100 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
     }
 }
 
+fn optional_string<T: Into<String>>(value: Option<T>) -> FieldPresence<String> {
+    value.map_or(FieldPresence::Missing, |value| {
+        FieldPresence::Value(value.into())
+    })
+}
+
+fn optional_json_string(value: Option<String>) -> FieldPresence<serde_json::Value> {
+    value.map_or(FieldPresence::Missing, |value| {
+        FieldPresence::Value(serde_json::Value::String(value))
+    })
+}
+
+fn agent_task_facts(state: &TaskState, source_order: usize) -> AgentTaskFacts {
+    let base = state.base();
+    let mut facts = AgentTaskFacts {
+        source_order,
+        parent_id: optional_json_string(base.creator_agent_id.map(|id| id.as_uuid().to_string())),
+        row_description: FieldPresence::Value(base.description.clone()),
+        ..AgentTaskFacts::default()
+    };
+    match state {
+        TaskState::LocalAgent(agent) => {
+            let exposed_id = agent.agent_id.as_uuid().to_string();
+            facts.stable_agent_id = FieldPresence::Value(exposed_id.clone());
+            facts.agent_type = FieldPresence::Value(agent.subagent_type.clone());
+            facts.spawned_description = agent
+                .spawned_description
+                .clone()
+                .map_or(FieldPresence::Missing, FieldPresence::Value);
+            facts.spawned_by = agent.agent_spawn_provenance.hook_caller.clone();
+            facts.hook_origin = agent.agent_spawn_provenance.hook_origin.clone();
+            facts.is_idle = agent.agent_list_lifecycle.is_idle.clone();
+            facts.finalizing = agent.agent_list_lifecycle.finalizing.clone();
+            facts.keepalive_reasons = agent.agent_list_lifecycle.keepalive_reasons.clone();
+            facts.activity_agent_id = FieldPresence::Value(exposed_id);
+            facts.is_backgrounded = FieldPresence::Value(agent.is_backgrounded);
+        }
+        TaskState::InProcessTeammate(teammate) => {
+            let stable_id = teammate.agent_id.as_uuid().to_string();
+            facts.stable_agent_id = FieldPresence::Value(stable_id.clone());
+            facts.resumable_agent_id = FieldPresence::Value(stable_id.clone());
+            facts.teammate_id =
+                optional_json_string(base.creator_teammate_name.as_ref().map(|name| {
+                    match base
+                        .creator_team_name
+                        .as_deref()
+                        .filter(|team| !team.is_empty())
+                    {
+                        Some(team) => format!("{name}@{team}"),
+                        None => name.clone(),
+                    }
+                }));
+            facts.name = optional_json_string(base.creator_teammate_name.clone());
+            facts.team_name = optional_string(base.creator_team_name.clone());
+            facts.child_model = optional_string(teammate.child_model.clone());
+            facts.child_model_profile = optional_string(teammate.child_model_profile.clone());
+            facts.agent_type = optional_string(teammate.spawned_agent_type.clone());
+            facts.spawned_description = teammate
+                .spawned_description
+                .clone()
+                .map_or(FieldPresence::Missing, FieldPresence::Value);
+            facts.spawned_by = teammate.agent_spawn_provenance.hook_caller.clone();
+            facts.hook_origin = teammate.agent_spawn_provenance.hook_origin.clone();
+            facts.is_idle = FieldPresence::Value(teammate.is_idle);
+            facts.awaiting_plan_approval =
+                FieldPresence::Value(teammate.awaiting_plan_approval && !base.status.is_terminal());
+            facts.activity_agent_id = FieldPresence::Value(stable_id);
+        }
+        TaskState::LocalBash(shell) => {
+            facts.activity_agent_id = optional_string(
+                base.creator_agent_id
+                    .map(|agent_id| agent_id.as_uuid().to_string()),
+            );
+            facts.is_backgrounded = shell
+                .is_backgrounded
+                .map_or(FieldPresence::Missing, FieldPresence::Value);
+        }
+        TaskState::MonitorMcp(_) | TaskState::Monitor(_) => {
+            facts.activity_agent_id = optional_string(
+                base.creator_agent_id
+                    .map(|agent_id| agent_id.as_uuid().to_string()),
+            );
+        }
+        _ => {}
+    }
+    facts
+}
+
 pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
     let b = s.base();
+    let description = match s {
+        TaskState::Monitor(monitor) => monitor.source_description.clone(),
+        _ => b.description.clone(),
+    };
     let started_at_ms = b
         .start_time
         .duration_since(std::time::UNIX_EPOCH)
@@ -96,7 +236,7 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
     // prefers `command` over `description` for shell-backed tasks
     // (`stopTask.ts:97`); every other task type reports `None`.
     let command = match s {
-        TaskState::LocalBash(bash) => Some(bash.command.clone()),
+        TaskState::LocalBash(bash) => Some(Utf16JsonProjection::from(bash.command.as_str())),
         TaskState::Monitor(monitor) if b.task_type == TaskType::LocalBash => {
             Some(monitor.command.clone())
         }
@@ -214,7 +354,7 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),
         status: status_to_wire(b.status).to_string(),
-        description: b.description.clone(),
+        description,
         started_at_ms,
         command,
         agent_type,
@@ -232,71 +372,79 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
         },
         error,
         stage,
+        agent_facts: Some(agent_task_facts(s, 0)),
     }
 }
 
 /// Port of `extractTextContent(blocks, '\n')` (claude-code
-/// `utils/messages.ts:2893-2901`): filter the content blocks whose `type` is
-/// `"text"` and join their `text` fields with `\n`.
-///
-/// The agent's final-message `content` arrives here as a `serde_json::Value`
-/// (the spooled `SubagentResult::Completed.content`). A non-array `content`
-/// (e.g. a bare string the spawner returned) yields no `text` blocks → `""`,
-/// exactly mirroring the TS `.filter(...).map(...).join(...)` over a typed
-/// block array.
-pub(crate) fn extract_text_content(content: &serde_json::Value) -> String {
-    // The runner's completion payload is an OBJECT — `{text, content:[…]}` —
-    // and the `local_agent` spool holds exactly that object, pretty-printed.
-    // Reading only a bare array meant `as_array()` failed for every production
-    // agent, so `TaskOutputChunk.result` was ALWAYS `None` and `TaskOutput`
-    // fell back to the raw JSON transcript instead of the agent's answer. The
-    // bare-array form is still accepted: it is what a caller holding the
-    // content blocks directly passes (the one-shot handler does), and what the
-    // fixtures use.
-    //
-    // `text` wins over `content` when both are present, matching the runner's
-    // own `completed_result_text`.
-    if let Some(text) = content.get("text").and_then(serde_json::Value::as_str) {
+/// `utils/messages.ts:2893-2901`): filter text blocks and join exact source
+/// UTF-16 units with a newline. The runner's completion object is kept as a
+/// projection through this consumer; no recursive `Value` is materialized.
+pub(crate) fn extract_text_content(content: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let root = content
+        .at_pointer("")
+        .expect("every JSON projection has a root");
+    if let Some(text) = root
+        .get_property("text")
+        .and_then(JsonValueView::code_units)
+    {
         if !text.is_empty() {
-            return text.to_string();
+            return root_text_projection(text);
         }
     }
-    let blocks = match content.as_array() {
-        Some(blocks) => blocks,
-        None => match content.get("content").and_then(serde_json::Value::as_array) {
-            Some(blocks) => blocks,
-            None => return String::new(),
-        },
+
+    let blocks = if root.array_len().is_some() {
+        Some(root)
+    } else {
+        root.get_property("content")
+            .filter(|value| value.array_len().is_some())
     };
-    blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let Some(blocks) = blocks else {
+        return root_text_projection(&[]);
+    };
+    let mut joined = Vec::new();
+    let mut has_text = false;
+    for index in 0..blocks.array_len().unwrap_or_default() {
+        let Some(block) = blocks.get_index(index) else {
+            continue;
+        };
+        if block.get_property("type").and_then(JsonValueView::as_str) != Some("text") {
+            continue;
+        }
+        let Some(text) = block
+            .get_property("text")
+            .and_then(JsonValueView::code_units)
+        else {
+            continue;
+        };
+        if has_text {
+            joined.push(u16::from(b'\n'));
+        }
+        joined.extend_from_slice(text);
+        has_text = true;
+    }
+    root_text_projection(&joined)
 }
 
-/// Recover the agent's final-message content `Value` from a `local_agent`
-/// spool. The `local_agent` handler writes
-/// `to_string_pretty(content)` + `"\n<usage><total_tokens>N</total_tokens></usage>\n"`
-/// (`handlers/local_agent.rs`). Strip the trailing `<usage>…</usage>` footer
-/// (if present) and JSON-parse the remainder back into the original `content`
-/// `Value`, so `extract_text_content` can pull the clean answer out of it.
-/// Returns `None` when the spool is empty or does not parse (e.g. a `Failed`
-/// reason string), in which case the caller falls back to the raw output.
-fn agent_content_from_spool(spool: &str) -> Option<serde_json::Value> {
+fn root_text_projection(units: &[u16]) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+        .expect("text units form a root string projection")
+}
+
+/// Recover the runner's exact completion object from a `local_agent` spool.
+/// The usage footer is generated ASCII text; the JSON body is parsed directly
+/// into the source projection so escaped lone surrogates remain intact.
+fn agent_content_from_spool(spool: &str) -> Option<Utf16JsonProjection> {
     let trimmed = spool.trim_end();
-    // Drop the appended `<usage>…</usage>` footer if it is present, keeping the
-    // pretty-printed JSON body that precedes it.
     let body = match trimmed.rfind("\n<usage>") {
-        Some(idx) => &trimmed[..idx],
+        Some(index) => &trimmed[..index],
         None => trimmed,
-    };
-    let body = body.trim();
+    }
+    .trim();
     if body.is_empty() {
         return None;
     }
-    serde_json::from_str::<serde_json::Value>(body).ok()
+    Utf16JsonProjection::parse(body).ok()
 }
 
 fn task_err_to_registry_err(e: TaskError) -> TaskRegistryError {
@@ -325,7 +473,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::LocalAgent => TaskSpawnInput::LocalAgent {
             agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: String::new(),
-            prompt: String::new(),
+            prompt: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             is_backgrounded: false,
             tool_use_id: None,
             creator_teammate_name: None,
@@ -344,7 +492,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             agent_id: lingxi_core::types::AgentId::nil(),
             name: String::new(),
             team_name: String::new(),
-            description: String::new(),
+            description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
             session_uuid: None,
@@ -372,7 +520,8 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             watch: vec![],
         },
         TaskType::Monitor => TaskSpawnInput::Monitor {
-            command: String::new(),
+            command: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
+            source_description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             spawn_command: None,
             timeout: None,
             cwd: None,
@@ -418,16 +567,85 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
 
 #[async_trait]
 impl TaskRegistryHandle for TaskRegistry {
+    async fn handback_scope(&self) -> Option<lingxi_core::host::handback::HandbackSessionScope> {
+        TaskRegistry::handback_scope(self).await
+    }
+    async fn begin_handback_run(
+        &self,
+        input: lingxi_core::host::handback::BeginHandbackRun,
+    ) -> Result<lingxi_core::host::handback::HandbackRunToken, TaskRegistryError> {
+        TaskRegistry::begin_handback_run(self, input)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+    async fn handback_state(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+    ) -> Option<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_state(self, token).await
+    }
+    async fn handback_state_for_agent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Option<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_state_for_agent(self, agent_id).await
+    }
+    async fn handback_history_for_agent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Vec<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_history_for_agent(self, agent_id).await
+    }
+    async fn pending_handback_reports_for(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Vec<lingxi_core::host::handback::HandbackEnvelope> {
+        TaskRegistry::pending_handback_reports_for(self, agent_id).await
+    }
+    async fn acknowledge_handback_consumption(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        receipt: &lingxi_core::host::handback::HandbackReceipt,
+    ) -> bool {
+        TaskRegistry::acknowledge_handback_consumption(self, agent_id, receipt).await
+    }
+    async fn try_deliver_handback(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+        report: lingxi_core::host::handback::PreparedHandbackReport,
+    ) -> lingxi_core::host::handback::HandbackAdmissionOutcome {
+        TaskRegistry::try_deliver_handback(self, token, report).await
+    }
+    async fn next_handback_bounce(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+    ) -> Option<u8> {
+        TaskRegistry::next_handback_bounce(self, token).await
+    }
+    async fn set_handback_disposition(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+        disposition: lingxi_core::host::handback::HandbackDisposition,
+    ) {
+        TaskRegistry::set_handback_disposition(self, token, disposition).await
+    }
+    async fn agent_waiting_on_owned_work(&self, agent_id: lingxi_core::types::AgentId) -> bool {
+        TaskRegistry::agent_waiting_on_owned_work(self, agent_id).await
+    }
+
     async fn send_human_task_message(
         &self,
         id: &str,
-        message: &str,
+        message: &Utf16JsonProjection,
     ) -> Result<(), TaskRegistryError> {
         TaskRegistry::send_human_task_message(self, id, message)
             .await
             .map_err(|error| TaskRegistryError::Internal(error.to_string()))
     }
-    async fn take_human_task_messages_for(&self, id: lingxi_core::types::AgentId) -> Vec<String> {
+    async fn take_human_task_messages_for(
+        &self,
+        id: lingxi_core::types::AgentId,
+    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         TaskRegistry::take_human_task_messages_for(self, id).await
     }
     async fn begin_human_task_resume(&self, id: &str, epoch: u64) -> Result<(), TaskRegistryError> {
@@ -570,7 +788,7 @@ impl TaskRegistryHandle for TaskRegistry {
             task_id: id,
             task_type: input.task_type,
             status: "pending".into(),
-            description: input.description,
+            description: input.description.clone(),
             // `create` allocates a placeholder spawn input with an empty command
             // (`placeholder_input`), so no real command is available at this point;
             // a `local_bash` record gets its command once `state_to_record` reads
@@ -579,6 +797,7 @@ impl TaskRegistryHandle for TaskRegistry {
             // The per-type hook-payload extras are likewise unpopulated at the
             // placeholder-create point; they fill in once `state_to_record` reads
             // a real spawned state.
+            agent_facts: None,
             ..Default::default()
         })
     }
@@ -624,13 +843,183 @@ impl TaskRegistryHandle for TaskRegistry {
         Ok(self.get(id).await.as_ref().map(state_to_record))
     }
 
+    async fn wait_for_agent_terminal(
+        &self,
+        raw_agent_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<AgentTerminalWaitOutcome, TaskRegistryError> {
+        // Native UOt observes the raw Agent `agentId` without UUID parsing or
+        // alias normalization. Keep the lifecycle subscription before the
+        // first ordered registry snapshot; periodic reads remain authoritative
+        // because lifecycle messages can be unrelated to this agent.
+        let mut _lifecycle = TaskRegistry::subscribe_task_lifecycle(self);
+        let mut deadline = agent_wait_deadline(timeout)?;
+        let mut observed_task_id: Option<String> = None;
+        let mut last_transcript: Option<Utf16JsonProjection> = None;
+        let mut active_claim: Option<AgentWaitNotificationClaim> = None;
+        loop {
+            let state = TaskRegistry::list(self)
+                .await
+                .into_iter()
+                .find(|state| {
+                    matches!(state, TaskState::LocalAgent(agent) if agent.agent_id.as_uuid().to_string() == raw_agent_id)
+                });
+
+            if let Some(state) = state {
+                let TaskState::LocalAgent(agent) = &state else {
+                    continue;
+                };
+                let task_id = state.base().id.clone();
+                if observed_task_id.is_none() {
+                    // K3 claims the completion notification once the matching
+                    // registry row is first observed. Do not call mark_notified:
+                    // that public TaskOutput helper also changes parked-rest
+                    // state, while Native K3 only updates this bit.
+                    if let Some(claim) =
+                        TaskRegistry::claim_agent_wait_notification(self, &task_id, raw_agent_id)
+                            .await?
+                    {
+                        observed_task_id = Some(task_id.clone());
+                        active_claim = Some(claim);
+                        // Native starts a fresh ten-minute settle budget at
+                        // first observation; time spent waiting for startup
+                        // does not consume it.
+                        deadline = match agent_wait_deadline(timeout) {
+                            Ok(deadline) => deadline,
+                            Err(error) => {
+                                if let Some(claim) = active_claim.take() {
+                                    claim.release().await;
+                                }
+                                return Err(error);
+                            }
+                        };
+                    }
+                }
+                if observed_task_id.is_some() {
+                    let transcript_text = native_agent_transcript_text(&agent.messages);
+                    last_transcript = Some(transcript_text.clone());
+                    let snapshot = AgentTerminalSnapshot {
+                        task_id: task_id.clone(),
+                        native_transcript_text: transcript_text,
+                        error: agent.error.as_ref().map(Utf16JsonProjection::from),
+                    };
+                    let terminal_outcome = match state.base().status {
+                        TaskStatus::Completed => {
+                            Some(AgentTerminalWaitOutcome::Completed(snapshot))
+                        }
+                        TaskStatus::Failed => Some(AgentTerminalWaitOutcome::Failed(snapshot)),
+                        TaskStatus::Killed => Some(AgentTerminalWaitOutcome::Killed(snapshot)),
+                        TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => None,
+                    };
+                    if let Some(outcome) = terminal_outcome {
+                        if let Some(claim) = active_claim.take() {
+                            claim.finish().await;
+                        }
+                        return Ok(outcome);
+                    }
+                }
+            } else if observed_task_id.is_some() {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                // The real Claude registry can read its transcript store after
+                // a task row disappears. This registry has no shared transcript
+                // reader port, so retain only the last exact conversation
+                // snapshot observed while the row was live.
+                return Ok(AgentTerminalWaitOutcome::Evicted {
+                    native_transcript_text: last_transcript,
+                });
+            }
+
+            // Native tests terminal status before AbortSignal/deadline. An
+            // abort after observing a live task restores notification
+            // eligibility (qOt) but never cancels that launched worker.
+            if cancel.is_cancelled() {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                return Ok(AgentTerminalWaitOutcome::Interrupted {
+                    reason: AgentTerminalWaitReason::Aborted,
+                    observed_task_id,
+                });
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                return Ok(AgentTerminalWaitOutcome::Interrupted {
+                    reason: if observed_task_id.is_some() {
+                        AgentTerminalWaitReason::SettleTimeout
+                    } else {
+                        AgentTerminalWaitReason::StartupTimeout
+                    },
+                    observed_task_id,
+                });
+            }
+
+            let poll_interval = std::time::Duration::from_millis(150);
+            let sleep_for = deadline.map_or(poll_interval, |deadline| {
+                deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(poll_interval)
+            });
+            tokio::time::sleep(sleep_for).await;
+            while _lifecycle.try_recv().is_ok() {}
+        }
+    }
+
+    async fn wait_for_agent_settled(&self, task_id: &str) -> Result<(), TaskRegistryError> {
+        loop {
+            let state = TaskRegistry::list(self)
+                .await
+                .into_iter()
+                .find(|state| state.base().id == task_id);
+            match state {
+                None => return Ok(()),
+                Some(state) if state.base().status.is_terminal() => return Ok(()),
+                Some(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+            }
+        }
+    }
+
+    async fn replace_agent_transcript_messages(
+        &self,
+        task_id: &str,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::replace_agent_transcript_messages(self, task_id, messages)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn update_agent_list_local_fact(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::update_agent_list_local_fact(self, agent_id, update)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::set_team_member_active(self, agent_id, active)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
         let want_status = match filter.status.as_deref() {
             Some(s) => Some(status_from_wire(s)?),
             None => None,
         };
         let mut out = Vec::new();
-        for state in self.list().await {
+        for (source_order, state) in self.list().await.into_iter().enumerate() {
             if !self.workflow_visible_in_current_session(&state) {
                 continue;
             }
@@ -640,6 +1029,9 @@ impl TaskRegistryHandle for TaskRegistry {
                 }
             }
             let mut record = state_to_record(&state);
+            if let Some(facts) = record.agent_facts.as_mut() {
+                facts.source_order = source_order;
+            }
             record.completed_agent_visible = self.completed_agent_visible(&record.task_id).await;
             out.push(record);
         }
@@ -668,7 +1060,12 @@ impl TaskRegistryHandle for TaskRegistry {
                     run_id: w.run_id.clone(),
                     name: w.workflow_id.clone(),
                     status: status_to_wire(w.base.status).to_string(),
-                    description: w.base.description.clone(),
+                    description: w
+                        .base
+                        .description
+                        .string_at("")
+                        .unwrap_or_default()
+                        .to_owned(),
                     current_step: w.current_step,
                     started_at_ms: epoch_ms(w.base.start_time),
                     ended_at_ms: w.base.end_time.and_then(epoch_ms),
@@ -775,7 +1172,8 @@ impl TaskRegistryHandle for TaskRegistry {
         registration: lingxi_core::host::task_registry::WebSocketMonitorRegistration,
         http: std::sync::Arc<dyn lingxi_core::host::HttpTransport>,
     ) -> Result<String, TaskRegistryError> {
-        let description = registration.task.description.clone();
+        let source_description = registration.task.description.clone();
+        let row_description = source_description.clone();
         TaskRegistry::spawn(
             self,
             TaskType::Monitor,
@@ -783,13 +1181,15 @@ impl TaskRegistryHandle for TaskRegistry {
                 registration,
                 http,
             }),
-            description,
+            row_description,
         )
         .await
         .map_err(task_err_to_registry_err)
     }
 
     async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
+        let source_description = reg.description;
+        let row_description = source_description.clone();
         let timeout = if reg.persistent || reg.timeout_ms == 0 {
             None
         } else {
@@ -800,6 +1200,7 @@ impl TaskRegistryHandle for TaskRegistry {
             TaskType::Monitor,
             TaskSpawnInput::Monitor {
                 command: reg.command,
+                source_description,
                 spawn_command: reg.spawn_command,
                 timeout,
                 cwd: reg.cwd.map(PathBuf::from),
@@ -808,13 +1209,18 @@ impl TaskRegistryHandle for TaskRegistry {
                 creator_team_name: reg.creator_team_name,
                 creator_agent_id: reg.creator_agent_id,
             },
-            reg.description,
+            row_description,
         )
         .await
         .map_err(task_err_to_registry_err)
     }
 
-    async fn notify_monitor_event(&self, id: &str, event: &str, housekeeping: bool) {
+    async fn notify_monitor_event(
+        &self,
+        id: &str,
+        event: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        housekeeping: bool,
+    ) {
         let _ = TaskRegistry::enqueue_monitor_event(self, id, event, housekeeping).await;
     }
 
@@ -840,9 +1246,9 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn settle_mcp_task_with_hint(
         &self,
         id: &str,
-        text: &str,
+        text: &Utf16JsonProjection,
         failed: bool,
-        saved_hint: Option<&str>,
+        saved_hint: Option<&Utf16JsonProjection>,
     ) -> Result<bool, TaskRegistryError> {
         TaskRegistry::settle_mcp_task_with_hint(self, id, text, failed, saved_hint)
             .await
@@ -852,7 +1258,7 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn settle_mcp_task(
         &self,
         id: &str,
-        result_text: &str,
+        result_text: &Utf16JsonProjection,
         failed: bool,
     ) -> Result<bool, TaskRegistryError> {
         TaskRegistry::settle_mcp_task(self, id, result_text, failed)
@@ -918,11 +1324,19 @@ impl TaskRegistryHandle for TaskRegistry {
                     .outcome
                     .result
                     .clone()
-                    .filter(|s| !s.is_empty())
+                    .filter(|value| {
+                        value
+                            .string_units("")
+                            .is_some_and(|units| !units.is_empty())
+                    })
                     .or_else(|| {
                         agent_content_from_spool(&out.content)
                             .map(|content| extract_text_content(&content))
-                            .filter(|s| !s.is_empty())
+                            .filter(|value| {
+                                value
+                                    .string_units("")
+                                    .is_some_and(|units| !units.is_empty())
+                            })
                     });
                 (a.error.clone(), Some(a.prompt.clone()), clean)
             }
@@ -961,7 +1375,9 @@ impl TaskRegistryHandle for TaskRegistry {
                     lingxi_core::host::subagent_output::max_turns_harness_note(
                         limit,
                         &agent.subagent_type,
-                        result.as_ref().is_some_and(|text| !text.is_empty()),
+                        result.as_ref().is_some_and(|text| {
+                            text.string_units("").is_some_and(|units| !units.is_empty())
+                        }),
                     )
                 })
             }
@@ -1206,7 +1622,7 @@ impl TaskRegistryHandle for TaskRegistry {
 
     fn subscribe_task_lifecycle(
         &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Utf16JsonProjection>> {
         Some(TaskRegistry::subscribe_task_lifecycle(self))
     }
 
@@ -1226,6 +1642,16 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::mark_shell_supervised(self, id).await;
     }
 
+    async fn settle_background_bash_deadline(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_background_bash_deadline(self, id, exit_code)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn settle_background_bash(
         &self,
         id: &str,
@@ -1243,16 +1669,6 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::mark_notified(self, id)
             .await
             .map_err(task_err_to_registry_err)
-    }
-
-    async fn mark_rested(
-        &self,
-        id: &str,
-        result: Option<String>,
-        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
-    ) {
-        // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
-        TaskRegistry::mark_task_rested(self, id, result, usage, None, None, None).await;
     }
 
     async fn take_pending_task_notifications(
@@ -1280,10 +1696,10 @@ impl TaskRegistryHandle for TaskRegistry {
         for state in TaskRegistry::list(self).await {
             match state {
                 TaskState::LocalAgent(agent) if agent.agent_id == agent_id => {
-                    return agent.is_parked
+                    return agent.is_parked;
                 }
                 TaskState::InProcessTeammate(agent) if agent.agent_id == agent_id => {
-                    return agent.is_idle
+                    return agent.is_idle;
                 }
                 _ => {}
             }
@@ -1363,6 +1779,27 @@ mod tests {
 
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;
+
+    #[test]
+    fn native_agent_transcript_text_keeps_exact_utf16_units() {
+        use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+        let messages = vec![ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::TextJsUtf16 {
+                text: "�".into(),
+                utf16_code_units: vec![0xd800],
+                citations: None,
+            }],
+            stop_reason: None,
+            resumable: None,
+        }];
+
+        assert_eq!(
+            native_agent_transcript_text(&messages).string_units(""),
+            Some(vec![0xd800])
+        );
+    }
 
     /// In-memory `FileSystem` that actually preserves writes — used by the
     /// M5-01 Task 6 `output_returns_real_content_after_spool_write` test.
@@ -1495,13 +1932,31 @@ mod tests {
         let (_dir, registry) = make_registry();
         let task_id = crate::id::generate_task_id(crate::id::TaskType::Monitor);
         let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let command_units = vec![b't' as u16, 0xd800, b'l' as u16];
+        let command = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&command_units),
+            command_units.clone(),
+        )
+        .unwrap();
+        let description_units = vec![b'w' as u16, 0xdfff, b't' as u16];
+        let source_description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&description_units),
+            description_units.clone(),
+        )
+        .unwrap();
+        let event_units = vec![b's' as u16, 0xd800, b'e' as u16];
+        let source_event = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&event_units),
+            event_units.clone(),
+        )
+        .unwrap();
         registry
             .insert_state_for_test(TaskState::Monitor(crate::state::MonitorTaskState {
                 base: crate::state::TaskStateBase {
                     id: task_id.clone(),
                     task_type: crate::id::TaskType::Monitor,
                     status: TaskStatus::Running,
-                    description: "watch build".into(),
+                    description: source_description.clone(),
                     tool_use_id: Some("toolu_monitor".into()),
                     start_time: std::time::SystemTime::UNIX_EPOCH,
                     end_time: None,
@@ -1514,15 +1969,25 @@ mod tests {
                     creator_team_name: None,
                     creator_agent_id: None,
                 },
-                command: "tail -f build.log".into(),
+                command,
+                source_description: source_description.clone(),
                 exit_code: None,
                 stdout_bytes: None,
             }))
             .await;
 
         let handle: &dyn TaskRegistryHandle = registry.as_ref();
+        let record = handle.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(record.description.string_units(""), Some(description_units));
+        assert_eq!(
+            record
+                .command
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(command_units)
+        );
         handle
-            .notify_monitor_event(&task_id, "step <2> complete", false)
+            .notify_monitor_event(&task_id, source_event, false)
             .await;
         let events = handle.take_pending_task_notifications().await.unwrap();
         assert_eq!(events.len(), 1);
@@ -1530,7 +1995,13 @@ mod tests {
         assert_eq!(event.task_id, task_id);
         assert_eq!(event.task_type, "monitor_ws");
         assert_eq!(event.status, "running");
-        assert_eq!(event.result.as_deref(), Some("step <2> complete"));
+        assert_eq!(
+            event
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(event_units)
+        );
         assert_eq!(event.tool_use_id.as_deref(), Some("toolu_monitor"));
         assert_eq!(event.output_path.as_deref(), spool.to_str());
         assert!(
@@ -1545,84 +2016,111 @@ mod tests {
 
     // ── agent-specific output helpers (T3) ───────────────────────────────
 
-    /// TO-07 step 0: the shape the RUNNER actually produces. `SubagentResult`'s
-    /// `content` is the runner's completion payload — an object carrying `text`
-    /// and/or a `content` block array — and the `local_agent` spool holds that
-    /// object pretty-printed. Requiring a bare array made this return `""` for
-    /// every production agent, so `TaskOutputChunk.result` was always `None` and
-    /// `TaskOutput` served the raw JSON transcript instead of the answer.
+    /// TO-07 step 0: the shape the RUNNER actually produces. Bounded test
+    /// fixtures are projected explicitly, and source strings stay UJP.
     #[test]
     fn extract_text_content_reads_the_runners_object_shape() {
-        // `text` wins when present, matching the runner's own
-        // `completed_result_text`.
+        let as_source = |value: &serde_json::Value| {
+            Utf16JsonProjection::from_serde_value(value).expect("bounded test JSON projects")
+        };
         assert_eq!(
-            extract_text_content(&serde_json::json!({
+            extract_text_content(&as_source(&serde_json::json!({
                 "text": "the answer",
                 "content": [{"type": "text", "text": "ignored"}]
-            })),
-            "the answer"
+            })))
+            .string_at(""),
+            Some("the answer")
         );
-        // Falls back to the block array under `content`.
         assert_eq!(
-            extract_text_content(&serde_json::json!({
+            extract_text_content(&as_source(&serde_json::json!({
                 "content": [
                     {"type": "text", "text": "first"},
                     {"type": "tool_use", "name": "Bash"},
                     {"type": "text", "text": "second"}
                 ]
-            })),
-            "first\nsecond"
+            })))
+            .string_at(""),
+            Some("first\nsecond")
         );
-        // An empty `text` is not an answer — fall through rather than return "".
         assert_eq!(
-            extract_text_content(&serde_json::json!({
+            extract_text_content(&as_source(&serde_json::json!({
                 "text": "",
                 "content": [{"type": "text", "text": "real"}]
-            })),
-            "real"
+            })))
+            .string_at(""),
+            Some("real")
         );
-        // The max-turns payload carries neither, so it yields nothing.
         assert_eq!(
-            extract_text_content(&serde_json::json!({
+            extract_text_content(&as_source(&serde_json::json!({
                 "reason": "max_turns_exhausted", "max_turns": 12
-            })),
-            ""
+            })))
+            .string_at(""),
+            Some("")
         );
     }
 
     #[test]
     fn extract_text_content_joins_text_blocks_with_newline() {
-        // Port of `extractTextContent(blocks, '\n')`: only `type:"text"` blocks,
-        // joined by `\n`; non-text blocks (e.g. tool_use) are dropped.
-        let content = serde_json::json!([
+        let content = Utf16JsonProjection::from_serde_value(&serde_json::json!([
             { "type": "text", "text": "first" },
             { "type": "tool_use", "name": "Bash", "input": {} },
             { "type": "text", "text": "second" }
-        ]);
-        assert_eq!(extract_text_content(&content), "first\nsecond");
+        ]))
+        .expect("bounded fixture projects");
+        assert_eq!(
+            extract_text_content(&content).string_at(""),
+            Some("first\nsecond")
+        );
     }
 
     #[test]
     fn extract_text_content_non_array_is_empty() {
-        // A non-array content (bare string / object) has no text blocks ⇒ "".
-        assert_eq!(extract_text_content(&serde_json::json!("hello")), "");
-        assert_eq!(extract_text_content(&serde_json::json!({ "x": 1 })), "");
+        let string = Utf16JsonProjection::from("hello");
+        let object = Utf16JsonProjection::from_serde_value(&serde_json::json!({ "x": 1 }))
+            .expect("bounded fixture projects");
+        assert_eq!(extract_text_content(&string).string_at(""), Some(""));
+        assert_eq!(extract_text_content(&object).string_at(""), Some(""));
     }
 
     #[test]
-    fn agent_content_from_spool_strips_usage_footer_and_parses() {
-        // The local_agent handler spools `to_string_pretty(content)` + a
-        // `<usage>…</usage>` footer; recover the original content Value.
-        let spool = "[\n  {\n    \"type\": \"text\",\n    \"text\": \"the answer\"\n  }\n]\n\
-                     <usage><total_tokens>9</total_tokens></usage>\n";
+    fn extract_text_content_preserves_lone_surrogate_units() {
+        let content = Utf16JsonProjection::parse(
+            r#"{"content":[{"type":"text","text":"A\ud800Z"},{"type":"text","text":"B"}]}"#,
+        )
+        .expect("exact source JSON parses");
+        let extracted = extract_text_content(&content);
+        assert_eq!(
+            extracted.string_units(""),
+            Some(vec![
+                u16::from(b'A'),
+                0xD800,
+                u16::from(b'Z'),
+                u16::from(b'\n'),
+                u16::from(b'B')
+            ])
+        );
+    }
+
+    #[test]
+    fn agent_content_from_spool_strips_usage_footer_and_parses_exact_source() {
+        let spool =
+            "{\n  \"text\": \"the answer\"\n}\n<usage><total_tokens>9</total_tokens></usage>\n";
         let content = agent_content_from_spool(spool).expect("parses");
-        assert_eq!(extract_text_content(&content), "the answer");
+        assert_eq!(
+            extract_text_content(&content).string_at(""),
+            Some("the answer")
+        );
+        let exact = r#"{"text":"A\ud800Z"}"#.to_owned()
+            + "\n<usage><total_tokens>1</total_tokens></usage>\n";
+        let content = agent_content_from_spool(&exact).expect("exact source JSON parses");
+        assert_eq!(
+            extract_text_content(&content).string_units(""),
+            Some(vec![u16::from(b'A'), 0xD800, u16::from(b'Z')])
+        );
     }
 
     #[test]
     fn agent_content_from_spool_unparseable_is_none() {
-        // A `Failed` reason string (not JSON) ⇒ None, so the caller keeps the
-        // raw output.
         assert!(agent_content_from_spool("model refused to continue").is_none());
         assert!(agent_content_from_spool("").is_none());
     }
@@ -1659,6 +2157,12 @@ mod tests {
                 creator_agent_id: None,
             };
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                handback: None,
+                handback_history: Vec::new(),
+
+                agent_spawn_provenance: Default::default(),
+                agent_list_lifecycle: Default::default(),
+                spawned_description: None,
                 is_parked: false,
                 is_observer: false,
                 observed_agent_id: None,
@@ -1689,10 +2193,81 @@ mod tests {
             h.output(&task_id, None).await.unwrap()
         };
 
-        assert_eq!(chunk.result.as_deref(), Some("final answer"));
-        assert_eq!(chunk.prompt.as_deref(), Some("do the thing"));
+        assert_eq!(
+            chunk.result.as_ref().and_then(|value| value.string_at("")),
+            Some("final answer")
+        );
+        assert_eq!(
+            chunk
+                .prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at("")),
+            Some("do the thing")
+        );
         assert_eq!(chunk.error.as_deref(), Some("model refused"));
         assert!(chunk.done, "failed task is terminal");
+    }
+
+    #[tokio::test]
+    async fn output_local_agent_preserves_exact_outcome_result_units() {
+        let (_dir, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalAgent);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let expected_units = vec![u16::from(b'A'), 0xD800, u16::from(b'Z')];
+        let result = root_text_projection(&expected_units);
+        let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
+            is_parked: false,
+            is_observer: false,
+            observed_agent_id: None,
+            base: crate::state::TaskStateBase {
+                id: task_id.clone(),
+                task_type: crate::id::TaskType::LocalAgent,
+                status: TaskStatus::Completed,
+                description: "source answer".into(),
+                tool_use_id: None,
+                start_time: std::time::SystemTime::UNIX_EPOCH,
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: spool,
+                evict_after: None,
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: lingxi_core::types::AgentId::nil(),
+            subagent_type: String::new(),
+            prompt: "source answer".into(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: crate::state::AgentOutcomeState {
+                result: Some(result),
+                ..Default::default()
+            },
+            forked_skill_name: None,
+        });
+        registry.insert_state_for_test(state).await;
+
+        let handle: &dyn TaskRegistryHandle = registry.as_ref();
+        let chunk = handle
+            .output(&task_id, None)
+            .await
+            .expect("output succeeds");
+        assert_eq!(
+            chunk
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(expected_units)
+        );
     }
 
     #[tokio::test]
@@ -1787,6 +2362,7 @@ mod tests {
                 command: "cargo build".into(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }))
@@ -1897,6 +2473,7 @@ mod tests {
                 command: "echo visible".into(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }))
@@ -1952,6 +2529,7 @@ mod tests {
             command: "cargo build --release".into(),
             pid: None,
             exit_code: None,
+            stop_cause: None,
             cwd: None,
             is_backgrounded: None,
         });
@@ -1960,11 +2538,11 @@ mod tests {
         let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h.get(&task_id).await.unwrap().expect("record present");
         assert_eq!(
-            rec.command.as_deref(),
+            rec.command.as_ref().and_then(|value| value.string_at("")),
             Some("cargo build --release"),
             "local_bash record carries the shell command"
         );
-        assert_eq!(rec.description, "build the workspace");
+        assert_eq!(rec.description.string_at(""), Some("build the workspace"));
     }
 
     #[tokio::test]
@@ -1992,6 +2570,12 @@ mod tests {
             creator_agent_id: None,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -2166,6 +2750,29 @@ mod tests {
         assert!(rec.task_id.starts_with('b'));
         assert_eq!(rec.status, "pending");
         assert_eq!(rec.task_type, "local_bash");
+    }
+
+    #[tokio::test]
+    async fn task_description_keeps_lone_utf16_units_in_task_record_and_agent_facts() {
+        let (_dir, registry) = make_registry();
+        let handle: &dyn TaskRegistryHandle = registry.as_ref();
+        let description = Utf16JsonProjection::parse(r#""task-\ud800""#).unwrap();
+        let created = handle
+            .create(TaskCreateInput {
+                task_type: "local_agent".into(),
+                description: description.clone(),
+            })
+            .await
+            .unwrap();
+
+        let record = handle.get(&created.task_id).await.unwrap().unwrap();
+        let expected_units = description.string_units("").unwrap();
+        assert_eq!(record.description.string_units(""), Some(expected_units));
+        let facts = record.agent_facts.expect("agent row facts are present");
+        assert!(matches!(
+            facts.row_description,
+            FieldPresence::Value(value) if value.string_units("") == Some(expected_units)
+        ));
     }
 
     #[tokio::test]

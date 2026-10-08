@@ -294,7 +294,7 @@ async fn an_idle_teammate_does_not_defer_but_a_working_teammate_does() {
 }
 
 #[derive(Default)]
-struct IdleQueue(std::sync::Mutex<Vec<String>>);
+struct IdleQueue(std::sync::Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>);
 #[async_trait::async_trait]
 impl crate::prompt::mid_turn_input::MidTurnInputSource for IdleQueue {
     fn supports_goal_retries(&self) -> bool {
@@ -303,12 +303,14 @@ impl crate::prompt::mid_turn_input::MidTurnInputSource for IdleQueue {
     async fn enqueue_goal_retry(
         &self,
         _: String,
-        body: String,
+        body: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: tokio_util::sync::CancellationToken,
     ) {
         self.0.lock().unwrap().push(body);
     }
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         None
     }
 }
@@ -343,7 +345,7 @@ async fn idle_checkin_queues_a_turn_including_when_background_work_has_finished(
         .expect("idle check-in must wake the host queue");
         let queued = queue.0.lock().unwrap().clone();
         assert_eq!(queued.len(), 1);
-        assert!(queued[0].contains(if finished {
+        assert!(queued[0].string_at("").unwrap().contains(if finished {
             "no longer running"
         } else {
             "background work is still running"

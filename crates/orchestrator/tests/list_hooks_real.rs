@@ -79,7 +79,12 @@ async fn list_hooks_returns_one_pretooluse_entry() {
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].name, "./fmt.sh");
     assert_eq!(v[0].event, "PreToolUse");
-    assert_eq!(v[0].matcher.as_deref(), Some("Write|Edit"));
+    assert_eq!(
+        v[0].matcher
+            .as_ref()
+            .and_then(|matcher| matcher.string_at("")),
+        Some("Write|Edit")
+    );
     assert_eq!(v[0].timeout_ms, 30_000);
 }
 

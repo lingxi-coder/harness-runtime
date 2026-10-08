@@ -7,10 +7,10 @@
 //!
 //! See spec §25 (LSP) and D17 (Runtime boundary).
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use thiserror::Error;
+use std::fmt;
 
 /// Configuration describing one LSP server the engine knows how to start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,8 +38,13 @@ pub struct LspServerConfig {
     #[serde(default, alias = "root_dir_markers")]
     pub root_dir_markers: Vec<String>,
     /// Optional server-specific initialization payload.
-    #[serde(default, alias = "initialization_options")]
-    pub initialization_options: Option<Value>,
+    #[serde(
+        default,
+        alias = "initialization_options",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub initialization_options: Option<Utf16JsonProjection>,
     /// File-extension → `languageId` mapping for `textDocument/didOpen`.
     /// Mirrors claude-code's `LSPServerConfig.extensionToLanguage`. The keys
     /// must include the leading dot (`.rs`, `.ts`) and are case-folded to
@@ -52,8 +57,12 @@ pub struct LspServerConfig {
     pub transport: String,
     /// Server settings exposed through `workspace/configuration` and pushed
     /// once through `workspace/didChangeConfiguration` after initialization.
-    #[serde(default)]
-    pub settings: Option<Value>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub settings: Option<Utf16JsonProjection>,
     /// Workspace folder override. Missing means the live process workspace.
     #[serde(default)]
     pub workspace_folder: Option<String>,
@@ -178,8 +187,8 @@ pub trait LspTransport: Send + Sync {
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
-    ) -> Result<Value, LspError>;
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError>;
 
     /// Issue an LSP notification (no response expected).
     ///
@@ -190,7 +199,7 @@ pub trait LspTransport: Send + Sync {
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
+        params: Utf16JsonProjection,
     ) -> Result<(), LspError>;
 
     /// Return the live `Arc<jsonrpc::Connection>` for `conn_id` so the registry
@@ -244,7 +253,7 @@ pub trait LspTransport: Send + Sync {
 pub trait NewDiagnosticsSource: Send + Sync {
     /// The next `<new-diagnostics>` block for diagnostics not yet surfaced to
     /// the model, or `None` when there are none.
-    async fn take_new_diagnostics_block(&self) -> Option<String>;
+    async fn take_new_diagnostics_block(&self) -> Option<Utf16JsonProjection>;
 
     /// Release any workspace-scoped resources owned by this source.
     ///
@@ -255,15 +264,64 @@ pub trait NewDiagnosticsSource: Send + Sync {
 }
 
 /// Failure modes shared by every [`LspTransport`] method.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum LspError {
     /// Transport is not implemented on the current platform.
-    #[error("unavailable")]
     Unavailable,
     /// Underlying transport (stdio / TCP) failed.
-    #[error("{0}")]
     Transport(String),
-    /// Server returned a JSON-RPC error response.
-    #[error("{0}")]
-    ServerError(String),
+    /// Server returned a JSON-RPC error response, preserving its exact text.
+    ServerError(Utf16JsonProjection),
+}
+
+impl fmt::Display for LspError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => formatter.write_str("unavailable"),
+            Self::Transport(message) => formatter.write_str(message),
+            Self::ServerError(message) => {
+                formatter.write_str(message.string_at("").unwrap_or_default())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LspError {}
+
+#[cfg(test)]
+mod tests {
+    use super::LspServerConfig;
+
+    #[test]
+    fn initialization_options_and_settings_preserve_raw_utf16_json() {
+        let config: LspServerConfig = serde_json::from_str(
+            r#"{"command":"server","initialization_options":{"text":"\ud800"},"settings":{"text":"\udfff"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .and_then(|value| value.string_units("/text")),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            config
+                .settings
+                .as_ref()
+                .and_then(|value| value.string_units("/text")),
+            Some(vec![0xdfff])
+        );
+
+        let encoded = serde_json::to_string(&config).unwrap();
+        assert!(encoded.contains(r#""initializationOptions":{"text":"\ud800"}"#));
+        assert!(encoded.contains(r#""settings":{"text":"\udfff"}"#));
+
+        let defaults: LspServerConfig = serde_json::from_str(r#"{"command":"server"}"#).unwrap();
+        assert!(defaults.initialization_options.is_none());
+        assert!(defaults.settings.is_none());
+        let encoded_defaults = serde_json::to_string(&defaults).unwrap();
+        assert!(encoded_defaults.contains(r#""initializationOptions":null"#));
+        assert!(encoded_defaults.contains(r#""settings":null"#));
+    }
 }

@@ -25,22 +25,23 @@
 use async_trait::async_trait;
 use hooks::{HookBackgroundTask, HookSessionCron};
 use lingxi_core::host::task_registry::TaskRecord;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// claude-code `Ljo` — the per-field truncation cap (characters) applied to a
 /// background task's `description` / `command` and a cron's `prompt`.
 pub const SNAPSHOT_TRUNCATE_CHARS: usize = 1000;
 
-/// Port of claude-code `TUe(s, Ljo)` — truncate `s` to at most
-/// [`SNAPSHOT_TRUNCATE_CHARS`] **characters** (NOT bytes; JS `.slice` operates
-/// on UTF-16 code units, but truncating on Rust `char` boundaries is the closest
-/// faithful analogue for the prompts/descriptions seen here and never splits a
-/// scalar value). A string already within the cap is returned unchanged.
+/// Port of claude-code `TUe(s, Ljo)` — truncate a root string to at most
+/// [`SNAPSHOT_TRUNCATE_CHARS`] UTF-16 code units, matching JavaScript `.slice`.
+/// This preserves isolated units and can split a surrogate pair at the cap.
 #[must_use]
-fn truncate_chars(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((byte_idx, _)) => s[..byte_idx].to_string(),
-        None => s.to_string(),
-    }
+fn truncate_source_text(source: &Utf16JsonProjection, max_units: usize) -> Utf16JsonProjection {
+    let units = source
+        .string_units("")
+        .expect("snapshot text must be a root JSON string");
+    let units = units.into_iter().take(max_units).collect::<Vec<_>>();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display derives from exact UTF-16 units")
 }
 
 /// Port of claude-code `O1o[type] ?? type` — map a task-type wire string to the
@@ -108,12 +109,12 @@ pub fn build_background_tasks(records: &[TaskRecord]) -> Vec<HookBackgroundTask>
             id: r.task_id.clone(),
             r#type: type_label(&r.task_type),
             status: r.status.clone(),
-            description: truncate_chars(&r.description, SNAPSHOT_TRUNCATE_CHARS),
+            description: truncate_source_text(&r.description, SNAPSHOT_TRUNCATE_CHARS),
             // claude-code truncates the shell command too (`TUe(n.command, Ljo)`).
             command: r
                 .command
-                .as_deref()
-                .map(|c| truncate_chars(c, SNAPSHOT_TRUNCATE_CHARS)),
+                .as_ref()
+                .map(|command| truncate_source_text(command, SNAPSHOT_TRUNCATE_CHARS)),
             agent_type: r.agent_type.clone(),
             server: r.server.clone(),
             tool: r.tool.clone(),
@@ -135,7 +136,7 @@ pub struct CronSnapshotInput {
     /// `recurring ?? false` source (claude `t.recurring`).
     pub recurring: Option<bool>,
     /// Prompt enqueued at each fire (claude `t.prompt`).
-    pub prompt: String,
+    pub prompt: Utf16JsonProjection,
 }
 
 /// Port of claude-code `Mic(Cv())` — build the `session_crons` array:
@@ -149,7 +150,7 @@ pub fn build_session_crons(crons: &[CronSnapshotInput]) -> Vec<HookSessionCron> 
             id: c.id.clone(),
             schedule: c.cron.clone(),
             recurring: c.recurring.unwrap_or(false),
-            prompt: truncate_chars(&c.prompt, SNAPSHOT_TRUNCATE_CHARS),
+            prompt: truncate_source_text(&c.prompt, SNAPSHOT_TRUNCATE_CHARS),
         })
         .collect()
 }
@@ -197,6 +198,7 @@ mod tests {
             task_type: task_type.into(),
             status: status.into(),
             description: description.into(),
+            agent_facts: None,
             ..Default::default()
         }
     }
@@ -257,6 +259,7 @@ mod tests {
             status: "running".into(),
             description: "build it".into(),
             command: Some("cargo build".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let agent = TaskRecord {
@@ -267,6 +270,7 @@ mod tests {
             agent_type: Some("general-purpose".into()),
             forked_skill_name: None,
             is_backgrounded: Some(true),
+            agent_facts: None,
             ..Default::default()
         };
         let monitor = TaskRecord {
@@ -275,6 +279,7 @@ mod tests {
             status: "pending".into(),
             description: "watch".into(),
             server: Some("srv".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let workflow = TaskRecord {
@@ -283,6 +288,7 @@ mod tests {
             status: "running".into(),
             description: "flow".into(),
             name: Some("my-wf".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let out = build_background_tasks(&[bash, agent, monitor, workflow]);
@@ -314,11 +320,59 @@ mod tests {
             status: "running".into(),
             description: long.clone(),
             command: Some(long.clone()),
+            agent_facts: None,
             ..Default::default()
         };
         let out = build_background_tasks(&[r]);
-        assert_eq!(out[0].description.chars().count(), 1000);
-        assert_eq!(out[0].command.as_deref().unwrap().chars().count(), 1000);
+        assert_eq!(out[0].description.string_units("").unwrap().len(), 1000);
+        assert_eq!(
+            out[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .string_units("")
+                .unwrap()
+                .len(),
+            1000
+        );
+    }
+
+    #[test]
+    fn stop_snapshots_preserve_unpaired_utf16_units() {
+        let description = Utf16JsonProjection::parse(r#""task \ud800""#).unwrap();
+        let command = Utf16JsonProjection::parse(r#""run \udfff""#).unwrap();
+        let task = TaskRecord {
+            task_id: "b1".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: description.clone(),
+            command: Some(command.clone()),
+            agent_facts: None,
+            ..Default::default()
+        };
+        let task_snapshot = build_background_tasks(&[task]);
+        assert_eq!(
+            task_snapshot[0].description.string_units(""),
+            description.string_units("")
+        );
+        assert_eq!(
+            task_snapshot[0].command.as_ref().unwrap().string_units(""),
+            command.string_units("")
+        );
+
+        let prompt = Utf16JsonProjection::parse(r#""cron \ud800""#).unwrap();
+        let cron_snapshot = build_session_crons(&[CronSnapshotInput {
+            id: "c1".into(),
+            cron: "* * * * *".into(),
+            recurring: Some(true),
+            prompt: prompt.clone(),
+        }]);
+        assert_eq!(
+            cron_snapshot[0].prompt.string_units(""),
+            prompt.string_units("")
+        );
+        let serialized = serde_json::to_string(&cron_snapshot[0]).unwrap();
+        assert!(serialized.contains(r#""prompt":"cron \ud800""#));
     }
 
     #[test]
@@ -345,16 +399,15 @@ mod tests {
         );
         // recurring None → false; prompt truncated to 1000 chars.
         assert!(!out[1].recurring);
-        assert_eq!(out[1].prompt.chars().count(), 1000);
+        assert_eq!(out[1].prompt.string_units("").unwrap().len(), 1000);
         assert_eq!(out[1].schedule, "* * * * *");
     }
 
     #[test]
-    fn truncate_respects_char_boundaries() {
-        // multi-byte chars must not be split mid-scalar.
-        let s = "é".repeat(1500);
-        let t = truncate_chars(&s, 1000);
-        assert_eq!(t.chars().count(), 1000);
-        assert!(t.is_char_boundary(t.len()));
+    fn truncate_uses_native_utf16_slice_units() {
+        let source = Utf16JsonProjection::from("😀".repeat(600));
+        let truncated = truncate_source_text(&source, 999);
+        let expected = source.string_units("").unwrap()[..999].to_vec();
+        assert_eq!(truncated.string_units(""), Some(expected));
     }
 }

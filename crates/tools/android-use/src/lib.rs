@@ -14,6 +14,7 @@ use lingxi_core::host::{
     AndroidUiAutomation, AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS,
     MAX_ANDROID_AUDIO_SPEAK_CHARS, MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_WAIT_MS,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -87,8 +88,8 @@ the microphone or `speak` through Android TTS only when those capabilities are \
 enabled in Settings. Protected and high-risk surfaces remain enforced by the \
 Android host.";
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    Utf16JsonProjection::from_serde_value(&json!({
         "type": "object",
         "properties": {
             "action": {
@@ -158,7 +159,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         },
         "required": ["action"],
         "additionalProperties": false
-    })
+    }))
+    .expect("generated Android tool schema is JSON")
 });
 
 fn map_err(error: AndroidAutomationError) -> ToolError {
@@ -166,70 +168,96 @@ fn map_err(error: AndroidAutomationError) -> ToolError {
         AndroidAutomationError::PermissionDenied(message)
         | AndroidAutomationError::TargetNotAllowed(message)
         | AndroidAutomationError::TierInsufficient(message)
-        | AndroidAutomationError::ProtectedSurface(message) => ToolError::PermissionDenied(message),
-        AndroidAutomationError::Timeout(message) => ToolError::Io(format!("timeout: {message}")),
+        | AndroidAutomationError::ProtectedSurface(message) => {
+            ToolError::PermissionDenied(message.into())
+        }
+        AndroidAutomationError::Timeout(message) => {
+            ToolError::Io(format!("timeout: {message}").into())
+        }
         other => ToolError::Internal(other.to_string()),
     }
 }
 
-fn parse_tier(input: &Value) -> Result<AndroidAccessTier, ToolError> {
-    match input.get("tier").and_then(Value::as_str).unwrap_or("read") {
+fn invalid_input(message: impl Into<String>) -> ToolError {
+    ToolError::InvalidInput(message.into().into())
+}
+
+fn string_field<'a>(input: &'a Utf16JsonProjection, key: &str) -> Option<&'a str> {
+    input.string_at(&format!("/{key}"))
+}
+
+fn bool_field(input: &Utf16JsonProjection, key: &str) -> Option<bool> {
+    input
+        .at_pointer(&format!("/{key}"))
+        .and_then(|value| value.as_bool())
+}
+
+fn number_field(input: &Utf16JsonProjection, key: &str) -> Option<f64> {
+    input.number_at(&format!("/{key}"))
+}
+
+fn u64_field(input: &Utf16JsonProjection, key: &str) -> Option<u64> {
+    let value = number_field(input, key)?;
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u64::MAX as f64)
+        .then_some(value as u64)
+}
+
+fn parse_tier(input: &Utf16JsonProjection) -> Result<AndroidAccessTier, ToolError> {
+    match string_field(input, "tier").unwrap_or("read") {
         "read" => Ok(AndroidAccessTier::Read),
         "click" => Ok(AndroidAccessTier::Click),
         "full" => Ok(AndroidAccessTier::Full),
-        other => Err(ToolError::InvalidInput(format!("unknown tier `{other}`"))),
+        other => Err(invalid_input(format!("unknown tier `{other}`"))),
     }
 }
 
-fn u32_field(input: &Value, key: &str) -> Result<u32, ToolError> {
-    input
-        .get(key)
-        .and_then(Value::as_u64)
+fn u32_field(input: &Utf16JsonProjection, key: &str) -> Result<u32, ToolError> {
+    u64_field(input, key)
         .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| ToolError::InvalidInput(format!("`{key}` is required")))
+        .ok_or_else(|| invalid_input(format!("`{key}` is required")))
 }
 
-fn optional_u32(input: &Value, key: &str) -> Option<u32> {
-    input
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
+fn optional_u32(input: &Utf16JsonProjection, key: &str) -> Option<u32> {
+    u64_field(input, key).and_then(|value| u32::try_from(value).ok())
 }
 
-fn optional_node(input: &Value) -> Option<String> {
-    input
-        .get("node_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+fn optional_node(input: &Utf16JsonProjection) -> Option<String> {
+    string_field(input, "node_id").map(str::to_owned)
 }
 
 fn node_or_coordinate(
-    input: &Value,
+    input: &Utf16JsonProjection,
 ) -> Result<(Option<String>, Option<u32>, Option<u32>), ToolError> {
     let node_id = optional_node(input);
     let x = optional_u32(input, "x");
     let y = optional_u32(input, "y");
     if node_id.is_none() && (x.is_none() || y.is_none()) {
-        return Err(ToolError::InvalidInput(
-            "provide `node_id` or both `x` and `y`".into(),
-        ));
+        return Err(invalid_input("provide `node_id` or both `x` and `y`"));
     }
     Ok((node_id, x, y))
 }
 
-fn parse_query(value: Option<&Value>) -> Result<AndroidNodeQuery, ToolError> {
-    serde_json::from_value(value.cloned().unwrap_or_else(|| json!({})))
-        .map_err(|error| ToolError::InvalidInput(format!("invalid `query`: {error}")))
+fn parse_query(input: &Utf16JsonProjection) -> Result<AndroidNodeQuery, ToolError> {
+    let query = input
+        .subprojection("/query")
+        .unwrap_or_else(|_| Utf16JsonProjection::parse("{}").expect("empty object is valid JSON"));
+    let source = query
+        .to_json_string()
+        .map_err(|error| invalid_input(format!("invalid `query`: {error}")))?;
+    serde_json::from_str(&source)
+        .map_err(|error| invalid_input(format!("invalid `query`: {error}")))
 }
 
 fn action_result(data: Value) -> ToolCallResult {
     ToolCallResult {
-        data,
+        data: Utf16JsonProjection::from_serde_value(&data)
+            .expect("generated Android result is representable as JSON"),
         model_content: None,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -251,7 +279,7 @@ fn screenshot_result(
 ) -> Result<ToolCallResult, ToolError> {
     let original_size = u64::try_from(screenshot.png_bytes.len()).unwrap_or(u64::MAX);
     let processed = tool_api::util::image_budget::process_image(screenshot.png_bytes)
-        .map_err(ToolError::Internal)?;
+        .map_err(|message| ToolError::Internal(message))?;
     let mut file = json!({
         "base64": processed.base64,
         "type": processed.media_type,
@@ -268,25 +296,27 @@ fn screenshot_result(
         });
     }
     Ok(ToolCallResult {
-        data: json!({
+        data: Utf16JsonProjection::from_serde_value(&json!({
             "type": "image",
             "file": file,
             "width": screenshot.width,
             "height": screenshot.height,
             EPHEMERAL_MARKER: true,
             "summary": "Temporary Android screen capture; pixels are excluded from session persistence."
-        }),
-        model_content: Some(
+        }))
+        .expect("generated Android screenshot result is JSON"),
+        model_content: Some(Utf16JsonProjection::from(
             json!({
                 EPHEMERAL_MARKER: true,
                 "summary": "Temporary Android screenshot attached; pixels are not persisted."
             })
             .to_string(),
-        ),
+        )),
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     })
 }
 
@@ -300,8 +330,19 @@ impl Tool for AndroidUseTool {
         Some("Android Computer Use")
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -312,13 +353,13 @@ impl Tool for AndroidUseTool {
         512 * 1024
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         matches!(
-            input.get("action").and_then(Value::as_str),
+            string_field(input, "action"),
             Some("status" | "list_granted_apps" | "screenshot" | "ui_tree" | "find" | "inspect")
         )
     }
@@ -327,7 +368,11 @@ impl Tool for AndroidUseTool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "Android host enforces active-session grants and high-risk confirmation"
@@ -339,24 +384,21 @@ impl Tool for AndroidUseTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("status");
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        let action = string_field(input, "action").unwrap_or("status");
         format!("Android Computer Use: {action}")
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         ANDROID_USE_PROMPT.into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match string_field(input, "action") {
             Some(action) if ACTIONS.contains(&action) => Ok(()),
             _ => Err(ValidationError("unsupported Android action".into())),
         }
@@ -364,14 +406,11 @@ impl Tool for AndroidUseTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("status");
+        let action = string_field(&input, "action").unwrap_or("status");
         match action {
             "status" => Ok(action_result(json!(self
                 .automation
@@ -380,36 +419,28 @@ impl Tool for AndroidUseTool {
                 .map_err(map_err)?))),
             "request_access" => {
                 let apps = input
-                    .get("apps")
-                    .and_then(Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
+                    .array_len("/apps")
+                    .map(|count| {
+                        (0..count)
+                            .filter_map(|index| {
+                                input
+                                    .at_pointer("/apps")
+                                    .and_then(|apps| apps.get_index(index))
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_owned)
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
                 let request = AndroidAccessRequest {
-                    reason: input
-                        .get("reason")
-                        .and_then(Value::as_str)
+                    reason: string_field(&input, "reason")
                         .unwrap_or("Agent requested Android Computer Use access")
-                        .to_string(),
+                        .to_owned(),
                     apps,
                     tier: parse_tier(&input)?,
-                    clipboard_read: input
-                        .get("clipboard_read")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    clipboard_write: input
-                        .get("clipboard_write")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    include_system_ui: input
-                        .get("include_system_ui")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    clipboard_read: bool_field(&input, "clipboard_read").unwrap_or(false),
+                    clipboard_write: bool_field(&input, "clipboard_write").unwrap_or(false),
+                    include_system_ui: bool_field(&input, "include_system_ui").unwrap_or(false),
                 };
                 Ok(action_result(json!(self
                     .automation
@@ -436,7 +467,7 @@ impl Tool for AndroidUseTool {
                 .await
                 .map_err(map_err)?))),
             "find" => {
-                let query = parse_query(input.get("query"))?;
+                let query = parse_query(&input)?;
                 Ok(action_result(json!(self
                     .automation
                     .find_nodes(query)
@@ -444,12 +475,8 @@ impl Tool for AndroidUseTool {
                     .map_err(map_err)?)))
             }
             "inspect" => {
-                let node_id = input
-                    .get("node_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        ToolError::InvalidInput("`inspect` requires `node_id`".into())
-                    })?;
+                let node_id = string_field(&input, "node_id")
+                    .ok_or_else(|| invalid_input("`inspect` requires `node_id`"))?;
                 Ok(action_result(json!(self
                     .automation
                     .inspect_node(node_id.to_string())
@@ -457,16 +484,15 @@ impl Tool for AndroidUseTool {
                     .map_err(map_err)?)))
             }
             "wait_for" => {
-                let condition: AndroidWaitCondition =
-                    serde_json::from_value(input.get("condition").cloned().ok_or_else(|| {
-                        ToolError::InvalidInput("`wait_for` requires `condition`".into())
-                    })?)
-                    .map_err(|error| {
-                        ToolError::InvalidInput(format!("invalid `condition`: {error}"))
-                    })?;
-                let timeout = input
-                    .get("timeout_ms")
-                    .and_then(Value::as_u64)
+                let condition = input
+                    .subprojection("/condition")
+                    .map_err(|_| invalid_input("`wait_for` requires `condition`"))?;
+                let condition_source = condition
+                    .to_json_string()
+                    .map_err(|error| invalid_input(format!("invalid `condition`: {error}")))?;
+                let condition: AndroidWaitCondition = serde_json::from_str(&condition_source)
+                    .map_err(|error| invalid_input(format!("invalid `condition`: {error}")))?;
+                let timeout = u64_field(&input, "timeout_ms")
                     .unwrap_or(10_000)
                     .min(MAX_ANDROID_UI_WAIT_MS);
                 Ok(action_result(json!(self
@@ -476,16 +502,10 @@ impl Tool for AndroidUseTool {
                     .map_err(map_err)?)))
             }
             "wait_idle" => {
-                let timeout = input
-                    .get("timeout_ms")
-                    .and_then(Value::as_u64)
+                let timeout = u64_field(&input, "timeout_ms")
                     .unwrap_or(10_000)
                     .min(MAX_ANDROID_UI_WAIT_MS);
-                let quiet_ms = input
-                    .get("duration_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(500)
-                    .min(5_000);
+                let quiet_ms = u64_field(&input, "duration_ms").unwrap_or(500).min(5_000);
                 Ok(action_result(json!(self
                     .automation
                     .wait_for(AndroidWaitCondition::Idle { quiet_ms }, timeout)
@@ -493,14 +513,10 @@ impl Tool for AndroidUseTool {
                     .map_err(map_err)?)))
             }
             "listen" => {
-                let timeout_ms = input
-                    .get("listen_timeout_ms")
-                    .and_then(Value::as_u64)
+                let timeout_ms = u64_field(&input, "listen_timeout_ms")
                     .unwrap_or(15_000)
                     .clamp(1_000, MAX_ANDROID_AUDIO_LISTEN_MS);
-                let language = input
-                    .get("language")
-                    .and_then(Value::as_str)
+                let language = string_field(&input, "language")
                     .filter(|value| !value.trim().is_empty() && *value != "auto")
                     .map(str::to_string);
                 Ok(ephemeral_audio_result(json!(self
@@ -513,26 +529,20 @@ impl Tool for AndroidUseTool {
                     .map_err(map_err)?)))
             }
             "speak" => {
-                let text = input
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ToolError::InvalidInput("`speak` requires `text`".into()))?;
+                let text = string_field(&input, "text")
+                    .ok_or_else(|| invalid_input("`speak` requires `text`"))?;
                 if text.is_empty() || text.chars().count() > MAX_ANDROID_AUDIO_SPEAK_CHARS {
-                    return Err(ToolError::InvalidInput(format!(
+                    return Err(invalid_input(format!(
                         "`speak` text must contain 1..={MAX_ANDROID_AUDIO_SPEAK_CHARS} characters"
                     )));
                 }
-                let speed = input
-                    .get("speed")
-                    .and_then(Value::as_f64)
-                    .map(|value| value.clamp(0.5, 2.0) as f32);
+                let speed = number_field(&input, "speed").map(|value| value.clamp(0.5, 2.0) as f32);
                 Ok(action_result(json!(self
                     .automation
                     .speak(AndroidAudioSpeakRequest {
                         text: text.to_string(),
                         voice: input
-                            .get("voice")
-                            .and_then(Value::as_str)
+                            .string_at("/voice")
                             .filter(|value| !value.trim().is_empty())
                             .map(str::to_string),
                         speed,
@@ -545,18 +555,20 @@ impl Tool for AndroidUseTool {
                 Ok(action_result(json!({ "stopped": true })))
             }
             "batch" => {
-                let actions = input
-                    .get("actions")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| ToolError::InvalidInput("`batch` requires `actions`".into()))?;
-                if actions.is_empty() || actions.len() > MAX_ANDROID_UI_BATCH {
-                    return Err(ToolError::InvalidInput(format!(
+                let action_count = input
+                    .array_len("/actions")
+                    .ok_or_else(|| invalid_input("`batch` requires `actions`"))?;
+                if action_count == 0 || action_count > MAX_ANDROID_UI_BATCH {
+                    return Err(invalid_input(format!(
                         "`batch` requires 1..={MAX_ANDROID_UI_BATCH} actions"
                     )));
                 }
-                let mut results = Vec::with_capacity(actions.len());
-                for (index, step) in actions.iter().enumerate() {
-                    let native = parse_native_action(step)?;
+                let mut results = Vec::with_capacity(action_count);
+                for index in 0..action_count {
+                    let step = input
+                        .subprojection(&format!("/actions/{index}"))
+                        .map_err(|error| invalid_input(format!("invalid batch action: {error}")))?;
+                    let native = parse_native_action(&step)?;
                     match self.automation.perform(native).await {
                         Ok(result) => results.push(json!({ "index": index, "result": result })),
                         Err(error) => {
@@ -588,11 +600,8 @@ impl Tool for AndroidUseTool {
     }
 }
 
-fn parse_native_action(input: &Value) -> Result<AndroidAction, ToolError> {
-    let action = input
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::InvalidInput("missing `action`".into()))?;
+fn parse_native_action(input: &Utf16JsonProjection) -> Result<AndroidAction, ToolError> {
+    let action = string_field(input, "action").ok_or_else(|| invalid_input("missing `action`"))?;
     match action {
         "tap" => {
             let (node_id, x, y) = node_or_coordinate(input)?;
@@ -604,25 +613,19 @@ fn parse_native_action(input: &Value) -> Result<AndroidAction, ToolError> {
                 node_id,
                 x,
                 y,
-                duration_ms: input
-                    .get("duration_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(600)
-                    .min(5_000),
+                duration_ms: u64_field(input, "duration_ms").unwrap_or(600).min(5_000),
             })
         }
         "set_text" => Ok(AndroidAction::SetText {
             node_id: optional_node(input),
-            text: input
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ToolError::InvalidInput("`set_text` requires `text`".into()))?
+            text: string_field(input, "text")
+                .ok_or_else(|| invalid_input("`set_text` requires `text`"))?
                 .to_string(),
         }),
         "clear_text" => Ok(AndroidAction::ClearText {
             node_id: optional_node(input),
         }),
-        "key" => match input.get("key").and_then(Value::as_str) {
+        "key" => match string_field(input, "key") {
             Some("back") => Ok(AndroidAction::Global {
                 action: AndroidGlobalAction::Back,
             }),
@@ -644,15 +647,13 @@ fn parse_native_action(input: &Value) -> Result<AndroidAction, ToolError> {
             Some(direction @ ("up" | "down" | "left" | "right")) => Ok(AndroidAction::Direction {
                 direction: direction.to_string(),
             }),
-            _ => Err(ToolError::InvalidInput("invalid or missing `key`".into())),
+            _ => Err(invalid_input("invalid or missing `key`")),
         },
         "scroll" => Ok(AndroidAction::Scroll {
             node_id: optional_node(input),
             x: optional_u32(input, "x"),
             y: optional_u32(input, "y"),
-            direction: input
-                .get("direction")
-                .and_then(Value::as_str)
+            direction: string_field(input, "direction")
                 .unwrap_or("down")
                 .to_string(),
             amount: optional_u32(input, "amount").unwrap_or(1).min(10),
@@ -662,36 +663,20 @@ fn parse_native_action(input: &Value) -> Result<AndroidAction, ToolError> {
             start_y: u32_field(input, "start_y")?,
             end_x: u32_field(input, "end_x")?,
             end_y: u32_field(input, "end_y")?,
-            duration_ms: input
-                .get("duration_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(350)
-                .min(5_000),
+            duration_ms: u64_field(input, "duration_ms").unwrap_or(350).min(5_000),
         }),
         "pinch" => Ok(AndroidAction::Pinch {
             center_x: u32_field(input, "center_x")?,
             center_y: u32_field(input, "center_y")?,
-            scale: input
-                .get("scale")
-                .and_then(Value::as_f64)
-                .unwrap_or(1.5)
-                .clamp(0.1, 10.0) as f32,
-            duration_ms: input
-                .get("duration_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(500)
-                .min(5_000),
+            scale: number_field(input, "scale").unwrap_or(1.5).clamp(0.1, 10.0) as f32,
+            duration_ms: u64_field(input, "duration_ms").unwrap_or(500).min(5_000),
         }),
         "open_app" => Ok(AndroidAction::OpenApp {
-            package_name: input
-                .get("package_name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ToolError::InvalidInput("`open_app` requires `package_name`".into())
-                })?
-                .to_string(),
+            package_name: string_field(input, "package_name")
+                .ok_or_else(|| invalid_input("`open_app` requires `package_name`"))?
+                .to_owned(),
         }),
-        other => Err(ToolError::InvalidInput(format!(
+        other => Err(invalid_input(format!(
             "`{other}` is not valid inside a control batch"
         ))),
     }
@@ -707,45 +692,61 @@ mod tests {
 
     #[test]
     fn schema_contains_complete_android_action_set() {
-        let actions = INPUT_SCHEMA["properties"]["action"]["enum"]
-            .as_array()
+        let count = INPUT_SCHEMA
+            .array_len("/properties/action/enum")
             .expect("action enum");
+        let actions = (0..count)
+            .filter_map(|index| {
+                INPUT_SCHEMA
+                    .at_pointer("/properties/action/enum")
+                    .and_then(|values| values.get_index(index))
+                    .and_then(|value| value.as_str())
+            })
+            .collect::<Vec<_>>();
         for expected in ACTIONS {
-            assert!(actions.iter().any(|value| value == expected));
+            assert!(actions.contains(expected));
         }
     }
 
     #[test]
     fn batch_is_bounded() {
         assert_eq!(
-            INPUT_SCHEMA["properties"]["actions"]["maxItems"],
-            MAX_ANDROID_UI_BATCH
+            INPUT_SCHEMA.number_at("/properties/actions/maxItems"),
+            Some(MAX_ANDROID_UI_BATCH as f64)
         );
     }
 
     #[test]
     fn audio_actions_have_bounded_inputs_and_ephemeral_transcripts() {
         assert_eq!(
-            INPUT_SCHEMA["properties"]["listen_timeout_ms"]["maximum"],
-            MAX_ANDROID_AUDIO_LISTEN_MS
+            INPUT_SCHEMA.number_at("/properties/listen_timeout_ms/maximum"),
+            Some(MAX_ANDROID_AUDIO_LISTEN_MS as f64)
         );
         assert!(ACTIONS.contains(&"listen"));
         assert!(ACTIONS.contains(&"speak"));
         assert!(ACTIONS.contains(&"stop_audio"));
 
         let result = ephemeral_audio_result(json!({"text":"private words"}));
-        assert_eq!(result.data[EPHEMERAL_MARKER], true);
-        assert_eq!(result.data["text"], "private words");
-        assert!(result.data["summary"]
-            .as_str()
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/_lingxi_ephemeral")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(result.data.string_at("/text"), Some("private words"));
+        assert!(result
+            .data
+            .string_at("/summary")
             .is_some_and(|summary| summary.contains("omitted")));
     }
 
     #[test]
     fn native_actions_require_target_coordinates_or_node() {
-        assert!(parse_native_action(&json!({"action":"tap"})).is_err());
-        assert!(parse_native_action(&json!({"action":"tap","node_id":"n"})).is_ok());
-        assert!(parse_native_action(&json!({"action":"tap","x":1,"y":2})).is_ok());
+        let input = |value: Value| Utf16JsonProjection::from_serde_value(&value).unwrap();
+        assert!(parse_native_action(&input(json!({"action":"tap"}))).is_err());
+        assert!(parse_native_action(&input(json!({"action":"tap","node_id":"n"}))).is_ok());
+        assert!(parse_native_action(&input(json!({"action":"tap","x":1,"y":2}))).is_ok());
     }
 
     #[test]

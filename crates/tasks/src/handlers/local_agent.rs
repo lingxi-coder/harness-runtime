@@ -48,6 +48,7 @@ use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -83,11 +84,79 @@ const HANDLER_NAME: &str = "local_agent";
 /// every other completion carries the agent's answer under `text`. Reading the
 /// budget from the payload is what lets the terminal notification say the
 /// result is partial instead of reporting the run as simply "finished".
-fn max_turns_reached_from(result: &serde_json::Value) -> Option<u64> {
-    if result.get("reason").and_then(serde_json::Value::as_str) != Some("max_turns_exhausted") {
+fn max_turns_reached_from(result: &Utf16JsonProjection) -> Option<u64> {
+    let result = result.at_pointer("")?;
+    if result
+        .get_property("reason")
+        .and_then(|value| value.as_str())
+        != Some("max_turns_exhausted")
+    {
         return None;
     }
-    result.get("max_turns").and_then(serde_json::Value::as_u64)
+    let value = result.get_property("max_turns")?.as_number()?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
+        return None;
+    }
+    Some(value as u64)
+}
+
+fn subagent_content_json(content: &Utf16JsonProjection) -> String {
+    content
+        .to_pretty_json_string()
+        .or_else(|_| content.to_json_string())
+        .expect("validated subagent projection serializes")
+}
+
+fn root_string_projection(units: &[u16]) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+        .expect("text code units form a valid JSON string")
+}
+
+fn subagent_content_text_projection(content: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(root) = content.at_pointer("") else {
+        return Utf16JsonProjection::from("");
+    };
+    if let Some(text) = root
+        .get_property("text")
+        .and_then(|value| value.code_units())
+    {
+        if !text.is_empty() {
+            return root_string_projection(text);
+        }
+    }
+    let blocks = if root.array_len().is_some() {
+        root
+    } else {
+        let Some(blocks) = root.get_property("content") else {
+            return Utf16JsonProjection::from("");
+        };
+        blocks
+    };
+    let Some(length) = blocks.array_len() else {
+        return Utf16JsonProjection::from("");
+    };
+    let mut units = Vec::new();
+    let mut has_text_block = false;
+    for index in 0..length {
+        let Some(block) = blocks.get_index(index) else {
+            continue;
+        };
+        if block.get_property("type").and_then(|value| value.as_str()) != Some("text") {
+            continue;
+        }
+        let Some(text) = block
+            .get_property("text")
+            .and_then(|value| value.code_units())
+        else {
+            continue;
+        };
+        if has_text_block {
+            units.push(u16::from(b'\n'));
+        }
+        units.extend_from_slice(text);
+        has_text_block = true;
+    }
+    root_string_projection(&units)
 }
 
 pub struct WorkerCancel {
@@ -98,6 +167,22 @@ pub struct WorkerCancel {
 
 struct PersistentTeardown {
     agent_id: Arc<StdMutex<Option<AgentId>>>,
+}
+
+struct RestoreStartupGuard(Option<lingxi_core::host::handback::HandbackRestoreParticipant>);
+
+impl RestoreStartupGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for RestoreStartupGuard {
+    fn drop(&mut self) {
+        if let Some(participant) = &self.0 {
+            participant.release_failed();
+        }
+    }
 }
 
 struct AgentIdentityObserver {
@@ -198,7 +283,7 @@ pub struct LocalAgentHandler {
     /// launched it. The fork identity the resume gate corroborates against the
     /// on-disk scoping record. Kept beside [`Self::agent_ids`] and torn down
     /// with it.
-    fork_names: Arc<Mutex<HashMap<String, String>>>,
+    fork_names: Arc<Mutex<HashMap<String, Utf16JsonProjection>>>,
     /// `task_id` → the LAST rest payload for a persistent agent. If the agent
     /// is killed after coming to rest, cancelling the outer worker still leaves
     /// enough terminal payload to match the normal completion path.
@@ -482,9 +567,10 @@ impl Task for LocalAgentHandler {
     async fn register_resume_recipe(
         &self,
         task_id: &str,
-        request: SubagentSpawnRequest,
+        mut request: SubagentSpawnRequest,
         inheritance: SubagentInheritance,
     ) -> Result<(), TaskError> {
+        request.restore_handback_start = None;
         self.resume_recipes
             .lock()
             .unwrap()
@@ -557,7 +643,7 @@ impl Task for LocalAgentHandler {
     async fn send_message(
         &self,
         task_id: &str,
-        message: String,
+        message: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
         let Some(streaming) = &self.streaming_spawner else {
@@ -594,7 +680,7 @@ impl Task for LocalAgentHandler {
         // on-disk state refuses.
         if let Some(gate) = &self.fork_resume_gate {
             let fork_name = self.fork_names.lock().await.get(task_id).cloned();
-            gate.check_resume(agent_id, fork_name.as_deref())
+            gate.check_resume(agent_id, fork_name.as_ref())
                 .await
                 .map_err(TaskError::Internal)?;
         }
@@ -609,6 +695,46 @@ impl Task for LocalAgentHandler {
             self.status_sink
                 .set_status(task_id, TaskStatus::Failed)
                 .await;
+            return Err(TaskError::Internal(error.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn send_peer(
+        &self,
+        task_id: &str,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        let streaming = self
+            .streaming_spawner
+            .as_ref()
+            .ok_or(TaskError::Unsupported)?;
+        let agent_id = self
+            .agent_ids
+            .lock()
+            .await
+            .get(task_id)
+            .copied()
+            .ok_or(TaskError::TerminatedTask)?;
+        if !envelope.validate()
+            || !matches!(envelope.receipt.recipient, lingxi_core::host::handback::HandbackRecipient::Agent { agent_id: recipient, .. } if recipient == agent_id)
+        {
+            return Err(TaskError::Internal("invalid peer report recipient".into()));
+        }
+        if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string())
+            || (self.workers.lock().await.contains_key(task_id)
+                && self.status_sink.is_terminal(task_id).await)
+        {
+            return Err(TaskError::TerminatedTask);
+        }
+        if let Some(gate) = &self.fork_resume_gate {
+            let fork_name = self.fork_names.lock().await.get(task_id).cloned();
+            gate.check_resume(agent_id, fork_name.as_ref())
+                .await
+                .map_err(TaskError::Internal)?;
+        }
+        if let Err(error) = streaming.resume_peer(&agent_id, envelope).await {
             return Err(TaskError::Internal(error.to_string()));
         }
         Ok(())
@@ -683,6 +809,15 @@ impl LocalAgentHandler {
             .as_ref()
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
+            parent_native_query_depth: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type,
             prompt,
@@ -702,6 +837,7 @@ impl LocalAgentHandler {
             cwd: None,
             worktree: None,
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -728,8 +864,14 @@ impl LocalAgentHandler {
         });
         // What `park` needs, cloned BEFORE `request` moves into the spawn:
         // the launch configuration is what a rebuilt runner is configured from.
+        if let Some(store) = &self.parked_store {
+            store.register_origin(requested_agent_id, &request);
+        }
         let parked_request = request.clone();
-        let parked_description = request.description.clone().unwrap_or_default();
+        let parked_description = request
+            .description
+            .clone()
+            .unwrap_or_else(|| Utf16JsonProjection::from(""));
 
         // 4. Preserve the immediate parent's registry/budget handles. Root
         //    handles are only the correct fallback for legacy direct tasks.
@@ -739,10 +881,12 @@ impl LocalAgentHandler {
         });
 
         if restoring.is_none() {
+            let mut recipe_request = request.clone();
+            recipe_request.restore_handback_start = None;
             self.resume_recipes
                 .lock()
                 .unwrap()
-                .insert(task_id.clone(), (request.clone(), inherit.clone()));
+                .insert(task_id.clone(), (recipe_request, inherit.clone()));
         }
         let human_epoch = restoring.as_ref().map(|restore| restore.epoch);
         let mut human_ready = restoring.take().map(|restore| restore.ready);
@@ -802,6 +946,7 @@ impl LocalAgentHandler {
         } else {
             (None, None)
         };
+        let restore_startup = RestoreStartupGuard(request.restore_handback_start.clone());
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if is_backgrounded && worker_streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
@@ -812,6 +957,7 @@ impl LocalAgentHandler {
                 // evicted). Terminal only on Failed / Killed / channel-close.
                 let streaming = worker_streaming.expect("is_some checked");
                 Box::pin(async move {
+                    let mut restore_startup = restore_startup;
                     if let Some(activation_rx) = activation_rx {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
@@ -866,8 +1012,14 @@ impl LocalAgentHandler {
                             .await
                     };
                     let (agent_id, mut rx) = match started {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            restore_startup.disarm();
+                            v
+                        }
                         Err(e) => {
+                            // Release before output/cleanup awaits: peer runners
+                            // must not depend on this failed worker's I/O.
+                            drop(restore_startup);
                             let ready = human_ready.take();
                             if human_epoch.is_none() {
                                 let _ = output_manager
@@ -936,7 +1088,16 @@ impl LocalAgentHandler {
                     let mut terminal_status = TaskStatus::Completed;
                     loop {
                         match rx.recv().await {
+                            Some(SubagentEvent::TranscriptSnapshot {
+                                agent_id: snapshot_agent_id,
+                                messages,
+                            }) if snapshot_agent_id == agent_id => {
+                                status_sink
+                                    .replace_agent_transcript(&worker_task_id, messages)
+                                    .await;
+                            }
                             Some(SubagentEvent::Completed {
+                                handback,
                                 result,
                                 usage,
                                 total_tool_use_count,
@@ -948,8 +1109,7 @@ impl LocalAgentHandler {
                                         .link_transcript(&worker_spool_path, target)
                                         .await;
                                 }
-                                let body = serde_json::to_string_pretty(&result)
-                                    .unwrap_or_else(|_| result.to_string());
+                                let body = subagent_content_json(&result);
                                 let counts = usage.counts();
                                 let total = counts.total().saturating_sub(counts.reasoning_tokens);
                                 let body = format!(
@@ -960,10 +1120,14 @@ impl LocalAgentHandler {
                                 // — binary `wc(ne.content,"\n")`, which the runner
                                 // already exposes as the result's `text` field
                                 // (`blocks.join("\n")`); NOT the JSON-pretty spool.
+                                // Keep the exact final-text projection in the
+                                // status/notification path; the spool above
+                                // retains the full source payload separately.
                                 let rest_result = result
-                                    .get("text")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned);
+                                    .at_pointer("")
+                                    .and_then(|root| root.get_property("text"))
+                                    .and_then(|text| text.code_units())
+                                    .map(root_string_projection);
                                 let rest_usage =
                                     Some(lingxi_core::host::task_registry::AgentRunUsage {
                                         subagent_tokens: total,
@@ -981,21 +1145,29 @@ impl LocalAgentHandler {
                                 // can resume from, so this is where the durable
                                 // record is written.
                                 if let Some(store) = &parked_store {
+                                    let history = match status_sink.task_registry() {
+                                        Some(registry) => {
+                                            registry.handback_history_for_agent(agent_id).await
+                                        }
+                                        None => Vec::new(),
+                                    };
                                     store
                                         .park(
                                             &worker_task_id,
                                             agent_id,
                                             &parked_description,
                                             &parked_request,
+                                            handback.as_ref(),
+                                            &history,
                                         )
                                         .await;
                                 }
-                                if rest_result.is_some() {
-                                    outcome.result = rest_result.clone();
-                                }
-                                if rest_usage.is_some() {
-                                    outcome.usage = rest_usage.clone();
-                                }
+                                // Each outer run starts a fresh report allowance.
+                                // Empty or withheld output must not revive an old
+                                // report, warning or terminal usage projection.
+                                outcome.result = rest_result.clone();
+                                outcome.usage = rest_usage.clone();
+                                outcome.handback = handback;
                                 // Unconditional, unlike the two above: this
                                 // accumulator is what a LATER terminal
                                 // notification reads, so a clean rest after a
@@ -1017,13 +1189,15 @@ impl LocalAgentHandler {
                                     .set_agent_outcome(&worker_task_id, outcome.clone())
                                     .await;
                                 status_sink
-                                    .notify_rest(
+                                    .notify_rest_with_finalizing(
                                         &worker_task_id,
                                         rest_result,
                                         rest_usage,
                                         Some(agent_id),
                                         parked_request.name.clone(),
                                         parked_request.team_name.clone(),
+                                        outcome.handback.as_ref().map(|state| state.run),
+                                        true,
                                     )
                                     .await;
                             }
@@ -1087,6 +1261,7 @@ impl LocalAgentHandler {
                 })
             } else {
                 Box::pin(async move {
+                    let _restore_startup = restore_startup;
                     if let Some(activation_rx) = activation_rx {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
@@ -1118,8 +1293,7 @@ impl LocalAgentHandler {
                         Ok(SubagentResult::Completed { content, usage, .. }) => {
                             // Pretty-print the JSON payload; fall back to the compact
                             // Display form if serialization somehow fails.
-                            let body = serde_json::to_string_pretty(content)
-                                .unwrap_or_else(|_| content.to_string());
+                            let body = subagent_content_json(content);
                             let body = format!(
                                 "{body}\n<usage><total_tokens>{}</total_tokens></usage>\n",
                                 usage.total_tokens
@@ -1146,17 +1320,22 @@ impl LocalAgentHandler {
                         lingxi_core::host::task_registry::AgentTerminalOutcome::default();
                     match &result {
                         Ok(SubagentResult::Completed {
+                            handback,
                             content,
                             total_tool_use_count,
                             total_duration_ms,
                             total_tokens,
                             ..
                         }) => {
-                            let text = crate::handle::extract_text_content(content);
+                            let text = subagent_content_text_projection(content);
                             // Claude gates the section on a TRUTHY finalMessage
                             // (`s ? "<result>…" : ""`), so an empty answer omits
                             // `<result>` rather than rendering an empty one.
-                            outcome.result = (!text.is_empty()).then_some(text);
+                            outcome.result = text
+                                .string_units("")
+                                .is_some_and(|units| !units.is_empty())
+                                .then_some(text);
+                            outcome.handback = handback.clone();
                             outcome.usage = Some(lingxi_core::host::task_registry::AgentRunUsage {
                                 subagent_tokens: *total_tokens,
                                 tool_uses: *total_tool_use_count,
@@ -1211,7 +1390,17 @@ impl LocalAgentHandler {
                     status_sink
                         .set_agent_outcome(&worker_task_id, outcome)
                         .await;
-                    status_sink.set_status(&worker_task_id, status).await;
+                    if matches!(&result, Ok(SubagentResult::Completed { .. })) {
+                        status_sink
+                            .set_agent_status_with_finalizing(
+                                &worker_task_id,
+                                TaskStatus::Completed,
+                                true,
+                            )
+                            .await;
+                    } else {
+                        status_sink.set_status(&worker_task_id, status).await;
+                    }
 
                     // The subagent has terminated; drop the cancel record so a late
                     // kill is a graceful no-op (claude-code `status !== 'running'`).
@@ -1282,6 +1471,7 @@ mod tests {
     }
     use super::*;
     use crate::state::TaskStatus;
+    use futures::StreamExt;
     use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use lingxi_core::host::tool_invoker::{
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
@@ -1319,7 +1509,10 @@ mod tests {
             limit: Option<u64>,
         ) -> Result<FileContent, FsError> {
             let map = self.files.lock().await;
-            let content = map.get(path).cloned().unwrap_or_default();
+            let content = map
+                .get(path)
+                .cloned()
+                .ok_or_else(|| FsError::NotFound(path.to_string()))?;
             let off = usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX);
             let body: String = content.chars().skip(off).collect();
             let truncated = limit.is_some_and(|lim| body.len() as u64 > lim);
@@ -1445,8 +1638,10 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        handback: None,
                         agent_id: lingxi_core::types::AgentId::new(),
-                        content,
+                        content: Utf16JsonProjection::from_serde_value(&content)
+                            .expect("generated subagent fixture is valid JSON"),
                         usage: SubagentUsage {
                             total_tokens,
                             ..Default::default()
@@ -1487,10 +1682,10 @@ mod tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
-            Ok(json!(null))
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").unwrap())
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -1579,23 +1774,26 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingParkedStore {
-        parked: StdMutex<Vec<(String, AgentId, String)>>,
+        parked: StdMutex<Vec<(String, AgentId, Utf16JsonProjection)>>,
         unparked: StdMutex<Vec<AgentId>>,
     }
     #[async_trait]
     impl lingxi_core::host::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
+        fn register_origin(&self, _agent_id: AgentId, _request: &SubagentSpawnRequest) {}
+
         async fn park(
             &self,
             task_id: &str,
             agent_id: AgentId,
-            description: &str,
+            description: &Utf16JsonProjection,
             _request: &SubagentSpawnRequest,
+            _handback: Option<&lingxi_core::host::handback::HandbackState>,
+            _history: &[lingxi_core::host::handback::HandbackState],
         ) {
-            self.parked.lock().unwrap().push((
-                task_id.to_string(),
-                agent_id,
-                description.to_string(),
-            ));
+            self.parked
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), agent_id, description.clone()));
         }
 
         async fn unpark(&self, agent_id: AgentId) {
@@ -1615,6 +1813,15 @@ mod tests {
     /// resolved before dispatch (the P1-01 ownership transfer).
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
+            parent_native_query_depth: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
@@ -1634,6 +1841,7 @@ mod tests {
             cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
             worktree: Some(isolation_worktree_handle()),
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -1685,7 +1893,7 @@ mod tests {
         rest_count: StdMutex<usize>,
         last_rest: StdMutex<
             Option<(
-                Option<String>,
+                Option<Utf16JsonProjection>,
                 Option<lingxi_core::host::task_registry::AgentRunUsage>,
                 Option<lingxi_core::types::AgentId>,
                 Option<String>,
@@ -1696,6 +1904,7 @@ mod tests {
         /// terminal `set_status` — the drain is terminal-gated, so the payload
         /// must land first.
         outcome: StdMutex<Option<lingxi_core::host::task_registry::AgentTerminalOutcome>>,
+        transcript: StdMutex<Option<Vec<lingxi_core::types::ConversationMessage>>>,
         calls: StdMutex<Vec<&'static str>>,
     }
     #[async_trait]
@@ -1722,14 +1931,22 @@ mod tests {
             self.calls.lock().unwrap().push("outcome");
             *self.outcome.lock().unwrap() = Some(outcome);
         }
+        async fn replace_agent_transcript(
+            &self,
+            _task_id: &str,
+            messages: Vec<lingxi_core::types::ConversationMessage>,
+        ) {
+            *self.transcript.lock().unwrap() = Some(messages);
+        }
         async fn notify_rest(
             &self,
             task_id: &str,
-            result: Option<String>,
+            result: Option<Utf16JsonProjection>,
             usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
             agent_id: Option<lingxi_core::types::AgentId>,
             agent_name: Option<String>,
             team_name: Option<String>,
+            _run: Option<lingxi_core::host::handback::HandbackRunKey>,
         ) {
             *self.parked.lock().unwrap() = true;
             self.statuses
@@ -1829,7 +2046,7 @@ mod tests {
     struct MockStreamingSpawner {
         transcript: StdMutex<Option<PathBuf>>,
         requests: StdMutex<Vec<SubagentSpawnRequest>>,
-        delivered: StdMutex<Vec<String>>,
+        delivered: StdMutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>>,
         resume_count: Arc<std::sync::atomic::AtomicUsize>,
         // Records the agent id passed to `stop` (the inner-runner dealloc), so a
@@ -1901,7 +2118,7 @@ mod tests {
         async fn resume(
             &self,
             _agent_id: &AgentId,
-            message: String,
+            message: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> Result<(), SubagentSpawnError> {
             self.delivered.lock().unwrap().push(message);
             self.resume_count
@@ -1916,6 +2133,7 @@ mod tests {
 
     fn completed_event(marker: &str) -> SubagentEvent {
         SubagentEvent::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             result: json!({ "marker": marker }),
             usage: llm_runtime::ExecutionUsage::default(),
@@ -1948,6 +2166,144 @@ mod tests {
     }
 
     // ---- Tests --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handback_restore_batch_async_pool_failure_releases_remaining_runner() {
+        use lingxi_core::host::handback::HandbackRestoreBatch;
+
+        #[derive(Default)]
+        struct Api(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl agent::SubagentApiClient for Api {
+            async fn stream(
+                &self,
+                _request: agent::api::SubagentApiRequest,
+            ) -> Result<
+                futures::stream::BoxStream<
+                    'static,
+                    Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+                >,
+                llm_runtime::LlmError,
+            > {
+                let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(llm_runtime::HistoryResponse {
+                        id: "restored-response".into(),
+                        model: "mock".into(),
+                        content: vec![llm_runtime::ContentBlock::Text {
+                            text: "restored answer".into(),
+                            cache_control: None,
+                            citations: None,
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                        stop_details: None,
+                        usage: llm_runtime::ExecutionUsage::default(),
+                        cost: None,
+                        provider_metadata:
+                            llm_runtime::services::sdk::protocol::JsonPayload::parse("null")
+                                .expect("null is valid provider metadata"),
+                        resumable: None,
+                    })
+                };
+                let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+                Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+            }
+        }
+
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, output) = make_output_manager(fs.clone());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(agent::StateMachinePool::new(runtime.clone(), 1));
+        let api = Arc::new(Api::default());
+        let spawner = Arc::new(agent::PoolSubagentSpawner::new(pool).with_api_client(api.clone()));
+        let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+        let handler = Arc::new(
+            LocalAgentHandler::new(
+                spawner.clone(),
+                Arc::new(MockInvoker),
+                Arc::new(MockBudget),
+                output.clone(),
+            )
+            .with_status_sink(sink.clone())
+            .with_streaming_spawner(spawner.clone()),
+        );
+        let mut registry = crate::registry::TaskRegistry::new(runtime, fs, output);
+        registry.register_handler(TaskType::LocalAgent, handler.clone());
+        let registry = Arc::new(registry);
+        sink.bind(registry.clone());
+        spawner.set_task_registry(registry.clone());
+        let actors = [AgentId::new(), AgentId::new(), AgentId::new()];
+        let batch = HandbackRestoreBatch::new(actors);
+        let mut task_ids = Vec::new();
+        // Every host launch succeeds synchronously. The two capacity failures
+        // occur later in the actual persistent spawner's detached worker.
+        for actor in actors {
+            let request = SubagentSpawnRequest {
+                subagent_type: "general-purpose".into(),
+                parent_native_query_depth: None,
+                run_in_background: true,
+                resumed_history: Some(vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "restored history".into(),
+                )]),
+                restore_handback_start: batch.participant(actor),
+                ..Default::default()
+            };
+            task_ids.push(
+                registry
+                    .spawn(
+                        TaskType::LocalAgent,
+                        TaskSpawnInput::LocalAgent {
+                            agent_id: actor,
+                            subagent_type: request.subagent_type.clone(),
+                            prompt: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
+                            is_backgrounded: true,
+                            tool_use_id: None,
+                            creator_teammate_name: None,
+                            creator_team_name: None,
+                            creator_agent_id: None,
+                            spawn_request: Some(request),
+                            inheritance: None,
+                        },
+                        "restored batch".into(),
+                    )
+                    .await
+                    .expect("host launch returns before async capacity failure"),
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let mut completed = 0;
+                let mut failed = 0;
+                for task_id in &task_ids {
+                    match registry.get(task_id).await.unwrap().base().status {
+                        TaskStatus::Completed => completed += 1,
+                        TaskStatus::Failed => failed += 1,
+                        _ => {}
+                    }
+                }
+                if completed == 1 && failed == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed startup slots release the real surviving runner");
+        assert_eq!(api.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(handler
+            .resume_recipes
+            .lock()
+            .unwrap()
+            .values()
+            .all(|(request, _)| request.restore_handback_start.is_none()));
+        // Keep the batch alive through the assertions: Arc final-drop cannot
+        // accidentally make a missing asynchronous release pass this test.
+        assert!(batch.participant(actors[0]).is_some());
+        for task_id in task_ids {
+            registry.kill(&task_id).await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn real_background_pool_identity_routes_nested_completion_to_its_parent() {
@@ -1989,6 +2345,7 @@ mod tests {
         fn request(prompt: &str, description: &str) -> SubagentSpawnRequest {
             SubagentSpawnRequest {
                 subagent_type: "general-purpose".into(),
+                parent_native_query_depth: None,
                 prompt: prompt.into(),
                 description: Some(description.into()),
                 run_in_background: true,
@@ -2011,88 +2368,102 @@ mod tests {
         }
         #[async_trait]
         impl agent::SubagentApiClient for Api {
-            async fn messages_create(
+            async fn stream(
                 &self,
-                _: &str,
-                _: Option<&str>,
-                messages: Vec<lingxi_core::types::ConversationMessage>,
-                _: Vec<serde_json::Value>,
-            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-                let registry = self.registry.get().unwrap().upgrade().unwrap();
-                let history = serde_json::to_string(&messages).unwrap();
-                let child = history.contains("nested child prompt");
-                let label = if child { "nested child" } else { "real parent" };
-                let actual = *self
-                    .allocations
-                    .0
-                    .lock()
-                    .unwrap()
-                    .get(label)
-                    .expect("allocation precedes model");
-                assert!(
-                    self.mcp_ids.lock().unwrap().contains(&actual),
-                    "MCP builder must see the actual owner ID before the first model request"
-                );
-                let row = registry
-                    .get(&actual.to_string())
-                    .await
-                    .expect("actual pool id must resolve before the first model request");
-                assert!(
-                    matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual)
-                );
-                if !child {
-                    if let Some(expected) = self.expected_restored_id {
-                        assert_eq!(actual, expected, "restore must allocate the persisted runner ID, not merely add an alias");
-                        let old = registry
-                            .get("arestoredold")
-                            .await
-                            .expect("old task alias must resolve before the first model request");
-                        assert!(
-                            matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected)
-                        );
-                        assert!(!history.contains("original prompt must not replay"));
-                    }
-                }
-                let text = if child {
-                    self.release_child.notified().await;
-                    "nested child answer"
-                } else if self
-                    .parent_calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    == 0
-                {
-                    let mut req = request("nested child prompt", "nested child");
-                    req.creator_agent_id = Some(actual);
-                    let id = registry
-                        .spawn(
-                            TaskType::LocalAgent,
-                            input(req, Some(actual)),
-                            "nested child".into(),
-                        )
-                        .await
-                        .unwrap();
-                    *self.child_task.lock().unwrap() = Some(id);
-                    "waiting for child"
-                } else {
+                api_request: agent::api::SubagentApiRequest,
+            ) -> Result<
+                futures::stream::BoxStream<
+                    'static,
+                    Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+                >,
+                llm_runtime::LlmError,
+            > {
+                let messages = api_request.messages;
+                let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+                    let registry = self.registry.get().unwrap().upgrade().unwrap();
+                    let history = serde_json::to_string(&messages).unwrap();
+                    let child = history.contains("nested child prompt");
+                    let label = if child { "nested child" } else { "real parent" };
+                    let actual = *self
+                        .allocations
+                        .0
+                        .lock()
+                        .unwrap()
+                        .get(label)
+                        .expect("allocation precedes model");
                     assert!(
-                        history.contains("nested child answer"),
-                        "the real owner's resumed model must receive its child's result"
+                        self.mcp_ids.lock().unwrap().contains(&actual),
+                        "MCP builder must see the actual owner ID before the first model request"
                     );
-                    "parent folded child"
+                    let row = registry
+                        .get(&actual.to_string())
+                        .await
+                        .expect("actual pool id must resolve before the first model request");
+                    assert!(
+                        matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual)
+                    );
+                    if !child {
+                        if let Some(expected) = self.expected_restored_id {
+                            assert_eq!(
+                                actual, expected,
+                                "restore must allocate the persisted runner ID, not merely add an alias"
+                            );
+                            let old = registry.get("arestoredold").await.expect(
+                                "old task alias must resolve before the first model request",
+                            );
+                            assert!(
+                                matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected)
+                            );
+                            assert!(!history.contains("original prompt must not replay"));
+                        }
+                    }
+                    let text = if child {
+                        self.release_child.notified().await;
+                        "nested child answer"
+                    } else if self
+                        .parent_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                    {
+                        let mut req = request("nested child prompt", "nested child");
+                        req.creator_agent_id = Some(actual);
+                        let id = registry
+                            .spawn(
+                                TaskType::LocalAgent,
+                                input(req, Some(actual)),
+                                "nested child".into(),
+                            )
+                            .await
+                            .unwrap();
+                        *self.child_task.lock().unwrap() = Some(id);
+                        "waiting for child"
+                    } else {
+                        assert!(
+                            history.contains("nested child answer"),
+                            "the real owner's resumed model must receive its child's result"
+                        );
+                        "parent folded child"
+                    };
+                    Ok(llm_runtime::HistoryResponse {
+                        id: "response".into(),
+                        model: "mock".into(),
+                        content: vec![llm_runtime::ContentBlock::Text {
+                            text: text.into(),
+                            cache_control: None,
+                            citations: None,
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                        stop_details: None,
+                        usage: llm_runtime::ExecutionUsage::default(),
+                        cost: None,
+                        provider_metadata:
+                            llm_runtime::services::sdk::protocol::JsonPayload::parse("null")
+                                .expect("null is valid provider metadata"),
+                        resumable: None,
+                    })
                 };
-                Ok(llm_runtime::HistoryResponse {
-                    id: "response".into(),
-                    model: "mock".into(),
-                    content: vec![llm_runtime::ContentBlock::Text {
-                        text: text.into(),
-                        cache_control: None,
-                    }],
-                    stop_reason: Some("end_turn".into()),
-                    stop_details: None,
-                    usage: llm_runtime::ExecutionUsage::default(),
-                    cost: None,
-                    provider_metadata: serde_json::Value::Null,
-                })
+                let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+                Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
             }
         }
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -2233,7 +2604,12 @@ mod tests {
                     registry.get(&parent).await
                 {
                     if agent.is_parked
-                        && agent.outcome.result.as_deref() == Some("parent folded child")
+                        && agent
+                            .outcome
+                            .result
+                            .as_ref()
+                            .and_then(|result| result.string_at(""))
+                            == Some("parent folded child")
                     {
                         break;
                     }
@@ -2251,7 +2627,10 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].task_id, parent);
         assert_eq!(
-            notifications[0].result.as_deref(),
+            notifications[0]
+                .result
+                .as_ref()
+                .and_then(|result| result.string_at("")),
             Some("parent folded child")
         );
         registry.kill_with_reason(&parent, "user").await.unwrap();
@@ -2315,6 +2694,7 @@ mod tests {
         };
         let request = SubagentSpawnRequest {
             subagent_type: "reviewer".into(),
+            parent_native_query_depth: None,
             prompt: "Observe material issues".into(),
             name: Some("step two".into()),
             observer: Some(lingxi_core::host::subagent_spawn::ObserverSpec::new(
@@ -2406,7 +2786,8 @@ mod tests {
             .contains("\"isObserver\":true"));
         assert!(streaming.requests.lock().unwrap()[0]
             .prompt
-            .contains("first digest"));
+            .string_at("")
+            .is_some_and(|prompt| prompt.contains("first digest")));
         TaskRegistryHandle::observe_agent_activity(
             registry.as_ref(),
             request.clone(),
@@ -2431,7 +2812,7 @@ mod tests {
         }
         assert_eq!(
             streaming.delivered.lock().unwrap().as_slice(),
-            &["second digest"]
+            &["second digest".into()]
         );
         assert!(registry.take_pending_task_notifications().await.is_empty());
         tx.send(completed_event("rest-two")).await.unwrap();
@@ -2503,7 +2884,7 @@ mod tests {
             manager.clone(),
             sink.clone(),
         )
-        .with_streaming_spawner(streaming);
+        .with_streaming_spawner(streaming.clone());
         let ctx = make_ctx(fs);
         let handle = handler
             .spawn(local_agent_input("start"), ctx.clone())
@@ -2516,6 +2897,27 @@ mod tests {
             }
             tokio::task::yield_now().await;
         };
+        let agent_id = streaming.spawned_id.lock().unwrap().unwrap();
+        let settled_transcript = vec![
+            lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "prompt from the runner".into(),
+            ),
+            lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "actual last assistant row".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+            },
+        ];
+        tx.send(SubagentEvent::TranscriptSnapshot {
+            agent_id,
+            messages: settled_transcript.clone(),
+        })
+        .await
+        .unwrap();
         tx.send(completed_event("clean report")).await.unwrap();
         for _ in 0..200 {
             if std::fs::read_link(&output).is_ok() && *sink.parked.lock().unwrap() {
@@ -2524,6 +2926,11 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(std::fs::read_link(&output).unwrap(), target);
+        assert_eq!(
+            sink.transcript.lock().unwrap().as_deref(),
+            Some(settled_transcript.as_slice()),
+            "the handler replaces the task state with the runner's full settled transcript before rest"
+        );
         assert_eq!(
             std::fs::read_to_string(&output).unwrap(),
             "transcript line\n"
@@ -2559,7 +2966,7 @@ mod tests {
             mgr.clone(),
             sink.clone(),
         )
-        .with_streaming_spawner(streaming);
+        .with_streaming_spawner(streaming.clone());
         assert!(
             handler.supports_messages(),
             "streaming seam ⇒ messages supported"
@@ -2598,10 +3005,18 @@ mod tests {
         assert_eq!(sink.rest_count(), 1, "first rest armed a notification");
 
         // ── Resume via send_message → the runner wakes for turn-set 2. ──
+        let resume_message =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""again \ud800""#)
+                .unwrap();
         handler
-            .send_message(&task_id, "again".into(), ctx)
+            .send_message(&task_id, resume_message.clone(), ctx)
             .await
             .expect("resume ok");
+        assert_eq!(
+            streaming.delivered.lock().unwrap().as_slice(),
+            &[resume_message],
+            "the local-agent resume seam retains exact source units"
+        );
         assert_eq!(sink.last_status(), Some(TaskStatus::Running));
         assert_eq!(
             resume_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -2850,7 +3265,7 @@ mod tests {
             req.subagent_type, "general-purpose",
             "default type fallback"
         );
-        assert_eq!(req.prompt, "do the thing");
+        assert_eq!(req.prompt.string_at(""), Some("do the thing"));
         assert!(req.context_paths.is_empty());
 
         // The Completed content was spooled (pretty JSON ⇒ contains the keys)
@@ -3052,7 +3467,10 @@ mod tests {
 
         let outcome = sink.outcome();
         assert_eq!(
-            outcome.result.as_deref(),
+            outcome
+                .result
+                .as_ref()
+                .and_then(|result| result.string_at("")),
             Some("first\nsecond"),
             "text blocks joined with \\n; the tool_use block dropped"
         );
@@ -3559,6 +3977,7 @@ mod tests {
         let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
 
         tx.send(SubagentEvent::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             result: json!({ "text": "rest answer" }),
             usage: llm_runtime::ExecutionUsage::default(),
@@ -3608,7 +4027,13 @@ mod tests {
             "the rest payload AND the terminal payload must both precede Killed: {calls:?}"
         );
         let outcome = sink.outcome();
-        assert_eq!(outcome.result.as_deref(), Some("rest answer"));
+        assert_eq!(
+            outcome
+                .result
+                .as_ref()
+                .and_then(|result| result.string_at("")),
+            Some("rest answer")
+        );
         assert_eq!(outcome.usage.as_ref().map(|u| u.tool_uses), Some(3));
         assert_eq!(wt.removed_count(), 1, "kill runs worktree judgment");
         assert_eq!(
@@ -3899,6 +4324,15 @@ mod tests {
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
         let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
+            agent_spawn_provenance: Default::default(),
+            parent_native_query_depth: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
@@ -3918,6 +4352,7 @@ mod tests {
             cwd: Some("/workspace/subdir".into()),
             worktree: None,
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: Some(r#"{\"type\":\"object\"}"#.into()),
             structured_output_mode: Default::default(),
@@ -4039,37 +4474,37 @@ mod tests {
 
     /// A gate that refuses everything, recording what it was asked about.
     struct RefusingGate {
-        seen: StdMutex<Vec<Option<String>>>,
+        seen: StdMutex<Vec<Option<Utf16JsonProjection>>>,
     }
     #[async_trait]
     impl lingxi_core::host::fork_resume_gate::ForkResumeGate for RefusingGate {
         async fn check_resume(
             &self,
             _agent_id: lingxi_core::types::AgentId,
-            task_forked_skill_name: Option<&str>,
+            task_forked_skill_name: Option<&Utf16JsonProjection>,
         ) -> Result<(), String> {
             self.seen
                 .lock()
                 .unwrap()
-                .push(task_forked_skill_name.map(str::to_string));
+                .push(task_forked_skill_name.cloned());
             Err("refusing to resume it without the skill's permission scoping.".into())
         }
     }
 
     struct AllowingGate {
-        seen: StdMutex<Vec<Option<String>>>,
+        seen: StdMutex<Vec<Option<Utf16JsonProjection>>>,
     }
     #[async_trait]
     impl lingxi_core::host::fork_resume_gate::ForkResumeGate for AllowingGate {
         async fn check_resume(
             &self,
             _agent_id: lingxi_core::types::AgentId,
-            task_forked_skill_name: Option<&str>,
+            task_forked_skill_name: Option<&Utf16JsonProjection>,
         ) -> Result<(), String> {
             self.seen
                 .lock()
                 .unwrap()
-                .push(task_forked_skill_name.map(str::to_string));
+                .push(task_forked_skill_name.cloned());
             Ok(())
         }
     }
@@ -4098,7 +4533,7 @@ mod tests {
         if let TaskSpawnInput::LocalAgent { spawn_request, .. } = &mut input {
             let mut req = request_with_worktree("start");
             req.worktree = None;
-            req.forked_skill_name = fork_name.map(str::to_string);
+            req.forked_skill_name = fork_name.map(Into::into);
             *spawn_request = Some(req);
         }
         let handle = handler
@@ -4153,7 +4588,7 @@ mod tests {
         // on-disk record.
         assert_eq!(
             gate.seen.lock().unwrap().as_slice(),
-            &[Some("review".to_string())]
+            &[Some(Utf16JsonProjection::from("review"))]
         );
     }
 

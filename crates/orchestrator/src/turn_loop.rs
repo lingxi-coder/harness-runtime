@@ -2,22 +2,40 @@
 
 use crate::conversation::{classify_api_error, ConversationOrchestrator, ModelCallPath};
 use crate::error::OrchestratorError;
+use hooks::attachment::HookPublicationGuard;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use llm_runtime::LlmError;
-mod api_recovery;
+
+/// Construct large phase futures outside the caller's poll stack frame.
+/// Passing the factory also avoids a large temporary before heap allocation.
+pub(crate) fn boxed_turn_future<'a, T, F>(
+    create: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, T>
+where
+    F: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(create())
+}
+pub(crate) mod api_recovery;
 mod batch_hooks;
 mod error_reporting;
+mod mod_batched_step;
+mod mod_fs_ancestors;
+mod mod_session_messages;
 mod response;
 pub(crate) mod tool_dispatch;
 mod tool_results;
+mod visible_response;
 pub(crate) use api_recovery::call_api_with_ptl_recovery;
 pub(crate) use api_recovery::PtlCallOutcome;
 pub(crate) use batch_hooks::append_tool_injected_messages;
 pub(crate) use batch_hooks::apply_model_context_modifiers;
+pub(crate) use batch_hooks::apply_model_context_state;
 #[cfg(test)]
 use batch_hooks::post_tool_batch_identity;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks_after_turn_end;
+pub(crate) use batch_hooks::{PostToolBatchDispatch, PostToolBatchOutcome};
 pub(crate) use error_reporting::clear_goal_after_unrecoverable_error;
 #[cfg(test)]
 use error_reporting::goal_clear_bucket;
@@ -25,6 +43,7 @@ use error_reporting::goal_clear_bucket;
 use error_reporting::goal_cleared_after_error_message;
 pub(crate) use error_reporting::is_carveout_propagated;
 use error_reporting::maybe_checkpoint_on_rate_limit;
+pub(crate) use error_reporting::orchestrator_error_text_source;
 #[cfg(test)]
 use error_reporting::refusal_explanation_clause;
 pub(crate) use error_reporting::surface_api_error_notice;
@@ -46,16 +65,22 @@ pub(crate) use response::prior_assistant_used_structured_output;
 pub(crate) use response::translate_response_blocks;
 #[cfg(test)]
 use tool_dispatch::accumulate_code_change;
+pub(crate) use tool_dispatch::dispatch_streaming_tool_use;
 #[cfg(test)]
 pub(crate) use tool_dispatch::dispatch_tool_uses;
 pub(crate) use tool_dispatch::dispatch_tool_uses_tracked;
 pub(crate) use tool_dispatch::dispatch_tool_uses_tracked_deferred;
+pub(crate) use tool_dispatch::generation_bound_mod_session_context;
 pub(crate) use tool_dispatch::normalize_lexically;
 #[cfg(test)]
 use tool_dispatch::rule_decision_otel_source;
 #[cfg(test)]
 use tool_dispatch::tool_denial_kind;
-pub(crate) use tool_dispatch::DeferredToolDispatch;
+pub(crate) use tool_dispatch::ToolUseDispatchFacts;
+pub(crate) use tool_dispatch::{dispatch_streaming_tool_use_owned, streaming_tool_context_base};
+pub(crate) use tool_dispatch::{
+    DeferredToolDispatch, ToolResultFramePublication, ToolResultPublication,
+};
 #[cfg(test)]
 use tool_results::apply_tool_result_persistence;
 #[cfg(test)]
@@ -65,7 +90,7 @@ use tool_results::bash_image_tool_result_blocks;
 #[cfg(test)]
 use tool_results::image_tool_result_blocks;
 #[cfg(test)]
-use tool_results::process_output_file_from_data;
+use tool_results::process_output_file_from_source;
 #[cfg(test)]
 use tool_results::tool_result_size;
 #[cfg(test)]
@@ -100,6 +125,7 @@ async fn apply_terminal_sequence(
     orch: &ConversationOrchestrator,
     hook_name: &str,
     seq: Option<&str>,
+    publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) {
     let Some(seq) = seq else {
         return;
@@ -108,7 +134,13 @@ async fn apply_terminal_sequence(
         Some(validated) => {
             // Forward the validated, BEL-normalized sequence to the host's
             // terminal-write seam (claude-code `BEo`). Default no-op off the TUI.
-            orch.output.emit_terminal_sequence(&validated).await;
+            if let Some(fence) = publication_fence {
+                fence
+                    .publish_if_current(Box::pin(orch.output.emit_terminal_sequence(&validated)))
+                    .await;
+            } else {
+                orch.output.emit_terminal_sequence(&validated).await;
+            }
         }
         None => {
             tracing::warn!(
@@ -131,8 +163,46 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 /// Escalated output-token cap for the single-shot 8k→64k retry. 1:1 with TS
 /// `utils/context.ts:25` `ESCALATED_MAX_TOKENS = 64_000`.
 /// [`RecoveryState::max_output_tokens_override`] carries this value into the
-/// next `messages_create_with_opts` request.
+/// next `messages_create` request.
 pub(crate) const ESCALATED_MAX_TOKENS: u32 = 64_000;
+
+fn select_visible_response_request_history<'a>(
+    visible_response_id: &str,
+    physical_request_histories: impl Iterator<Item = (&'a str, &'a [ConversationMessage])>,
+    final_response: bool,
+    final_request_history: &'a [ConversationMessage],
+    final_history_source: Option<mod_batched_step::RequestHistorySource>,
+    turn_step_input_history: &'a [ConversationMessage],
+) -> (
+    Vec<ConversationMessage>,
+    mod_batched_step::RequestHistorySource,
+) {
+    let mut matching = physical_request_histories.filter(|(response_id, _)| {
+        !visible_response_id.is_empty() && *response_id == visible_response_id
+    });
+    if let Some((_, history)) = matching.next() {
+        if matching.next().is_none() {
+            return (
+                history.to_vec(),
+                mod_batched_step::RequestHistorySource::PhysicalRequest,
+            );
+        }
+    }
+
+    if final_response {
+        return (
+            final_request_history.to_vec(),
+            final_history_source.unwrap_or(
+                mod_batched_step::RequestHistorySource::TurnStepInputForSyntheticResponse,
+            ),
+        );
+    }
+
+    (
+        turn_step_input_history.to_vec(),
+        mod_batched_step::RequestHistorySource::TurnStepInputForSyntheticResponse,
+    )
+}
 
 /// The byte-exact meta "resume directly" nudge injected as a user message on a
 /// `max_tokens` `stop_reason`. 1:1 with TS `query.ts:1226-1227` (note the U+2014
@@ -166,10 +236,9 @@ pub(crate) fn truncated_response_recovery_eligible(query_source: &str, interacti
 }
 
 /// cc 2.1.263 `ji`: `agent:*` and `hook_agent` are subagent queries.
-/// Keep the port's established `subagent` alias; sanitization only collapses
-/// custom-agent suffixes and does not otherwise classify query sources.
+/// Current native source classification has no `subagent` compatibility alias.
 pub(crate) fn truncated_response_recovery_is_subagent(query_source: &str) -> bool {
-    query_source.starts_with("agent:") || matches!(query_source, "hook_agent" | "subagent")
+    query_source.starts_with("agent:") || query_source == "hook_agent"
 }
 
 /// Byte-exact `isMeta` retry message pushed when a `PermissionDenied` hook
@@ -200,8 +269,7 @@ pub(crate) const MALFORMED_TOOL_USE_RETRY_FAILED: &str =
 /// (`bin/claude.exe` offset ~202947000). Injected as a META user message
 /// ([`ConversationMessage::user_meta`]), matching CC's `isMeta:!0` — it persists
 /// with top-level `isMeta:true` and is skipped by title/first-prompt extraction.
-pub(crate) const THINKING_ONLY_NUDGE: &str =
-    "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
+pub(crate) const THINKING_ONLY_NUDGE: &str = "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
 
 /// Byte-exact bare content returned as `is_error:true` `tool_result` when the
 /// user-interrupt signal fires BEFORE a tool executes — the pre-cancellation
@@ -227,7 +295,7 @@ pub(crate) struct RecoveryState {
     pub(crate) max_output_tokens_recovery_count: u32,
     /// When `Some(n)`, the NEXT API call uses `n` as its output-token cap
     /// (REC.A1 escalated retry). The turn loop TAKEs it (one-shot) before each
-    /// call via [`crate::OrchestratorApiClient::messages_create_with_opts`], so
+    /// call via [`crate::OrchestratorApiClient::messages_create`], so
     /// it never leaks past the single escalated retry.
     pub(crate) max_output_tokens_override: Option<u32>,
     /// Whether the 8k→64k escalation has already fired this recovery episode
@@ -265,10 +333,34 @@ impl RecoveryState {
     }
 }
 
+/// Native query-function re-entry effect for the next request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeQueryTransition {
+    /// A completed tool-result round re-enters the query at the next depth.
+    NextTurn,
+    /// Local retries keep the current query depth.
+    InPlaceRetry,
+    /// Native's resumeActive request is an in-place re-entry.
+    ResumeIncompleteThinking,
+}
+
+/// Compute Native `queryTracking.depth` for the next request.
+pub(crate) const fn native_query_depth_after(
+    current_depth: u32,
+    transition: NativeQueryTransition,
+) -> u32 {
+    match transition {
+        NativeQueryTransition::NextTurn => current_depth.saturating_add(1),
+        NativeQueryTransition::InPlaceRetry | NativeQueryTransition::ResumeIncompleteThinking => {
+            current_depth
+        }
+    }
+}
+
 /// What one turn step decided.
 pub(crate) enum TurnStepOutcome {
-    /// Continue the loop (e.g. model returned `tool_use`).
-    Continue,
+    /// Continue with the Native query-entry effect of this transition.
+    Continue(NativeQueryTransition),
     /// Loop should terminate.
     Ended {
         final_message_id: MessageId,
@@ -299,7 +391,7 @@ pub(crate) enum TurnStepOutcome {
 #[allow(dead_code)]
 pub(crate) async fn execute_one_turn(
     orch: &ConversationOrchestrator,
-    system: Option<&str>,
+    system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Backward-compatible shim: no recovery state → legacy disposition
     // (any non-`end_turn` stop_reason Continues). Used by the in-file tests.
@@ -327,13 +419,13 @@ pub(crate) async fn execute_one_turn(
 #[allow(dead_code)]
 pub(crate) async fn execute_one_turn_with_recovery(
     orch: &ConversationOrchestrator,
-    system: Option<&str>,
+    system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     recovery: Option<&mut RecoveryState>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Drop the per-call output-token count (A3 callers use the `_tracked`
     // variant). Preserves the historical signature for every existing caller.
     Ok(
-        execute_one_turn_with_recovery_tracked(orch, system, recovery)
+        execute_one_turn_with_recovery_tracked(orch, system, recovery, None, 0)
             .await?
             .0,
     )
@@ -353,281 +445,18 @@ pub(crate) fn execute_one_turn_with_recovery_tracked<'a>(
     system: Option<&'a lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     recovery: Option<&'a mut RecoveryState>,
     mod_step: Option<(&'a str, u32)>,
+    query_depth: u32,
 ) -> futures::future::BoxFuture<'a, Result<(TurnStepOutcome, u64), OrchestratorError>> {
     // A shared heap/type boundary keeps the turn state out of caller futures
     // and stops Send checks from expanding through every streaming wrapper.
     Box::pin(execute_one_turn_with_recovery_tracked_impl(
-        orch, system, recovery, mod_step,
+        orch,
+        system,
+        recovery,
+        mod_step,
+        query_depth,
     ))
 }
-
-/// PARITY the binary's `Xi`. Spelled out rather than imported: `orchestrator`
-/// does not depend on `tool-cron`, and the tool name is a model-facing wire
-/// string, not an internal symbol.
-const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
-
-/// PARITY `Zoe(family, model)` =
-/// `dm(model, "fable_5_mitigations", family) || family === "claude-mythos-5"`
-/// — the model gate on the lone-`ScheduleWakeup` turn end. It is a
-/// model-generation mitigation, so most models never take the branch and keep
-/// feeding the tool result back, exactly as before.
-fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
-    use lingxi_core::host::model_capabilities::{
-        has_capability, normalize_model_id, ModelCapability,
-    };
-    has_capability(model_id, ModelCapability::Fable5Mitigations)
-        || normalize_model_id(model_id) == "claude-mythos-5"
-}
-
-/// Consume the wakeup-armed flag and report whether this round was exactly one
-/// `ScheduleWakeup` that armed a wakeup, on a model the binary's gate covers.
-///
-/// PARITY `if(yo.length===1 && yo[0].name===Xi && Zoe(...)) { if(kg().some(…loop…)) … }`.
-///
-/// Shared by BOTH turn loops — the batched one in this module and the streaming
-/// twin in `conversation::drivers`. One definition matters more than usual here:
-/// the first cut of this arm lived only in the batched loop, and the streaming
-/// loop is the one the desktop bridge takes, so `/loop` never reached it.
-///
-/// The flag is consumed on every call (`swap`), including the early returns, so
-/// a `ScheduleWakeup` that armed a wakeup alongside other tools cannot leak into
-/// the next round.
-pub(crate) async fn take_lone_wakeup_turn_end<'a>(
-    orch: &ConversationOrchestrator,
-    tool_names: impl Iterator<Item = &'a str>,
-) -> bool {
-    let armed = orch
-        .loop_wakeup_armed_slot
-        .as_ref()
-        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
-    if !armed {
-        return false;
-    }
-    let mut names = tool_names;
-    if !matches!(
-        (names.next(), names.next()),
-        (Some(only), None) if only == SCHEDULE_WAKEUP_TOOL_NAME
-    ) {
-        return false;
-    }
-    let session = orch.session();
-    let model = session.lock().await.model.clone();
-    lone_wakeup_ends_turn_model(&model)
-}
-
-/// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:
-/// `i("tengu_loop_dynamic_wakeup_ends_turn", {queryChainId, queryDepth})`.
-pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(orch: &ConversationOrchestrator) {
-    telemetry::emit_loop_dynamic_wakeup_ends_turn(&orch.query_chain_id, 0);
-    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
-        return;
-    };
-    let mut metadata = telemetry::LogEventMetadata::new();
-    metadata.insert(
-        "queryChainId".into(),
-        telemetry::AnalyticsValue::String(orch.query_chain_id.clone()),
-    );
-    metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
-    bus.log_event(
-        telemetry::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
-        metadata,
-    )
-    .await;
-}
-
-pub(crate) async fn emit_tool_result_ended_turn_telemetry(
-    orch: &ConversationOrchestrator,
-    turn_end: tool_api::tool_trait::ToolResultTurnEnd,
-) {
-    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
-        return;
-    };
-    let payload = telemetry::tengu::mcp::ToolResultEndedTurnPayload {
-        query_chain_id: telemetry::Verified::assert_safe(orch.query_chain_id.clone()),
-        query_depth: 0,
-        source: telemetry::Verified::assert_safe(turn_end.source.as_str().to_string()),
-    };
-    let mut metadata = telemetry::LogEventMetadata::new();
-    metadata.insert(
-        "queryChainId".into(),
-        telemetry::AnalyticsValue::String(payload.query_chain_id.as_str().to_string()),
-    );
-    metadata.insert(
-        "queryDepth".into(),
-        telemetry::AnalyticsValue::Int(i64::from(payload.query_depth)),
-    );
-    metadata.insert(
-        "source".into(),
-        telemetry::AnalyticsValue::String(payload.source.as_str().to_string()),
-    );
-    bus.log_event(telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN, metadata)
-        .await;
-}
-
-pub(crate) async fn emit_tools_refreshed_mid_turn_telemetry(
-    orch: &ConversationOrchestrator,
-    old_mcp_count: usize,
-) {
-    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
-        return;
-    };
-    let new_mcp_count = orch.filtered_mcp_tool_count().await;
-    if new_mcp_count == old_mcp_count {
-        return;
-    }
-    let payload = telemetry::tengu::mcp::ToolsRefreshedMidTurnPayload {
-        old_mcp_count: u32::try_from(old_mcp_count).unwrap_or(u32::MAX),
-        new_mcp_count: u32::try_from(new_mcp_count).unwrap_or(u32::MAX),
-        recovered: old_mcp_count == 0 && new_mcp_count > 0,
-    };
-    let mut metadata = telemetry::LogEventMetadata::new();
-    metadata.insert(
-        "oldMcpCount".into(),
-        telemetry::AnalyticsValue::Int(i64::from(payload.old_mcp_count)),
-    );
-    metadata.insert(
-        "newMcpCount".into(),
-        telemetry::AnalyticsValue::Int(i64::from(payload.new_mcp_count)),
-    );
-    metadata.insert(
-        "recovered".into(),
-        telemetry::AnalyticsValue::Bool(payload.recovered),
-    );
-    bus.log_event(telemetry::tengu::mcp::TOOLS_REFRESHED_MID_TURN, metadata)
-        .await;
-}
-
-/// `StructuredOutput` tool name (claude-code `bp`). It is the only tool that
-/// sets the `endsTurn`/`toolEndsTurn` flag, so detecting its `tool_use` by name
-/// is equivalent to the binary's `name===bp` check.
-pub(crate) const STRUCTURED_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
-
-#[cfg(test)]
-#[path = "turn_loop/tests/image_tool_result_tests.rs"]
-mod image_tool_result_tests;
-
-#[cfg(test)]
-#[path = "turn_loop/tests/code_change_accumulation_tests.rs"]
-mod code_change_accumulation_tests;
-
-// ORCH-1: the `ZX_` rule-scope → OTEL decision-source mapping, kept out of the
-// concurrently-edited turn_loop_test.rs.
-#[cfg(test)]
-#[path = "turn_loop/tests/decision_otel_source_tests.rs"]
-mod decision_otel_source_tests;
-
-// The `toolDenialKind` classifier, kept out of the concurrently-edited
-// turn_loop_test.rs for the same reason as the module above.
-#[cfg(test)]
-#[path = "turn_loop/tests/tool_denial_kind_tests.rs"]
-mod tool_denial_kind_tests;
-
-// End-to-end pin for the denial-provenance WIRING (as opposed to the
-// `tool_denial_kind` unit tests above, which only cover the pure classifier).
-// Kept in its own module rather than in the concurrently-edited
-// turn_loop_test.rs, per the convention the modules above already follow.
-//
-// This seam is exactly where the first version of this feature was wrong:
-// `MockOutputStream` inherits the DEFAULTED `emit_tool_result_denied` unless it
-// overrides it, so before that override existed every deny-path test passed no
-// matter what kind the turn loop computed.
-#[cfg(test)]
-#[path = "turn_loop/tests/denial_kind_wiring_tests.rs"]
-mod denial_kind_wiring_tests;
-
-/// O4-A: the `interrupted` denial stamp.
-///
-/// claude-code stamps `toolDenialKind` for an ABORTED tool inside the per-tool
-/// execution catch (`oQ_`, 2.1.220 @235424972):
-/// ```js
-/// toolDenialKind: YDd(ce, n.abortController.signal)
-/// ```
-/// with (`YDd` @235394375)
-/// ```js
-/// function YDd(e,t){
-///   let r = e instanceof hW && e.interrupted;              // ShellError.interrupted
-///   if(!(e instanceof tl || r || $7e(e)&&t.aborted)) return; // tl = AbortError
-///   return t.aborted && H_(t.reason)==="background" ? "cancelled" : "interrupted";
-/// }
-/// ```
-/// The LingXi analog of `tl` is [`tool_api::ToolError::Aborted`], and the
-/// analog of `oQ_`'s catch is the `Err(err)` arm of
-/// [`dispatch_tool_uses_tracked`] — so the stamp attaches at exactly the site
-/// claude-code stamps at, with no emission-point change.
-///
-/// Real-transcript ground truth (2.1.220, `~/.claude/projects/**/*.jsonl`):
-/// `toolDenialKind` census is `user-rejected` ×13 and `interrupted` ×1; the
-/// `interrupted` line carries `"toolUseResult": "Error: [Request interrupted by
-/// user for tool use]"`.
-#[cfg(test)]
-#[path = "turn_loop/tests/interrupted_denial_stamp_tests.rs"]
-mod interrupted_denial_stamp_tests;
-
-/// O3: hook `additionalContext` / `hook_error_during_execution` become
-/// TRANSCRIPT ATTACHMENTS, and the model-facing rendering is EPHEMERAL.
-///
-/// Oracle — the attachment→model renderer table (2.1.220 BIN off 238107100):
-/// ```text
-/// hook_additional_context: (e) => { if (e.content.length === 0) return [];
-///     return [ zr({ content: Ww(`${e.hookName} hook additional context: ${e.content.join("\n")}`), isMeta:!0 }) ] },
-/// hook_error_during_execution: () => [],
-/// ```
-/// `Ww` (BIN off 238046823) is the `<system-reminder>` wrapper. The `zr(…)`
-/// message is built at API-normalization time from the attachment and is never
-/// written to the transcript — census of real 2.1.220 sessions finds 145
-/// `hook_additional_context` attachment lines and ZERO persisted `user` lines
-/// carrying the rendered text. `hook_error_during_execution` renders to `[]`,
-/// so the MODEL NEVER SEES IT.
-///
-/// claude also never folds a PostToolUse `additionalContext` into the
-/// tool_result string — the success arm (BIN off 235420375) assembles
-/// `[formattedResult, acceptFeedback?, ...contentBlocks?]` with no hook
-/// context, and the PostToolUse consumer (BIN off 234726655) only yields the
-/// attachment.
-#[cfg(test)]
-#[path = "turn_loop/tests/hook_context_attachment_tests.rs"]
-mod hook_context_attachment_tests;
-
-/// A1 — the `<persisted-output>` substitution wired into the SUCCESS-path
-/// `tool_result` push (claude-code 2.1.220 `F0u`, BIN off **230270568**).
-#[cfg(test)]
-#[path = "turn_loop/tests/tool_result_persistence_wiring_tests.rs"]
-mod tool_result_persistence_wiring_tests;
-
-// ===========================================================================
-// BASH-10 / BASH-18 — the two trait seams this file now WIRES.
-//
-// Both hooks existed on `Tool` (or, for `coerce_input`, did not exist at all)
-// with ZERO production call sites, which is why the findings that needed them
-// were previously refused. These tests pin the CALL SITES, not the hooks: each
-// one runs a real `dispatch_tool_uses_tracked` and would still pass if the
-// hook were only DEFINED — so every case is paired with its A/B twin (the same
-// dispatch with the hook returning the neutral value), which fails if the
-// dispatcher stops consulting it.
-//
-// Kept in its own module rather than in the concurrently-edited
-// turn_loop_test.rs, per the convention the modules above already follow.
-// ===========================================================================
-#[cfg(test)]
-#[path = "turn_loop/tests/observer_pairings_reach_tools_tests.rs"]
-mod observer_pairings_reach_tools_tests;
-
-#[cfg(test)]
-#[path = "turn_loop/tests/tool_hook_wiring_tests.rs"]
-mod tool_hook_wiring_tests;
-use hooks::attachment::HookPublicationGuard;
-
-/// Construct large phase futures outside the caller's poll stack frame.
-/// Passing the factory also avoids a large temporary before heap allocation.
-pub(crate) fn boxed_turn_future<'a, T, F>(
-    create: impl FnOnce() -> F,
-) -> futures::future::BoxFuture<'a, T>
-where
-    F: std::future::Future<Output = T> + Send + 'a,
-{
-    Box::pin(create())
-}
-pub(crate) use batch_hooks::resolve_model_context_modifier;
 
 #[allow(clippy::too_many_lines)]
 async fn execute_one_turn_with_recovery_tracked_impl(
@@ -635,6 +464,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     mut recovery: Option<&mut RecoveryState>,
     mod_step: Option<(&str, u32)>,
+    query_depth: u32,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
     let cancel = crate::native_computer::current_turn_cancel();
     crate::native_computer::cancel_before_effects(crate::native_computer::recover_before_request(
@@ -902,23 +732,22 @@ async fn execute_one_turn_with_recovery_tracked_impl(
         }
         Err(e) => {
             // Classify the TYPED error into the api-error envelope (`Flp`/`KNn`)
-            // BEFORE consuming it for the verbatim error text. The rendered
-            // message stays `e.to_string()` (`createAssistantAPIErrorMessage`
-            // renders content verbatim); the envelope adds `error`/`apiErrorStatus`.
+            // BEFORE producing the user-facing text. The envelope adds
+            // `error`/`apiErrorStatus`; the text source keeps exact provider
+            // code units when this error came from the SDK.
             let env = classify_api_error(&e);
-            // Content is rendered verbatim (`e.to_string()`) EXCEPT a 413
-            // `request_too_large` (accumulated images/attachments), which the
-            // 2.1.212 handler renders with the byte-exact `$Vi()` notice.
             let content = match &e {
-                OrchestratorError::ApiCall(LlmError::RequestTooLarge)
-                | OrchestratorError::Streaming(LlmError::RequestTooLarge) => {
+                OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error)
+                    if matches!(error.classification_source(), LlmError::RequestTooLarge) =>
+                {
                     crate::conversation::request_too_large_notice(orch.prompt_is_interactive())
+                        .into()
                 }
-                _ => e.to_string(),
+                _ => orchestrator_error_text_source(&e, &model),
             };
             let error_kind = env.error;
             crate::server_fallback::flush_pending_notice(orch).await;
-            let assistant_id = surface_model_error(orch, &content, env).await;
+            let assistant_id = surface_model_error(orch, content, env).await;
             orch.mark_mod_turn_error();
             // SLASH-04: this arm is the oracle's `api_error` reason (see the
             // NAMING NOTE on `GoalClearBucket`), so it is classified by
@@ -1035,12 +864,12 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                     crate::cost_wiring::response_pricing(call.response.cost.as_ref(), native_quote);
                 let billing_model = if native_quote {
                     crate::cost_wiring::native_fallback_cost_model(&call.response.provider_metadata)
-                        .unwrap_or(call.model)
+                        .unwrap_or_else(|| call.model.to_owned())
                 } else {
-                    call.model
+                    call.model.to_owned()
                 };
                 let model_ref = quoted_model.unwrap_or_else(|| {
-                    crate::cost_wiring::model_ref_from_string(billing_model, call.profile)
+                    crate::cost_wiring::model_ref_from_string(&billing_model, call.profile)
                 });
                 let scope = cost_scope
                     .clone()
@@ -1109,20 +938,12 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
     // is appended below. Strict no-op when no cache-safe slot is wired.
     if requested_model && physical_responses.is_empty() {
-        let display_system = system.map(
-            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
-        );
-        orch.save_cache_safe_params(display_system.as_deref(), &model, &tools)
-            .await;
+        orch.save_cache_safe_params(system, &model, &tools).await;
     }
     // FORK (codex #5 follow-up): record the rendered system prompt this turn
     // handed the model, so a fork-subagent spawn dispatched below in this same
     // turn can thread the exact bytes onto its child (cache-identical prefix).
-    let display_system = system.map(
-        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
-    );
-    orch.save_current_turn_system_prompt(display_system.as_deref())
-        .await;
+    orch.save_current_turn_system_prompt(system).await;
 
     // Task 8 (llm-runtime future-work batch 3): the call succeeded — forward
     // the adapter's unified rate-limit snapshot to the output stream when it
@@ -1210,7 +1031,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     if let Some(info) = declined_server_fallback {
         crate::server_fallback::flush_pending_notice(orch).await;
         let (assistant_id, stop_reason) =
-            crate::server_fallback::surface_declined(orch, &info).await;
+            crate::server_fallback::surface_declined(orch, &info, Some(response.id.as_str())).await;
         return Ok((
             TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
@@ -1223,7 +1044,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     }
 
     let final_index = visible_responses.len() - 1;
-    let mut outcome = TurnStepOutcome::Continue;
+    let mut outcome = TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry);
     let mut same_turn_tool_uses = Vec::new();
     for (index, visible) in visible_responses.iter().enumerate() {
         let final_response = index == final_index;
@@ -1252,6 +1073,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             request_history,
             same_turn_tool_uses.clone(),
             request_history_source,
+            query_depth,
         )
         .await?;
         same_turn_tool_uses.extend(
@@ -1271,3 +1093,262 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     }
     Ok((outcome, output_tokens))
 }
+
+/// PARITY the binary's `Xi`. Spelled out rather than imported: `orchestrator`
+/// does not depend on `tool-cron`, and the tool name is a model-facing wire
+/// string, not an internal symbol.
+const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
+
+/// Current native AM/ny gate, shared with the loop prompt builder. Explicit
+/// capability denial precedes the baked mitigation and Mythos fallback.
+fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
+    let model = lingxi_core::host::model_capabilities::normalize_model_id(model_id);
+    lingxi_core::host::model_capabilities::wakeup_ends_turn(
+        &model,
+        std::env::var(branding::MODEL_CAPABILITIES_ENV)
+            .ok()
+            .as_deref(),
+        false,
+    )
+}
+
+/// Consume the wakeup-armed flag and report whether this round was exactly one
+/// `ScheduleWakeup` that armed a wakeup, on a model the binary's gate covers.
+///
+/// PARITY `if(yo.length===1 && yo[0].name===Xi && Zoe(...)) { if(kg().some(…loop…)) … }`.
+///
+/// Shared by BOTH turn loops — the batched one in this module and the streaming
+/// twin in `conversation::drivers`. One definition matters more than usual here:
+/// the first cut of this arm lived only in the batched loop, and the streaming
+/// loop is the one the desktop bridge takes, so `/loop` never reached it.
+///
+/// The flag is consumed on every call (`swap`), including the early returns, so
+/// a `ScheduleWakeup` that armed a wakeup alongside other tools cannot leak into
+/// the next round.
+pub(crate) async fn take_lone_wakeup_turn_end<'a>(
+    orch: &ConversationOrchestrator,
+    tool_names: impl Iterator<Item = &'a str>,
+) -> bool {
+    let armed = orch
+        .loop_wakeup_armed_slot
+        .as_ref()
+        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+    if !armed {
+        return false;
+    }
+    let mut names = tool_names;
+    if !matches!(
+        (names.next(), names.next()),
+        (Some(only), None) if only == SCHEDULE_WAKEUP_TOOL_NAME
+    ) {
+        return false;
+    }
+    match orch.bundled_prompt_model().await {
+        Ok(model) => lone_wakeup_ends_turn_model(&model),
+        Err(error) => {
+            tracing::warn!(%error, "could not resolve wakeup model context");
+            false
+        }
+    }
+}
+
+/// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:
+/// `i("tengu_loop_dynamic_wakeup_ends_turn", {queryChainId, queryDepth})`.
+pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(orch: &ConversationOrchestrator) {
+    telemetry::emit_loop_dynamic_wakeup_ends_turn(&orch.query_chain_id, 0);
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "queryChainId".into(),
+        telemetry::AnalyticsValue::String(orch.query_chain_id.clone()),
+    );
+    metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
+    bus.log_event(
+        telemetry::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+        metadata,
+    )
+    .await;
+}
+
+pub(crate) async fn emit_tool_result_ended_turn_telemetry(
+    orch: &ConversationOrchestrator,
+    turn_end: tool_api::tool_trait::ToolResultTurnEnd,
+) {
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let payload = telemetry::tengu::mcp::ToolResultEndedTurnPayload {
+        query_chain_id: telemetry::Verified::assert_safe(orch.query_chain_id.clone()),
+        query_depth: 0,
+        source: telemetry::Verified::assert_safe(turn_end.source.as_str().to_string()),
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "queryChainId".into(),
+        telemetry::AnalyticsValue::String(payload.query_chain_id.as_str().to_string()),
+    );
+    metadata.insert(
+        "queryDepth".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.query_depth)),
+    );
+    metadata.insert(
+        "source".into(),
+        telemetry::AnalyticsValue::String(payload.source.as_str().to_string()),
+    );
+    bus.log_event(telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN, metadata)
+        .await;
+}
+
+pub(crate) async fn emit_tools_refreshed_mid_turn_telemetry(
+    orch: &ConversationOrchestrator,
+    old_mcp_count: usize,
+) {
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let new_mcp_count = orch.filtered_mcp_tool_count().await;
+    if new_mcp_count == old_mcp_count {
+        return;
+    }
+    let payload = telemetry::tengu::mcp::ToolsRefreshedMidTurnPayload {
+        old_mcp_count: u32::try_from(old_mcp_count).unwrap_or(u32::MAX),
+        new_mcp_count: u32::try_from(new_mcp_count).unwrap_or(u32::MAX),
+        recovered: old_mcp_count == 0 && new_mcp_count > 0,
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "oldMcpCount".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.old_mcp_count)),
+    );
+    metadata.insert(
+        "newMcpCount".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.new_mcp_count)),
+    );
+    metadata.insert(
+        "recovered".into(),
+        telemetry::AnalyticsValue::Bool(payload.recovered),
+    );
+    bus.log_event(telemetry::tengu::mcp::TOOLS_REFRESHED_MID_TURN, metadata)
+        .await;
+}
+
+/// `StructuredOutput` tool name (claude-code `bp`). It is the only tool that
+/// sets the `endsTurn`/`toolEndsTurn` flag, so detecting its `tool_use` by name
+/// is equivalent to the binary's `name===bp` check.
+pub(crate) const STRUCTURED_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
+
+#[cfg(test)]
+#[path = "turn_loop/tests/image_tool_result_tests.rs"]
+mod image_tool_result_tests;
+
+#[cfg(test)]
+#[path = "turn_loop/tests/code_change_accumulation_tests.rs"]
+mod code_change_accumulation_tests;
+
+// ORCH-1: the `ZX_` rule-scope → OTEL decision-source mapping, kept out of the
+// concurrently-edited turn_loop_test.rs.
+#[cfg(test)]
+#[path = "turn_loop/tests/decision_otel_source_tests.rs"]
+mod decision_otel_source_tests;
+
+// The `toolDenialKind` classifier, kept out of the concurrently-edited
+// turn_loop_test.rs for the same reason as the module above.
+#[cfg(test)]
+#[path = "turn_loop/tests/tool_denial_kind_tests.rs"]
+mod tool_denial_kind_tests;
+
+// End-to-end pin for the denial-provenance WIRING (as opposed to the
+// `tool_denial_kind` unit tests above, which only cover the pure classifier).
+// Kept in its own module rather than in the concurrently-edited
+// turn_loop_test.rs, per the convention the modules above already follow.
+//
+// This seam is exactly where the first version of this feature was wrong:
+// `MockOutputStream` inherits the DEFAULTED `emit_tool_result_denied` unless it
+// overrides it, so before that override existed every deny-path test passed no
+// matter what kind the turn loop computed.
+#[cfg(test)]
+#[path = "turn_loop/tests/denial_kind_wiring_tests.rs"]
+mod denial_kind_wiring_tests;
+
+/// O4-A: the `interrupted` denial stamp.
+///
+/// claude-code stamps `toolDenialKind` for an ABORTED tool inside the per-tool
+/// execution catch (`oQ_`, 2.1.220 @235424972):
+/// ```js
+/// toolDenialKind: YDd(ce, n.abortController.signal)
+/// ```
+/// with (`YDd` @235394375)
+/// ```js
+/// function YDd(e,t){
+///   let r = e instanceof hW && e.interrupted;              // ShellError.interrupted
+///   if(!(e instanceof tl || r || $7e(e)&&t.aborted)) return; // tl = AbortError
+///   return t.aborted && H_(t.reason)==="background" ? "cancelled" : "interrupted";
+/// }
+/// ```
+/// The LingXi analog of `tl` is [`tool_api::ToolError::Aborted`], and the
+/// analog of `oQ_`'s catch is the `Err(err)` arm of
+/// [`dispatch_tool_uses_tracked`] — so the stamp attaches at exactly the site
+/// claude-code stamps at, with no emission-point change.
+///
+/// Real-transcript ground truth (2.1.220, `~/.claude/projects/**/*.jsonl`):
+/// `toolDenialKind` census is `user-rejected` ×13 and `interrupted` ×1; the
+/// `interrupted` line carries `"toolUseResult": "Error: [Request interrupted by
+/// user for tool use]"`.
+#[cfg(test)]
+#[path = "turn_loop/tests/interrupted_denial_stamp_tests.rs"]
+mod interrupted_denial_stamp_tests;
+
+/// O3: hook `additionalContext` / `hook_error_during_execution` become
+/// TRANSCRIPT ATTACHMENTS, and the model-facing rendering is EPHEMERAL.
+///
+/// Oracle — the attachment→model renderer table (2.1.220 BIN off 238107100):
+/// ```text
+/// hook_additional_context: (e) => { if (e.content.length === 0) return [];
+///     return [ zr({ content: Ww(`${e.hookName} hook additional context: ${e.content.join("\n")}`), isMeta:!0 }) ] },
+/// hook_error_during_execution: () => [],
+/// ```
+/// `Ww` (BIN off 238046823) is the `<system-reminder>` wrapper. The `zr(…)`
+/// message is built at API-normalization time from the attachment and is never
+/// written to the transcript — census of real 2.1.220 sessions finds 145
+/// `hook_additional_context` attachment lines and ZERO persisted `user` lines
+/// carrying the rendered text. `hook_error_during_execution` renders to `[]`,
+/// so the MODEL NEVER SEES IT.
+///
+/// claude also never folds a PostToolUse `additionalContext` into the
+/// tool_result string — the success arm (BIN off 235420375) assembles
+/// `[formattedResult, acceptFeedback?, ...contentBlocks?]` with no hook
+/// context, and the PostToolUse consumer (BIN off 234726655) only yields the
+/// attachment.
+#[cfg(test)]
+#[path = "turn_loop/tests/hook_context_attachment_tests.rs"]
+mod hook_context_attachment_tests;
+
+/// A1 — the `<persisted-output>` substitution wired into the SUCCESS-path
+/// `tool_result` push (claude-code 2.1.220 `F0u`, BIN off **230270568**).
+#[cfg(test)]
+#[path = "turn_loop/tests/tool_result_persistence_wiring_tests.rs"]
+mod tool_result_persistence_wiring_tests;
+
+// ===========================================================================
+// BASH-10 / BASH-18 — the two trait seams this file now WIRES.
+//
+// Both hooks existed on `Tool` (or, for `coerce_input`, did not exist at all)
+// with ZERO production call sites, which is why the findings that needed them
+// were previously refused. These tests pin the CALL SITES, not the hooks: each
+// one runs a real `dispatch_tool_uses_tracked` and would still pass if the
+// hook were only DEFINED — so every case is paired with its A/B twin (the same
+// dispatch with the hook returning the neutral value), which fails if the
+// dispatcher stops consulting it.
+//
+// Kept in its own module rather than in the concurrently-edited
+// turn_loop_test.rs, per the convention the modules above already follow.
+// ===========================================================================
+#[cfg(test)]
+#[path = "turn_loop/tests/observer_pairings_reach_tools_tests.rs"]
+mod observer_pairings_reach_tools_tests;
+
+#[cfg(test)]
+#[path = "turn_loop/tests/tool_hook_wiring_tests.rs"]
+mod tool_hook_wiring_tests;

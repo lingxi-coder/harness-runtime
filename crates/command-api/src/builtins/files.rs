@@ -40,7 +40,7 @@ impl BuiltinCommandHandler for FilesHandler {
         let files = self.handle.files_in_context().await;
         let snap = self.handle.get_status_snapshot().await;
         CommandResult::Done {
-            display: Some(render_files(&files, &snap.cwd)),
+            display: Some((render_files(&files, &snap.cwd)).into()),
         }
     }
     fn name(&self) -> &str {
@@ -108,8 +108,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "files".to_string(),
-            raw_args: String::new(),
+            name: "files".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

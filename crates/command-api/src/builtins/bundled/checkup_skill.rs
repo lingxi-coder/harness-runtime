@@ -72,7 +72,7 @@
 //! prefix for claude.ai connectors, not branding; rebranding it would stop the
 //! model matching real transcript entries.
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// `is()` — the checkup body, rebranded and with the two distribution checks cut.
 const CHECKUP_BODY: &str = include_str!("checkup_body.md");
@@ -80,8 +80,7 @@ const CHECKUP_BODY: &str = include_str!("checkup_body.md");
 /// Upstream's `description`, minus the two cut checks' clauses.
 pub(crate) const CHECKUP_DESCRIPTION: &str = "Health-check the user's LingXi setup and fix issues: diagnose setup health from local data (unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local LINGXI.md files against checked-in ones; trim checked-in LINGXI.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded LINGXI.md guidance into lazy skills and nested LINGXI.md files; flag slow hooks and context-heavy extensions; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a checkup, audit, tune-up, or cleanup of their LingXi setup or configuration.";
 
-pub(crate) const CHECKUP_MENU_DESCRIPTION: &str =
-    "Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions";
+pub(crate) const CHECKUP_MENU_DESCRIPTION: &str = "Health-check your setup and fix issues: unused extensions, duplicated or bloated memory files, slow hooks, permissions";
 
 /// Upstream `progressMessage`. ⚠️ Not wired: `SlashCommand` carries no
 /// progress-message field in this port. Kept so the copy survives until it can
@@ -93,12 +92,16 @@ pub(crate) const CHECKUP_PROGRESS_MESSAGE: &str = "running checkup";
 pub struct CheckupPromptFn;
 
 impl BundledPromptFn for CheckupPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         let body = CHECKUP_BODY.trim_end_matches('\n');
-        if args.is_empty() {
-            body.to_string()
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            body.into()
         } else {
-            format!("{body}\n\n## Additional instructions from the user\n\n{args}")
+            let prefix = format!("{body}\n\n## Additional instructions from the user\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -106,6 +109,7 @@ impl BundledPromptFn for CheckupPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     /// 🚨 Rebranding a path can turn a TRUE statement about the upstream repo
     /// into a FALSE one about this one. `readOnlyValidation.ts` was rewritten to
@@ -244,10 +248,10 @@ mod tests {
 
     #[test]
     fn user_instructions_are_appended_last() {
-        let out = CheckupPromptFn.build("focus on MCP servers");
+        let out = CheckupPromptFn.build(&"focus on MCP servers".into());
         assert!(out.ends_with("## Additional instructions from the user\n\nfocus on MCP servers"));
         assert!(!CheckupPromptFn
-            .build("")
+            .build(&"".into())
             .contains("## Additional instructions from the user"));
     }
 }

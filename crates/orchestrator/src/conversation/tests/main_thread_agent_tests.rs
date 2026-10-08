@@ -108,8 +108,11 @@ impl Tool for NamedTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         self.0.into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -150,6 +153,7 @@ fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
 async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
     orch.build_wire_tools()
         .await
+        .0
         .into_iter()
         .filter_map(|t| {
             t.get("name")
@@ -252,6 +256,8 @@ async fn large_memory_warnings_are_recomputed_from_the_live_memory_set() {
     // against the floor would have made this pass for the wrong reason.
     let big = "x".repeat(250_000);
     let file = crate::prompt::MemoryFile {
+        parent: None,
+        source_content: None,
         path: std::path::PathBuf::from("/work/repo/LINGXI.md"),
         body: big,
         is_local_override: false,
@@ -360,7 +366,7 @@ async fn main_thread_agent_prompt_replaces_default() {
     let default = orch.assemble_system_prompt_preview().await;
     orch.set_main_thread_agent(
         "code-reviewer".to_string(),
-        Some("You are a meticulous code reviewer.".to_string()),
+        Some("You are a meticulous code reviewer.".into()),
         keep_all_tools(),
         Vec::new(),
         None,
@@ -380,11 +386,11 @@ async fn main_thread_agent_prompt_replaces_default() {
 #[tokio::test]
 async fn system_prompt_override_beats_main_thread_agent() {
     let mut config = OrchestratorConfig::default();
-    config.system_prompt_override = Some("EXPLICIT --system-prompt wins".to_string());
+    config.system_prompt_override = Some("EXPLICIT --system-prompt wins".into());
     let orch = orch_with_config(config);
     orch.set_main_thread_agent(
         "code-reviewer".to_string(),
-        Some("agent prompt should be ignored".to_string()),
+        Some("agent prompt should be ignored".into()),
         keep_all_tools(),
         Vec::new(),
         None,
@@ -493,6 +499,7 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
                 content: vec![
                     lingxi_core::types::ContentBlock::Text {
                         text: " first line ".to_string(),
+                        citations: None,
                     },
                     lingxi_core::types::ContentBlock::Thinking {
                         thinking: "hidden".to_string(),
@@ -500,9 +507,11 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
                     },
                     lingxi_core::types::ContentBlock::Text {
                         text: "second line ".to_string(),
+                        citations: None,
                     },
                 ],
                 stop_reason: Some("end_turn".to_string()),
+                resumable: None,
             });
     }
 
@@ -532,8 +541,10 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "   ".to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         });
     assert_eq!(
         orch.expansion_hook_context().await.last_assistant_message,
@@ -645,15 +656,15 @@ async fn mobile_runtime_reminder_is_stable_across_agent_tool_filters() {
     assert!(!after.contains("available to this agent"));
 }
 
-/// A resolved `--agent` model (`Some(resolved_id)`) replaces the session
+/// A resolved `--agent` model and profile replace the session route
 /// model (claude `jb(Zo(y.model))`); the caller has already gated it on
-/// `!userSpecifiedModel` and resolved the alias to a wire id. The profile is
-/// cleared (agent frontmatter carries a bare id).
+/// `!userSpecifiedModel` and resolved the alias against the selected profile.
 #[tokio::test]
 async fn main_thread_agent_model_override_replaces_session_model() {
     let mut config = OrchestratorConfig::default();
     config.model = "base-model".to_string();
     let orch = orch_with_config(config);
+    orch.session().lock().await.model_profile = Some("previous-profile".into());
     assert_eq!(orch.session().lock().await.model, "base-model");
 
     orch.set_main_thread_agent(
@@ -661,13 +672,88 @@ async fn main_thread_agent_model_override_replaces_session_model() {
         None,
         keep_all_tools(),
         Vec::new(),
-        Some("claude-agent-model".to_string()),
+        Some((
+            "claude-agent-model".to_string(),
+            Some("selected-profile".into()),
+        )),
     )
     .await;
     let session = orch.session();
     let s = session.lock().await;
     assert_eq!(s.model, "claude-agent-model");
-    assert_eq!(s.model_profile, None);
+    assert_eq!(s.model_profile.as_deref(), Some("selected-profile"));
+}
+
+#[tokio::test]
+async fn main_thread_agent_model_override_distinguishes_empty_and_missing_profile() {
+    for selected_profile in [Some(String::new()), None] {
+        let mut config = OrchestratorConfig::default();
+        config.model = "shared-wire-id".into();
+        let orch = orch_with_config(config);
+        orch.session().lock().await.model_profile = Some("previous-profile".into());
+        orch.set_main_thread_agent(
+            "selected-agent".into(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            Some(("shared-wire-id".into(), selected_profile.clone())),
+        )
+        .await;
+        let session = orch.session();
+        let session = session.lock().await;
+        assert_eq!(session.model, "shared-wire-id");
+        assert_eq!(session.model_profile, selected_profile);
+    }
+}
+
+#[tokio::test]
+async fn initial_model_gate_refreshes_with_route_authority_before_wire_tool_assembly() {
+    let mut config = OrchestratorConfig::default();
+    config.model = "opus".into();
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+    let captured = calls.clone();
+    let orch = orch_with_config(config).with_model_resolution_context_provider(Arc::new(
+        move |model: &str, profile: Option<&str>| {
+            captured.lock().unwrap().push(profile.map(str::to_owned));
+            Ok(agent::model_resolution::ModelResolutionContext {
+                route: agent::model_resolution::ModelRouteFacts {
+                    model: model.to_owned(),
+                    profile: profile.map(str::to_owned),
+                    ..Default::default()
+                },
+                family_defaults: agent::model_resolution::FamilyModelDefaults {
+                    opus: Some(format!("wire-opus-{}", profile.unwrap_or("unqualified"))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        },
+    ));
+    assert_eq!(
+        orch.tools.main_loop_model().as_deref(),
+        Some("wire-opus-unqualified")
+    );
+    for profile in ["provider-a", "provider-b", ""] {
+        orch.seed_initial_model_profile("opus", profile).await;
+        assert_eq!(
+            orch.tools.main_loop_model(),
+            Some(format!("wire-opus-{profile}")),
+            "the reminder gate must see the seeded route before tools are assembled"
+        );
+        assert_eq!(
+            orch.session.lock().await.model_profile.as_deref(),
+            Some(profile)
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            None,
+            Some("provider-a".into()),
+            Some("provider-b".into()),
+            Some(String::new())
+        ]
+    );
 }
 
 /// `model_override == None` (agent `model: inherit`, or the user passed

@@ -984,13 +984,13 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         file.frontmatter.description.clone()
     };
     SlashCommand {
-        name,
-        description,
+        name: name.into(),
+        description: description.into(),
         source,
         kind: SlashCommandKind::Markdown {
             file_path: file.file_path.clone(),
             frontmatter: file.frontmatter.clone(),
-            prompt_template: file.content.clone(),
+            prompt_template: file.content.clone().into(),
         },
         has_user_specified_description,
         // SLASH.2: TS `createSkillCommand` copies the frontmatter `argument-hint`
@@ -998,13 +998,24 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         // stores it as a one-element `argument_hints` vec (empty when the key is
         // absent), so its first element is the hint — mirroring TS
         // `frontmatter['argument-hint'] != null ? String(...) : undefined`.
-        argument_hint: file.frontmatter.argument_hints.first().cloned(),
+        argument_hint: file
+            .frontmatter
+            .argument_hints
+            .first()
+            .cloned()
+            .map(Into::into),
         // ARGS.3: TS `createSkillCommand` copies the parsed `argNames`
         // (`parseArgumentNames(frontmatter.arguments)`) onto the top-level
         // command. The frontmatter parser already stores that filtered list in
         // `argument_names`, so carry it through verbatim. This is what drives the
         // in-TUI progressive argument-hint (`generateProgressiveArgumentHint`).
-        argument_names: file.frontmatter.argument_names.clone(),
+        argument_names: file
+            .frontmatter
+            .argument_names
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
         // SLASH.3: legacy `.lingxi/commands/**.md` files load through TS
         // `loadSkillsFromCommandsDir`, which tags every command it builds with
         // `loadedFrom: 'commands_DEPRECATED'`.
@@ -1032,17 +1043,28 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
         file.frontmatter.description.clone()
     };
     SlashCommand {
-        name,
-        description,
+        name: name.into(),
+        description: description.into(),
         source,
         kind: SlashCommandKind::Markdown {
             file_path: file.file_path.clone(),
             frontmatter: file.frontmatter.clone(),
-            prompt_template: file.content.clone(),
+            prompt_template: file.content.clone().into(),
         },
         has_user_specified_description,
-        argument_hint: file.frontmatter.argument_hints.first().cloned(),
-        argument_names: file.frontmatter.argument_names.clone(),
+        argument_hint: file
+            .frontmatter
+            .argument_hints
+            .first()
+            .cloned()
+            .map(Into::into),
+        argument_names: file
+            .frontmatter
+            .argument_names
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
         loaded_from: Some("skills".to_string()),
         disable_model_invocation: file.frontmatter.disable_model_invocation,
         when_to_use: file.frontmatter.when_to_use.clone(),
@@ -1306,12 +1328,15 @@ mod tests {
             &file,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
-        assert_eq!(cmd.name, "foo");
-        assert_eq!(cmd.description, "Foo Title");
+        assert_eq!(cmd.name.string_at(""), Some("foo"));
+        assert_eq!(cmd.description.string_at(""), Some("Foo Title"));
         match cmd.kind {
             SlashCommandKind::Markdown {
                 prompt_template, ..
-            } => assert_eq!(prompt_template, "# Foo Title\n\nHello $1"),
+            } => assert_eq!(
+                prompt_template.string_at(""),
+                Some("# Foo Title\n\nHello $1")
+            ),
             _ => panic!("expected Markdown kind"),
         }
     }
@@ -1333,7 +1358,7 @@ mod tests {
             &file,
             CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         );
-        assert_eq!(cmd.description, "explicit");
+        assert_eq!(cmd.description.string_at(""), Some("explicit"));
     }
 
     #[test]
@@ -1355,7 +1380,12 @@ mod tests {
             &file,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
-        assert_eq!(cmd.argument_hint.as_deref(), Some("<file> [flags]"));
+        assert_eq!(
+            cmd.argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("<file> [flags]")
+        );
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
     }
 
@@ -1379,8 +1409,11 @@ mod tests {
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(
-            cmd.argument_names,
-            vec!["first".to_string(), "second".to_string()]
+            cmd.argument_names
+                .iter()
+                .map(|name| name.string_at(""))
+                .collect::<Vec<_>>(),
+            vec![Some("first"), Some("second")]
         );
     }
 
@@ -1407,8 +1440,8 @@ mod tests {
         // JSON, keeping the serialized shape byte-identical to before this field
         // existed (which is what keeps parity_slash_commands*.json unchanged).
         let cmd = crate::model::SlashCommand {
-            name: "help".to_string(),
-            description: "Show help".to_string(),
+            name: "help".into(),
+            description: "Show help".into(),
             ..crate::model::SlashCommand::default()
         };
         let json = serde_json::to_string(&cmd).expect("serialize");
@@ -1418,8 +1451,8 @@ mod tests {
         );
         // A non-empty list round-trips.
         let cmd2 = crate::model::SlashCommand {
-            name: "deploy".to_string(),
-            argument_names: vec!["env".to_string()],
+            name: "deploy".into(),
+            argument_names: vec!["env".into()],
             ..crate::model::SlashCommand::default()
         };
         let json2 = serde_json::to_string(&cmd2).expect("serialize");
@@ -1748,15 +1781,16 @@ mod tests {
                 file,
                 CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             );
-            let want = match cmd.name.as_str() {
+            let want = match cmd.name.string_at("").unwrap_or_default() {
                 "hidden" => Some(false),
                 "shown" => Some(true),
                 other => panic!("unexpected skill {other}"),
             };
             assert_eq!(
-                cmd.user_invocable, want,
+                cmd.user_invocable,
+                want,
                 "{} must honour its frontmatter",
-                cmd.name
+                cmd.name.string_at("").unwrap_or_default()
             );
         }
     }
@@ -1786,8 +1820,8 @@ mod tests {
             &skill_files[0],
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
-        assert_eq!(cmd.name, "demo");
-        assert_eq!(cmd.description, "Demo skill");
+        assert_eq!(cmd.name.string_at(""), Some("demo"));
+        assert_eq!(cmd.description.string_at(""), Some("Demo skill"));
         assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
         assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
         assert_eq!(cmd.content_length, Some(skill_markdown.len()));
@@ -1799,7 +1833,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(file_path.as_path(), skill_dir.join("SKILL.md").as_path());
-                assert_eq!(prompt_template, "Use $ARGUMENTS well\n");
+                assert_eq!(prompt_template.string_at(""), Some("Use $ARGUMENTS well\n"));
             }
             other => panic!("expected Markdown kind, got {other:?}"),
         }

@@ -3,32 +3,30 @@
 //! [`run_subagent`] is the future that
 //! [`crate::pool::StateMachinePool::allocate`] hands to the runtime.
 //!
-//! Two modes coexist, selected on [`SubagentContext::api_client`]:
+//! The multi-turn loop requires a configured [`SubagentContext::api_client`].
+//! A missing client fails before startup persistence or a model request.
 //!
-//! * **Real multi-turn loop** (`api_client = Some`): an imperative loop that
-//!   mirrors the orchestrator's `execute_one_turn` — call the model, append
-//!   the assistant turn, dispatch any `tool_use` blocks through the inherited
-//!   [`lingxi_core::host::ToolInvoker`], feed the results back as a user message, and
-//!   repeat until the model stops (`end_turn` / no tool use) or `max_turns`
-//!   is hit. A `UserExit` / `UserInterrupt` arriving on `event_rx` aborts the
-//!   loop and surfaces [`SubagentEvent::Killed`]. When
-//!   [`crate::context::SubagentContext::persistent`] is set, the loop does not
-//!   return on a terminal stop: it parks awaiting the next inbound
-//!   [`lingxi_core::Event::UserMessage`], appends it to history, and runs the next
-//!   turn-set — modelling a long-lived, message-driven teammate.
-//! * **Legacy stub** (`api_client = None`): the M1.11 reducer-driven stub that
-//!   completes after the first inbound event. Retained for back-compat with
-//!   callers that haven't wired an API client yet.
+//! The loop calls the model, dispatches tools, and repeats until the model
+//! stops or the turn limit is reached. A termination event emits `Killed`.
+//! Persistent agents park between turn sets and resume on the next input.
 
 use crate::context::SubagentContext;
+use crate::mod_prompt_attachment::ChildPromptAttachments;
+use crate::mod_turn_complete::{child_turn_start_text, fire_child_turn_start, ChildTurnComplete};
 use futures::StreamExt;
-use lingxi_core::host::WorkflowQueryWatchdog;
-use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
+use hooks::ExactHookText;
+use lingxi_core::host::json_schema_validator::{JsonSchemaValidation, SchemaProfile};
+use lingxi_core::host::{CancellationToken, WorkflowQueryWatchdog};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{AgentId, ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{HistoryEvent, LlmError};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+#[path = "runner_live_tools.rs"]
+mod live_tools;
 
 /// Events emitted by [`run_subagent`] back to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,25 +44,25 @@ pub enum SubagentEvent {
     Completed {
         /// Agent that completed.
         agent_id: AgentId,
-        /// Final result payload (free-form JSON).
-        result: serde_json::Value,
-        /// Wire usage from the FINAL model response (the spawner translates this
-        /// into `lingxi_core::host::SubagentUsage` + the result-level token total). The
-        /// legacy stub path has no real round-trips and emits `ExecutionUsage::default()`.
+        /// Final result payload in the current exact JSON carrier.
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        result: Utf16JsonProjection,
+        /// Final response usage, translated by the spawner into the result's
+        /// [`lingxi_core::host::SubagentUsage`] and token total.
         usage: llm_runtime::ExecutionUsage,
         /// Number of tool-use blocks executed across the run (claude
-        /// `totalToolUseCount`). `0` on the stub path.
+        /// `totalToolUseCount`).
         total_tool_use_count: u64,
         /// Wall-clock duration of the run in milliseconds (claude
-        /// `totalDurationMs`). `0` on the stub path.
+        /// `totalDurationMs`).
         total_duration_ms: u64,
         /// Number of assistant messages produced across the run (claude
         /// `agentMessages.length`, fed into `tengu_agent_tool_completed`'s
-        /// `assistant_message_count`). `0` on the stub path.
+        /// `assistant_message_count`).
         assistant_message_count: u64,
         /// The FINAL assistant turn's provider request id (claude
         /// `lastAssistantMessage.requestId`) — used to gate
-        /// `tengu_cache_eviction_hint`. `None` on the stub path.
+        /// `tengu_cache_eviction_hint`.
         last_request_id: Option<String>,
         /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
         #[serde(default)]
@@ -76,10 +74,12 @@ pub enum SubagentEvent {
         /// values from the last turn that completed successfully BEFORE the
         /// error — the failing turn's own (real, provider-billed) tokens are
         /// not included, because they were never captured. `true` on every
-        /// other path (clean stop, max-turns exhaustion, stub) where the
-        /// usage fields are the real, complete totals.
+        /// other completed path with complete usage totals.
         #[serde(default = "usage_complete_default")]
         usage_complete: bool,
+        /// Trusted final reporting disposition and persisted whole report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handback: Option<lingxi_core::host::handback::HandbackState>,
     },
     /// Agent terminated due to an error.
     Failed {
@@ -94,8 +94,7 @@ pub enum SubagentEvent {
         /// exhaustion) still reflects real, already-billed provider spend
         /// from any turn that succeeded before it — this lets a caller price
         /// that spend instead of settling it at $0. `ExecutionUsage::default()` on
-        /// every path that made no real round-trip (spawn-time failure, the
-        /// legacy stub).
+        /// every startup failure before a real round-trip.
         #[serde(default)]
         cumulative_usage: llm_runtime::ExecutionUsage,
     },
@@ -109,7 +108,46 @@ pub enum SubagentEvent {
         /// Agent that produced the message.
         agent_id: AgentId,
         /// Free-form message payload (full schema lands in Plan 09+).
-        message: serde_json::Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        message: Utf16JsonProjection,
+        /// Shared session-agent stream index. Hidden lifecycle rows have no
+        /// public transcript index.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_index: Option<u64>,
+    },
+    /// Host-only settled transcript snapshot used by the local-agent registry
+    /// for Native `pae` result extraction. This is sent after the runner has
+    /// applied tombstones, fallback stitching, and retained-row hooks; it is
+    /// not a model/SDK message and must not be projected as one.
+    #[serde(skip)]
+    TranscriptSnapshot {
+        /// Agent whose settled history is being replaced.
+        agent_id: AgentId,
+        /// The exact current runner history after terminal settlement.
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    },
+    /// Host-only transcript deletion emitted by a server-fallback decision.
+    /// `display_only` is preserved, but does not prevent UUID-based deletion.
+    #[serde(skip)]
+    ServerFallbackTombstone {
+        /// Agent whose row was removed.
+        agent_id: AgentId,
+        /// Complete row facts available to the Agent host.
+        message: lingxi_core::host::ServerFallbackTombstoneMessage,
+        /// Native presentation flag.
+        display_only: bool,
+    },
+    /// Host-only synthetic API-error row. This is not a provider message or
+    /// `LlmError`; the nested query message is used only for Agent history and
+    /// observer presentation.
+    #[serde(skip)]
+    ServerFallbackApiErrorRow {
+        /// Agent that emitted the row.
+        agent_id: AgentId,
+        /// Native outer row envelope.
+        row: lingxi_core::host::ServerFallbackApiErrorRow,
+        /// Shared session-agent stream index assigned to the visible row.
+        message_index: u64,
     },
 }
 
@@ -121,30 +159,26 @@ fn usage_complete_default() -> bool {
     true
 }
 
-fn completed_result_text(result: &serde_json::Value) -> Option<String> {
-    if let Some(text) = result.get("text").and_then(serde_json::Value::as_str) {
+fn completed_result_text(result: &Utf16JsonProjection) -> Option<String> {
+    if let Some(text) = result.string_at("/text") {
         if !text.is_empty() {
-            return Some(text.to_string());
+            return Some(text.to_owned());
         }
     }
-    let content = result
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|block| {
-                    (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-                        .then(|| block.get("text").and_then(serde_json::Value::as_str))
-                        .flatten()
-                        .map(str::to_string)
-                })
-                .collect::<Vec<String>>()
-        })?;
-    if content.is_empty() {
+    let content = result.at_pointer("/content")?;
+    let mut text_blocks = Vec::new();
+    for index in 0..content.array_len()? {
+        let block = content.get_index(index)?;
+        if block.get_property("type").and_then(|value| value.as_str()) == Some("text") {
+            if let Some(text) = block.get_property("text").and_then(|value| value.as_str()) {
+                text_blocks.push(text.to_owned());
+            }
+        }
+    }
+    if text_blocks.is_empty() {
         None
     } else {
-        Some(content.join("\n"))
+        Some(text_blocks.join("\n"))
     }
 }
 
@@ -152,6 +186,1285 @@ fn completed_result_text(result: &serde_json::Value) -> Option<String> {
 /// `totalDurationMs`).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+async fn publish_local_agent_idle_fact(ctx: &SubagentContext, value: Option<bool>) {
+    let (Some(registry), Some(value)) = (&ctx.task_registry, value) else {
+        return;
+    };
+    if let Err(error) = registry
+        .update_agent_list_local_fact(
+            ctx.agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(value),
+        )
+        .await
+    {
+        tracing::debug!(
+            agent_id = %ctx.agent_id,
+            %error,
+            "could not update the local-agent idle fact"
+        );
+    }
+}
+
+fn observe_local_tool_result(
+    lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
+    tool_use_id: &lingxi_core::types::ToolUseId,
+) -> Option<bool> {
+    lifecycle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .observe_tool_result(tool_use_id)
+}
+
+fn invocation_context_for_tool(
+    ctx: &SubagentContext,
+    name: &str,
+    tool_use_id: &lingxi_core::types::ToolUseId,
+    assistant_message_id: MessageId,
+    current_history: &[ConversationMessage],
+    system_prompt: Option<&Utf16JsonProjection>,
+    model: &str,
+    model_profile: Option<String>,
+    tool_context_state: Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+) -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
+    let agent_id = ctx.agent_id;
+    lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        native_query_depth: Some(ctx.native_query_depth),
+        cancellation_token: CancellationToken::new(),
+        permission_pause_observer: ctx.task_registry.clone().map(|registry| {
+            lingxi_core::host::permission_gate::PermissionPauseObserver::new(move |ms| {
+                registry.add_permission_paused_ms(agent_id, ms);
+            })
+        }),
+        parent_agent_id: Some(agent_id),
+        origin_session_id: ctx.origin_session_id,
+        instruction_context: Some(ctx.instruction_context.clone()),
+        fork_context: (name == "Agent" || name == lingxi_core::host::handback::HANDBACK_TOOL_NAME)
+            .then(|| lingxi_core::host::tool_invoker::SubagentForkContext {
+                messages: current_history.to_vec(),
+                system_prompt: system_prompt.cloned(),
+            }),
+        tool_execution_policy: if lingxi_core::host::is_fusion_panel_type(
+            &ctx.agent_definition.agent_type,
+        ) {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel
+        } else {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary
+        },
+        agent_name: ctx.agent_name.clone(),
+        team_name: ctx.team_name.clone(),
+        is_async: ctx.is_async,
+        is_non_interactive_session: ctx.is_async
+            || lingxi_core::host::session_flags::effective_non_interactive_session(),
+        can_show_permission_prompts: ctx.can_show_permission_prompts,
+        cwd: ctx.cwd.clone(),
+        tool_use_id: Some(tool_use_id.as_str().to_string()),
+        assistant_message_id: Some(assistant_message_id),
+        depth: ctx.depth,
+        observer: ctx
+            .observer
+            .as_ref()
+            .filter(|observer| {
+                observer.observe_subagents
+                    && ctx.depth < crate::observer::DEFAULT_OBSERVER_FANOUT_DEPTH
+            })
+            .cloned(),
+        parent_model: Some(model.to_owned()),
+        parent_model_profile: model_profile,
+        agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
+        tool_context_state,
+        current_history: current_history.to_vec(),
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
+        mode_override: ctx.permission_mode_override.clone(),
+        request_source: None,
+        frozen_command_denies: ctx.frozen_command_denies.clone(),
+    }
+}
+
+struct AgentStreamAttempt {
+    response: Option<
+        Result<
+            (
+                llm_runtime::HistoryResponse,
+                futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+            ),
+            (Vec<llm_runtime::ContentBlock>, LlmError),
+        >,
+    >,
+    assistant_rows: Vec<crate::transcript::StagedAssistantRow>,
+    ordered_rows: Vec<ConversationMessage>,
+    /// Native `je`: completed user/tool-result and attachment rows only.
+    /// This is intentionally distinct from the full executor/result queue.
+    je_rows: Vec<ConversationMessage>,
+    early_tool_result_ids: std::collections::HashSet<lingxi_core::types::ToolUseId>,
+    tool_calls: Vec<(
+        live_tools::LiveAgentToolCall,
+        Option<
+            Result<
+                lingxi_core::host::tool_invoker::ToolInvocationResult,
+                lingxi_core::host::tool_invoker::ToolInvokerError,
+            >,
+        >,
+    )>,
+    request_messages: Vec<ConversationMessage>,
+    declined_fallback: Option<String>,
+    declined_api_error_row: Option<lingxi_core::host::ServerFallbackApiErrorRow>,
+    partial_response: Option<llm_runtime::HistoryResponse>,
+}
+
+impl AgentStreamAttempt {
+    fn failed(error: LlmError, request_messages: Vec<ConversationMessage>) -> Self {
+        Self {
+            response: Some(Err((Vec::new(), error))),
+            assistant_rows: Vec::new(),
+            ordered_rows: Vec::new(),
+            je_rows: Vec::new(),
+            early_tool_result_ids: std::collections::HashSet::new(),
+            tool_calls: Vec::new(),
+            request_messages,
+            declined_fallback: None,
+            declined_api_error_row: None,
+            partial_response: None,
+        }
+    }
+}
+
+fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAgentToolDispatch> {
+    let invoker = ctx.tool_invoker.clone()?;
+    let handback = ctx.handback.clone();
+    Some(std::sync::Arc::new(move |call| {
+        let invoker = invoker.clone();
+        let handback = handback.clone();
+        Box::pin(async move {
+            if call.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME
+                && handback.as_ref().is_some_and(|runtime| runtime.eligible)
+            {
+                if let Some(runtime) = handback {
+                    let tool: std::sync::Arc<dyn tool_api::Tool> =
+                        std::sync::Arc::new(crate::handback::SubagentHandbackTool(runtime));
+                    invoker
+                        .invoke_supplied_detailed(
+                            &call.name,
+                            call.input,
+                            call.context,
+                            None,
+                            std::sync::Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
+                        )
+                        .await
+                } else {
+                    Err(lingxi_core::host::tool_invoker::ToolInvokerError::NotFound(
+                        call.name,
+                    ))
+                }
+            } else {
+                invoker
+                    .invoke_detailed(&call.name, call.input, call.context, None)
+                    .await
+            }
+        }) as futures::future::BoxFuture<'static, _>
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_assistant_row(
+    // api_block_index identifies the append row. A complete-only response
+    // uses Native's row index 0 even though each ToolCall keeps its own source
+    // content ordinal for dispatch and fallback bookkeeping.
+    api_block_index: u32,
+    blocks: &[llm_runtime::ContentBlock],
+    stop_reason: Option<&str>,
+    source_tool_use_block_indices: &[u32],
+    ctx: &SubagentContext,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    prior_history: &[ConversationMessage],
+    system_prompt: Option<&Utf16JsonProjection>,
+    response_model: &str,
+    logical_model: &str,
+    logical_model_profile: Option<String>,
+    tool_context_state: Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+    allowed_tools: &[String],
+    force_structured_tool: Option<&str>,
+    defer_local_work: bool,
+    retryable_body: &std::sync::atomic::AtomicBool,
+    live_output_started: &std::sync::atomic::AtomicBool,
+    tool_effects_started: &std::sync::atomic::AtomicBool,
+    emitted_assistant_row_ids: &mut std::collections::HashSet<MessageId>,
+    assistant_row_models: &mut std::collections::HashMap<MessageId, String>,
+    executor: &mut live_tools::LiveAgentToolExecutor,
+    dispatch: Option<&live_tools::LiveAgentToolDispatch>,
+    prior_siblings: &mut Vec<(u32, lingxi_core::types::ContentBlock)>,
+    rows: &mut Vec<crate::transcript::StagedAssistantRow>,
+    ordered_rows: &mut Vec<ConversationMessage>,
+    lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    let content = translate_response_blocks(blocks);
+    if content.is_empty() {
+        return;
+    }
+    let raw = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content,
+        stop_reason: stop_reason.map(str::to_owned),
+
+        resumable: None,
+    };
+    let staged = if defer_local_work {
+        crate::transcript::StagedAssistantRow::from_source(api_block_index, raw.clone())
+    } else if let Some(writer) = transcript {
+        match writer
+            .accept_assistant_block(api_block_index, raw.clone(), prior_history)
+            .await
+        {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::warn!(%error, "could not accept assistant row");
+                crate::transcript::StagedAssistantRow::from_source(api_block_index, raw)
+            }
+        }
+    } else {
+        crate::transcript::StagedAssistantRow::from_source(api_block_index, raw.clone())
+    };
+    debug_assert_eq!(
+        staged.source_tool_uses.len(),
+        source_tool_use_block_indices.len(),
+        "every source ToolCall needs its provider content index"
+    );
+    assistant_row_models.insert(staged.accepted.id(), response_model.to_owned());
+
+    // Native's through wrapper yields the same row after session.append has
+    // projected it. The append merger keeps the original ToolUse block even
+    // when a hook returns only accepted Text, so query history, emitted events,
+    // and eventual JSONL persistence all observe that accepted row.
+    if !defer_local_work && emitted_assistant_row_ids.insert(staged.accepted.id()) {
+        live_output_started.store(true, std::sync::atomic::Ordering::Relaxed);
+        emit_message(out_tx, ctx.agent_id, &staged.accepted).await;
+    }
+    ordered_rows.push(staged.accepted.clone());
+    rows.push(staged.clone());
+
+    if staged.source_tool_uses.is_empty() {
+        return;
+    }
+
+    let assistant_message_id = staged.accepted.id();
+    for (source_tool_use, index) in staged
+        .source_tool_uses
+        .iter()
+        .cloned()
+        .zip(source_tool_use_block_indices.iter().copied())
+    {
+        let lingxi_core::types::ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            provider_id,
+        } = &source_tool_use
+        else {
+            continue;
+        };
+        let id = id.clone();
+        let name = name.clone();
+        let input = input.clone();
+        let provider_id = provider_id.clone();
+
+        let idle_update = lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe_assistant_row([(id.clone(), name == "Agent")]);
+        publish_local_agent_idle_fact(ctx, idle_update).await;
+        executor.track_tool_use(index, id.clone());
+
+        if force_structured_tool == Some(name.as_str())
+            || (!allowed_tools.is_empty() && !allowed_tools.iter().any(|allowed| allowed == &name))
+        {
+            prior_siblings.push((index, source_tool_use));
+            continue;
+        }
+        let Some(dispatch) = dispatch else {
+            prior_siblings.push((index, source_tool_use));
+            continue;
+        };
+
+        let mut call_context = invocation_context_for_tool(
+            ctx,
+            &name,
+            &id,
+            assistant_message_id,
+            prior_history,
+            system_prompt,
+            logical_model,
+            logical_model_profile.clone(),
+            tool_context_state.clone(),
+        );
+        // Main's W1 carrier distinguishes the query's pre-call history, the
+        // current accepted row and earlier source ToolUse blocks.
+        call_context.assistant_message = Some(staged.accepted.clone());
+        call_context.same_turn_tool_uses = prior_siblings
+            .iter()
+            .map(|(_, sibling)| sibling.clone())
+            .collect();
+
+        let concurrency_safe = ctx
+            .tool_invoker
+            .as_ref()
+            .and_then(|invoker| invoker.tool_is_concurrency_safe(&name, &input))
+            .unwrap_or(false);
+        let call = live_tools::LiveAgentToolCall {
+            block_index: index,
+            id,
+            name,
+            input,
+            provider_id,
+            concurrency_safe,
+            context: call_context,
+        };
+        if defer_local_work {
+            executor.add_call_deferred(call, true);
+        } else {
+            tool_effects_started.store(true, std::sync::atomic::Ordering::Relaxed);
+            retryable_body.store(false, std::sync::atomic::Ordering::Relaxed);
+            executor.add_call(call, true, dispatch);
+        }
+        prior_siblings.push((index, source_tool_use));
+    }
+}
+
+fn assistant_content(message: &ConversationMessage) -> &[lingxi_core::types::ContentBlock] {
+    match message {
+        ConversationMessage::Assistant { content, .. } => content,
+        _ => &[],
+    }
+}
+
+async fn emit_unpublished_assistant_rows(
+    rows: &[crate::transcript::StagedAssistantRow],
+    emitted_ids: &mut std::collections::HashSet<MessageId>,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    agent_id: AgentId,
+    live_output_started: &std::sync::atomic::AtomicBool,
+) {
+    for row in rows {
+        if emitted_ids.insert(row.accepted.id()) {
+            live_output_started.store(true, std::sync::atomic::Ordering::Relaxed);
+            emit_message(out_tx, agent_id, &row.accepted).await;
+        }
+    }
+}
+
+async fn accept_deferred_assistant_rows(
+    rows: &mut [crate::transcript::StagedAssistantRow],
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    prior_history: &[ConversationMessage],
+    stop_reason: Option<&str>,
+) {
+    for row in rows {
+        if let Some(writer) = transcript {
+            match writer
+                .accept_assistant_block(row.api_block_index, row.accepted.clone(), prior_history)
+                .await
+            {
+                Ok(accepted) => {
+                    row.accepted = accepted.accepted;
+                    row.source_tool_uses = accepted.source_tool_uses;
+                }
+                Err(error) => tracing::warn!(%error, "could not accept qualified assistant block"),
+            }
+        }
+        if let ConversationMessage::Assistant {
+            stop_reason: accepted_stop_reason,
+            ..
+        } = &mut row.accepted
+        {
+            *accepted_stop_reason = stop_reason.map(str::to_owned);
+        }
+    }
+}
+
+async fn persist_salvaged_assistant_rows(
+    rows: &mut [crate::transcript::StagedAssistantRow],
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &mut [ConversationMessage],
+) {
+    for row in rows {
+        if let Some(writer) = transcript {
+            if let Err(error) = writer.persist_assistant_block(row, Some("api_error")).await {
+                tracing::warn!(%error, "could not persist salvaged assistant block");
+            }
+        } else {
+            if let ConversationMessage::Assistant { stop_reason, .. } = &mut row.accepted {
+                *stop_reason = Some("api_error".to_string());
+            }
+        }
+        if let Some(existing) = history
+            .iter_mut()
+            .find(|message| message.id() == row.accepted.id())
+        {
+            *existing = row.accepted.clone();
+        }
+    }
+}
+
+fn remove_discarded_assistant_rows(
+    assistant_rows: &mut Vec<crate::transcript::StagedAssistantRow>,
+    ordered_rows: &mut Vec<ConversationMessage>,
+    discarded_blocks: &[usize],
+    assistant_row_models: &mut std::collections::HashMap<MessageId, String>,
+    target_model: Option<&str>,
+) -> Vec<(crate::transcript::StagedAssistantRow, Option<String>)> {
+    let removed_message_ids = assistant_rows
+        .iter()
+        .filter(|row| {
+            discarded_blocks.contains(&(row.api_block_index as usize))
+                || target_model.is_some_and(|model| {
+                    assistant_row_models
+                        .get(&row.accepted.id())
+                        .is_some_and(|row_model| row_model == model)
+                })
+        })
+        .map(|row| row.accepted.id())
+        .collect::<std::collections::HashSet<_>>();
+    let removed_rows = assistant_rows
+        .iter()
+        .filter(|row| removed_message_ids.contains(&row.accepted.id()))
+        .map(|row| {
+            (
+                row.clone(),
+                assistant_row_models.get(&row.accepted.id()).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assistant_rows.retain(|row| !removed_message_ids.contains(&row.accepted.id()));
+    assistant_row_models.retain(|row_id, _| !removed_message_ids.contains(row_id));
+    ordered_rows.retain_mut(|message| !removed_message_ids.contains(&message.id()));
+    removed_rows
+}
+
+fn clear_stream_je_rows(
+    je_rows: &mut Vec<ConversationMessage>,
+    ordered_rows: &mut Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    let removed_ids = je_rows
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<std::collections::HashSet<_>>();
+    ordered_rows.retain(|message| !removed_ids.contains(&message.id()));
+    std::mem::take(je_rows)
+}
+
+fn fallback_tombstone_for_message(
+    message: &ConversationMessage,
+    model: Option<&str>,
+) -> lingxi_core::host::ServerFallbackTombstoneMessage {
+    let (message_type, content, stop_reason) = match message {
+        ConversationMessage::Assistant {
+            content,
+            stop_reason,
+            ..
+        } => ("assistant", content.clone(), stop_reason.clone()),
+        ConversationMessage::User { content, .. } => ("user", content.clone(), None),
+        ConversationMessage::System { content, .. } => {
+            let units = content
+                .string_units("")
+                .expect("system message content is a source string");
+            (
+                "system",
+                vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&units),
+                    utf16_code_units: units,
+                    citations: None,
+                }],
+                None,
+            )
+        }
+    };
+    lingxi_core::host::ServerFallbackTombstoneMessage {
+        uuid: message.id(),
+        message_type: message_type.into(),
+        timestamp: chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
+        request_id: None,
+        request_ref: None,
+        provider_message_id: None,
+        model: model.map(str::to_owned),
+        stop_reason,
+        stop_details: None,
+        usage: None,
+        content,
+        is_api_error_message: None,
+        supersedes_uuids: None,
+    }
+}
+
+async fn emit_fallback_tombstone(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    agent_id: AgentId,
+    message: &ConversationMessage,
+    model: Option<&str>,
+    display_only: bool,
+) {
+    let tombstone = fallback_tombstone_for_message(message, model);
+    if let Some(writer) = transcript {
+        if let Err(error) = writer
+            .remove_server_fallback_row(&tombstone, display_only)
+            .await
+        {
+            tracing::warn!(%error, row_id = %tombstone.uuid, "could not remove server-fallback transcript row");
+        }
+    }
+    let _ = out_tx
+        .send(SubagentEvent::ServerFallbackTombstone {
+            agent_id,
+            message: tombstone,
+            display_only,
+        })
+        .await;
+}
+
+async fn append_live_stream_rows(
+    ordered_rows: Vec<ConversationMessage>,
+    je_rows: &[ConversationMessage],
+    assistant_rows: &mut [crate::transcript::StagedAssistantRow],
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &mut Vec<ConversationMessage>,
+    transcript_written: &mut usize,
+    stop_reason: Option<&str>,
+) {
+    // `K` and `je` are separate Native query arrays. The staged assistant
+    // UUIDs identify K; the explicit JE vector contains only projected user
+    // rows (including user rows carrying attachment blocks). Other executor
+    // context rows must not leak into the next provider history merely because
+    // their message enum is not Assistant.
+    let assistant_row_ids = assistant_rows
+        .iter()
+        .map(|row| row.accepted.id())
+        .collect::<std::collections::HashSet<_>>();
+    let je_row_ids = je_rows
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut append_history = history.clone();
+    let mut assistant_history = Vec::new();
+    let mut je_history = Vec::new();
+    for message in ordered_rows {
+        let row_id = message.id();
+        if assistant_row_ids.contains(&row_id) {
+            match message {
+                message @ ConversationMessage::Assistant { .. } => {
+                    let history_message = if let Some(row) = assistant_rows
+                        .iter_mut()
+                        .find(|row| row.accepted.id() == row_id)
+                    {
+                        if let Some(writer) = transcript {
+                            if let Err(error) =
+                                writer.persist_assistant_block(row, stop_reason).await
+                            {
+                                tracing::warn!(%error, "could not persist completed assistant block");
+                            }
+                        } else if let Some(stop_reason) = stop_reason {
+                            if let ConversationMessage::Assistant {
+                                stop_reason: row_stop_reason,
+                                ..
+                            } = &mut row.accepted
+                            {
+                                *row_stop_reason = Some(stop_reason.to_string());
+                            }
+                        }
+                        row.accepted.clone()
+                    } else {
+                        message
+                    };
+                    append_history.push(history_message.clone());
+                    assistant_history.push(history_message);
+                }
+                _ => {}
+            }
+        } else {
+            let mut stored = message.clone();
+            if let Some(writer) = transcript {
+                if let Err(error) = writer.record_retained(&mut stored, &append_history).await {
+                    tracing::warn!(%error, "could not persist streamed executor message row");
+                }
+            }
+            if je_row_ids.contains(&row_id) {
+                append_history.push(message.clone());
+                je_history.push(message);
+            }
+        }
+    }
+    history.extend(assistant_history);
+    history.extend(je_history);
+    *transcript_written = history.len();
+}
+
+async fn append_unmatched_stream_tool_results(
+    assistant_rows: &[crate::transcript::StagedAssistantRow],
+    error: &str,
+    error_utf16: &[u16],
+    already_result_ids: &mut std::collections::HashSet<lingxi_core::types::ToolUseId>,
+    ordered_rows: &mut Vec<ConversationMessage>,
+    je_rows: &mut Vec<ConversationMessage>,
+    lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
+    ctx: &SubagentContext,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    for row in assistant_rows {
+        for block in &row.source_tool_uses {
+            let lingxi_core::types::ContentBlock::ToolUse {
+                id, provider_id, ..
+            } = block
+            else {
+                continue;
+            };
+            if !already_result_ids.insert(id.clone()) {
+                continue;
+            }
+            let error_prefix = "The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: ";
+            let content_display = format!("{error_prefix}{error}");
+            let mut content_utf16 = error_prefix.encode_utf16().collect::<Vec<_>>();
+            content_utf16.extend_from_slice(error_utf16);
+            let result = lingxi_core::types::ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: Utf16JsonProjection::root_string(content_display, content_utf16)
+                    .expect("the display string matches the exact UTF-16 tool result"),
+                is_error: Some(true),
+                provider_tool_use_id: provider_id.clone(),
+                content_blocks: None,
+            };
+            let message = ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![result],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
+            };
+            emit_message(out_tx, ctx.agent_id, &message).await;
+            ordered_rows.push(message.clone());
+            je_rows.push(message);
+            let idle_update = observe_local_tool_result(lifecycle, id);
+            publish_local_agent_idle_fact(ctx, idle_update).await;
+        }
+    }
+}
+
+fn live_tool_result_block(
+    name: &str,
+    id: &lingxi_core::types::ToolUseId,
+    provider_id: Option<&str>,
+    result: &Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    >,
+) -> Option<ContentBlock> {
+    match result {
+        Ok(invocation) => Some(successful_live_tool_result_block(
+            name,
+            id,
+            provider_id,
+            invocation,
+        )),
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(_)) => None,
+        Err(error) => Some(ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: error.model_tool_result_content(),
+            is_error: Some(true),
+            provider_tool_use_id: provider_id.map(str::to_owned),
+            content_blocks: None,
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_live_tool_completion(
+    call: Option<live_tools::LiveAgentToolCall>,
+    result: &Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    >,
+    ctx: &SubagentContext,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    ordered_rows: &mut Vec<ConversationMessage>,
+    je_rows: &mut Vec<ConversationMessage>,
+    early_tool_result_ids: &mut std::collections::HashSet<lingxi_core::types::ToolUseId>,
+    lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
+) {
+    let Some(call) = call else {
+        return;
+    };
+    let live_tools::LiveAgentToolCall {
+        id,
+        name,
+        provider_id,
+        ..
+    } = call;
+    let Some(block) = live_tool_result_block(&name, &id, provider_id.as_deref(), result) else {
+        return;
+    };
+    let tool_use_id = id;
+    early_tool_result_ids.insert(tool_use_id.clone());
+    let row = ConversationMessage::User {
+        id: MessageId::new(),
+        content: vec![block],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+    };
+    emit_message(out_tx, ctx.agent_id, &row).await;
+    ordered_rows.push(row.clone());
+    je_rows.push(row);
+    if let Ok(invocation) = result {
+        // Native first yields and journals every returned row, then `xr`
+        // projects only user rows (including rows whose content contains
+        // attachments) into `je` and the next model-history array.
+        for message in &invocation.new_messages {
+            emit_message(out_tx, ctx.agent_id, message).await;
+            ordered_rows.push(message.clone());
+            if matches!(message, ConversationMessage::User { .. }) {
+                je_rows.push(message.clone());
+            }
+        }
+    }
+    let idle_update = observe_local_tool_result(lifecycle, &tool_use_id);
+    publish_local_agent_idle_fact(ctx, idle_update).await;
+}
+
+fn successful_live_tool_result_block(
+    name: &str,
+    id: &lingxi_core::types::ToolUseId,
+    provider_id: Option<&str>,
+    invocation: &lingxi_core::host::tool_invoker::ToolInvocationResult,
+) -> ContentBlock {
+    let data = &invocation.data;
+    let supplied_content = invocation.model_content.clone();
+    let mapped_text = supplied_content.clone().unwrap_or_else(|| {
+        if let Some(units) = data.string_units("") {
+            tool_api::tool_trait::source_text_projection_units(&units)
+        } else {
+            let serialized = data
+                .to_json_string()
+                .expect("valid tool result projection serializes as JSON");
+            tool_api::tool_trait::source_text_projection(&serialized)
+        }
+    });
+    let content_blocks =
+        tool_api::tool_result_media::media_content_blocks_for_tool(name, data, &mapped_text).map(
+            |blocks| {
+                Utf16JsonProjection::array(blocks).expect("tool result blocks form a JSON array")
+            },
+        );
+    let content = supplied_content.unwrap_or_else(|| {
+        content_blocks
+            .as_ref()
+            .and_then(|_| tool_api::tool_result_media::ephemeral_summary(data))
+            .unwrap_or(mapped_text)
+    });
+    ContentBlock::ToolResult {
+        tool_use_id: id.clone(),
+        content,
+        is_error: Some(invocation.is_error),
+        provider_tool_use_id: provider_id.map(str::to_owned),
+        content_blocks,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accumulate_agent_stream_live(
+    mut stream: futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    ctx: &SubagentContext,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    request_messages: Vec<ConversationMessage>,
+    system_prompt: Option<Utf16JsonProjection>,
+    initial_response_model: String,
+    logical_tool_model: String,
+    logical_tool_model_profile: Option<String>,
+    tool_context_state: Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+    allowed_tools: &[String],
+    force_structured_tool: Option<&str>,
+    defer_local_work: bool,
+    retryable_body: &std::sync::atomic::AtomicBool,
+    live_output_started: &std::sync::atomic::AtomicBool,
+    tool_effects_started: &std::sync::atomic::AtomicBool,
+    lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) -> AgentStreamAttempt {
+    use llm_runtime::stream_accumulator::{ResponseAccumulator, ResponseAccumulatorUpdate};
+
+    let mut accumulator = ResponseAccumulator::default();
+    let mut executor = live_tools::LiveAgentToolExecutor::new(
+        lingxi_core::host::tool_use_lifecycle::max_tool_use_concurrency(),
+    );
+    let dispatch = live_agent_tool_dispatch(ctx);
+    let mut assistant_rows = Vec::new();
+    let mut ordered_rows = Vec::new();
+    let mut je_rows = Vec::new();
+    let mut emitted_assistant_row_ids = std::collections::HashSet::new();
+    let mut assistant_row_models = std::collections::HashMap::new();
+    let mut early_tool_result_ids = std::collections::HashSet::new();
+    let mut prior_siblings = Vec::new();
+    let mut response: Option<(
+        llm_runtime::HistoryResponse,
+        futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    )> = None;
+    let mut response_error: Option<(Vec<llm_runtime::ContentBlock>, LlmError)> = None;
+    let mut active_response_model = initial_response_model.clone();
+    // Keep the route being served separately from ResponseObserved: Native
+    // emits that event when a fallback candidate starts, before the host has
+    // accepted it. Only an admitted visible hop advances this source route.
+    let mut query_serving_model = initial_response_model;
+    let mut declined_fallback = None;
+    let mut declined_api_error_row = None;
+    let mut partial_response = None;
+
+    loop {
+        enum Next {
+            Event(Option<Result<HistoryEvent, LlmError>>),
+            Tool(
+                Option<(
+                    usize,
+                    Result<
+                        lingxi_core::host::tool_invoker::ToolInvocationResult,
+                        lingxi_core::host::tool_invoker::ToolInvokerError,
+                    >,
+                )>,
+            ),
+        }
+        let next = if executor.has_inflight() {
+            tokio::select! {
+                biased;
+                completion = executor.next_completion() => Next::Tool(completion),
+                event = stream.next() => Next::Event(event),
+            }
+        } else {
+            Next::Event(stream.next().await)
+        };
+        let item = match next {
+            Next::Tool(Some((index, result))) => {
+                if let Some(dispatch) = dispatch.as_ref() {
+                    let call = executor.call(index).cloned();
+                    publish_live_tool_completion(
+                        call,
+                        &result,
+                        ctx,
+                        out_tx,
+                        &mut ordered_rows,
+                        &mut je_rows,
+                        &mut early_tool_result_ids,
+                        lifecycle,
+                    )
+                    .await;
+                    executor.record_completion(index, result, dispatch);
+                }
+                continue;
+            }
+            Next::Tool(None) => continue,
+            Next::Event(item) => item,
+        };
+        let Some(item) = item else {
+            let partial = accumulator.partial_content().to_vec();
+            let error =
+                accumulator
+                    .take_malformed_error()
+                    .unwrap_or_else(|| LlmError::StreamInterrupted {
+                        message: "stream ended without message_stop or completed event".into(),
+                    });
+            response_error = Some((partial, error));
+            break;
+        };
+        let event = match item {
+            Ok(event) => event,
+            Err(error) => {
+                let partial = accumulator.partial_content().to_vec();
+                response_error =
+                    Some((partial, accumulator.take_malformed_error().unwrap_or(error)));
+                break;
+            }
+        };
+
+        if let HistoryEvent::ResponseObserved { model, .. } = &event {
+            active_response_model.clone_from(model);
+        }
+
+        if let HistoryEvent::ServerFallback {
+            event: fallback,
+            lane,
+            profile,
+        } = &event
+        {
+            let visible = matches!(fallback.reason.as_str(), "refusal" | "sticky");
+            let discarded_tool = executor.contains_discarded_tool(&fallback.discarded_blocks);
+            let allowed = !ctx
+                .server_fallback_model_enforcement
+                .as_ref()
+                .is_some_and(|policy| {
+                    visible
+                        && llm_runtime::model::allowlist::model_allowed_under(
+                            policy,
+                            &fallback.to_model,
+                        ) == Some(false)
+                });
+            if visible && !allowed {
+                // Native declines are a query-level abandon, not a decision to
+                // keep reading the rejected serving model's body. The host
+                // executor owns the outstanding ids, so cancel all work and
+                // remove every tracked id even when the event's discarded
+                // list is empty or contains no tool block.
+                let removal = executor.reset_for_server_fallback(None);
+                if let Some(removal) = removal {
+                    let idle_update = lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .apply_removal(&removal);
+                    publish_local_agent_idle_fact(ctx, idle_update).await;
+                }
+                prior_siblings.clear();
+                let removed_rows = remove_discarded_assistant_rows(
+                    &mut assistant_rows,
+                    &mut ordered_rows,
+                    &fallback.discarded_blocks,
+                    &mut assistant_row_models,
+                    Some(&fallback.to_model),
+                );
+                for (row, model) in removed_rows {
+                    emit_fallback_tombstone(
+                        out_tx,
+                        transcript,
+                        ctx.agent_id,
+                        &row.accepted,
+                        model.as_deref(),
+                        false,
+                    )
+                    .await;
+                }
+                let tombstoned_je = clear_stream_je_rows(&mut je_rows, &mut ordered_rows);
+                for row in tombstoned_je {
+                    emit_fallback_tombstone(out_tx, transcript, ctx.agent_id, &row, None, false)
+                        .await;
+                }
+                let decline_error = server_fallback_decline_error(
+                    fallback.reason.as_str(),
+                    fallback.to_model.as_str(),
+                );
+                declined_fallback = Some(decline_error);
+                declined_api_error_row = declined_server_fallback_api_error_row(
+                    ctx.api_client.as_deref(),
+                    &query_serving_model,
+                    Some(profile),
+                    fallback,
+                );
+                // Preserve the typed fallback/usage observation, but represent
+                // the host decline outside the provider-error channel.
+                let _ = accumulator.observe(event);
+                partial_response = Some(accumulator.partial_snapshot());
+                break;
+            }
+            if visible && allowed {
+                // Accepted Native fallback always removes discarded assistant
+                // rows from K by their source block identities. JE is separate:
+                // it is retained unless a discarded block was a tool use.
+                let removed_rows = remove_discarded_assistant_rows(
+                    &mut assistant_rows,
+                    &mut ordered_rows,
+                    &fallback.discarded_blocks,
+                    &mut assistant_row_models,
+                    None,
+                );
+                if discarded_tool {
+                    let reason = Some(
+                        lingxi_core::host::tool_use_lifecycle::ToolUseRemovalReason::FallbackSweep,
+                    );
+                    if let Some(removal) = executor.reset_for_server_fallback(reason) {
+                        let idle_update = lifecycle
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .apply_removal(&removal);
+                        publish_local_agent_idle_fact(ctx, idle_update).await;
+                    }
+                    prior_siblings.clear();
+                }
+                for (row, model) in removed_rows {
+                    emit_fallback_tombstone(
+                        out_tx,
+                        transcript,
+                        ctx.agent_id,
+                        &row.accepted,
+                        model.as_deref(),
+                        true,
+                    )
+                    .await;
+                }
+                if discarded_tool {
+                    let tombstoned_je = clear_stream_je_rows(&mut je_rows, &mut ordered_rows);
+                    for row in tombstoned_je {
+                        emit_fallback_tombstone(out_tx, transcript, ctx.agent_id, &row, None, true)
+                            .await;
+                    }
+                }
+                query_serving_model =
+                    lingxi_core::host::refusal_server_control::resolve_received_model(
+                        Some(&lane.model),
+                        &fallback.to_model,
+                    );
+                active_response_model.clone_from(&query_serving_model);
+                for row_model in assistant_row_models.values_mut() {
+                    row_model.clone_from(&active_response_model);
+                }
+            }
+        }
+
+        match accumulator.observe(event) {
+            Ok(ResponseAccumulatorUpdate::Continue {
+                completed_block: Some((index, block)),
+            }) => {
+                let source_tool_use_block_indices =
+                    matches!(&block, llm_runtime::ContentBlock::ToolCall { .. })
+                        .then_some(index)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                stage_assistant_row(
+                    index,
+                    std::slice::from_ref(&block),
+                    None,
+                    &source_tool_use_block_indices,
+                    ctx,
+                    transcript,
+                    &request_messages,
+                    system_prompt.as_ref(),
+                    &active_response_model,
+                    &logical_tool_model,
+                    logical_tool_model_profile.clone(),
+                    tool_context_state.clone(),
+                    allowed_tools,
+                    force_structured_tool,
+                    defer_local_work,
+                    retryable_body,
+                    live_output_started,
+                    tool_effects_started,
+                    &mut emitted_assistant_row_ids,
+                    &mut assistant_row_models,
+                    &mut executor,
+                    dispatch.as_ref(),
+                    &mut prior_siblings,
+                    &mut assistant_rows,
+                    &mut ordered_rows,
+                    lifecycle,
+                    out_tx,
+                )
+                .await;
+            }
+            Ok(ResponseAccumulatorUpdate::Continue { .. }) => {}
+            Ok(ResponseAccumulatorUpdate::Completed(completed)) => {
+                if let Some((fallback, serving_model)) = declined_fallback_in_response(
+                    &completed,
+                    ctx.server_fallback_model_enforcement.as_ref(),
+                    &query_serving_model,
+                ) {
+                    let error = server_fallback_decline_error(
+                        &fallback.event.reason,
+                        &fallback.event.to_model,
+                    );
+                    declined_api_error_row = declined_server_fallback_api_error_row(
+                        ctx.api_client.as_deref(),
+                        &serving_model,
+                        Some(&fallback.profile),
+                        &fallback.event,
+                    );
+                    partial_response = Some(completed.clone());
+                    let removal = executor.reset_for_server_fallback(None);
+                    if let Some(removal) = removal {
+                        let idle_update = lifecycle
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .apply_removal(&removal);
+                        publish_local_agent_idle_fact(ctx, idle_update).await;
+                    }
+                    declined_fallback = Some(error.clone());
+                    // A complete-response adapter can carry the same host
+                    // observation in metadata. Do not stage its rejected body.
+                    break;
+                }
+                // A client may provide a complete response snapshot instead of
+                // block events. Keep that adapter path complete, while normal
+                // streaming starts each tool at its stop boundary above.
+                if assistant_rows.is_empty() {
+                    // Native normalizes a complete-only response into one
+                    // assistant row at apiBlockIndex 0. Keep source tool
+                    // ordinals separate for the executor and same-row siblings.
+                    let source_tool_use_block_indices = completed
+                        .content
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, block)| {
+                            matches!(block, llm_runtime::ContentBlock::ToolCall { .. })
+                                .then(|| u32::try_from(index).ok())
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>();
+                    let mut complete_row_prior_siblings = Vec::new();
+                    stage_assistant_row(
+                        0,
+                        &completed.content,
+                        completed.stop_reason.as_deref(),
+                        &source_tool_use_block_indices,
+                        ctx,
+                        transcript,
+                        &request_messages,
+                        system_prompt.as_ref(),
+                        &active_response_model,
+                        &logical_tool_model,
+                        logical_tool_model_profile.clone(),
+                        tool_context_state.clone(),
+                        allowed_tools,
+                        force_structured_tool,
+                        defer_local_work,
+                        retryable_body,
+                        live_output_started,
+                        tool_effects_started,
+                        &mut emitted_assistant_row_ids,
+                        &mut assistant_row_models,
+                        &mut executor,
+                        dispatch.as_ref(),
+                        &mut complete_row_prior_siblings,
+                        &mut assistant_rows,
+                        &mut ordered_rows,
+                        lifecycle,
+                        out_tx,
+                    )
+                    .await;
+                }
+                if defer_local_work {
+                    if executor.has_pending_calls() {
+                        tool_effects_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    accept_deferred_assistant_rows(
+                        &mut assistant_rows,
+                        transcript,
+                        &request_messages,
+                        completed.stop_reason.as_deref(),
+                    )
+                    .await;
+                    // Queued calls captured their row before deferred Mod
+                    // acceptance. Update those snapshots after the accepted
+                    // content and terminal metadata are both available.
+                    for row in &assistant_rows {
+                        executor.refresh_assistant_message(&row.accepted);
+                    }
+                    emit_unpublished_assistant_rows(
+                        &assistant_rows,
+                        &mut emitted_assistant_row_ids,
+                        out_tx,
+                        ctx.agent_id,
+                        live_output_started,
+                    )
+                    .await;
+                    if let Some(dispatch) = dispatch.as_ref() {
+                        executor.start_queued_calls(dispatch);
+                    }
+                }
+                response = Some((completed, stream));
+                break;
+            }
+            Err((partial, error)) => {
+                response_error = Some((partial, error));
+                break;
+            }
+        }
+    }
+
+    if response_error.is_some() || declined_fallback.is_some() {
+        // The Native query finalizer drains completed results before it
+        // discards the executor. Preserve every future already ready at this
+        // boundary, cancel the rest before dropping them, and do not start
+        // queued calls while handling a failed provider stream.
+        let completed = executor.abort_inflight_and_collect_ready().await;
+        for (index, result) in completed {
+            let call = executor.call(index).cloned();
+            publish_live_tool_completion(
+                call,
+                &result,
+                ctx,
+                out_tx,
+                &mut ordered_rows,
+                &mut je_rows,
+                &mut early_tool_result_ids,
+                lifecycle,
+            )
+            .await;
+            executor.record_completion_without_scheduling(index, result);
+        }
+        if defer_local_work {
+            // Calls held for host-side response qualification have never run.
+            // Clear their pending lifecycle ids on this failed attempt without
+            // manufacturing ToolResults for effects that were never started.
+            if let Some(removal) = executor.reset_for_server_fallback(None) {
+                let idle_update = lifecycle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .apply_removal(&removal);
+                publish_local_agent_idle_fact(ctx, idle_update).await;
+            }
+        }
+    } else if let Some(dispatch) = dispatch.as_ref() {
+        while executor.has_inflight() {
+            if let Some((index, result)) = executor.next_completion().await {
+                let call = executor.call(index).cloned();
+                publish_live_tool_completion(
+                    call,
+                    &result,
+                    ctx,
+                    out_tx,
+                    &mut ordered_rows,
+                    &mut je_rows,
+                    &mut early_tool_result_ids,
+                    lifecycle,
+                )
+                .await;
+                executor.record_completion(index, result, dispatch);
+            }
+        }
+        executor.mark_completed_normally();
+    }
+    let tool_calls = executor.into_calls();
+    let response = if declined_fallback.is_some() {
+        None
+    } else {
+        Some(response.map(Ok).unwrap_or_else(|| {
+            Err(response_error.unwrap_or_else(|| {
+                (
+                    accumulator.partial_content().to_vec(),
+                    LlmError::StreamInterrupted {
+                        message: "stream ended without message_stop or completed event".into(),
+                    },
+                )
+            }))
+        }))
+    };
+    if partial_response.is_none() && response.as_ref().is_some_and(Result::is_err) {
+        partial_response = Some(accumulator.partial_snapshot());
+    }
+    AgentStreamAttempt {
+        response,
+        assistant_rows,
+        ordered_rows,
+        je_rows,
+        early_tool_result_ids,
+        tool_calls,
+        request_messages,
+        declined_fallback,
+        declined_api_error_row,
+        partial_response,
+    }
 }
 
 const USAGE_LIMIT_NEAR_WRAP_UP_FLAG: &str = "tengu_vellum_anchor";
@@ -210,7 +1523,7 @@ fn workflow_watchdog_timeout_error(phase: &str, timeout: Duration) -> LlmError {
 
 fn is_workflow_watchdog_timeout(error: &LlmError) -> bool {
     matches!(
-        error,
+        error.classification_source(),
         LlmError::TransportTimeout { message }
             if message.starts_with("workflow model query stalled while ")
     )
@@ -290,10 +1603,8 @@ impl Drop for PromptTranscriptCancellationGuard {
 
 /// Subagent state-machine loop.
 ///
-/// When [`SubagentContext::api_client`] is `Some`, drives the real
-/// multi-turn agentic loop (see [`run_subagent_loop`]). Otherwise falls back
-/// to the legacy reducer-driven stub (see [`run_subagent_stub`]). Both emit
-/// [`SubagentEvent`]s on `out_tx`.
+/// Drives the multi-turn loop and emits [`SubagentEvent`]s on `out_tx`.
+/// A missing API client emits a startup failure.
 pub async fn run_subagent(
     ctx: SubagentContext,
     event_rx: mpsc::Receiver<lingxi_core::Event>,
@@ -355,16 +1666,39 @@ pub async fn run_subagent(
     snapshot_cleanup.completed = true;
 }
 
+fn cleanup_agent_inputs(
+    ctx: &SubagentContext,
+) -> llm_runtime::BoxFuture<'static, Result<(), String>> {
+    let owner = ctx
+        .tool_invoker
+        .clone()
+        .map(|invoker| (invoker, ctx.agent_id, ctx.origin_session_id));
+    Box::pin(async move {
+        if let Some((invoker, agent_id, session_id)) = owner {
+            for attempt in 0..3 {
+                match invoker.cleanup_computer_inputs(agent_id, session_id).await {
+                    Ok(()) => return Ok(()),
+                    Err(error) if attempt == 2 => {
+                        return Err(format!(
+                            "Computer input cleanup failed for Agent {agent_id}: {error}. The desktop remains reserved until this owner's inputs are released."
+                        ));
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 async fn run_subagent_inner(
     ctx: SubagentContext,
     event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
-    // Keep a cleanup handle outside the body: both the real loop and the stub
-    // contain many terminal returns, while this dispatcher always regains
-    // control after either future completes.
+    // Keep cleanup outside the loop so every terminal return closes it.
     let diagnostics_cleanup = ctx.new_diagnostics_source.clone();
-    let mut live_hook_model_selection = hooks::registry::HookModelSelection {
+    let mut live_hook_model_selection = hooks::HookModelSelection {
         model: resolve_model(&ctx),
         model_profile: ctx.model_profile.clone(),
     };
@@ -550,8 +1884,8 @@ async fn run_subagent_inner(
     ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
-            model_selection: Some(live_hook_model_selection),
             prompt_transcript: Some(live_hook_transcript),
+            model_selection: Some(live_hook_model_selection.clone()),
             session_id,
             agent_id: Some(agent_id),
             cwd,
@@ -593,67 +1927,6 @@ async fn run_subagent_inner(
 /// forwards it. Only when the spawner has no `default_model` wired (legacy /
 /// tests) does this forward a raw `"inherit"` / bare alias — which then resolves
 /// solely via any configured `routing.aliases`.
-/// Validate a captured `StructuredOutput` input against the workflow
-/// `agent({schema})` JSON Schema (claude-code's Ajv `validateSchema`/`compile`
-/// inside the StructuredOutput tool `call`). Returns a concise leaf-error string
-/// on mismatch, `Ok(())` on a valid input.
-///
-/// BEHAVIORAL parity only: PASS/FAIL matches claude-code (full JSON-Schema
-/// validation), but the error-detail bytes differ from Ajv's
-/// `${instancePath}: ${message}` form (boon's native messages are unportable —
-/// the same intentional divergence as `orchestrator::schema_validation`). The
-/// byte-exact part is the `Output does not match required schema: ` WRAPPER the
-/// caller prepends. A schema that fails to COMPILE is treated as PASS (a LingXi
-/// schema bug must not block the model), matching the binary's stance.
-fn validate_structured_output(
-    schema_json: Option<&str>,
-    input: &serde_json::Value,
-) -> Result<(), String> {
-    let Some(schema_str) = schema_json else {
-        return Ok(());
-    };
-    let schema: serde_json::Value = match serde_json::from_str(schema_str) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    const URL: &str = "mem://structured-output-schema";
-    let mut schemas = boon::Schemas::new();
-    let mut compiler = boon::Compiler::new();
-    if compiler.add_resource(URL, schema).is_err() {
-        return Ok(());
-    }
-    let sch = match compiler.compile(URL, &mut schemas) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-    match schemas.validate(input, sch) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let mut out = Vec::new();
-            flatten_schema_error(&err, &mut out);
-            Err(out.join(", "))
-        }
-    }
-}
-
-/// Flatten a boon validation error into concise `at '<loc>': <kind>` leaves
-/// (mirrors `orchestrator::schema_validation::flatten`).
-fn flatten_schema_error(err: &boon::ValidationError, out: &mut Vec<String>) {
-    if err.causes.is_empty() {
-        let loc = err.instance_location.to_string();
-        let loc = if loc.is_empty() {
-            "(root)".to_string()
-        } else {
-            loc
-        };
-        out.push(format!("at '{loc}': {}", err.kind));
-    } else {
-        for cause in &err.causes {
-            flatten_schema_error(cause, out);
-        }
-    }
-}
-
 /// The workflow `agent({schema})` StructuredOutput retry cap — claude-code
 /// `Fe.MAX_STRUCTURED_OUTPUT_RETRIES ?? OBp`, where `OBp = 5`. The env override
 /// matches the binary's `parseInt(process.env.MAX_STRUCTURED_OUTPUT_RETRIES||"5")`.
@@ -673,79 +1946,311 @@ pub(crate) fn resolve_model(ctx: &SubagentContext) -> String {
     }
 }
 
+/// Consume only host-authored, admitted server-fallback observations. The
+/// provider's `HistoryResponse.model` is not sufficient authority to change a
+/// child query route: the typed event carries both the declared lane and the
+/// actual received model, and the managed policy applies to the latter.
+fn admitted_server_fallback_route(
+    response: &llm_runtime::HistoryResponse,
+    enforcement: Option<&llm_runtime::model::allowlist::ModelEnforcement>,
+) -> Result<Option<(String, String)>, String> {
+    let mut route = None;
+    for fallback in response.server_fallback_events() {
+        let event = &fallback.event;
+        if !matches!(event.reason.as_str(), "refusal" | "sticky") {
+            continue;
+        }
+        if enforcement.is_some_and(|policy| {
+            llm_runtime::model::allowlist::model_allowed_under(policy, &event.to_model)
+                == Some(false)
+        }) {
+            return Err(server_fallback_decline_error(
+                &event.reason,
+                &event.to_model,
+            ));
+        }
+        route = Some((
+            lingxi_core::host::refusal_server_control::resolve_received_model(
+                Some(&fallback.lane.model),
+                &event.to_model,
+            ),
+            fallback.profile,
+        ));
+    }
+    Ok(route)
+}
+
+fn declined_fallback_in_response(
+    response: &llm_runtime::HistoryResponse,
+    enforcement: Option<&llm_runtime::model::allowlist::ModelEnforcement>,
+    initial_serving_model: &str,
+) -> Option<(llm_runtime::history::HistoryServerFallback, String)> {
+    let mut serving_model = initial_serving_model.to_owned();
+    for fallback in response.server_fallback_events() {
+        if !matches!(fallback.event.reason.as_str(), "refusal" | "sticky") {
+            continue;
+        }
+        if enforcement.is_some_and(|policy| {
+            llm_runtime::model::allowlist::model_allowed_under(policy, &fallback.event.to_model)
+                == Some(false)
+        }) {
+            return Some((fallback, serving_model));
+        }
+        serving_model = lingxi_core::host::refusal_server_control::resolve_received_model(
+            Some(&fallback.lane.model),
+            &fallback.event.to_model,
+        );
+    }
+    None
+}
+
+fn declined_server_fallback_api_error_row(
+    api_client: Option<&dyn crate::api::SubagentApiClient>,
+    source_model: &str,
+    profile: Option<&str>,
+    event: &llm_runtime::services::sdk::providers::anthropic::fallback_response::ServerFallbackEvent,
+) -> Option<lingxi_core::host::ServerFallbackApiErrorRow> {
+    let timestamp = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    if event.reason == "sticky" {
+        let text = Utf16JsonProjection::from(
+            lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR,
+        );
+        return Some(lingxi_core::host::ServerFallbackApiErrorRow::new(
+            &text, timestamp,
+        ));
+    }
+    if event.reason != "refusal" {
+        return None;
+    }
+
+    let Some(api_client) = api_client else {
+        tracing::warn!(
+            source_model,
+            "refusal fallback was declined without a provider API facts source"
+        );
+        return None;
+    };
+    let snapshot = match api_client.refusal_api_text_snapshot(source_model, profile) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            tracing::warn!(
+                source_model,
+                profile = profile.unwrap_or("<none>"),
+                "refusal fallback API-error text facts were not supplied"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                source_model,
+                profile = profile.unwrap_or("<none>"),
+                %error,
+                "could not resolve refusal fallback API-error text facts"
+            );
+            return None;
+        }
+    };
+    let text = match snapshot.format(
+        event.api_refusal_category.as_deref(),
+        event.request_id.as_deref(),
+    ) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                source_model,
+                profile = profile.unwrap_or("<none>"),
+                %error,
+                "resolved refusal fallback facts could not render native API-error text"
+            );
+            return None;
+        }
+    };
+    let text = Utf16JsonProjection::from(text);
+    let mut row = lingxi_core::host::ServerFallbackApiErrorRow::new(&text, timestamp);
+    let stop_details = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+        "type": "refusal",
+        "category": event.api_refusal_category,
+        "explanation": null,
+        "fallback_credit_token": null,
+        "fallback_has_prefill_claim": null,
+        "recommended_model": null,
+    }))
+    .expect("generated refusal details are valid JSON");
+    row.set_refusal(event.request_id.clone(), stop_details);
+    Some(row)
+}
+
+fn server_fallback_decline_error(reason: &str, model: &str) -> String {
+    if reason == "sticky" {
+        lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR.to_string()
+    } else {
+        format!(
+            "Server refusal-fallback target \"{}{}",
+            model,
+            llm_runtime::model::allowlist::warnings::NOT_IN_ALLOWLIST_SWAP_DECLINE
+        )
+    }
+}
+
+/// Exact text selected by Native's final-agent backward scan. Plain blocks use
+/// their UTF-8 spelling; `TextJsUtf16` keeps the original JavaScript code units.
+#[derive(Clone)]
+struct ExactAgentText {
+    display: String,
+    units: Vec<u16>,
+}
+
+impl ExactAgentText {
+    fn plain(text: impl Into<String>) -> Self {
+        let display = text.into();
+        let units = display.encode_utf16().collect();
+        Self { display, units }
+    }
+
+    fn projection(&self) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(self.display.clone(), self.units.clone())
+            .expect("exact text display matches its UTF-16 source")
+    }
+}
+
+fn exact_texts_of(blocks: &[lingxi_core::types::ContentBlock]) -> Vec<ExactAgentText> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            lingxi_core::types::ContentBlock::Text { text, .. } => {
+                Some(ExactAgentText::plain(text.clone()))
+            }
+            lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                ..
+            } => Some(ExactAgentText {
+                display: text.clone(),
+                units: utf16_code_units.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Extract the text blocks the final agent response surfaces, with claude's
 /// backward-scan fallback.
-///
-/// Port of claude-code `finalizeAgentTool` (agentToolUtils.ts:304-317): take the
-/// text blocks from the LAST assistant message; if it carried none (the loop
-/// exited mid-turn on a pure `tool_use` turn), fall back to the most recent
-/// assistant message in `history` that DOES have text blocks. Returns the raw
-/// text strings (one per surviving text block) in source order — the caller maps
-/// them into claude's `content: [{type:'text', text}]` array.
 fn final_text_blocks(
     history: &[lingxi_core::types::ConversationMessage],
     final_assistant_blocks: &[lingxi_core::types::ContentBlock],
-) -> Vec<String> {
-    let texts_of = |blocks: &[lingxi_core::types::ContentBlock]| -> Vec<String> {
-        blocks
-            .iter()
-            .filter_map(|b| match b {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<String>>()
-    };
-    // 1. Text from the final assistant message.
-    let primary = texts_of(final_assistant_blocks);
+) -> Vec<ExactAgentText> {
+    let primary = exact_texts_of(final_assistant_blocks);
     if !primary.is_empty() {
         return primary;
     }
-    // 2. Backward scan: most recent assistant message WITH text.
     for msg in history.iter().rev() {
         if let lingxi_core::types::ConversationMessage::Assistant { content, .. } = msg {
-            let t = texts_of(content);
-            if !t.is_empty() {
-                return t;
+            let text = exact_texts_of(content);
+            if !text.is_empty() {
+                return text;
             }
         }
     }
     Vec::new()
 }
 
-/// Build the terminal `Completed.result` JSON for a clean stop.
-///
-/// Carries claude's `content` array (`[{type:'text', text}]`, agentToolUtils.ts
-/// `finalizeAgentTool` return) computed via the backward-scan
-/// [`final_text_blocks`], plus the legacy `text`/`stop_reason` keys existing
-/// consumers (and the runner's own tests) read. `AgentTool` reads `content` to
-/// build claude's structured result + model-facing trailer; the joined `text`
-/// stays for back-compat (`tasks::handlers::local_agent` / `dream`).
+fn joined_exact_text(blocks: &[ExactAgentText]) -> ExactAgentText {
+    let mut display = String::new();
+    let mut units = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            display.push('\n');
+            units.push(u16::from(b'\n'));
+        }
+        display.push_str(&block.display);
+        units.extend_from_slice(&block.units);
+    }
+    ExactAgentText { display, units }
+}
+
+fn plain_json_string(text: impl Into<String>) -> Utf16JsonProjection {
+    ExactAgentText::plain(text).projection()
+}
+
+/// Add the model-visible schema error wrapper without lowering the Ajv detail
+/// from its exact UTF-16 source into a Rust string.
+fn structured_output_validation_error(detail: &Utf16JsonProjection) -> Utf16JsonProjection {
+    const PREFIX: &str = "Output does not match required schema: ";
+    let display = format!("{PREFIX}{}", detail.string_at("").unwrap_or_default());
+    let mut units = PREFIX.encode_utf16().collect::<Vec<_>>();
+    units.extend(detail.string_units("").unwrap_or_default());
+    Utf16JsonProjection::root_string(display, units)
+        .expect("structured-output detail source and display remain aligned")
+}
+
+fn result_object(
+    blocks: Vec<ExactAgentText>,
+    stop_reason: Option<&str>,
+    max_turns: Option<u32>,
+) -> Utf16JsonProjection {
+    let content = blocks
+        .iter()
+        .map(|block| {
+            Utf16JsonProjection::object(vec![
+                ("text".into(), block.projection()),
+                ("type".into(), plain_json_string("text")),
+            ])
+            .expect("result text block is a valid flat object")
+        })
+        .collect::<Vec<_>>();
+    let joined = joined_exact_text(&blocks).projection();
+    let mut fields = vec![(
+        "content".into(),
+        Utf16JsonProjection::array(content).expect("content array"),
+    )];
+    if let Some(max_turns) = max_turns {
+        fields.push((
+            "max_turns".into(),
+            Utf16JsonProjection::parse(&max_turns.to_string()).expect("u32 is JSON number"),
+        ));
+        fields.push(("reason".into(), plain_json_string("max_turns_exhausted")));
+    }
+    fields.push((
+        "stop_reason".into(),
+        stop_reason.map_or_else(
+            || Utf16JsonProjection::parse("null").expect("null is JSON"),
+            |reason| plain_json_string(reason),
+        ),
+    ));
+    fields.push(("text".into(), joined));
+    Utf16JsonProjection::object(fields).expect("completed result is a flat JSON object")
+}
+
+/// Build the terminal current `Completed.result` object directly in the exact
+/// JSON carrier. The text arrays and joined text retain source UTF-16 units.
 fn build_completed_result(
     history: &[lingxi_core::types::ConversationMessage],
     final_assistant_blocks: &[lingxi_core::types::ContentBlock],
     stop_reason: Option<&str>,
     serving_model: &str,
-) -> serde_json::Value {
-    // `ICe`: retracted messages come out before the answer is picked, so a
-    // superseded hop's output cannot become the report.
+    max_turns: Option<u32>,
+) -> Utf16JsonProjection {
     let live = drop_retracted(history);
     let mut blocks = final_text_blocks(&live, final_assistant_blocks);
-    // The `⚠ {notice}` harness note. Upstream unshifts it in `iht` AFTER the
-    // turn-limit note; here the turn-limit note is inserted at index 0 by the
-    // agent tool's finalizer, so prepending here lands the pair in upstream's
-    // order — turn-limit, then this, then the report.
     if let Some(notice) = local_refusal_notice(&live, serving_model) {
-        blocks.insert(0, format!("\u{26A0} {notice}\n"));
+        let mut units = "\u{26A0} ".encode_utf16().collect::<Vec<_>>();
+        units.extend(
+            notice
+                .string_units("")
+                .expect("refusal notice content is a source string"),
+        );
+        units.extend("\n".encode_utf16());
+        blocks.insert(
+            0,
+            ExactAgentText {
+                display: String::from_utf16_lossy(&units),
+                units,
+            },
+        );
     }
-    let content: Vec<serde_json::Value> = blocks
-        .iter()
-        .map(|t| serde_json::json!({ "type": "text", "text": t }))
-        .collect();
-    serde_json::json!({
-        "content": content,
-        "text": blocks.join("\n"),
-        "stop_reason": stop_reason,
-    })
+    result_object(blocks, stop_reason, max_turns)
 }
 
 /// CC 2.1.207 subagent api-error classification (`CTy` / `zho`
@@ -763,7 +2268,7 @@ fn build_completed_result(
 /// which is what the finalize path yields.
 fn classify_api_termination(e: &llm_runtime::LlmError) -> Option<(&'static str, &'static str)> {
     use llm_runtime::LlmError;
-    match e {
+    match e.classification_source() {
         LlmError::Overloaded { .. } => Some((
             "overloaded",
             "API Error: Server error mid-response. The response above may be incomplete.",
@@ -833,18 +2338,10 @@ fn build_recovered_result(
     history: &[lingxi_core::types::ConversationMessage],
     final_assistant_blocks: &[lingxi_core::types::ContentBlock],
     cutoff_note: &str,
-) -> serde_json::Value {
+) -> Utf16JsonProjection {
     let mut blocks = final_text_blocks(history, final_assistant_blocks);
-    blocks.insert(0, cutoff_note.to_string());
-    let content: Vec<serde_json::Value> = blocks
-        .iter()
-        .map(|t| serde_json::json!({ "type": "text", "text": t }))
-        .collect();
-    serde_json::json!({
-        "content": content,
-        "text": blocks.join("\n"),
-        "stop_reason": serde_json::Value::Null,
-    })
+    blocks.insert(0, ExactAgentText::plain(cutoff_note));
+    result_object(blocks, None, None)
 }
 
 /// Assemble the CC 2.1.207 `cutoffNote` (`wTy`): the
@@ -864,12 +2361,20 @@ Everything below is PARTIAL output recovered from the agent before it was cut of
 /// skill's meta user message. claude ignores the `progressMessage` arg
 /// (`_progressMessage` is unused), so this renders only the (resolved) name:
 /// `<command-message>{name}</command-message>\n<command-name>{name}</command-name>\n<skill-format>true</skill-format>`.
-fn format_skill_loading_metadata(skill_name: &str) -> String {
-    format!(
-        "<command-message>{skill_name}</command-message>\n\
-<command-name>{skill_name}</command-name>\n\
-<skill-format>true</skill-format>"
-    )
+fn format_skill_loading_metadata(skill_name: &Utf16JsonProjection) -> ContentBlock {
+    let name_units = skill_name
+        .string_units("")
+        .expect("skill display name is a source string");
+    let mut units = "<command-message>".encode_utf16().collect::<Vec<_>>();
+    units.extend(&name_units);
+    units.extend("</command-message>\n<command-name>".encode_utf16());
+    units.extend(name_units);
+    units.extend("</command-name>\n<skill-format>true</skill-format>".encode_utf16());
+    ContentBlock::TextJsUtf16 {
+        text: String::from_utf16_lossy(&units),
+        utf16_code_units: units,
+        citations: None,
+    }
 }
 
 /// Build the G4 (SubagentStart additionalContext) + G5 (skills) messages claude
@@ -933,13 +2438,15 @@ async fn build_preload_messages(
                 )
                 .await;
             if !agg.additional_contexts.is_empty() {
-                let joined = agg.additional_contexts.join("\n");
-                out.push(ConversationMessage::user(
-                    MessageId::new(),
-                    format!(
-                        "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
-                    ),
-                ));
+                let joined = hooks::ExactHookText::join(&agg.additional_contexts, "\n");
+                out.push(
+                    hooks::ExactHookText::wrapped(
+                        "<system-reminder>\nSubagentStart hook additional context: ",
+                        &joined,
+                        "\n</system-reminder>",
+                    )
+                    .to_conversation_message(MessageId::new(), false),
+                );
             }
         }
     }
@@ -953,7 +2460,12 @@ async fn build_preload_messages(
     if let Some(loader) = &ctx.skill_loader {
         for skill_name in &ctx.agent_definition.skills {
             match loader
-                .resolve_and_load(skill_name, &agent_type, ctx.cwd.as_deref())
+                .resolve_and_load(
+                    skill_name,
+                    &agent_type,
+                    ctx.cwd.as_deref(),
+                    Some(resolve_model(ctx).as_str()),
+                )
                 .await?
             {
                 None => {
@@ -970,9 +2482,7 @@ async fn build_preload_messages(
                     // marks the message meta so last-user-query selection and UI
                     // rendering never mistake a preload for user intent.
                     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + load.content.len());
-                    blocks.push(ContentBlock::Text {
-                        text: format_skill_loading_metadata(&load.display_name),
-                    });
+                    blocks.push(format_skill_loading_metadata(&load.display_name));
                     blocks.extend(load.content);
                     out.push(ConversationMessage::User {
                         id: MessageId::new(),
@@ -980,6 +2490,10 @@ async fn build_preload_messages(
                         is_meta: true,
                         is_compact_summary: false,
                         is_visible_in_transcript_only: false,
+                        turn_companion: None,
+                        usage_limit_note: None,
+                        origin: None,
+                        turn_origin: None,
                     });
                 }
             }
@@ -997,20 +2511,44 @@ async fn build_preload_messages(
 fn translate_response_blocks(
     content: &[llm_runtime::ContentBlock],
 ) -> Vec<lingxi_core::types::ContentBlock> {
+    fn source(
+        payload: &llm_runtime::services::sdk::protocol::JsonPayload,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(payload.as_json_source())
+            .expect("SDK JSON payload retains valid JSON source")
+    }
+    fn source_citations(
+        value: &Option<Option<llm_runtime::services::sdk::protocol::JsonPayload>>,
+    ) -> Option<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>> {
+        value.as_ref().map(|value| value.as_ref().map(source))
+    }
     content
         .iter()
         .filter_map(|b| match b {
-            llm_runtime::ContentBlock::ProviderContent { protocol, value } => Some(lingxi_core::types::ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
+            llm_runtime::ContentBlock::ProviderContent { protocol, value } => Some(lingxi_core::types::ContentBlock::ProviderContent { protocol: protocol.clone(), value: source(value) }),
 
-            llm_runtime::ContentBlock::Text { text, .. }
-            | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => {
-                Some(lingxi_core::types::ContentBlock::Text { text: text.clone() })
+            llm_runtime::ContentBlock::Text { text, citations, .. } => {
+                Some(lingxi_core::types::ContentBlock::Text {
+                    text: text.clone(),
+                    citations: source_citations(citations),
+                })
             }
+            llm_runtime::ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+                ..
+            } => Some(lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: text.clone(),
+                utf16_code_units: utf16_code_units.clone(),
+                citations: source_citations(citations),
+            }),
             llm_runtime::ContentBlock::ToolCall { id, name, input } => {
                 // (cc 2.1.218 `jYd`) Same literal-`\uXXXX` repair the orchestrator
                 // applies — a subagent's tool inputs must be normalized too.
+                let source_input = source(input);
                 let (input, _stats) =
-                    llm_runtime::unicode_repair::repair_tool_input(name, input);
+                    llm_runtime::unicode_repair::repair_tool_input(name, &source_input);
                 Some(lingxi_core::types::ContentBlock::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code); the provider_id sidecar stays None.
@@ -1035,7 +2573,7 @@ fn translate_response_blocks(
                 Some(lingxi_core::types::ContentBlock::ServerToolUse {
                     id: id.clone(),
                     name: name.clone(),
-                    input: input.clone(),
+                    input: source(input),
                 })
             }
             llm_runtime::ContentBlock::ConnectorText {
@@ -1051,7 +2589,7 @@ fn translate_response_blocks(
                 is_error,
             } => Some(lingxi_core::types::ContentBlock::AdvisorToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: content.clone(),
+                content: source(content),
                 is_error: *is_error,
             }),
             // Input-only / non-output variants remain dropped on the response path.
@@ -1071,10 +2609,21 @@ async fn emit_message(
     agent_id: AgentId,
     msg: &lingxi_core::types::ConversationMessage,
 ) {
+    let message_index = crate::transcript::message_row_index(msg);
+    if message_index.is_some() {
+        if let Err(error) = crate::transcript::persist_current_message_index_high_water().await {
+            tracing::warn!(%error, "could not persist session-agent message index high-water");
+        }
+    }
+    let message_source = serde_json::to_string(msg)
+        .expect("current ConversationMessage projection serializes to valid JSON");
+    let message = Utf16JsonProjection::parse(&message_source)
+        .expect("serialized ConversationMessage remains valid JSON source");
     let _ = out_tx
         .send(SubagentEvent::Message {
             agent_id,
-            message: serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
+            message,
+            message_index,
         })
         .await;
 }
@@ -1085,15 +2634,16 @@ async fn emit_message(
 async fn emit_parked(
     ctx: &SubagentContext,
     out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
     agent_id: AgentId,
     history: &[lingxi_core::types::ConversationMessage],
     hook_usage: &llm_runtime::ExecutionUsage,
     hook_model_selection: &hooks::HookModelSelection,
-) -> bool {
+) {
     if !cleanup_before_terminal(
         ctx,
         out_tx,
-        None,
+        transcript,
         llm_runtime::ExecutionUsage::default(),
         history,
         hook_usage,
@@ -1101,21 +2651,25 @@ async fn emit_parked(
     )
     .await
     {
-        return false;
+        return;
     }
+    if let Some(writer) = transcript {
+        let _ = writer.record_terminal("idle", None).await;
+    }
+    publish_prompt_hook_transcript(ctx, history, hook_usage, hook_model_selection);
     emit_message(
         out_tx,
         agent_id,
         &lingxi_core::types::ConversationMessage::System {
             id: lingxi_core::types::MessageId::new(),
-            content: "idle".to_string(),
+            content: "idle".to_string().into(),
             subtype: Some("agent_idle".to_string()),
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         },
     )
     .await;
-    true
 }
 
 async fn emit_progress(
@@ -1135,7 +2689,7 @@ async fn emit_progress(
 
 async fn flush_transcript(
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    history: &[lingxi_core::types::ConversationMessage],
+    history: &mut [lingxi_core::types::ConversationMessage],
     written: &mut usize,
 ) {
     let Some(writer) = transcript else {
@@ -1145,8 +2699,10 @@ async fn flush_transcript(
     // malformed restored history so transcript persistence can never panic and
     // mask the actual agent terminal event.
     let start = (*written).min(history.len());
-    for message in &history[start..] {
-        if writer.record(message).await.is_err() {
+    for index in start..history.len() {
+        let (prior, remaining) = history.split_at_mut(index);
+        let message = &mut remaining[0];
+        if writer.record_retained(message, prior).await.is_err() {
             break;
         }
         *written += 1;
@@ -1190,7 +2746,7 @@ async fn emit_failed(
     ctx: &SubagentContext,
     out_tx: &mpsc::Sender<SubagentEvent>,
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    history: &[lingxi_core::types::ConversationMessage],
+    history: &mut [lingxi_core::types::ConversationMessage],
     written: &mut usize,
     agent_id: AgentId,
     error: String,
@@ -1207,10 +2763,6 @@ async fn emit_failed(
     if let Some(writer) = transcript {
         let _ = writer.record_terminal("failed", Some(&error)).await;
     }
-    // Publish after retained rows are accepted and before the terminal event.
-    // Every failed exit, including pre-query failures, shares this boundary.
-    // Initial instruction loading precedes the writer and history seeding. A
-    // cold resume still owns its already-retained transcript at that boundary.
     let hook_history = if transcript.is_none() && history.is_empty() {
         ctx.resumed_history.as_deref().unwrap_or(history)
     } else {
@@ -1260,6 +2812,48 @@ async fn emit_killed(
         let _ = writer.record_terminal("cancelled", None).await;
     }
     let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+}
+
+async fn cleanup_before_terminal(
+    ctx: &SubagentContext,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    cumulative_usage: llm_runtime::ExecutionUsage,
+    history: &[lingxi_core::types::ConversationMessage],
+    hook_usage: &llm_runtime::ExecutionUsage,
+    hook_model_selection: &hooks::HookModelSelection,
+) -> bool {
+    if let Err(error) = cleanup_agent_inputs(ctx).await {
+        if let Some(writer) = transcript {
+            let _ = writer.record_terminal("failed", Some(&error)).await;
+        }
+        publish_prompt_hook_transcript(ctx, history, hook_usage, hook_model_selection);
+        let _ = out_tx
+            .send(SubagentEvent::Failed {
+                agent_id: ctx.agent_id,
+                error,
+                cumulative_usage,
+            })
+            .await;
+        return false;
+    }
+    true
+}
+
+async fn emit_transcript_snapshot(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    agent_id: AgentId,
+    messages: &[lingxi_core::types::ConversationMessage],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let _ = out_tx
+        .send(SubagentEvent::TranscriptSnapshot {
+            agent_id,
+            messages: messages.to_vec(),
+        })
+        .await;
 }
 
 /// Returns the companion note suffix (`yyo` in the binary, `nke` set) appended
@@ -1314,6 +2908,45 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
     }
 }
 
+/// Apply one tool-result batch's modifiers to the concrete per-agent context.
+/// All tools in a batch share the same pre-batch snapshot; callbacks then fold
+/// in tool-use order after their results have been selected. The resulting
+/// model/profile become the actual route for the next Agent request.
+fn apply_nested_tool_context_modifiers(
+    state: &mut Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+    observed_states: Vec<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+    modifiers: Vec<lingxi_core::host::tool_invoker::ToolInvocationContextModifier>,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let base = observed_states
+        .first()
+        .cloned()
+        .or_else(|| state.clone())
+        .ok_or_else(|| {
+            "Nested tool returned a context modifier without a concrete ToolUseContext snapshot"
+                .to_string()
+        })?;
+    let mut context = base
+        .downcast_arc::<tool_api::context::ToolUseContext>()
+        .map_err(|error| format!("Nested tool context state is invalid: {error}"))?
+        .as_ref()
+        .clone();
+    for modifier in modifiers {
+        context = modifier
+            .apply::<tool_api::context::ToolUseContext>(context)
+            .map_err(|error| {
+                format!("Nested tool context modifier could not be applied: {error}")
+            })?;
+    }
+    let model = context.options.main_loop_model.clone();
+    let profile = context.options.model_profile.clone();
+    *state = Some(
+        lingxi_core::host::tool_invoker::ToolInvocationContextState::new(std::sync::Arc::new(
+            context,
+        )),
+    );
+    Ok(Some((model, profile)))
+}
+
 /// Real multi-turn agentic loop.
 ///
 /// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
@@ -1333,7 +2966,7 @@ async fn run_subagent_loop(
     mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
     live_hook_transcript: &mut hooks::PromptHookTranscript,
-    live_hook_model_selection: &mut hooks::registry::HookModelSelection,
+    live_hook_model_selection: &mut hooks::HookModelSelection,
 ) {
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
@@ -1364,10 +2997,10 @@ async fn run_subagent_loop(
     // because they share its query generator; here the loops are separate, so
     // each run walks its own chain (handed down on the context).
     let mut refusal_cascade = lingxi_core::host::refusal_driver::RefusalCascadeState::default();
-    let system: Option<String> = ctx
+    let system: Option<Utf16JsonProjection> = ctx
         .rendered_system_prompt
         .as_ref()
-        .map(std::string::ToString::to_string);
+        .map(|prompt| prompt.as_ref().clone());
     // Wire tool definitions advertised to the model on every round-trip (empty
     // when the spawner wired none). Cloned per round-trip below.
     //
@@ -1377,22 +3010,26 @@ async fn run_subagent_loop(
     // run's result. `force_structured_tool` drives validation/capture/retry-cap
     // (unchanged) — see `force_tool_choice_for_api` below for what actually
     // gets sent on the wire as `tool_choice`.
-    let mut tool_schemas = ctx.tool_schemas.clone();
+    let mut tool_schemas: Vec<lingxi_core::host::SourceToolWireDefinition> =
+        ctx.tool_schemas.clone();
     let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
-        let input_schema: serde_json::Value = serde_json::from_str(schema_str)
-            .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+        let input_schema = Utf16JsonProjection::parse(schema_str).unwrap_or_else(|_| {
+            Utf16JsonProjection::parse(r#"{"type":"object"}"#)
+                .expect("fallback StructuredOutput schema is valid JSON")
+        });
         // The normal registry exposes a permissive StructuredOutput tool. A
         // workflow schema run must replace it with this invocation's schema,
         // not append a second declaration with the same provider-facing name.
-        tool_schemas.retain(|tool| {
-            tool.get("name").and_then(serde_json::Value::as_str) != Some("StructuredOutput")
-        });
-        tool_schemas.push(serde_json::json!({
-            "name": "StructuredOutput",
-            "description":
+        tool_schemas.retain(|tool| tool.name != "StructuredOutput");
+        tool_schemas.push(lingxi_core::host::SourceToolWireDefinition {
+            name: "StructuredOutput".into(),
+            description: Utf16JsonProjection::from(
                 "Return the final result as a single structured object matching the required schema.",
-            "input_schema": input_schema,
-        }));
+            ),
+            input_schema,
+            strict: false,
+            defer_loading: false,
+        });
         Some("StructuredOutput")
     } else {
         None
@@ -1445,7 +3082,7 @@ async fn run_subagent_loop(
     // Captured when the model calls the synthetic `StructuredOutput` tool with an
     // input that VALIDATES against the schema — that input becomes the run's
     // result, and the loop terminates.
-    let mut structured_result: Option<serde_json::Value> = None;
+    let mut structured_result: Option<Utf16JsonProjection> = None;
     // claude-code `agent({schema})` run-scoped counters: `kn` (failed
     // StructuredOutput validations) and `ft` (in-conversation nudges injected
     // when the model ends a turn without calling StructuredOutput). `Yr` is the
@@ -1472,15 +3109,6 @@ async fn run_subagent_loop(
     // This is the dispatch-time guard the advertised set relies on: the
     // inherited `RegistryToolInvoker` itself does NOT check policy.
     let mut allowed_tools = ctx.allowed_tools.clone();
-
-    // Recovered rows already belong to the child, even if initial instruction
-    // loading fails. Seed the live hook view before startup without publishing
-    // transcript rows or duplicating the later successful resume prefix.
-    if let Some(resumed) = &ctx.resumed_history {
-        live_hook_transcript
-            .messages
-            .extend(resumed.iter().cloned());
-    }
 
     ctx.instruction_context = match crate::instructions::resolve(&ctx).await {
         Ok(context) => context,
@@ -1512,7 +3140,8 @@ async fn run_subagent_loop(
     // would duplicate context the agent has seen and re-fire `SubagentStart`
     // for a run that began in another process.
     let history = &mut live_hook_transcript.messages;
-    if ctx.resumed_history.is_some() {
+    if let Some(resumed) = &ctx.resumed_history {
+        history.extend(resumed.iter().cloned());
         if let Some(scope) = llm_runtime::thinking_scope::current() {
             crate::transcript::restore_thinking_recovery(history, &scope);
         }
@@ -1567,20 +3196,26 @@ async fn run_subagent_loop(
         match build_preload_messages(&ctx).await {
             Ok(messages) => history.extend(messages),
             Err(error) => {
-                let mut transcript_written = 0;
-                emit_failed(
+                emit_transcript_snapshot(&out_tx, agent_id, history).await;
+                let error = match cleanup_agent_inputs(&ctx).await {
+                    Ok(()) => format!("Could not preload agent skills: {error}"),
+                    Err(cleanup_error) => {
+                        format!("Could not preload agent skills: {error}; {cleanup_error}")
+                    }
+                };
+                publish_prompt_hook_transcript(
                     &ctx,
-                    &out_tx,
-                    None,
                     history,
-                    &mut transcript_written,
-                    agent_id,
-                    format!("Could not preload agent skills: {error}"),
-                    llm_runtime::ExecutionUsage::default(),
                     &llm_runtime::ExecutionUsage::default(),
                     live_hook_model_selection,
-                )
-                .await;
+                );
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error,
+                        cumulative_usage: llm_runtime::ExecutionUsage::default(),
+                    })
+                    .await;
                 return;
             }
         }
@@ -1695,7 +3330,6 @@ async fn run_subagent_loop(
     }
 
     let max_turns = ctx.agent_definition.max_turns;
-
     // Once the cancellation channel closes, no UserExit / UserInterrupt can
     // ever arrive, so we stop racing it and await the API future directly
     // (racing a perpetually-ready `recv() -> None` arm would busy-loop).
@@ -1731,6 +3365,71 @@ async fn run_subagent_loop(
     if let Some(participant) = ctx.handback_restore_start.take() {
         participant.arrive_and_wait().await;
     }
+
+    // Native constructs the workflow's Ajv validator before its first model
+    // request. Keep the compiled schema for every StructuredOutput call in
+    // this run, and fail closed if this host did not provide its Source-native
+    // validator.
+    let compiled_structured_schema = if let Some(schema_json) = ctx.schema.as_deref() {
+        let Some(validator) = ctx.structured_output_validator.as_ref() else {
+            emit_failed(
+                &ctx,
+                &out_tx,
+                transcript.as_ref(),
+                history,
+                &mut transcript_written,
+                agent_id,
+                "agent({schema}): StructuredOutput validator is not configured".into(),
+                cumulative_usage.clone(),
+                &last_usage,
+                live_hook_model_selection,
+            )
+            .await;
+            return;
+        };
+        let schema_projection = match Utf16JsonProjection::parse(schema_json) {
+            Ok(schema) => schema,
+            Err(error) => {
+                emit_failed(
+                    &ctx,
+                    &out_tx,
+                    transcript.as_ref(),
+                    history,
+                    &mut transcript_written,
+                    agent_id,
+                    format!("agent({{schema}}): invalid schema JSON: {error}"),
+                    cumulative_usage.clone(),
+                    &last_usage,
+                    live_hook_model_selection,
+                )
+                .await;
+                return;
+            }
+        };
+        let validation_session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+        match validation_session.compile(&schema_projection).await {
+            Ok(compiled) => Some(compiled),
+            Err(error) => {
+                emit_failed(
+                    &ctx,
+                    &out_tx,
+                    transcript.as_ref(),
+                    history,
+                    &mut transcript_written,
+                    agent_id,
+                    format!("agent({{schema}}): {error}"),
+                    cumulative_usage.clone(),
+                    &last_usage,
+                    live_hook_model_selection,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let mod_executor = ctx.hook_executor.clone();
     let mod_cwd = ctx.cwd.clone().unwrap_or_else(|| ctx.hook_cwd.clone());
 
@@ -1823,10 +3522,7 @@ async fn run_subagent_loop(
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                     event = event_rx.recv(), if event_channel_open => match event {
                         Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
-                            emit_killed(&ctx, &out_tx, transcript.as_ref(), history, &mut transcript_written, agent_id,
-                                &last_usage,
-                                live_hook_model_selection,
-                            ).await;
+                            emit_killed(&ctx, &out_tx, transcript.as_ref(), history, &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
                             return;
                         }
                         Some(lingxi_core::Event::PeerMessage { envelope }) => pending_peer_messages.push(envelope),
@@ -1887,6 +3583,12 @@ async fn run_subagent_loop(
                                 "Budget limit reached (${dollars:.2} of ${maximum}); stopping background agents."
                             )
                         },
+                    );
+                    publish_prompt_hook_transcript(
+                        &ctx,
+                        history,
+                        &last_usage,
+                        live_hook_model_selection,
                     );
                     emit_failed(
                         &ctx,
@@ -1999,6 +3701,8 @@ async fn run_subagent_loop(
                 }
             }
             let mut mod_physical_usage = llm_runtime::ExecutionUsage::default();
+            let mut native_response_request_model = model.clone();
+            let mut native_response_request_profile = model_profile.clone();
             let (response, local_only_response) = 'response_attempts: loop {
                 // Only the opened body is retried here; ApiService already owns
                 // connect-phase retries. Any server-side content revokes replay
@@ -2027,6 +3731,8 @@ async fn run_subagent_loop(
                 )
                 .await;
                 flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
+                native_response_request_model.clone_from(&model);
+                native_response_request_profile.clone_from(&model_profile);
                 let api_call = async {
                     let current_model = model.clone();
                     tracing::debug!(
@@ -2065,6 +3771,13 @@ async fn run_subagent_loop(
                         }
                     };
                     let request_messages = messages_for_api.clone();
+                    let tools =
+                        match llm_runtime::convert::to_tool_declarations(tool_schemas.clone()) {
+                            Ok(tools) => tools,
+                            Err(error) => {
+                                return AgentStreamAttempt::failed(error, request_messages);
+                            }
+                        };
                     let call_opts = crate::api::SubagentApiCallOpts {
                         model_attempt: model_attempt.clone(),
                         max_output_tokens: ctx.max_output_tokens_per_turn,
@@ -2080,7 +3793,7 @@ async fn run_subagent_loop(
                         profile: profile.map(str::to_owned),
                         system: system.clone(),
                         messages: messages_for_api,
-                        tools: tool_schemas.clone(),
+                        tools,
                         effort: effort_wire.clone(),
                         forced_tool,
                         call_opts,
@@ -2235,10 +3948,7 @@ async fn run_subagent_loop(
                                     Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                         if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
                                         emit_killed(&ctx, &out_tx, transcript.as_ref(), history,
-                                            &mut transcript_written, agent_id,
-                                &last_usage,
-                                live_hook_model_selection,
-                            ).await;
+                                            &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
                                         return;
                                     }
                                     Some(lingxi_core::Event::UserMessage { content, .. })
@@ -2293,9 +4003,8 @@ async fn run_subagent_loop(
                                             history,
                                             &mut transcript_written,
                                             agent_id,
-                                &last_usage,
-                                live_hook_model_selection,
-                            ).await;
+                                        &last_usage, live_hook_model_selection,)
+                                        .await;
                                         return;
                                     }
                                     // A launcher message is task direction, not
@@ -2340,7 +4049,7 @@ async fn run_subagent_loop(
 
                 if let Some(Err((_partial_blocks, error))) = &attempt_result.response {
                     let interrupted_body = retry_response_body
-                        && matches!(error, LlmError::Transport { .. })
+                        && matches!(error.classification_source(), LlmError::Transport { .. })
                         && stream_opened.load(std::sync::atomic::Ordering::Relaxed);
                     if attempt_result.declined_fallback.is_none()
                         && !live_output_started.load(std::sync::atomic::Ordering::Relaxed)
@@ -2477,6 +4186,12 @@ async fn run_subagent_loop(
                             })
                             .await;
                     }
+                    publish_prompt_hook_transcript(
+                        &ctx,
+                        history,
+                        &last_usage,
+                        live_hook_model_selection,
+                    );
                     emit_failed(
                         &ctx,
                         &out_tx,
@@ -2505,14 +4220,19 @@ async fn run_subagent_loop(
                     Some(Err((partial_blocks, e))) => {
                         let had_streamed_assistant_rows = !assistant_rows.is_empty();
                         let stream_error_text = e
-                            .provider_message()
-                            .map(str::to_owned)
+                            .provider_error_text()
+                            .map(|text| text.display().to_owned())
+                            .or_else(|| e.provider_message().map(str::to_owned))
                             .unwrap_or_else(|| e.to_string());
+                        let stream_error_utf16 = e
+                            .provider_error_text()
+                            .map(|text| text.utf16_code_units().to_vec())
+                            .unwrap_or_else(|| stream_error_text.encode_utf16().collect());
                         if let LlmError::MalformedToolInput {
                             tool_name,
                             has_other_tool_calls,
                             ..
-                        } = &e
+                        } = e.classification_source()
                         {
                             // The Host enables this policy only for Create Local App.
                             // Ordinary agents keep the existing StructuredOutput-only
@@ -2520,12 +4240,7 @@ async fn run_subagent_loop(
                             let create_local_tool = retry_response_body
                                 && ctx.tool_invoker.is_some()
                                 && (allowed_tools.is_empty() || allowed_tools.contains(tool_name))
-                                && tool_schemas.iter().any(|tool| {
-                                    tool.get("name").and_then(serde_json::Value::as_str)
-                                        == Some(tool_name.as_str())
-                                        && tool.get("input_schema").is_some()
-                                        && tool.get("type").is_none()
-                                });
+                                && tool_schemas.iter().any(|tool| tool.name == *tool_name);
                             let can_recover = (force_structured_tool == Some(tool_name.as_str())
                                 || create_local_tool)
                                 && (!retry_response_body || local_only_response)
@@ -2582,6 +4297,7 @@ async fn run_subagent_loop(
                                 append_unmatched_stream_tool_results(
                                     &assistant_rows,
                                     &stream_error_text,
+                                    &stream_error_utf16,
                                     &mut early_tool_result_ids,
                                     &mut ordered_rows,
                                     &mut je_rows,
@@ -2601,6 +4317,12 @@ async fn run_subagent_loop(
                                 None,
                             )
                             .await;
+                            publish_prompt_hook_transcript(
+                                &ctx,
+                                history,
+                                &last_usage,
+                                live_hook_model_selection,
+                            );
                             emit_failed(
                                 &ctx,
                                 &out_tx,
@@ -2620,6 +4342,7 @@ async fn run_subagent_loop(
                             append_unmatched_stream_tool_results(
                                 &assistant_rows,
                                 &stream_error_text,
+                                &stream_error_utf16,
                                 &mut early_tool_result_ids,
                                 &mut ordered_rows,
                                 &mut je_rows,
@@ -2640,6 +4363,12 @@ async fn run_subagent_loop(
                         )
                         .await;
                         if is_workflow_watchdog_timeout(&e) {
+                            publish_prompt_hook_transcript(
+                                &ctx,
+                                history,
+                                &last_usage,
+                                live_hook_model_selection,
+                            );
                             emit_failed(&ctx,
                             &out_tx,
                             transcript.as_ref(),
@@ -2651,9 +4380,8 @@ async fn run_subagent_loop(
                                 lingxi_core::host::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
                             ),
                             cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                        &last_usage, live_hook_model_selection,)
+                        .await;
                             return;
                         }
                         // CC 2.1.207 subagent api_error_partial recovery. Only
@@ -2695,6 +4423,8 @@ async fn run_subagent_loop(
                                             id: MessageId::new(),
                                             content: salvaged,
                                             stop_reason: Some("api_error".to_string()),
+
+                                            resumable: None,
                                         };
                                         history.push(partial_message.clone());
                                         emit_message(&out_tx, agent_id, &partial_message).await;
@@ -2751,6 +4481,12 @@ async fn run_subagent_loop(
                                 return;
                             }
                             _ => {
+                                publish_prompt_hook_transcript(
+                                    &ctx,
+                                    history,
+                                    &last_usage,
+                                    live_hook_model_selection,
+                                );
                                 emit_failed(
                                     &ctx,
                                     &out_tx,
@@ -2835,6 +4571,12 @@ async fn run_subagent_loop(
                     }
                     Ok(None) => {}
                     Err(error) => {
+                        publish_prompt_hook_transcript(
+                            &ctx,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        );
                         emit_failed(
                             &ctx,
                             &out_tx,
@@ -2887,7 +4629,7 @@ async fn run_subagent_loop(
                 let tool_uses: Vec<(
                     lingxi_core::types::ToolUseId,
                     String,
-                    serde_json::Value,
+                    Utf16JsonProjection,
                     Option<String>,
                 )> = assistant_blocks
                     .iter()
@@ -2915,6 +4657,7 @@ async fn run_subagent_loop(
                 // stop_reason — mirroring the orchestrator references. Every emitted
                 // tool is dispatched even when the model used an unusual stop reason.
                 let mut tool_turn_end = None;
+                let mut native_next_turn_has_tool_results = false;
                 if !tool_uses.is_empty() {
                     let mut context_state_candidates = Vec::new();
                     let mut context_modifiers = Vec::new();
@@ -2923,6 +4666,12 @@ async fn run_subagent_loop(
                         .iter()
                         .any(|(_, name, _, _)| matches!(name.as_str(), "Write" | "Edit"));
                     if ctx.tool_invoker.is_none() {
+                        publish_prompt_hook_transcript(
+                            &ctx,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        );
                         emit_failed(
                             &ctx,
                             &out_tx,
@@ -2959,8 +4708,25 @@ async fn run_subagent_loop(
                         // the error and retries on the next turn (the `tool_use` stop keeps
                         // the loop going), up to the retry cap checked after dispatch.
                         if force_structured_tool == Some(name.as_str()) {
-                            match validate_structured_output(ctx.schema.as_deref(), input) {
-                                Ok(()) => {
+                            let Some(compiled_schema) = compiled_structured_schema.as_ref() else {
+                                emit_failed(
+                                    &ctx,
+                                    &out_tx,
+                                    transcript.as_ref(),
+                                    history,
+                                    &mut transcript_written,
+                                    agent_id,
+                                    "agent({schema}): StructuredOutput validator is not configured"
+                                        .into(),
+                                    cumulative_usage.clone(),
+                                    &last_usage,
+                                    live_hook_model_selection,
+                                )
+                                .await;
+                                return;
+                            };
+                            match compiled_schema.validate(input).await {
+                                Ok(JsonSchemaValidation::Valid) => {
                                     structured_result = Some(input.clone());
                                     tool_results.push(ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
@@ -2968,25 +4734,46 @@ async fn run_subagent_loop(
                                         // `data: "Structured output provided successfully"`
                                         // as the tool-result content (binary 2.1.195
                                         // strings :311431 / :438281).
-                                        content: "Structured output provided successfully"
-                                            .to_string(),
+                                        content: plain_json_string(
+                                            "Structured output provided successfully",
+                                        ),
                                         is_error: Some(false),
                                         provider_tool_use_id: provider_id.clone(),
                                         content_blocks: None,
                                     });
                                 }
-                                Err(detail) => {
+                                Ok(JsonSchemaValidation::Invalid { detail, .. }) => {
                                     structured_failed_count =
                                         structured_failed_count.saturating_add(1);
                                     tool_results.push(ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
-                                        content: format!(
-                                            "Output does not match required schema: {detail}"
-                                        ),
+                                        content: structured_output_validation_error(&detail),
                                         is_error: Some(true),
                                         provider_tool_use_id: provider_id.clone(),
                                         content_blocks: None,
                                     });
+                                }
+                                Err(error) => {
+                                    publish_prompt_hook_transcript(
+                                        &ctx,
+                                        history,
+                                        &last_usage,
+                                        live_hook_model_selection,
+                                    );
+                                    emit_failed(
+                                        &ctx,
+                                        &out_tx,
+                                        transcript.as_ref(),
+                                        history,
+                                        &mut transcript_written,
+                                        agent_id,
+                                        format!("agent({{schema}}): {error}"),
+                                        cumulative_usage.clone(),
+                                        &last_usage,
+                                        live_hook_model_selection,
+                                    )
+                                    .await;
+                                    return;
                                 }
                             }
                             let idle_update =
@@ -3010,9 +4797,9 @@ async fn run_subagent_loop(
                                 .unwrap_or_default();
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
-                                content: format!(
+                                content: plain_json_string(format!(
                                     "tool {name:?} is not in this agent's allowed tools{note}"
-                                ),
+                                )),
                                 is_error: Some(true),
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
@@ -3053,9 +4840,8 @@ async fn run_subagent_loop(
                                 }
                                 if invocation
                                     .context
-                                    .value
-                                    .as_array()
-                                    .is_some_and(|context| !context.is_empty())
+                                    .array_len("")
+                                    .is_some_and(|context_length| context_length > 0)
                                 {
                                     tool_context.push((
                                         tool_use_id.as_str().to_owned(),
@@ -3068,10 +4854,17 @@ async fn run_subagent_loop(
                                     }
                                 }
                                 if name == "Read" && !invocation.is_error {
-                                    if let (Some(provider), Some(path)) = (
-                                        ctx.instruction_provider.as_ref(),
-                                        input.get("file_path").and_then(serde_json::Value::as_str),
-                                    ) {
+                                    // A path is a typed OS boundary. Preserve the
+                                    // source through Tool dispatch, then use the
+                                    // exact UTF-16 units only if they decode to a
+                                    // native Rust path; never consult the display
+                                    // string after an unpaired surrogate.
+                                    let source_path = input
+                                        .string_units("/file_path")
+                                        .and_then(|units| String::from_utf16(&units).ok());
+                                    if let (Some(provider), Some(path)) =
+                                        (ctx.instruction_provider.as_ref(), source_path.as_deref())
+                                    {
                                         let cwd = ctx.cwd.as_deref().unwrap_or(&ctx.hook_cwd);
                                         let path = std::path::Path::new(path);
                                         let path = if path.is_absolute() || path.starts_with("~") {
@@ -3079,8 +4872,8 @@ async fn run_subagent_loop(
                                         } else {
                                             cwd.join(path)
                                         };
-                                        let partial = input.get("offset").is_some()
-                                            || input.get("limit").is_some();
+                                        let partial = input.contains_property("offset")
+                                            || input.contains_property("limit");
                                         let read_context = provider
                                             .after_read(
                                                 cwd,
@@ -3107,7 +4900,8 @@ async fn run_subagent_loop(
                                                 "PostToolUse",
                                                 &exact_context,
                                             );
-                                            let body = hooks::ExactHookText::join(&exact_context, "\n");
+                                            let body =
+                                                hooks::ExactHookText::join(&exact_context, "\n");
                                             let rendered = hooks::ExactHookText::wrapped(
                                                 "<system-reminder>\ntool.call hook additional context: ",
                                                 &body,
@@ -3132,6 +4926,12 @@ async fn run_subagent_loop(
                             Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
                                 error,
                             )) => {
+                                publish_prompt_hook_transcript(
+                                    &ctx,
+                                    history,
+                                    &last_usage,
+                                    live_hook_model_selection,
+                                );
                                 emit_failed(
                                     &ctx,
                                     &out_tx,
@@ -3166,12 +4966,17 @@ async fn run_subagent_loop(
                         }
                     }
                     if !tool_results.is_empty() {
+                        native_next_turn_has_tool_results = true;
                         let tool_results_msg = ConversationMessage::User {
                             id: MessageId::new(),
                             content: tool_results,
                             is_meta: false,
                             is_compact_summary: false,
                             is_visible_in_transcript_only: false,
+                            turn_companion: None,
+                            usage_limit_note: None,
+                            origin: None,
+                            turn_origin: None,
                         };
                         history.push(tool_results_msg.clone());
                         flush_transcript(transcript.as_ref(), history, &mut transcript_written)
@@ -3223,20 +5028,21 @@ async fn run_subagent_loop(
 
                     for (tool_use_id, context) in tool_context {
                         let context_projection = context;
-                        let Some(context) = context_projection.value.as_array() else {
+                        let Some(context_length) = context_projection.array_len("") else {
                             continue;
                         };
                         let mut lines = Vec::new();
-                        for (index, value) in context.iter().enumerate() {
-                            let Some(text) = value.as_str() else {
+                        for index in 0..context_length {
+                            let pointer = format!("/{index}");
+                            let Some(text) = context_projection.string_at(&pointer) else {
                                 continue;
                             };
                             if text.is_empty() {
                                 continue;
                             }
-                            let units = context_projection
-                                .string_units(&format!("/{index}"))
-                                .unwrap_or_else(|| text.encode_utf16().collect());
+                            let Some(units) = context_projection.string_units(&pointer) else {
+                                continue;
+                            };
                             lines.push((text.to_owned(), units));
                         }
                         if lines.is_empty() {
@@ -3270,21 +5076,17 @@ async fn run_subagent_loop(
                             "hookEvent":"PostToolUse",
                         });
                         let mut source_attachment =
-                            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                                attachment_value,
-                            );
-                        source_attachment.strings.extend(
-                            lines
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, (_, units))| String::from_utf16(units).is_err())
-                                .map(|(index, (_, units))| {
-                                    lingxi_core::types::utf16_json::Utf16JsonString {
-                                        pointer: format!("/content/{index}"),
-                                        code_units: units.clone(),
-                                    }
-                                }),
-                        );
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                                &attachment_value,
+                            )
+                            .expect("generated source attachment is valid JSON");
+                        for (index, (_, units)) in lines.iter().enumerate() {
+                            if String::from_utf16(units).is_err() {
+                                source_attachment
+                                    .set_string_units(&format!("/content/{index}"), units)
+                                    .expect("attachment source string is present");
+                            }
+                        }
                         if let Some(writer) = transcript.as_ref() {
                             writer.register_source_attachment(&reminder, source_attachment);
                         }
@@ -3308,9 +5110,20 @@ async fn run_subagent_loop(
                             Some(source) => source.take_new_diagnostics_block().await,
                             None => None,
                         } {
-                            let diagnostics_message = ConversationMessage::user_meta(
+                            const PREFIX: &str = "<system-reminder>\n";
+                            const SUFFIX: &str = "\n</system-reminder>";
+                            let mut units = PREFIX.encode_utf16().collect::<Vec<_>>();
+                            units.extend(
+                                block
+                                    .string_units("")
+                                    .expect("diagnostics source returns a root-string projection"),
+                            );
+                            units.extend(SUFFIX.encode_utf16());
+                            let display = String::from_utf16_lossy(&units);
+                            let diagnostics_message = ConversationMessage::user_meta_js_utf16(
                                 MessageId::new(),
-                                format!("<system-reminder>\n{block}\n</system-reminder>"),
+                                display,
+                                units,
                             );
                             history.push(diagnostics_message.clone());
                             flush_transcript(transcript.as_ref(), history, &mut transcript_written)
@@ -3341,6 +5154,12 @@ async fn run_subagent_loop(
                             }
                             Ok(None) => {}
                             Err(error) => {
+                                publish_prompt_hook_transcript(
+                                    &ctx,
+                                    history,
+                                    &last_usage,
+                                    live_hook_model_selection,
+                                );
                                 emit_failed(
                                     &ctx,
                                     &out_tx,
@@ -3385,6 +5204,12 @@ async fn run_subagent_loop(
                         } else {
                             "calls"
                         };
+                        publish_prompt_hook_transcript(
+                            &ctx,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        );
                         emit_failed(&ctx,
                     &out_tx,
                     transcript.as_ref(),
@@ -3395,9 +5220,8 @@ async fn run_subagent_loop(
                         "agent({{schema}}): StructuredOutput retry cap ({structured_retry_cap}) exceeded — {structured_failed_count} failed {calls} with no valid output"
                     ),
                     cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                &last_usage, live_hook_model_selection,)
+                .await;
                         return;
                     }
                 }
@@ -3468,10 +5292,7 @@ async fn run_subagent_loop(
                                         Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                             if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
                                             emit_killed(&ctx, &out_tx, transcript.as_ref(), history,
-                                                &mut transcript_written, agent_id,
-                                &last_usage,
-                                live_hook_model_selection,
-                            ).await;
+                                                &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
                                             return;
                                         }
                                         None => event_channel_open = false,
@@ -3576,6 +5397,12 @@ async fn run_subagent_loop(
                             emit_message(&out_tx, agent_id, &continuation).await;
                             continue 'model_turns;
                         }
+                        publish_prompt_hook_transcript(
+                            &ctx,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        );
                         emit_failed(&ctx,
                         &out_tx,
                         transcript.as_ref(),
@@ -3584,14 +5411,19 @@ async fn run_subagent_loop(
                         agent_id,
                         "agent({schema}): output token limit reached before completion; continuation budget exhausted".to_string(),
                         cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                    &last_usage, live_hook_model_selection,)
+                    .await;
                         return;
                     }
 
                     if force_structured_tool.is_some() && structured_result.is_none() {
                         if tool_turn_end.is_some() {
+                            publish_prompt_hook_transcript(
+                                &ctx,
+                                history,
+                                &last_usage,
+                                live_hook_model_selection,
+                            );
                             emit_failed(&ctx,
                             &out_tx,
                             transcript.as_ref(),
@@ -3600,9 +5432,8 @@ async fn run_subagent_loop(
                             agent_id,
                             "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
                             cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                        &last_usage, live_hook_model_selection,)
+                        .await;
                             return;
                         }
                         if !force_this_turn {
@@ -3625,6 +5456,12 @@ async fn run_subagent_loop(
                             emit_message(&out_tx, agent_id, &nudge).await;
                             continue 'model_turns;
                         }
+                        publish_prompt_hook_transcript(
+                            &ctx,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        );
                         emit_failed(&ctx,
                         &out_tx,
                         transcript.as_ref(),
@@ -3633,9 +5470,8 @@ async fn run_subagent_loop(
                         agent_id,
                         "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
                         cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                    &last_usage, live_hook_model_selection,)
+                    .await;
                         return;
                     }
 
@@ -3652,6 +5488,7 @@ async fn run_subagent_loop(
                             &assistant_blocks,
                             stop_reason.as_deref(),
                             &model,
+                            None,
                         ),
                     };
                     let handback = finalize_handback_result(&ctx, &mut result).await;
@@ -3659,6 +5496,29 @@ async fn run_subagent_loop(
                     emit_transcript_snapshot(&out_tx, agent_id, history).await;
                     if let Some(turn) = mod_turn.as_mut() {
                         turn.answered();
+                    }
+                    foreground_parked = park_foreground_owner(
+                        &ctx,
+                        &result,
+                        &last_usage,
+                        total_tool_use_count,
+                        elapsed_ms(run_start),
+                    )
+                    .await;
+                    if foreground_parked {
+                        ctx.is_async = true;
+                        emit_parked(
+                            &ctx,
+                            &out_tx,
+                            transcript.as_ref(),
+                            agent_id,
+                            history,
+                            &last_usage,
+                            live_hook_model_selection,
+                        )
+                        .await;
+                        terminated_cleanly = true;
+                        break 'model_turns;
                     }
                     if !cleanup_before_terminal(
                         &ctx,
@@ -3672,34 +5532,6 @@ async fn run_subagent_loop(
                     .await
                     {
                         return;
-                    }
-                    foreground_parked = park_foreground_owner(
-                        &ctx,
-                        &result,
-                        &last_usage,
-                        total_tool_use_count,
-                        elapsed_ms(run_start),
-                    )
-                    .await;
-                    if foreground_parked {
-                        ctx.is_async = true;
-                        if let Some(writer) = transcript.as_ref() {
-                            let _ = writer.record_terminal("idle", None).await;
-                        }
-                        if !emit_parked(
-                            &ctx,
-                            &out_tx,
-                            agent_id,
-                            history,
-                            &last_usage,
-                            live_hook_model_selection,
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                        terminated_cleanly = true;
-                        break 'model_turns;
                     }
                     if let Some(writer) = transcript.as_ref() {
                         let status = if ctx.persistent { "idle" } else { "completed" };
@@ -3732,6 +5564,10 @@ async fn run_subagent_loop(
                     break 'model_turns;
                 }
 
+                if should_continue && native_next_turn_has_tool_results {
+                    ctx.native_query_depth = ctx.native_query_depth.saturating_add(1);
+                }
+
                 // The current visible record's tools have been handled; if the Mods
                 // stream has no next visible assistant record, proceed to the next
                 // request turn instead of replaying this record.
@@ -3759,6 +5595,12 @@ async fn run_subagent_loop(
             // `max_turns` at all; now that it chooses freely, it can — so this exit
             // has to carry the schema contract too.
             if force_structured_tool.is_some() && structured_result.is_none() {
+                publish_prompt_hook_transcript(
+                    &ctx,
+                    history,
+                    &last_usage,
+                    live_hook_model_selection,
+                );
                 emit_failed(&ctx,
                     &out_tx,
                     transcript.as_ref(),
@@ -3767,9 +5609,8 @@ async fn run_subagent_loop(
                     agent_id,
                     "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
                     cumulative_usage.clone(),
-                    &last_usage,
-                    live_hook_model_selection,
-                ).await;
+                &last_usage, live_hook_model_selection,)
+                .await;
                 return;
             }
             // The inner loop fell through: `max_turns` exhausted without a terminal
@@ -3777,10 +5618,6 @@ async fn run_subagent_loop(
             // reason rather than a hard failure, so the parent can still consume
             // whatever work was produced.
             flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
-            if let Some(writer) = transcript.as_ref() {
-                let status = if ctx.persistent { "idle" } else { "completed" };
-                let _ = writer.record_terminal(status, None).await;
-            }
             publish_prompt_hook_transcript(&ctx, history, &last_usage, live_hook_model_selection);
             // The oracle's `bft` (src_162329786.js @3532630) finalizes a
             // max-turns exit through the SAME path as any other completion: the
@@ -3792,28 +5629,8 @@ async fn run_subagent_loop(
             // result and carry the reason alongside it, so the reason readers
             // (`tasks::handlers::local_agent::max_turns_reached_from`,
             // `fusion::panel::max_turns_exhausted_detail`) still see it.
-            let mut result = build_completed_result(history, &[], None, &model);
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert(
-                    "reason".to_string(),
-                    serde_json::Value::String("max_turns_exhausted".to_string()),
-                );
-                obj.insert("max_turns".to_string(), serde_json::json!(max_turns));
-            }
+            let mut result = build_completed_result(history, &[], None, &model, Some(max_turns));
             let handback = finalize_handback_result(&ctx, &mut result).await;
-            if !cleanup_before_terminal(
-                &ctx,
-                &out_tx,
-                transcript.as_ref(),
-                cumulative_usage.clone(),
-                history,
-                &last_usage,
-                live_hook_model_selection,
-            )
-            .await
-            {
-                return;
-            }
             foreground_parked = park_foreground_owner(
                 &ctx,
                 &result,
@@ -3827,13 +5644,23 @@ async fn run_subagent_loop(
             }
             if foreground_parked {
                 ctx.is_async = true;
-                if let Some(writer) = transcript.as_ref() {
-                    let _ = writer.record_terminal("idle", None).await;
-                }
-                if !emit_parked(
+                emit_parked(
                     &ctx,
                     &out_tx,
+                    transcript.as_ref(),
                     agent_id,
+                    history,
+                    &last_usage,
+                    live_hook_model_selection,
+                )
+                .await;
+            } else {
+                emit_transcript_snapshot(&out_tx, agent_id, history).await;
+                if !cleanup_before_terminal(
+                    &ctx,
+                    &out_tx,
+                    transcript.as_ref(),
+                    cumulative_usage.clone(),
                     history,
                     &last_usage,
                     live_hook_model_selection,
@@ -3842,8 +5669,16 @@ async fn run_subagent_loop(
                 {
                     return;
                 }
-            } else {
-                emit_transcript_snapshot(&out_tx, agent_id, history).await;
+                if let Some(writer) = transcript.as_ref() {
+                    let status = if ctx.persistent { "idle" } else { "completed" };
+                    let _ = writer.record_terminal(status, None).await;
+                }
+                publish_prompt_hook_transcript(
+                    &ctx,
+                    history,
+                    &last_usage,
+                    live_hook_model_selection,
+                );
                 if let Some(registry) = &ctx.task_registry {
                     reconcile_agent_child_keepalives(&ctx, registry.as_ref()).await;
                 }
@@ -3887,6 +5722,19 @@ async fn run_subagent_loop(
         // event channel has already closed, no message can ever arrive again, so we
         // terminate gracefully.
         if !event_channel_open {
+            if !cleanup_before_terminal(
+                &ctx,
+                &out_tx,
+                transcript.as_ref(),
+                cumulative_usage.clone(),
+                history,
+                &last_usage,
+                live_hook_model_selection,
+            )
+            .await
+            {
+                return;
+            }
             if let Some(writer) = transcript.as_ref() {
                 let _ = writer.record_terminal("completed", None).await;
             }
@@ -3967,12 +5815,19 @@ async fn run_subagent_loop(
                     emit_message(&out_tx, agent_id, &message).await;
                     break;
                 }
-                Some(lingxi_core::Event::UserMessageJsUtf16 { content, utf16_code_units, .. }) => {
+                Some(lingxi_core::Event::UserMessageJsUtf16 {
+                    content,
+                    utf16_code_units,
+                    ..
+                }) => {
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("running", None).await;
                     }
-                    let message = ExactHookText { display: content, utf16_code_units }
-                        .to_conversation_message(MessageId::new(), false);
+                    let message = ExactHookText {
+                        display: content,
+                        utf16_code_units,
+                    }
+                    .to_conversation_message(MessageId::new(), false);
                     history.push(message.clone());
                     emit_message(&out_tx, agent_id, &message).await;
                     break;
@@ -3999,6 +5854,19 @@ async fn run_subagent_loop(
                 // Channel closed -> graceful terminal shutdown. A persistent
                 // child is idle only while this channel remains open.
                 None => {
+                    if !cleanup_before_terminal(
+                        &ctx,
+                        &out_tx,
+                        transcript.as_ref(),
+                        cumulative_usage.clone(),
+                        history,
+                        &last_usage,
+                        live_hook_model_selection,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("completed", None).await;
                     }
@@ -4009,9 +5877,217 @@ async fn run_subagent_loop(
     }
 }
 
+fn handback_attachment_projection(
+    envelope: &lingxi_core::host::handback::HandbackEnvelope,
+) -> Utf16JsonProjection {
+    let serialized = serde_json::to_string(envelope).expect("handback envelope serializes");
+    let envelope = Utf16JsonProjection::parse(&serialized)
+        .expect("serialized handback envelope is valid source JSON");
+    Utf16JsonProjection::object(vec![
+        (
+            "type".into(),
+            Utf16JsonProjection::from("subagent_handback"),
+        ),
+        ("envelope".into(), envelope),
+    ])
+    .expect("handback attachment is an object")
+}
+
+async fn drain_peer_messages(
+    ctx: &SubagentContext,
+    pending: &mut Vec<lingxi_core::host::handback::HandbackEnvelope>,
+    history: &mut Vec<ConversationMessage>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    written: &mut usize,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    let registered = match &ctx.task_registry {
+        Some(registry) => registry.pending_handback_reports_for(ctx.agent_id).await,
+        None => Vec::new(),
+    };
+    for envelope in &registered {
+        if let Some(queued) = pending
+            .iter_mut()
+            .find(|queued| queued.receipt == envelope.receipt)
+        {
+            // The recipient-owned durable claim is authoritative even when
+            // an untrusted wake event supplied the same receipt first.
+            *queued = envelope.clone();
+        } else {
+            pending.push(envelope.clone());
+        }
+    }
+    let mut batch = std::mem::take(pending).into_iter();
+    while let Some(envelope) = batch.next() {
+        if !envelope.validate()
+            || !matches!(envelope.receipt.recipient, lingxi_core::host::handback::HandbackRecipient::Agent { agent_id, .. } if agent_id == ctx.agent_id)
+        {
+            continue;
+        }
+        let Some(registry) = &ctx.task_registry else {
+            continue;
+        };
+        if registry
+            .handback_scope()
+            .await
+            .map(|scope| scope.session_id)
+            != Some(envelope.origin.scope.session_id)
+            || !registered.iter().any(|committed| committed == &envelope)
+        {
+            continue;
+        }
+        let message = envelope.model_message();
+        if let Some(existing) = history
+            .iter()
+            .find(|message| message.id() == envelope.receipt.message_id)
+        {
+            if existing != &message {
+                pending.push(envelope);
+                pending.extend(batch);
+                break;
+            }
+            if let Some(transcript) = transcript {
+                if transcript
+                    .record_durable_attachment_once(
+                        &message,
+                        handback_attachment_projection(&envelope),
+                    )
+                    .await
+                    .is_err()
+                {
+                    pending.push(envelope);
+                    pending.extend(batch);
+                    break;
+                }
+            }
+            if let Some(registry) = &ctx.task_registry {
+                registry
+                    .acknowledge_handback_consumption(ctx.agent_id, &envelope.receipt)
+                    .await;
+            }
+            continue;
+        }
+        // Flush preceding ordinary rows before the typed peer row. A failed
+        // append never advances history or its watermark, and cannot be retried
+        // through generic user-message serialization.
+        flush_transcript(transcript, history, written).await;
+        if transcript.is_some() && *written != history.len() {
+            pending.push(envelope);
+            pending.extend(batch);
+            break;
+        }
+        if let Some(transcript) = transcript {
+            if transcript
+                .record_durable_attachment_once(&message, handback_attachment_projection(&envelope))
+                .await
+                .is_err()
+            {
+                pending.push(envelope);
+                pending.extend(batch);
+                break;
+            }
+        }
+        history.push(message.clone());
+        if transcript.is_some() {
+            *written = history.len();
+        }
+        if let Some(registry) = &ctx.task_registry {
+            registry
+                .acknowledge_handback_consumption(ctx.agent_id, &envelope.receipt)
+                .await;
+        }
+        emit_message(out_tx, ctx.agent_id, &message).await;
+    }
+}
+
+async fn configure_handback_run(
+    ctx: &SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+    schemas: &mut Vec<lingxi_core::host::SourceToolWireDefinition>,
+    allowed: &mut Vec<String>,
+    active: bool,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    use lingxi_core::host::handback::*;
+    if ctx
+        .handback
+        .as_ref()
+        .is_some_and(|runtime| runtime.eligible)
+    {
+        schemas.retain(|tool| tool.name != HANDBACK_TOOL_NAME);
+        allowed.retain(|name| name != HANDBACK_TOOL_NAME);
+        if active {
+            let tool =
+                crate::handback::SubagentHandbackTool(ctx.handback.as_ref().unwrap().clone());
+            let schema = tool_api::Tool::input_schema(&tool);
+            schemas.push(lingxi_core::host::SourceToolWireDefinition {
+                name: HANDBACK_TOOL_NAME.into(),
+                description: Utf16JsonProjection::from(HANDBACK_PROMPT),
+                input_schema: schema.clone(),
+                strict: false,
+                defer_loading: false,
+            });
+            allowed.push(HANDBACK_TOOL_NAME.into());
+        }
+    }
+    let latest = latest_handback_instruction(history);
+    let reminder = if active && latest != Some(HandbackInstruction::Reminder) {
+        Some(HANDBACK_REMINDER)
+    } else if !active && latest == Some(HandbackInstruction::Reminder) {
+        Some(HANDBACK_COUNTERMAND)
+    } else {
+        None
+    };
+    if let Some(reminder) = reminder {
+        let message = ConversationMessage::user_meta(
+            MessageId::new(),
+            format!("<system-reminder>\n{reminder}\n</system-reminder>"),
+        );
+        history.push(message.clone());
+        emit_message(out_tx, ctx.agent_id, &message).await;
+    }
+}
+
+async fn finalize_handback_result(
+    ctx: &SubagentContext,
+    result: &mut Utf16JsonProjection,
+) -> Option<lingxi_core::host::handback::HandbackState> {
+    let runtime = ctx.handback.as_ref()?;
+    let waiting = runtime
+        .registry
+        .agent_waiting_on_owned_work(ctx.agent_id)
+        .await;
+    let (state, text) = runtime.finalize(waiting, ctx.persistent || waiting).await?;
+    if result
+        .at_pointer("")
+        .and_then(|value| value.object_entries())
+        .is_some()
+    {
+        if let Some(text) = text {
+            let text_projection = plain_json_string(text.clone());
+            let content_block = Utf16JsonProjection::object(vec![
+                ("text".into(), text_projection.clone()),
+                ("type".into(), plain_json_string("text")),
+            ])
+            .expect("handback result block is a flat object");
+            result
+                .set_field("text", text_projection)
+                .expect("completed result is an object");
+            result
+                .set_field(
+                    "content",
+                    Utf16JsonProjection::array(vec![content_block])
+                        .expect("handback content is an array"),
+                )
+                .expect("completed result is an object");
+        }
+    }
+    Some(state)
+}
+
 async fn park_foreground_owner(
     ctx: &SubagentContext,
-    result: &serde_json::Value,
+    result: &Utf16JsonProjection,
     usage: &llm_runtime::ExecutionUsage,
     tool_uses: u64,
     duration_ms: u64,
@@ -4026,17 +6102,27 @@ async fn park_foreground_owner(
         .park_foreground_agent(
             ctx.agent_id,
             lingxi_core::host::task_registry::AgentTerminalOutcome {
-                result: result
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
+                handback: match &ctx.handback {
+                    Some(runtime) => runtime.state().await,
+                    None => None,
+                },
+                result: result.string_units("/text").map(|units| {
+                    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                        .expect("completed result text remains a root-string projection")
+                }),
                 usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: crate::handle::subagent_usage_from_llm_usage(usage)
                         .total_tokens,
                     tool_uses,
                     duration_ms,
                 }),
-                max_turns_reached: result.get("max_turns").and_then(serde_json::Value::as_u64),
+                max_turns_reached: result.number_at("/max_turns").and_then(|value| {
+                    (value.is_finite()
+                        && value >= 0.0
+                        && value.fract() == 0.0
+                        && value <= u32::MAX as f64)
+                        .then_some(value as u64)
+                }),
                 ..Default::default()
             },
         )
@@ -4055,6 +6141,7 @@ async fn fold_task_notifications(
         .take_pending_task_notifications_for(Some(ctx.agent_id))
         .await
         .unwrap_or_default();
+    reconcile_agent_child_keepalives(ctx, registry.as_ref()).await;
     let reminders = lingxi_core::host::task_notification::render_reminders_with_options(
         &notifications,
         false,
@@ -4068,147 +6155,100 @@ async fn fold_task_notifications(
             .await;
     }
     for reminder in reminders {
-        history.push(ConversationMessage::user_meta(MessageId::new(), reminder));
+        let units = reminder
+            .string_units("")
+            .expect("task reminder is a source string");
+        history.push(ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            String::from_utf16_lossy(&units),
+            units,
+        ));
     }
     for message in human {
-        history.push(ConversationMessage::user_meta(MessageId::new(), message));
+        let units = message
+            .string_units("")
+            .expect("human task message is a source string");
+        history.push(ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            String::from_utf16_lossy(&units),
+            units,
+        ));
     }
     any
 }
 
-/// Legacy reducer-driven stub.
-///
-/// Drives [`lingxi_core::reduce`] over `event_rx` and emits [`SubagentEvent`]s on
-/// `out_tx`. M1.11 stubs completion after the first event so the pool can be
-/// wired end-to-end before the real agentic loop arrives. Selected when
-/// [`SubagentContext::api_client`] is `None`.
-async fn run_subagent_stub(
-    ctx: SubagentContext,
-    mut event_rx: mpsc::Receiver<lingxi_core::Event>,
-    out_tx: mpsc::Sender<SubagentEvent>,
+/// Native `Yq` reconciles `agent:<child>` reasons against the current local
+/// Agent rows. A missing row, a row already notified, or a row whose creator
+/// changed no longer keeps this parent alive. Other reason families are owned
+/// by their own task producers and are deliberately left untouched.
+async fn reconcile_agent_child_keepalives(
+    ctx: &SubagentContext,
+    registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle,
 ) {
-    use lingxi_core::types::SessionId;
-    use lingxi_core::{reduce, ConversationState, SessionState};
-
-    let agent_id = ctx.agent_id;
-
-    // Seed initial state. The runner's local SessionState is transient —
-    // the orchestrator (M5-02) owns durable session persistence. We use
-    // SessionId::nil() and an inherited model string projected from the
-    // agent definition; both are placeholders the reducer accepts.
-    let model = match &ctx.agent_definition.model {
-        crate::definition::AgentModel::Inherit => "inherit".to_string(),
-        crate::definition::AgentModel::Alias(n) | crate::definition::AgentModel::Explicit(n) => {
-            n.clone()
-        }
+    let Ok(rows) = registry
+        .list(lingxi_core::host::task_registry::TaskListFilter::default())
+        .await
+    else {
+        return;
     };
-    let mut state = ConversationState::Idle {
-        session: SessionState::empty(SessionId::nil(), model),
+    let parent_id = ctx.agent_id.to_string();
+    let parent_stable_id = ctx.agent_id.as_uuid().to_string();
+    let Some(parent) = rows.iter().find(|row| {
+        row.task_type == "local_agent"
+            && row.agent_facts.as_ref().is_some_and(|facts| {
+                facts.stable_agent_id
+                    == lingxi_core::host::task_registry::FieldPresence::Value(
+                        parent_stable_id.clone(),
+                    )
+            })
+    }) else {
+        return;
     };
-    // Track whether at least one Message has been emitted — informs the
-    // EOF branch's choice between Completed(graceful) and Failed.
-    let mut produced_useful_work = false;
-
-    while let Some(event) = event_rx.recv().await {
-        // Fast path: explicit user-termination events bypass reason-string
-        // inspection and surface as Killed directly. The reducer's reason
-        // strings are an implementation detail; the input event itself is
-        // authoritative for the Killed signal. UserInterrupt in particular
-        // does NOT reach Terminated via the M1 reducer (catch-all), so
-        // without this fast path it would never produce Killed.
-        if matches!(
-            &event,
-            lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt
-        ) {
-            // Drive the reducer anyway for state consistency, but ignore
-            // the resulting reason.
-            let (new_state, _effects) = reduce(state, event);
-            state = new_state;
-            let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
-            // Suppress the unused-assignment lint by referencing `state`.
-            let _ = &state;
-            return;
-        }
-
-        // Capture whether this event represents a stream-end completion
-        // BEFORE the reducer consumes it — we need to peek at the
-        // final_message for the Message emit.
-        let api_end_msg = match &event {
-            lingxi_core::Event::ApiStreamEnd { final_message, .. } => Some(final_message.clone()),
-            _ => None,
+    let Some(lingxi_core::host::task_registry::FieldPresence::Value(reasons)) = parent
+        .agent_facts
+        .as_ref()
+        .map(|facts| &facts.keepalive_reasons)
+    else {
+        return;
+    };
+    for reason in reasons {
+        let Some(child_id) = reason.strip_prefix("agent:") else {
+            continue;
         };
-
-        let (new_state, _effects) = reduce(state, event);
-        state = new_state;
-
-        if let Some(msg) = api_end_msg {
-            produced_useful_work = true;
-            let _ = out_tx
-                .send(SubagentEvent::Message {
-                    agent_id,
-                    message: serde_json::to_value(&msg).unwrap_or(serde_json::Value::Null),
+        let child_keeps_parent = rows.iter().any(|child| {
+            child.task_type == "local_agent"
+                && child.agent_facts.as_ref().is_some_and(|facts| {
+                    facts.stable_agent_id
+                        == lingxi_core::host::task_registry::FieldPresence::Value(
+                            child_id.to_string(),
+                        )
+                        && facts.parent_id
+                            == lingxi_core::host::task_registry::FieldPresence::Value(
+                                serde_json::Value::String(parent_id.clone()),
+                            )
                 })
-                .await;
+                && !child.notified
+        });
+        if child_keeps_parent {
+            continue;
         }
-
-        if state.is_terminal() {
-            // Inspect the terminal reason; the M1 reducer puts it on
-            // `Terminated { reason, .. }`. Killed prefixes per Task 1 step 3.
-            if let ConversationState::Terminated { reason, .. } = &state {
-                if reason.starts_with("user_exit")
-                    || reason.starts_with("user_interrupt")
-                    || reason.starts_with("killed")
-                {
-                    let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
-                } else {
-                    let _ = out_tx
-                        .send(SubagentEvent::Completed {
-                            agent_id,
-                            result: serde_json::json!({ "reason": reason }),
-                            // Stub path makes no real round-trips: no usage / no
-                            // tool-use count / no measured duration.
-                            usage: llm_runtime::ExecutionUsage::default(),
-                            total_tool_use_count: 0,
-                            total_duration_ms: 0,
-                            assistant_message_count: 0,
-                            last_request_id: None,
-                            cumulative_usage: llm_runtime::ExecutionUsage::default(),
-                            usage_complete: true,
-                        })
-                        .await;
-                }
-            }
-            return;
+        if let Err(error) = registry
+            .update_agent_list_local_fact(
+                ctx.agent_id,
+                lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                    reason: reason.clone(),
+                    active: false,
+                },
+            )
+            .await
+        {
+            tracing::debug!(
+                parent_agent_id = %ctx.agent_id,
+                child_agent_id = child_id,
+                %error,
+                "could not reconcile a child-agent keepalive reason"
+            );
         }
-    }
-
-    // event_rx closed before reaching Terminated. If we already emitted a
-    // Message (the Task 2 happy path), it's a graceful end — emit Completed
-    // with a synthetic reason. Otherwise (no useful work done), Task 4 will
-    // refine this to Failed.
-    if produced_useful_work {
-        let _ = out_tx
-            .send(SubagentEvent::Completed {
-                agent_id,
-                result: serde_json::json!({ "reason": "eof_graceful" }),
-                // Stub path makes no real round-trips.
-                usage: llm_runtime::ExecutionUsage::default(),
-                total_tool_use_count: 0,
-                total_duration_ms: 0,
-                assistant_message_count: 0,
-                last_request_id: None,
-                cumulative_usage: llm_runtime::ExecutionUsage::default(),
-                usage_complete: true,
-            })
-            .await;
-    } else {
-        let _ = out_tx
-            .send(SubagentEvent::Failed {
-                agent_id,
-                error: "run_subagent: event channel closed without terminal state".into(),
-                cumulative_usage: llm_runtime::ExecutionUsage::default(),
-            })
-            .await;
     }
 }
 
@@ -4432,6 +6472,100 @@ fn cap_input_bytes(
     Ok(out)
 }
 
+/// Inline runQuery receives userContext separately from durable messages.
+/// Its prefix belongs to each outgoing request, never the child JSONL.
+fn instruction_request_messages(
+    history: &[ConversationMessage],
+    context: &lingxi_core::host::instructions::InstructionContext,
+    max_bytes: Option<u64>,
+) -> Result<Vec<ConversationMessage>, String> {
+    if context.rendering != lingxi_core::host::instructions::InstructionRendering::Inline {
+        return cap_input_bytes(history, max_bytes);
+    }
+    let Some(reminder) = context.reminder() else {
+        return cap_input_bytes(history, max_bytes);
+    };
+    let prefix = ConversationMessage::user_meta(MessageId::new(), reminder);
+    if history.is_empty() {
+        return cap_input_bytes(&[prefix], max_bytes);
+    }
+    // Reserve the prefix bytes without making it the trimming algorithm's
+    // mandatory task unit; the actual initial task must remain mandatory too.
+    let history_cap = max_bytes
+        .map(|max| {
+            let prefix_bytes = measure_serialized_input_unit(std::slice::from_ref(&prefix))
+                .serialized_bytes
+                .saturating_sub(1);
+            max.checked_sub(prefix_bytes)
+                .ok_or_else(|| "instruction context exceeds max_input_bytes_per_turn".to_string())
+        })
+        .transpose()?;
+    let history = cap_input_bytes(history, history_cap)?;
+    let mut messages = Vec::with_capacity(history.len() + 1);
+    messages.push(prefix);
+    messages.extend(history);
+    Ok(messages)
+}
+
+async fn announce_instruction_context(
+    ctx: &mut SubagentContext,
+    history: &mut Vec<ConversationMessage>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    written: &mut usize,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) {
+    use lingxi_core::host::instruction_announcements::{
+        context_attachments, render_instruction_attachment,
+    };
+    if ctx.instruction_context.rendering
+        == lingxi_core::host::instructions::InstructionRendering::Inline
+    {
+        return;
+    }
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    for attachment in context_attachments(&ctx.instruction_context, &date, "session_start") {
+        let id = MessageId::new();
+        let message = render_instruction_attachment(&attachment)
+            .map(|text| ConversationMessage::user_meta(id, text));
+        flush_transcript(transcript, history, written).await;
+        if let Some(writer) = transcript {
+            if *written == history.len()
+                && writer
+                    .record_context_attachment(id, message.as_ref(), attachment.clone())
+                    .await
+                    .is_ok()
+            {
+                *written += usize::from(message.is_some());
+            }
+        }
+        if let Some(message) = message {
+            history.push(message);
+        }
+        ctx.instruction_context
+            .announcement_history
+            .push(attachment.clone());
+        let message = Utf16JsonProjection::object(vec![
+            ("type".into(), plain_json_string("attachment")),
+            (
+                "uuid".into(),
+                Utf16JsonProjection::parse(
+                    &serde_json::to_string(&id).expect("message id serializes as JSON"),
+                )
+                .expect("serialized message id remains valid JSON"),
+            ),
+            ("attachment".into(), attachment.clone()),
+        ])
+        .expect("instruction announcement event is a flat JSON object");
+        let _ = out_tx
+            .send(SubagentEvent::Message {
+                agent_id: ctx.agent_id,
+                message,
+                message_index: None,
+            })
+            .await;
+    }
+}
+
 #[cfg(test)]
 #[path = "runner_test.rs"]
 mod runner_test;
@@ -4453,9 +6587,11 @@ fn refusal_fallback_frame(
         content: format!(
             "This model's safeguards flagged this message. Switched to {}.",
             banner.serving_model
-        ),
+        )
+        .into(),
         subtype: Some("model_refusal_fallback".to_string()),
         compact_metadata: None,
+        model_fallback: None,
         refusal_fallback: Some(lingxi_core::types::RefusalFallbackMetadata {
             trigger: "refusal".to_string(),
             direction: "retry".to_string(),
@@ -4466,6 +6602,7 @@ fn refusal_fallback_frame(
             api_refusal_category: banner.api_refusal_category.clone(),
             retracted_message_uuids: banner.retracted_message_uuids.clone(),
             refused_user_message_uuid: banner.refused_user_message_uuid.clone(),
+            ..Default::default()
         }),
     }
 }
@@ -4529,7 +6666,10 @@ fn drop_retracted(history: &[ConversationMessage]) -> Vec<ConversationMessage> {
 /// port's `Assistant` carries no model, but the runner knows the serving model
 /// outright — and that IS the model that produced the answer, because every hop
 /// retries the turn. So the match is on the same value, not an approximation.
-fn local_refusal_notice(live: &[ConversationMessage], serving_model: &str) -> Option<String> {
+fn local_refusal_notice(
+    live: &[ConversationMessage],
+    serving_model: &str,
+) -> Option<Utf16JsonProjection> {
     live.iter().rev().find_map(|m| match m {
         ConversationMessage::System {
             subtype: Some(subtype),
@@ -4544,55 +6684,4 @@ fn local_refusal_notice(live: &[ConversationMessage], serving_model: &str) -> Op
         }
         _ => None,
     })
-}
-
-fn cleanup_agent_inputs(
-    ctx: &SubagentContext,
-) -> llm_runtime::BoxFuture<'static, Result<(), String>> {
-    let owner = ctx
-        .tool_invoker
-        .clone()
-        .map(|invoker| (invoker, ctx.agent_id, ctx.origin_session_id));
-    Box::pin(async move {
-        if let Some((invoker, agent_id, session_id)) = owner {
-            for attempt in 0..3 {
-                match invoker.cleanup_computer_inputs(agent_id, session_id).await {
-                    Ok(()) => return Ok(()),
-                    Err(error) if attempt == 2 => {
-                        return Err(format!(
-                            "Computer input cleanup failed for Agent {agent_id}: {error}. The desktop remains reserved until this owner's inputs are released."
-                        ));
-                    }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
-                }
-            }
-        }
-        Ok(())
-    })
-}
-
-async fn cleanup_before_terminal(
-    ctx: &SubagentContext,
-    out_tx: &mpsc::Sender<SubagentEvent>,
-    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    cumulative_usage: llm_runtime::ExecutionUsage,
-    history: &[lingxi_core::types::ConversationMessage],
-    hook_usage: &llm_runtime::ExecutionUsage,
-    hook_model_selection: &hooks::HookModelSelection,
-) -> bool {
-    if let Err(error) = cleanup_agent_inputs(ctx).await {
-        if let Some(writer) = transcript {
-            let _ = writer.record_terminal("failed", Some(&error)).await;
-        }
-        publish_prompt_hook_transcript(ctx, history, hook_usage, hook_model_selection);
-        let _ = out_tx
-            .send(SubagentEvent::Failed {
-                agent_id: ctx.agent_id,
-                error,
-                cumulative_usage,
-            })
-            .await;
-        return false;
-    }
-    true
 }

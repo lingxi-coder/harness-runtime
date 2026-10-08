@@ -1,0 +1,11 @@
+{"id":3,"kind":"next","callId":1,"input":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"rewrite"}}
+{"id":3,"kind":"progress"}
+{"id":3,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"uuid":"rewrite"},"allHookedBuiltin":false}
+{"id":4,"kind":"progress"}
+{"id":4,"kind":"result","result":{"uuid":"direct","message":{"type":"user","content":[{"type":"text","text":"native-direct-return"}]}},"allHookedBuiltin":false}
+{"id":5,"kind":"next","callId":2,"input":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"cancel"}}
+{"id":5,"kind":"progress"}
+{"id":5,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"cancel"},"allHookedBuiltin":false}
+{"id":6,"kind":"next","callId":3,"input":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"throw"}}
+{"id":6,"kind":"progress"}
+{"id":6,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"throw"},"allHookedBuiltin":false}

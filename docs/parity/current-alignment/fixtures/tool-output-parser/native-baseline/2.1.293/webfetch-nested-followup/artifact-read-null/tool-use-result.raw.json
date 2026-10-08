@@ -1,0 +1,1 @@
+"Error: tool.call step resolved WebFetch with a result that does not match its output shape: [\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"artifactRead\"\n    ],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"

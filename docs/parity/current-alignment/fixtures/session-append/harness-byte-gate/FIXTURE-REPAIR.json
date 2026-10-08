@@ -1,0 +1,5 @@
+{
+  "failed_receipt": "/private/tmp/mods-current-native-harness-append-gate-v1645/native-append-byte-test-receipt.json",
+  "only_change": "Store root supplied as owned PathBuf required by actual production API; test inputs/assertions/native capture unchanged",
+  "source_count": 5911
+}

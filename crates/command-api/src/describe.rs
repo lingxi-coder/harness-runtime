@@ -26,11 +26,14 @@ use crate::model::{CommandSource, SlashCommand};
 ///    → `managed`.
 #[must_use]
 pub fn format_description_with_source(cmd: &SlashCommand) -> String {
+    // This helper is a final UI display formatter; retain source units on the
+    // command and lower them only as the display string is produced.
+    let description = cmd.description.string_at("").unwrap_or_default();
     // TS: `if (cmd.source === 'bundled') return `${cmd.description} (bundled)``.
     // Bundled origin is carried via `loaded_from` (and, for programmatic
     // bundled skills, also via `CommandSource::Bundled` below).
     if cmd.loaded_from.as_deref() == Some("bundled") {
-        return format!("{} (bundled)", cmd.description);
+        return format!("{description} (bundled)");
     }
 
     match cmd.source {
@@ -38,22 +41,22 @@ pub fn format_description_with_source(cmd: &SlashCommand) -> String {
         // `Bundled` renders its bare description too (matched here only when
         // `loaded_from != "bundled"`, e.g. a programmatic skill without the tag).
         CommandSource::Builtin | CommandSource::Mcp | CommandSource::Bundled => {
-            cmd.description.clone()
+            description.to_owned()
         }
         // TS: plugin → `(name) desc` when the manifest name is known, else `desc (plugin)`.
-        CommandSource::Plugin => format!("{} (plugin)", cmd.description),
+        CommandSource::Plugin => format!("{description} (plugin)"),
         // TS: `getSettingSourceName` mapping for the SettingSource cases.
         CommandSource::Settings(lingxi_core::types::SettingsScope::User) => {
-            format!("{} (user)", cmd.description)
+            format!("{description} (user)")
         }
         CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => {
-            format!("{} (project)", cmd.description)
+            format!("{description} (project)")
         }
         CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => {
-            format!("{} (project, gitignored)", cmd.description)
+            format!("{description} (project, gitignored)")
         }
         CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
-            format!("{} (managed)", cmd.description)
+            format!("{description} (managed)")
         }
     }
 }
@@ -65,8 +68,8 @@ mod tests {
 
     fn cmd(name: &str, description: &str, source: CommandSource) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
-            description: description.to_string(),
+            name: name.into(),
+            description: description.into(),
             source,
             kind: SlashCommandKind::Builtin {
                 handler_id: name.to_string(),

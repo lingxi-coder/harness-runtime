@@ -48,7 +48,7 @@ impl UnimplementedCommandHandler {
 impl BuiltinCommandHandler for UnimplementedCommandHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::Done {
-            display: Some(Self::stub_literal(&self.name)),
+            display: Some((Self::stub_literal(&self.name)).into()),
         }
     }
 
@@ -71,15 +71,15 @@ mod tests {
     async fn returns_locked_literal_with_name_substituted() {
         let h = UnimplementedCommandHandler::new("teleport", "(unimplemented in v0.6.0)");
         let args = ParsedSlashCommand {
-            name: "teleport".to_string(),
-            raw_args: String::new(),
+            name: "teleport".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
             }
-            other => panic!("expected Done{{display: Some(...)}}, got {other:?}"),
+            other => panic!("expected Done{{display: Some((...).into())}}, got {other:?}"),
         }
     }
 
@@ -95,7 +95,7 @@ mod tests {
         let h = UnimplementedCommandHandler::new("", "");
         let args = ParsedSlashCommand {
             name: String::new(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {

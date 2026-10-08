@@ -31,7 +31,8 @@
 
 use crate::defer::DeferralState;
 use crate::tool_trait::{PromptOptions, Tool};
-use serde_json::{json, Value};
+use lingxi_core::host::SourceToolWireDefinition;
+use serde_json::json;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -43,8 +44,7 @@ use std::sync::Arc;
 /// two passes in [`locale_cmp`] reproduce ICU's primary-then-tertiary semantics
 /// and match `localeCompare` exactly for ASCII tool names (validated against
 /// Node over 4M+ comparison pairs, zero mismatches).
-const LOCALE_PRIMARY_ORDER: &str =
-    " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+const LOCALE_PRIMARY_ORDER: &str = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
 
 /// Primary collation weight of an ASCII char (its index in [`LOCALE_PRIMARY_ORDER`]
 /// with the two cases of a letter collapsed to one weight). Non-ASCII / unmapped
@@ -135,15 +135,17 @@ pub fn locale_cmp(a: &str, b: &str) -> Ordering {
 ///
 /// `description` is awaited from [`Tool::prompt`] (the long-form tool prompt,
 /// the same text claude-code places in the API tool definition's `description`).
-pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
+pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> SourceToolWireDefinition {
     let input_schema = tool
         .input_schema_snapshot()
         .unwrap_or_else(|| tool.input_schema().clone());
-    json!({
-        "name": tool.name(),
-        "description": tool.prompt(opts).await,
-        "input_schema": input_schema,
-    })
+    SourceToolWireDefinition {
+        name: tool.name().to_owned(),
+        description: tool.prompt(opts).await,
+        input_schema,
+        strict: tool.strict(),
+        defer_loading: false,
+    }
 }
 
 /// Serialize a tool set to the wire `tools` array, **preserving the incoming
@@ -156,8 +158,11 @@ pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
 /// here would re-interleave MCP tools into the builtin prefix and break the
 /// server-side prompt-cache breakpoint contract claude-code preserves
 /// (`tools.ts:345-367`), so this function does NOT re-sort.
-pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::with_capacity(tools.len());
+pub async fn tools_to_wire(
+    tools: &[Arc<dyn Tool>],
+    opts: &PromptOptions,
+) -> Vec<SourceToolWireDefinition> {
+    let mut out: Vec<SourceToolWireDefinition> = Vec::with_capacity(tools.len());
     for tool in tools {
         out.push(tool_to_wire(tool.as_ref(), opts).await);
     }
@@ -168,21 +173,25 @@ pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec
 /// `defer` is set — claude-code's deferred-tool wire form
 /// (`{name, description, input_schema, defer_loading: true}`). When `defer` is
 /// `false` the output is the byte-identical base triple.
-pub async fn tool_to_wire_deferred(tool: &dyn Tool, opts: &PromptOptions, defer: bool) -> Value {
-    let mut v = tool_to_wire(tool, opts).await;
-    if defer {
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("defer_loading".to_string(), Value::Bool(true));
-        }
-    }
-    v
+pub async fn tool_to_wire_deferred(
+    tool: &dyn Tool,
+    opts: &PromptOptions,
+    defer: bool,
+) -> SourceToolWireDefinition {
+    let mut definition = tool_to_wire(tool, opts).await;
+    definition.defer_loading = defer;
+    definition
 }
 
 /// Apply claude-code's dynamic tool pool to an already-serialized wire list.
 /// Undiscovered deferred tools are omitted; tools discovered through
 /// `tool_reference` are included with `defer_loading: true`; non-candidates are
 /// unchanged. Matching is by name and preserves the original partition order.
-pub fn apply_defer_loading(wire: &mut Vec<Value>, tools: &[Arc<dyn Tool>], defer: &DeferralState) {
+pub fn apply_defer_loading(
+    wire: &mut Vec<SourceToolWireDefinition>,
+    tools: &[Arc<dyn Tool>],
+    defer: &DeferralState,
+) {
     // This compatibility entry point predates context-aware auto mode. With no
     // model window available, preserve its historical eager-auto behavior;
     // production turn assembly calls the context-aware variant below.
@@ -192,7 +201,7 @@ pub fn apply_defer_loading(wire: &mut Vec<Value>, tools: &[Arc<dyn Tool>], defer
 /// Context-aware variant used by callers without an exact token count. In
 /// automatic mode it applies Claude's 2.5-character fallback heuristic.
 pub fn apply_defer_loading_with_context(
-    wire: &mut Vec<Value>,
+    wire: &mut Vec<SourceToolWireDefinition>,
     tools: &[Arc<dyn Tool>],
     defer: &DeferralState,
     context_window: u64,
@@ -204,7 +213,7 @@ pub fn apply_defer_loading_with_context(
 /// token count. Claude first uses its provider token-count endpoint and falls
 /// back to the 2.5-character heuristic only when that endpoint is unavailable.
 pub fn apply_defer_loading_with_context_and_tokens(
-    wire: &mut Vec<Value>,
+    wire: &mut Vec<SourceToolWireDefinition>,
     tools: &[Arc<dyn Tool>],
     defer: &DeferralState,
     context_window: u64,
@@ -222,30 +231,23 @@ pub fn apply_defer_loading_with_context_and_tokens(
             || {
                 let chars: u128 = wire
                     .iter()
-                    .filter(|entry| {
-                        entry
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .is_some_and(|name| candidates.contains(name))
-                    })
+                    .filter(|entry| candidates.contains(entry.name.as_str()))
                     .map(|entry| {
                         // Claude's fallback sums exactly `name.length +
                         // description.length + JSON.stringify(inputSchema).length`;
                         // object field names/quotes are not counted. JavaScript length
                         // is UTF-16 code units, so use `encode_utf16` for non-BMP text.
-                        let string_units = |value: &str| value.encode_utf16().count() as u128;
-                        let name = entry
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .map_or(0, string_units);
+                        let name = entry.name.encode_utf16().count() as u128;
                         let description = entry
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map_or(0, string_units);
+                            .description
+                            .string_units("")
+                            .expect("Tool description is a JSON string projection")
+                            .len() as u128;
                         let schema = entry
-                            .get("input_schema")
-                            .map(|schema| string_units(&schema.to_string()))
-                            .unwrap_or(0);
+                            .input_schema
+                            .to_json_string()
+                            .map(|schema| schema.encode_utf16().count() as u128)
+                            .expect("Tool schema is a valid JSON projection");
                         name + description + schema
                     })
                     .sum();
@@ -270,22 +272,12 @@ pub fn apply_defer_loading_with_context_and_tokens(
         return;
     }
     // The API receives schemas only after ToolSearch returned a tool_reference.
-    wire.retain(|entry| {
-        let Some(name) = entry.get("name").and_then(Value::as_str) else {
-            return true;
-        };
-        !candidates.contains(name) || defer.is_loaded(name)
-    });
+    wire.retain(|entry| !candidates.contains(entry.name.as_str()) || defer.is_loaded(&entry.name));
     for w in wire.iter_mut() {
-        let Some(name) = w.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        if !candidates.contains(name) || !defer.is_loaded(name) {
+        if !candidates.contains(w.name.as_str()) || !defer.is_loaded(&w.name) {
             continue;
         }
-        if let Some(obj) = w.as_object_mut() {
-            obj.insert("defer_loading".to_string(), Value::Bool(true));
-        }
+        w.defer_loading = true;
     }
 }
 
@@ -294,7 +286,9 @@ mod tests {
     use super::*;
     use crate::context::ToolUseContext;
     use crate::tool_trait::{
-        DescriptionOptions, PromptOptions, ToolCallResult, ToolError, ToolStaticContext,
+        generated_builtin_result, generated_builtin_schema, DescriptionOptions, PromptOptions,
+        ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+        ToolInputSchemaProvenance, ToolStaticContext,
     };
     use async_trait::async_trait;
     use permission::result::PermissionMetadata;
@@ -305,7 +299,7 @@ mod tests {
     struct StubTool {
         name: &'static str,
         prompt: &'static str,
-        schema: Value,
+        schema: lingxi_core::types::utf16_json::Utf16JsonProjection,
     }
 
     #[async_trait]
@@ -313,8 +307,15 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn input_schema(&self) -> &Value {
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
             &self.schema
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -322,15 +323,21 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> PermissionResult {
             PermissionResult::Allow {
@@ -342,25 +349,33 @@ mod tests {
                 metadata: PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
             self.name.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
             self.prompt.into()
         }
         async fn call(
             &self,
-            _input: Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({"ok": true}),
+                data: generated_builtin_result(&json!({"ok": true})),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -370,6 +385,7 @@ mod tests {
             include_examples: true,
             model: None,
             model_profile: None,
+            ..Default::default()
         }
     }
 
@@ -378,15 +394,19 @@ mod tests {
         let tool = StubTool {
             name: "Read",
             prompt: "Reads a file from disk.",
-            schema: json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
+            schema: generated_builtin_schema(
+                &json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
+            ),
         };
         let wire = tool_to_wire(&tool, &opts()).await;
-        assert_eq!(wire["name"], "Read");
-        assert_eq!(wire["description"], "Reads a file from disk.");
-        assert_eq!(wire["input_schema"]["type"], "object");
-        // Exactly the base triple — no stray keys.
-        let obj = wire.as_object().unwrap();
-        assert_eq!(obj.len(), 3, "only name/description/input_schema: {wire}");
+        assert_eq!(wire.name, "Read");
+        assert_eq!(
+            wire.description.string_at("").as_deref(),
+            Some("Reads a file from disk.")
+        );
+        assert_eq!(wire.input_schema.string_at("/type"), Some("object"));
+        assert!(!wire.strict);
+        assert!(!wire.defer_loading);
     }
 
     #[tokio::test]
@@ -399,21 +419,24 @@ mod tests {
             Arc::new(StubTool {
                 name: "Bravo",
                 prompt: "b",
-                schema: json!({"type": "object"}),
+                schema: generated_builtin_schema(&json!({"type": "object"})),
             }),
             Arc::new(StubTool {
                 name: "Alpha",
                 prompt: "a",
-                schema: json!({"type": "object"}),
+                schema: generated_builtin_schema(&json!({"type": "object"})),
             }),
             Arc::new(StubTool {
                 name: "Charlie",
                 prompt: "c",
-                schema: json!({"type": "object"}),
+                schema: generated_builtin_schema(&json!({"type": "object"})),
             }),
         ];
         let wire = tools_to_wire(&tools, &opts()).await;
-        let names: Vec<&str> = wire.iter().map(|v| v["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = wire
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Bravo", "Alpha", "Charlie"]);
     }
 
@@ -497,7 +520,7 @@ mod tests {
     struct DeferStub {
         name: &'static str,
         defer: bool,
-        snapshot: Option<Value>,
+        snapshot: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     }
 
     #[async_trait]
@@ -505,13 +528,23 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn input_schema(&self) -> &Value {
-            static SCHEMA: once_cell::sync::Lazy<Value> =
-                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| generated_builtin_schema(&json!({"type": "object"})));
             &SCHEMA
         }
-        fn input_schema_snapshot(&self) -> Option<Value> {
+        fn input_schema_snapshot(
+            &self,
+        ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
             self.snapshot.clone()
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -522,15 +555,21 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> PermissionResult {
             PermissionResult::Allow {
@@ -542,25 +581,33 @@ mod tests {
                 metadata: PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
             self.name.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
+        async fn prompt(
+            &self,
+            _opts: &PromptOptions,
+        ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
             self.name.into()
         }
         async fn call(
             &self,
-            _input: Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({"ok": true}),
+                data: generated_builtin_result(&json!({"ok": true})),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -573,11 +620,9 @@ mod tests {
             snapshot: None,
         };
         let with = tool_to_wire_deferred(&tool, &opts(), true).await;
-        assert_eq!(with["defer_loading"], json!(true));
-        assert_eq!(with.as_object().unwrap().len(), 4);
+        assert!(with.defer_loading);
         let without = tool_to_wire_deferred(&tool, &opts(), false).await;
-        assert!(without.get("defer_loading").is_none());
-        assert_eq!(without.as_object().unwrap().len(), 3);
+        assert!(!without.defer_loading);
     }
 
     #[tokio::test]
@@ -585,15 +630,15 @@ mod tests {
         let tool = DeferStub {
             name: "speech",
             defer: false,
-            snapshot: Some(json!({
+            snapshot: Some(generated_builtin_schema(&json!({
                 "type": "object",
                 "properties": {"action": {"enum": ["transcribe"]}}
-            })),
+            }))),
         };
         let wire = tool_to_wire(&tool, &opts()).await;
         assert_eq!(
-            wire["input_schema"]["properties"]["action"]["enum"],
-            json!(["transcribe"])
+            wire.input_schema.string_at("/properties/action/enum/0"),
+            Some("transcribe")
         );
     }
 
@@ -634,9 +679,9 @@ mod tests {
         let mut wire = tools_to_wire(&tools, &opts()).await;
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
         apply_defer_loading(&mut wire, &tools, &d);
-        let by_name = |n: &str| wire.iter().find(|w| w["name"] == json!(n));
+        let by_name = |n: &str| wire.iter().find(|w| w.name == n);
         assert!(by_name("Task").is_none());
-        assert!(by_name("Read").unwrap().get("defer_loading").is_none());
+        assert!(!by_name("Read").unwrap().defer_loading);
     }
 
     #[tokio::test]
@@ -678,8 +723,8 @@ mod tests {
         d.mark_loaded(["Task".to_string()]);
         apply_defer_loading(&mut wire, &tools, &d);
         // A discovered tool is now present, but remains marked defer_loading.
-        let task = wire.iter().find(|w| w["name"] == json!("Task")).unwrap();
-        assert_eq!(task["defer_loading"], json!(true));
+        let task = wire.iter().find(|w| w.name == "Task").unwrap();
+        assert!(task.defer_loading);
     }
 
     #[tokio::test]
@@ -701,16 +746,12 @@ mod tests {
         let mut large_context = tools_to_wire(&tools, &opts()).await;
         apply_defer_loading_with_context(&mut large_context, &tools, &state, 1_000_000);
         assert!(!state.is_enabled());
-        assert!(large_context
-            .iter()
-            .all(|tool| tool.get("defer_loading").is_none()));
+        assert!(large_context.iter().all(|tool| !tool.defer_loading));
 
         let mut small_context = tools_to_wire(&tools, &opts()).await;
         apply_defer_loading_with_context(&mut small_context, &tools, &state, 1);
         assert!(state.is_enabled());
-        assert!(small_context
-            .iter()
-            .all(|tool| tool["name"] != json!("Task")));
+        assert!(small_context.iter().all(|tool| tool.name != "Task"));
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 //! byte-for-byte identical to the on-disk fixture after token substitution.
 
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use platform_posix::fs::PosixFileSystem;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};
@@ -23,6 +24,10 @@ const TS2: &str = "2026-05-25T14:30:01.000Z";
 const TS3: &str = "2026-05-25T14:30:02.000Z";
 const TS4: &str = "2026-05-25T14:30:03.000Z";
 const TS5: &str = "2026-05-25T14:30:04.000Z";
+
+fn projection(value: Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).unwrap()
+}
 
 fn substitute(template: &str) -> String {
     template
@@ -59,7 +64,7 @@ async fn writer_output_equals_single_turn_fixture() {
         timestamp: TS1.into(),
         cwd: "/tmp/golden".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":"say hi"}),
+        message: projection(json!({"role":"user","content":"say hi"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -67,7 +72,15 @@ async fn writer_output_equals_single_turn_fixture() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Map::new(),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let assistant = JsonlMessage {
         message_type: "assistant".into(),
@@ -77,7 +90,7 @@ async fn writer_output_equals_single_turn_fixture() {
         timestamp: TS2.into(),
         cwd: "/tmp/golden".into(),
         version: "0.6.0".into(),
-        message: json!({
+        message: projection(json!({
             "id": "msg_01",
             "type": "message",
             "role": "assistant",
@@ -86,7 +99,7 @@ async fn writer_output_equals_single_turn_fixture() {
             "stop_reason": "end_turn",
             "stop_sequence": Value::Null,
             "usage": {"input_tokens": 10, "output_tokens": 5}
-        }),
+        })),
         is_sidechain: false,
         user_type: None,
         git_branch: None,
@@ -94,7 +107,15 @@ async fn writer_output_equals_single_turn_fixture() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Map::new(),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
 
     writer.append(&user).await.expect("append user");
@@ -126,7 +147,7 @@ async fn reader_round_trips_single_turn_fixture() {
     assert_eq!(msgs[1].message_type, "assistant");
     assert_eq!(msgs[1].uuid, UUID2);
     assert_eq!(msgs[1].parent_uuid.as_deref(), Some(UUID1));
-    assert_eq!(msgs[1].message["stop_reason"], "end_turn");
+    assert_eq!(msgs[1].message.string_at("/stop_reason"), Some("end_turn"));
 }
 
 // ---------- T12: multi-turn write + read ----------
@@ -150,7 +171,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             timestamp: TS1.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":"read /etc/hostname"}),
+            message: projection(json!({"role":"user","content":"read /etc/hostname"})),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -158,7 +179,15 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "assistant".into(),
@@ -168,13 +197,13 @@ async fn writer_output_equals_multi_turn_fixture() {
             timestamp: TS2.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({
+            message: projection(json!({
                 "id":"msg_01","type":"message","role":"assistant",
                 "content":[{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/etc/hostname"}}],
                 "model":"claude-3-5-sonnet-latest","stop_reason":"tool_use",
                 "stop_sequence":Value::Null,
                 "usage":{"input_tokens":50,"output_tokens":20}
-            }),
+            })),
             is_sidechain: false,
             user_type: None,
             git_branch: None,
@@ -182,7 +211,15 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "user".into(),
@@ -192,7 +229,9 @@ async fn writer_output_equals_multi_turn_fixture() {
             timestamp: TS3.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"myhostname\n","is_error":false}]}),
+            message: projection(
+                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"myhostname\n","is_error":false}]}),
+            ),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -200,7 +239,15 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "assistant".into(),
@@ -210,13 +257,13 @@ async fn writer_output_equals_multi_turn_fixture() {
             timestamp: TS4.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({
+            message: projection(json!({
                 "id":"msg_02","type":"message","role":"assistant",
                 "content":[{"type":"text","text":"The hostname is myhostname."}],
                 "model":"claude-3-5-sonnet-latest","stop_reason":"end_turn",
                 "stop_sequence":Value::Null,
                 "usage":{"input_tokens":80,"output_tokens":10}
-            }),
+            })),
             is_sidechain: false,
             user_type: None,
             git_branch: None,
@@ -224,7 +271,15 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "user".into(),
@@ -234,7 +289,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             timestamp: TS5.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":"thanks"}),
+            message: projection(json!({"role":"user","content":"thanks"})),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -242,7 +297,15 @@ async fn writer_output_equals_multi_turn_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
     ];
 
@@ -264,8 +327,11 @@ async fn reader_round_trips_multi_turn_fixture() {
     let reader = JsonlReader::new(path, fs);
     let msgs = reader.read_all().await.expect("read_all");
     assert_eq!(msgs.len(), 5);
-    assert_eq!(msgs[1].message["content"][0]["name"], "Read");
-    assert_eq!(msgs[2].message["content"][0]["type"], "tool_result");
+    assert_eq!(msgs[1].message.string_at("/content/0/name"), Some("Read"));
+    assert_eq!(
+        msgs[2].message.string_at("/content/0/type"),
+        Some("tool_result")
+    );
 }
 
 #[tokio::test]
@@ -311,7 +377,7 @@ async fn writer_output_equals_compacted_fixture() {
             timestamp: TS1.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":"hi"}),
+            message: projection(json!({"role":"user","content":"hi"})),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -319,7 +385,15 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "assistant".into(),
@@ -329,13 +403,13 @@ async fn writer_output_equals_compacted_fixture() {
             timestamp: TS2.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({
+            message: projection(json!({
                 "id":"msg_01","type":"message","role":"assistant",
                 "content":[{"type":"text","text":"hello"}],
                 "model":"claude-3-5-sonnet-latest","stop_reason":"end_turn",
                 "stop_sequence":Value::Null,
                 "usage":{"input_tokens":5,"output_tokens":3}
-            }),
+            })),
             is_sidechain: false,
             user_type: None,
             git_branch: None,
@@ -343,7 +417,15 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "system".into(),
@@ -355,7 +437,7 @@ async fn writer_output_equals_compacted_fixture() {
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
             // Boundary lines carry NO inner `message` (skipped on write).
-            message: Value::Null,
+            message: Utf16JsonProjection::parse("null").unwrap(),
             is_sidechain: false,
             user_type: None,
             git_branch: None,
@@ -363,7 +445,15 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: Some(UUID2.into()),
-            extra: boundary_extra,
+            extra: projection(Value::Object(boundary_extra)),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
         JsonlMessage {
             message_type: "user".into(),
@@ -373,7 +463,9 @@ async fn writer_output_equals_compacted_fixture() {
             timestamp: TS4.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":"This session is being continued from a previous conversation. Summary:\nS"}),
+            message: projection(
+                json!({"role":"user","content":"This session is being continued from a previous conversation. Summary:\nS"}),
+            ),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -381,7 +473,15 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: summary_extra,
+            extra: projection(Value::Object(summary_extra)),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
         },
     ];
 
@@ -405,31 +505,37 @@ async fn reader_round_trips_compacted_fixture() {
     assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[2].message_type, "system");
     assert_eq!(
-        msgs[2].extra.get("subtype").and_then(|v| v.as_str()),
+        msgs[2].extra.string_at("/subtype"),
         Some("compact_boundary")
     );
     // Chain reset: parentUuid null, real parent in logicalParentUuid.
     assert_eq!(msgs[2].parent_uuid, None);
     assert_eq!(msgs[2].logical_parent_uuid.as_deref(), Some(UUID2));
     assert_eq!(
-        msgs[2].extra.get("content").and_then(|v| v.as_str()),
+        msgs[2].extra.string_at("/content"),
         Some("Conversation compacted")
     );
     assert_eq!(
         msgs[2]
             .extra
-            .get("compactMetadata")
-            .and_then(|v| v.get("preTokens"))
-            .and_then(serde_json::Value::as_i64),
-        Some(50)
+            .get_property("compactMetadata")
+            .and_then(|metadata| metadata.get_property("preTokens"))
+            .and_then(lingxi_core::types::utf16_json::JsonValueView::as_number),
+        Some(50.0)
     );
     // The summary line's flags round-trip as outer `extra` fields.
     assert_eq!(
-        msgs[3].extra.get("isCompactSummary"),
-        Some(&Value::Bool(true))
+        msgs[3]
+            .extra
+            .get_property("isCompactSummary")
+            .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool),
+        Some(true)
     );
     assert_eq!(
-        msgs[3].extra.get("isVisibleInTranscriptOnly"),
-        Some(&Value::Bool(true))
+        msgs[3]
+            .extra
+            .get_property("isVisibleInTranscriptOnly")
+            .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool),
+        Some(true)
     );
 }

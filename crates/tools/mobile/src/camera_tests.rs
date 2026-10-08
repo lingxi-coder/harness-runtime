@@ -1,4 +1,5 @@
 use super::*;
+use crate::device_support::{generated_projection, test_json_view};
 use base64::Engine;
 use image::GenericImageView;
 use lingxi_core::host::camera::{CameraControl, CapturedImage};
@@ -83,7 +84,9 @@ fn ctx_with(camera: Option<Arc<dyn CameraControl>>) -> BuiltinToolContext {
 
 async fn call(tool: &CameraTool, action: &str) -> Result<ToolCallResult, ToolError> {
     tool.call(
-        json!({ "action": action, "position": "front", "allow_editing": true }),
+        generated_projection(
+            &json!({ "action": action, "position": "front", "allow_editing": true }),
+        ),
         tool_api::test_support::fresh_ctx(),
         tool_api::test_support::fresh_tx(),
     )
@@ -99,12 +102,25 @@ async fn capture_and_library_results_reach_the_model_as_images() {
         let blocks = tool_api::tool_result_media::media_content_blocks(&result.data)
             .expect("camera result must produce a real model image block");
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "image");
-        assert_eq!(blocks[0]["source"]["media_type"], "image/jpeg");
-        assert!(!blocks[0]["source"]["data"].as_str().unwrap().is_empty());
-        assert_eq!(result.data["captured"], true);
-        assert_eq!(result.data["cancelled"], false);
-        assert!(result.model_content.as_ref().unwrap().len() < 200);
+        assert_eq!(blocks[0].string_at("/type"), Some("image"));
+        assert_eq!(
+            blocks[0].string_at("/source/media_type"),
+            Some("image/jpeg")
+        );
+        assert!(!blocks[0].string_at("/source/data").unwrap().is_empty());
+        let data = test_json_view(&result.data);
+        assert_eq!(data["captured"], true);
+        assert_eq!(data["cancelled"], false);
+        assert!(
+            result
+                .model_content
+                .as_ref()
+                .unwrap()
+                .string_units("")
+                .unwrap()
+                .len()
+                < 200
+        );
         assert!(!result.is_error);
         assert_eq!(*fake.sizing.lock().unwrap(), vec![(IMAGE_MAX_DIM, 0.8)]);
         let captures = fake.captures.lock().unwrap();
@@ -123,11 +139,12 @@ async fn oversized_native_images_are_bounded_before_model_delivery() {
     let fake = Arc::new(FakeCamera::new(Ok(photo(4000, 8))));
     let tool = CameraTool::new(ctx_with(Some(fake)));
     let result = call(&tool, "capture").await.unwrap();
-    let file = &result.data["file"];
+    let data = test_json_view(&result.data);
+    let file = &data["file"];
     assert_eq!(file["dimensions"]["originalWidth"], 4000);
     assert_eq!(file["dimensions"]["displayWidth"], IMAGE_MAX_DIM);
-    assert_eq!(result.data["width"], IMAGE_MAX_DIM);
-    assert_eq!(result.data["height"], file["dimensions"]["displayHeight"]);
+    assert_eq!(data["width"], IMAGE_MAX_DIM);
+    assert_eq!(data["height"], file["dimensions"]["displayHeight"]);
     assert!(file["base64"].as_str().unwrap().len() <= 5_242_880);
 }
 
@@ -186,7 +203,7 @@ async fn original_library_photos_reach_the_model_upright_with_matching_dimension
         let result = call(&tool, "pick_from_library").await.unwrap();
         let blocks = tool_api::tool_result_media::media_content_blocks(&result.data).unwrap();
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(blocks[0]["source"]["data"].as_str().unwrap())
+            .decode(blocks[0].string_at("/source/data").unwrap())
             .unwrap();
         let delivered = image::load_from_memory(&bytes).unwrap();
         let (dw, dh) = delivered.dimensions();
@@ -195,8 +212,8 @@ async fn original_library_photos_reach_the_model_upright_with_matching_dimension
             "portrait must stay upright in the model image block"
         );
         assert!(dh <= IMAGE_MAX_DIM);
-        assert_eq!(result.data["width"], dw);
-        assert_eq!(result.data["height"], dh);
+        assert_eq!(result.data.number_at("/width"), Some(f64::from(dw)));
+        assert_eq!(result.data.number_at("/height"), Some(f64::from(dh)));
         let top = delivered.get_pixel(dw / 2, dh / 4);
         let bottom = delivered.get_pixel(dw / 2, 3 * dh / 4);
         assert!(top[0] > 200 && top[2] < 30, "top must be red: {top:?}");
@@ -214,8 +231,20 @@ async fn cancelled_camera_actions_return_no_photo_and_no_error() {
         let fake = Arc::new(FakeCamera::new(Err(CameraError::Cancelled)));
         let tool = CameraTool::new(ctx_with(Some(fake)));
         let result = call(&tool, action).await.unwrap();
-        assert_eq!(result.data["captured"], false);
-        assert_eq!(result.data["cancelled"], true);
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/captured")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/cancelled")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert!(!result.is_error);
         assert!(tool_api::tool_result_media::media_content_blocks(&result.data).is_none());
     }

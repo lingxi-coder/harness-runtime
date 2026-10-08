@@ -36,9 +36,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Mutex;
 
 use lingxi_core::TodoState;
@@ -137,7 +137,7 @@ pub struct UnassignedTask {
     /// Decimal task id.
     pub id: String,
     /// Task subject at unassign time.
-    pub subject: String,
+    pub subject: Utf16JsonProjection,
 }
 
 /// Result of [`TodoStore::unassign_tasks_for_teammate`] (oracle `dCe`).
@@ -146,7 +146,7 @@ pub struct UnassignOutcome {
     /// The tasks reset to ownerless-pending, in list (id-ascending) order.
     pub unassigned_tasks: Vec<UnassignedTask>,
     /// The byte-exact notification for the lead's inbox.
-    pub notification_message: String,
+    pub notification_message: Utf16JsonProjection,
 }
 
 /// A retryable departure failure, retaining updates committed before the error.
@@ -174,21 +174,44 @@ pub fn format_unassignment_notification(
     name: &str,
     reason: TeammateEndReason,
     tasks: &[UnassignedTask],
-) -> String {
+) -> Utf16JsonProjection {
     let verb = match reason {
         TeammateEndReason::Terminated => "was terminated",
         TeammateEndReason::Shutdown => "has shut down",
     };
-    let mut message = format!("{name} {verb}.");
+    let mut units = format!("{name} {verb}.").encode_utf16().collect::<Vec<_>>();
     if !tasks.is_empty() {
-        let list = tasks
-            .iter()
-            .map(|task| format!("#{} \"{}\"", task.id, task.subject))
-            .collect::<Vec<_>>()
-            .join(", ");
-        message.push_str(&format!(" {} task(s) were unassigned: {list}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.", tasks.len()));
+        units.extend(format!(" {} task(s) were unassigned: ", tasks.len()).encode_utf16());
+        for (index, task) in tasks.iter().enumerate() {
+            if index > 0 {
+                units.extend(", ".encode_utf16());
+            }
+            units.extend(format!("#{} \"", task.id).encode_utf16());
+            if let Some(subject) = task.subject.string_units("") {
+                units.extend(subject);
+            }
+            units.extend("\"".encode_utf16());
+        }
+        units.extend(". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.".encode_utf16());
     }
-    message
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("unassignment notice is a valid source string")
+}
+
+fn deserialize_source_string<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if value
+        .at_pointer("")
+        .and_then(JsonValueView::code_units)
+        .is_some()
+    {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("expected a JSON string"))
+    }
 }
 
 /// One V2 task as persisted on disk. 1:1 with claude-code `TaskSchema`
@@ -198,18 +221,28 @@ pub struct TodoTask {
     /// Decimal task id (`"1".."N"`), assigned by [`TodoStore::create`].
     pub id: String,
     /// Brief, imperative title for the task.
-    pub subject: String,
+    #[serde(
+        deserialize_with = "deserialize_source_string",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize"
+    )]
+    pub subject: Utf16JsonProjection,
     /// What needs to be done.
-    pub description: String,
+    #[serde(
+        deserialize_with = "deserialize_source_string",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize"
+    )]
+    pub description: Utf16JsonProjection,
     /// Present-continuous spinner form (e.g. `"Running tests"`). Optional;
     /// omitted from disk when absent (matches TS `JSON.stringify` of
     /// `undefined`).
     #[serde(
         rename = "activeForm",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    pub active_form: Option<String>,
+    pub active_form: Option<Utf16JsonProjection>,
     /// Owning agent id, when claimed. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -221,9 +254,14 @@ pub struct TodoTask {
     /// Task ids that block this task.
     #[serde(rename = "blockedBy", default)]
     pub blocked_by: Vec<String>,
-    /// Arbitrary attached metadata.
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub metadata: Map<String, Value>,
+    /// Arbitrary attached metadata, retaining exact source bytes and absence.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub metadata: Option<Utf16JsonProjection>,
 }
 
 impl TodoTask {
@@ -231,10 +269,10 @@ impl TodoTask {
     /// [`TodoStore::create`]) and no blocks / owner.
     #[must_use]
     pub fn new(
-        subject: String,
-        description: String,
-        active_form: Option<String>,
-        metadata: Map<String, Value>,
+        subject: Utf16JsonProjection,
+        description: Utf16JsonProjection,
+        active_form: Option<Utf16JsonProjection>,
+        metadata: Option<Utf16JsonProjection>,
     ) -> Self {
         Self {
             id: String::new(),
@@ -865,7 +903,20 @@ impl TodoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn source_text(value: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+            .expect("test text is a valid source string")
+    }
+
+    fn task(subject: &str, description: &str) -> TodoTask {
+        TodoTask::new(source_text(subject), source_text(description), None, None)
+    }
+
+    fn exact_string(units: &[u16]) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+            .expect("test text is a valid UJP string")
+    }
 
     fn temp_store() -> (TodoStore, std::path::PathBuf) {
         // A process-wide counter guarantees per-call uniqueness: the wall-clock
@@ -899,19 +950,19 @@ mod tests {
         let (store, dir) = temp_store();
         let a = store
             .create(TodoTask::new(
-                "first".into(),
-                "do first".into(),
+                source_text("first"),
+                source_text("do first"),
                 None,
-                Map::new(),
+                None,
             ))
             .await
             .unwrap();
         let b = store
             .create(TodoTask::new(
-                "second".into(),
-                "do second".into(),
+                source_text("second"),
+                source_text("do second"),
                 None,
-                Map::new(),
+                None,
             ))
             .await
             .unwrap();
@@ -923,24 +974,31 @@ mod tests {
     #[tokio::test]
     async fn get_round_trips_all_fields() {
         let (store, dir) = temp_store();
-        let mut meta = Map::new();
-        meta.insert("k".into(), json!("v"));
+        let meta = Utf16JsonProjection::parse(r#"{"k":"v"}"#).unwrap();
         let id = store
             .create(TodoTask::new(
-                "subj".into(),
-                "desc".into(),
-                Some("Doing subj".into()),
-                meta.clone(),
+                source_text("subj"),
+                source_text("desc"),
+                Some(source_text("Doing subj")),
+                Some(meta.clone()),
             ))
             .await
             .unwrap();
         let got = store.get(&id).await.unwrap();
         assert_eq!(got.id, "1");
-        assert_eq!(got.subject, "subj");
-        assert_eq!(got.description, "desc");
-        assert_eq!(got.active_form.as_deref(), Some("Doing subj"));
+        assert_eq!(got.subject.string_at(""), Some("subj"));
+        assert_eq!(got.description.string_at(""), Some("desc"));
+        assert_eq!(
+            got.active_form
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("Doing subj")
+        );
         assert_eq!(got.status, TodoState::Pending);
-        assert_eq!(got.metadata, meta);
+        assert_eq!(
+            got.metadata.as_ref().unwrap().to_json_string().unwrap(),
+            meta.to_json_string().unwrap()
+        );
         assert!(got.blocks.is_empty());
         assert!(got.blocked_by.is_empty());
         assert!(store.get("999").await.is_none());
@@ -948,13 +1006,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_restart_keeps_exact_strings_and_arbitrary_metadata() {
+        let (store, dir) = temp_store();
+        let subject_units = vec![u16::from(b'A'), 0xD800, u16::from(b'B')];
+        let description_units = vec![0xDFFF, u16::from(b'!')];
+        let active_units = vec![u16::from(b'R'), 0xD801];
+        let metadata =
+            Utf16JsonProjection::parse(r#"{"label":"\ud800","nested":{"v":"\udfff"}}"#).unwrap();
+        let id = store
+            .create(TodoTask::new(
+                exact_string(&subject_units),
+                exact_string(&description_units),
+                Some(exact_string(&active_units)),
+                Some(metadata.clone()),
+            ))
+            .await
+            .unwrap();
+
+        let reopened = TodoStore::in_dir(dir.clone());
+        let task = reopened.get(&id).await.expect("persisted task");
+        assert_eq!(task.subject.string_units(""), Some(subject_units));
+        assert_eq!(task.description.string_units(""), Some(description_units));
+        assert_eq!(
+            task.active_form
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(active_units)
+        );
+        assert_eq!(
+            task.metadata.as_ref().unwrap().to_json_string().unwrap(),
+            metadata.to_json_string().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn optional_fields_keep_absence_distinct_from_explicit_null() {
+        let absent: TodoTask = serde_json::from_str(
+            r#"{"id":"1","subject":"s","description":"d","status":"pending"}"#,
+        )
+        .unwrap();
+        let explicit_null: TodoTask = serde_json::from_str(
+            r#"{"id":"1","subject":"s","description":"d","status":"pending","activeForm":null,"metadata":null}"#,
+        )
+        .unwrap();
+        assert!(absent.active_form.is_none());
+        assert!(absent.metadata.is_none());
+        assert!(explicit_null
+            .active_form
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        assert!(explicit_null
+            .metadata
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+        let absent_wire = serde_json::to_string(&absent).unwrap();
+        let null_wire = serde_json::to_string(&explicit_null).unwrap();
+        assert!(!absent_wire.contains("activeForm"));
+        assert!(!absent_wire.contains("metadata"));
+        assert!(null_wire.contains(r#""activeForm":null"#));
+        assert!(null_wire.contains(r#""metadata":null"#));
+    }
+
+    #[tokio::test]
     async fn list_returns_all_in_id_order() {
         let (store, dir) = temp_store();
         for i in 0..3 {
-            store
-                .create(TodoTask::new(format!("s{i}"), "d".into(), None, Map::new()))
-                .await
-                .unwrap();
+            store.create(task(&format!("s{i}"), "d")).await.unwrap();
         }
         let all = store.list().await;
         let ids: Vec<&str> = all.iter().map(|t| t.id.as_str()).collect();
@@ -965,20 +1089,17 @@ mod tests {
     #[tokio::test]
     async fn update_mutates_and_preserves_id() {
         let (store, dir) = temp_store();
-        let id = store
-            .create(TodoTask::new("s".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
+        let id = store.create(task("s", "d")).await.unwrap();
         let updated = store
             .update(&id, |t| {
                 t.status = TodoState::InProgress;
-                t.subject = "renamed".into();
+                t.subject = source_text("renamed");
             })
             .await
             .unwrap();
         assert_eq!(updated.id, "1");
         assert_eq!(updated.status, TodoState::InProgress);
-        assert_eq!(updated.subject, "renamed");
+        assert_eq!(updated.subject.string_at(""), Some("renamed"));
         assert!(store.update("999", |_| {}).await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -986,14 +1107,8 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_file_cascades_refs_and_bumps_hwm() {
         let (store, dir) = temp_store();
-        let a = store
-            .create(TodoTask::new("a".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
-        let b = store
-            .create(TodoTask::new("b".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
+        let a = store.create(task("a", "d")).await.unwrap();
+        let b = store.create(task("b", "d")).await.unwrap();
         // a blocks b.
         assert!(store.block_task(&a, &b).await);
         assert_eq!(store.get(&a).await.unwrap().blocks, vec![b.clone()]);
@@ -1005,10 +1120,7 @@ mod tests {
         assert!(store.get(&b).await.unwrap().blocked_by.is_empty());
 
         // Next create skips the deleted id (hwm = max existing id at delete time).
-        let c = store
-            .create(TodoTask::new("c".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
+        let c = store.create(task("c", "d")).await.unwrap();
         assert_eq!(c, "3");
         assert!(!store.delete("999").await);
         let _ = std::fs::remove_dir_all(dir);
@@ -1017,10 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn mutations_leave_no_stale_lock_directories() {
         let (store, dir) = temp_store();
-        let id = store
-            .create(TodoTask::new("s".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
+        let id = store.create(task("s", "d")).await.unwrap();
         // create() locks the list-level target: the empty `.lock` file persists
         // (claude-code leaves it too) but the lock *directory* is released.
         assert!(
@@ -1051,14 +1160,8 @@ mod tests {
     #[tokio::test]
     async fn block_task_is_bidirectional_and_idempotent() {
         let (store, dir) = temp_store();
-        let a = store
-            .create(TodoTask::new("a".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
-        let b = store
-            .create(TodoTask::new("b".into(), "d".into(), None, Map::new()))
-            .await
-            .unwrap();
+        let a = store.create(task("a", "d")).await.unwrap();
+        let b = store.create(task("b", "d")).await.unwrap();
         assert!(store.block_task(&a, &b).await);
         // Repeat: no duplicate edges.
         assert!(store.block_task(&a, &b).await);
@@ -1076,7 +1179,7 @@ mod tests {
         status: TodoState,
         owner: Option<&str>,
     ) -> String {
-        let mut t = TodoTask::new(subject.into(), "desc".into(), None, Map::new());
+        let mut t = task(subject, "desc");
         t.status = status;
         t.owner = owner.map(str::to_string);
         store.create(t).await.unwrap()
@@ -1140,7 +1243,7 @@ mod tests {
             error.unassigned_tasks,
             [UnassignedTask {
                 id: first,
-                subject: "first".into()
+                subject: source_text("first")
             }]
         );
         assert_eq!(std::fs::read(store.task_path(&second)).unwrap(), before);
@@ -1152,12 +1255,16 @@ mod tests {
             retry.unassigned_tasks,
             [UnassignedTask {
                 id: second,
-                subject: "second".into()
+                subject: source_text("second")
             }]
         );
         let mut all = error.unassigned_tasks;
         all.extend(retry.unassigned_tasks);
-        assert_eq!(format_unassignment_notification("nova", TeammateEndReason::Shutdown, &all), "nova has shut down. 2 task(s) were unassigned: #1 \"first\", #2 \"second\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.");
+        assert_eq!(
+            format_unassignment_notification("nova", TeammateEndReason::Shutdown, &all)
+                .string_at(""),
+            Some("nova has shut down. 2 task(s) were unassigned: #1 \"first\", #2 \"second\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1197,7 +1304,7 @@ mod tests {
     async fn strict_departure_atomic_write_failure_removes_temporary_file() {
         let (store, dir) = temp_store();
         std::fs::create_dir(&dir).unwrap();
-        let mut task = TodoTask::new("failure".into(), "desc".into(), None, Map::new());
+        let mut task = task("failure", "desc");
         task.id = "1".into();
         let destination = store.task_path(&task.id);
         std::fs::create_dir(&destination).unwrap();
@@ -1475,11 +1582,12 @@ mod tests {
         );
         // Byte-exact notification (oracle segment table @247332622 region):
         // base sentence + ` N task(s) were unassigned: #id "subj", …. Use …`.
+        let expected_notification = format!(
+            "nova has shut down. 2 task(s) were unassigned: #{by_id} \"Fix parser\", #{by_name} \"Write docs\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates."
+        );
         assert_eq!(
-            outcome.notification_message,
-            format!(
-                "nova has shut down. 2 task(s) were unassigned: #{by_id} \"Fix parser\", #{by_name} \"Write docs\". Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates."
-            )
+            outcome.notification_message.string_at(""),
+            Some(expected_notification.as_str())
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1492,12 +1600,18 @@ mod tests {
             .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Shutdown)
             .await;
         assert!(outcome.unassigned_tasks.is_empty());
-        assert_eq!(outcome.notification_message, "nova has shut down.");
+        assert_eq!(
+            outcome.notification_message.string_at(""),
+            Some("nova has shut down.")
+        );
         // Latent "terminated" branch (zero call sites in 2.1.263) byte-check.
         let outcome = store
             .unassign_tasks_for_teammate("agent-uuid-1", "nova", TeammateEndReason::Terminated)
             .await;
-        assert_eq!(outcome.notification_message, "nova was terminated.");
+        assert_eq!(
+            outcome.notification_message.string_at(""),
+            Some("nova was terminated.")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

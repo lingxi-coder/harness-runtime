@@ -26,7 +26,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::broker::{spawn as spawn_broker, BrokerError, BrokerHandle};
 use crate::codec::CodecError;
 use crate::inbound::{BoxedHandler, Dispatcher};
-use crate::messages::{Message, Notification};
+use crate::messages::{Id, JsonPayload, Message, Notification, Request, Response};
 use crate::router::{Router, RouterError, StartedCall, DEFAULT_STARTING_REQUEST_ID};
 
 /// Connection-level error variants — surfaces the broker, router, codec, and
@@ -260,6 +260,72 @@ impl Connection {
         Ok(self.router.start_call_unbounded(method, params)?)
     }
 
+    /// Build parameters using the assigned id before enqueueing the request.
+    pub fn start_call_with_params(
+        &self,
+        method: &str,
+        params: impl FnOnce(&Id) -> serde_json::Value,
+    ) -> Result<StartedCall, ConnectionError> {
+        Ok(self.router.start_call_with_params(method, params)?)
+    }
+
+    /// Enqueue a request with validated raw JSON parameters and return its id
+    /// plus a wait handle that retains the raw response text.
+    pub fn start_call_raw_json_unbounded(
+        &self,
+        method: &str,
+        params_json: String,
+    ) -> Result<StartedCall, ConnectionError> {
+        Ok(self
+            .router
+            .start_call_raw_json_unbounded(method, params_json)?)
+    }
+
+    /// Build validated raw JSON parameters after assigning the request id.
+    pub fn start_call_raw_json_with_params(
+        &self,
+        method: &str,
+        params: impl FnOnce(&Id) -> String,
+    ) -> Result<StartedCall, ConnectionError> {
+        Ok(self
+            .router
+            .start_call_raw_json_with_params(method, params)?)
+    }
+
+    /// Send raw JSON parameters and return the peer's raw JSON result.
+    pub async fn call_raw_json(
+        &self,
+        method: &str,
+        params_json: String,
+    ) -> Result<String, ConnectionError> {
+        Ok(self.router.call_raw_json(method, params_json).await?)
+    }
+
+    /// Send raw JSON parameters without a local deadline.
+    pub async fn call_raw_json_unbounded(
+        &self,
+        method: &str,
+        params_json: String,
+    ) -> Result<String, ConnectionError> {
+        Ok(self
+            .router
+            .call_raw_json_unbounded(method, params_json)
+            .await?)
+    }
+
+    /// Send raw JSON parameters with an explicit local deadline.
+    pub async fn call_raw_json_with_timeout(
+        &self,
+        method: &str,
+        params_json: String,
+        timeout: Duration,
+    ) -> Result<String, ConnectionError> {
+        Ok(self
+            .router
+            .call_raw_json_with_timeout(method, params_json, timeout)
+            .await?)
+    }
+
     /// Send an outbound request with an explicit per-call timeout.
     pub async fn call_with_timeout<P: Serialize, R: DeserializeOwned>(
         &self,
@@ -273,9 +339,8 @@ impl Connection {
             .await?)
     }
 
-    /// Send a disposable request while surfacing a response with a mismatched
-    /// id. Protocol negotiation uses this on a sibling connection with one
-    /// pending probe; ordinary calls continue to ignore unknown ids.
+    /// Send a discovery probe with its independent string-id sequence and
+    /// surface mismatched response ids. Ordinary calls ignore unknown ids.
     pub async fn call_with_timeout_probe<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
@@ -285,6 +350,20 @@ impl Connection {
         Ok(self
             .router
             .call_with_timeout_probe(method, params, timeout)
+            .await?)
+    }
+
+    /// Send a named discovery probe but ignore unrelated responses. Stdio
+    /// probes wait for their matching reply or timeout before falling back.
+    pub async fn call_with_timeout_probe_ignoring_unknown_ids<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        timeout: Duration,
+    ) -> Result<R, ConnectionError> {
+        Ok(self
+            .router
+            .call_with_timeout_probe_ignoring_unknown_ids(method, params, timeout)
             .await?)
     }
 
@@ -298,6 +377,33 @@ impl Connection {
     /// handler for that method.
     pub async fn register_handler(&self, method: impl Into<String>, handler: BoxedHandler) {
         self.dispatcher.register(method, handler).await;
+    }
+
+    /// Invoke an existing local handler without sending anything to the peer.
+    /// `None` means the capability has no registered handler. The registry lock
+    /// is released before invoking callbacks, which may themselves use this connection.
+    pub async fn invoke_registered_handler(&self, request: Request) -> Option<Response> {
+        let handler = self.local_registered_handler(&request.method).await?;
+        Some(handler.handle(request).await)
+    }
+
+    /// Capture the current local handler before protocol schema validation.
+    /// The sole registry lock is released before the caller runs its callback.
+    pub async fn local_registered_handler(&self, method: &str) -> Option<BoxedHandler> {
+        self.dispatcher.get_registered(method).await
+    }
+
+    /// Bind an HTTP-style request stream abort controller before sending calls.
+    pub fn set_per_request_cancellation(
+        &self,
+        controller: Arc<dyn crate::router::PerRequestCancellation>,
+    ) {
+        self.router.set_per_request_cancellation(controller);
+    }
+    /// Whether cancellation is owned by individual transport streams.
+    #[must_use]
+    pub fn has_per_request_cancellation(&self) -> bool {
+        self.router.has_per_request_cancellation()
     }
 
     /// Subscribe to inbound notifications. Each call returns a fresh
@@ -406,7 +512,11 @@ mod tests {
     #[async_trait]
     impl InboundHandler for Echo {
         async fn handle(&self, req: Request) -> Response {
-            Response::success(req.id, req.params.unwrap_or(json!(null)))
+            Response::success(
+                req.id,
+                req.params
+                    .unwrap_or_else(|| JsonPayload::parse("null").unwrap()),
+            )
         }
     }
 
@@ -436,7 +546,7 @@ mod tests {
         conn_a.notify("evt", json!({"k": "v"})).unwrap();
         let n = sub.recv().await.unwrap();
         assert_eq!(n.method, "evt");
-        assert_eq!(n.params, Some(json!({"k": "v"})));
+        assert_eq!(n.params.unwrap().to_value().unwrap(), json!({"k": "v"}));
     }
 
     // -----------------------------------------------------------------

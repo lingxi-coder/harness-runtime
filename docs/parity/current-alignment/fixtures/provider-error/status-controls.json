@@ -1,0 +1,24 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Return the fixed provider error fixture response.",
+  "response_body_case": "nested-error-message-lone-surrogate",
+  "max_retries": 0,
+  "cases": [
+    { "id": "http-401", "session_id": "00000000-0000-4000-8000-000000002951", "http_status": 401, "expected_native_posts": null },
+    { "id": "http-403", "session_id": "00000000-0000-4000-8000-000000002952", "http_status": 403, "expected_native_posts": 1 },
+    {
+      "id": "http-404",
+      "session_id": "00000000-0000-4000-8000-000000002953",
+      "http_status": 404,
+      "expected_native_posts": 2,
+      "native_request_shape": {
+        "model": "claude-sonnet-4-5",
+        "stream_sequence": [true, false],
+        "changed_json_paths": ["/stream"]
+      }
+    },
+    { "id": "http-413", "session_id": "00000000-0000-4000-8000-000000002954", "http_status": 413, "expected_native_posts": 1 },
+    { "id": "http-500", "session_id": "00000000-0000-4000-8000-000000002955", "http_status": 500, "expected_native_posts": null }
+  ]
+}

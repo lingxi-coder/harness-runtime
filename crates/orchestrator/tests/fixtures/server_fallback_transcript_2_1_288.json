@@ -1,0 +1,623 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "completed assistant block row construction and immediate yield",
+      "start": 189063243,
+      "end": 189064686,
+      "sha256": "08ac20ea61b30351488d0ee6cff8d4ab2f33fa9fdc0ab3dd045a68c1a31b9d2a"
+    },
+    {
+      "label": "Native completed block row literal",
+      "start": 189063912,
+      "end": 189064461,
+      "sha256": "b13139da905943cc052e35e1afe09e2541b2eb7c73c4b6219c7396e378c5a055"
+    },
+    {
+      "label": "message_delta in-place terminal metadata update for retained rows",
+      "start": 189066145,
+      "end": 189066398,
+      "sha256": "9733fcb5e70455f19f1c8e600689f5e0cdc982ca57ddafbaed77f4236a5aef3b"
+    },
+    {
+      "label": "Native sticky stop_reason and conditional stop_details assignment",
+      "start": 189065959,
+      "end": 189066398,
+      "sha256": "5ce1b6a56f4eb8857d990cc2203b4fdb4c24debe4dabfe21ad1bf5a005a5bcd3"
+    },
+    {
+      "label": "accepted stream hop and completed row retention/rewrite",
+      "start": 189057761,
+      "end": 189058831,
+      "sha256": "bd2696d02574015a24034b69789ec04de89db58458738c0330f0f02d35780821"
+    },
+    {
+      "label": "assistant event projection from completed transcript row",
+      "start": 194386458,
+      "end": 194388561,
+      "sha256": "28635190be96fe12c9fa9e8099072c81665931b9478309ab371bb3ba1c0bf32d"
+    },
+    {
+      "label": "accepted fallback output events and ordering",
+      "start": 195142316,
+      "end": 195143107,
+      "sha256": "40c8da035ae85a663f03f19d6270bcb6c385b99584b0fe296886eaa562ec1c67"
+    },
+    {
+      "label": "Native accepted assistant J merge and conditional supersedes field",
+      "start": 195151889,
+      "end": 195152857,
+      "sha256": "f27d46c714fd69391c842b548b9836387a74c520f942f9c7e7335ef6a73c67c2"
+    },
+    {
+      "label": "accepted J assistant row yield followed by original-row tombstones",
+      "start": 195153482,
+      "end": 195153981,
+      "sha256": "03033400d8f7f1fe0c33dc58eaa12bbb71d0f9c65ede97333119748f7e7b5267"
+    },
+    {
+      "label": "message callback adapter used by deferred query events",
+      "start": 191051477,
+      "end": 191052869,
+      "sha256": "8aae8dc2c1d3430f138647b9575df0dcbc28d1a00e1c14a8fe7c4041d68cbe38"
+    },
+    {
+      "label": "assistant append and continuation UUID removal trigger",
+      "start": 209335574,
+      "end": 209338044,
+      "sha256": "a18a423ca8d9624a21ee762806975a543e240ca67c466f5a76d789b735efc883"
+    },
+    {
+      "label": "query events are applied through deferred frame callback",
+      "start": 209349591,
+      "end": 209350241,
+      "sha256": "46fa521a6da63863b4fbdb331e522b1100d0324b0e0af08c9bb605dec139991f"
+    },
+    {
+      "label": "writer holds rows without terminal stop reason while query is active",
+      "start": 191162288,
+      "end": 191162448,
+      "sha256": "1790706354f5066d59d43dd4a4a694882c8d18c10b9c603ba360afc8c8d48df9"
+    },
+    {
+      "label": "live writer parent hint from preceding persisted transcript row",
+      "start": 191215312,
+      "end": 191215724,
+      "sha256": "3d6ffe922e0b962421cd635d828aec8693061f4812e09f535decb8a40f6b28c1"
+    },
+    {
+      "label": "physical JSONL UUID removal bounds and rewrite behavior",
+      "start": 191194159,
+      "end": 191195085,
+      "sha256": "7c9bc9c24bf8e30bd5617066c57966960f3da4c3699b5c2baf10ca5504dc40c5"
+    },
+    {
+      "label": "Native persisted transcript filter and parent projection",
+      "start": 191330748,
+      "end": 191332430,
+      "sha256": "e89c07e9401b80499bac1e20ead9d6c7afc7e1c58a998ed450539a0763362e73"
+    },
+    {
+      "label": "Native live JSONL entry envelope construction and insertion order",
+      "start": 191203362,
+      "end": 191205410,
+      "sha256": "b9306aa61fea110ddbd39caa64c561fb07bfcf881d28d7df2bf83eef5b057be8"
+    },
+    {
+      "label": "Native JSONL serializer",
+      "start": 180885684,
+      "end": 180886396,
+      "sha256": "9dcc99e14bf21ebacb8f27f67d233cba01d83efc90f55a41178a6bc1e9ae2dba"
+    },
+    {
+      "label": "resume parent-chain reconstruction",
+      "start": 191246151,
+      "end": 191246582,
+      "sha256": "8049df3c7e080a123a239832884c5d76896c9d5ff29e64739becc218f9022a03"
+    },
+    {
+      "label": "timestamp fallback candidate selector and 5000ms cutoff",
+      "start": 191248203,
+      "end": 191248519,
+      "sha256": "99ac3d2c7ab72af15ffd609ace37c879954e859704e9c8d8393e8a31536f2c51"
+    }
+  ],
+  "scope": "Source-anchored transcript lifecycle facts plus actual Native resume chain walker/nearest-parent selection. Parent chain is reconstructed for the returned transcript only; this oracle does not infer producer parentUuid, model real async filesystem scheduling, or prove host bridge/UI atomicity.",
+  "transcriptFacts": {
+    "assistantRowUuidCreatedAt": "content_block_stop",
+    "outerUuid": "fresh KY() per completed API content block",
+    "innerMessageIdAndModel": "spread from current MessageStart object pf",
+    "parentUuidAtProducer": "absent",
+    "messageDelta": "mutates usage and sticky stop_reason on every row still in Pp; stop_details follows the conditional stop-state rule below; row identity/model are not changed by the delta loop",
+    "messageDeltaStopState": "a string stop_reason replaces sticky Fu; absent/null/non-string reason leaves Fu unchanged; stop_details updates to delta value or null only when this delta has a string reason or Fu is still null",
+    "persistedParent": "live insertMessageChain assigns parent from prior loggable row; LE seeds from preceding row already in sessionMessages",
+    "acceptedFallbackEvents": [
+      "query_model_change",
+      "discarded row tombstones",
+      "compensation row tombstones",
+      "optional refusal_continuation begin"
+    ],
+    "jAcceptedReplacementEvents": [
+      "eligible replacement assistant row",
+      "tombstones for J.originals in source order"
+    ],
+    "acceptedFallbackTombstone": "displayOnly is stripped by callback adapter; Native transcript removal and JSONL remove-by-UUID are requested",
+    "sameUuidMutation": "LE skips rows whose UUID is already in sessionMessages; changed model/content is not appended or upserted by a later LE pass",
+    "supersedesPersistence": "when Je is true, We receives top-level supersedesUuids; Native DHo and insertMessageChain preserve it, and JSON.stringify writes it in insertion order before writer-added version/gitBranch/slug fields",
+    "removalReparenting": "physical UUID removal does not reparent surviving rows; missing-parent resume reconstruction may attach nearest earlier row in returned chain only"
+  },
+  "producerExecutions": {
+    "completedRow": {
+      "message": {
+        "id": "provider-inner-id",
+        "model": "initial-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      },
+      "apiBlockIndex": 7,
+      "requestId": "request-7",
+      "requestRef": "request-ref-7",
+      "type": "assistant",
+      "uuid": "outer-row-uuid-7",
+      "timestamp": "2023-11-14T22:13:20.000Z"
+    },
+    "messageDeltaRows": [
+      {
+        "message": {
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 4
+          },
+          "stop_reason": "end_turn",
+          "stop_details": "provider-stop-details"
+        }
+      },
+      {
+        "message": {
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 4
+          },
+          "stop_reason": "end_turn",
+          "stop_details": "provider-stop-details"
+        }
+      },
+      {
+        "message": {
+          "model": "row-model",
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 4
+          },
+          "stop_reason": "end_turn",
+          "stop_details": "provider-stop-details"
+        }
+      }
+    ],
+    "messageDeltaStopState": {
+      "stickyNoReason": {
+        "Fu": "refusal",
+        "stopReason": "refusal",
+        "stopDetails": {
+          "category": "cyber"
+        }
+      },
+      "preTerminalDetails": {
+        "Fu": null,
+        "stopReason": null,
+        "stopDetails": {
+          "category": "bio"
+        }
+      },
+      "newTerminalClearsDetails": {
+        "Fu": "end_turn",
+        "stopReason": "end_turn",
+        "stopDetails": null
+      }
+    },
+    "changedAlreadyPersistedRowWrites": [
+      [
+        {
+          "uuid": "retained-row-uuid",
+          "type": "assistant",
+          "timestamp": "2023-11-14T22:13:20.000Z",
+          "message": {
+            "id": "provider-inner-id",
+            "model": "first-provider",
+            "content": [
+              {
+                "type": "text",
+                "text": "prefix"
+              }
+            ]
+          }
+        }
+      ]
+    ],
+    "supersedesRow": {
+      "type": "assistant",
+      "timestamp": "2023-11-14T22:13:20.000Z",
+      "message": {
+        "id": "provider-inner-id",
+        "model": "served-model",
+        "content": [
+          {
+            "type": "text",
+            "text": "answer"
+          }
+        ],
+        "stop_reason": "end_turn"
+      },
+      "requestId": "request-8",
+      "requestRef": "request-ref-8",
+      "uuid": "incoming-row-uuid",
+      "querySource": "repl_main_thread",
+      "supersedesUuids": [
+        "retained-row-uuid"
+      ]
+    },
+    "persistedJsonlEntry": {
+      "parentUuid": null,
+      "isSidechain": false,
+      "type": "assistant",
+      "timestamp": "2023-11-14T22:13:20.000Z",
+      "message": {
+        "id": "provider-inner-id",
+        "model": "served-model",
+        "content": [
+          {
+            "type": "text",
+            "text": "answer"
+          }
+        ],
+        "stop_reason": "end_turn"
+      },
+      "requestId": "request-8",
+      "requestRef": "request-ref-8",
+      "uuid": "incoming-row-uuid",
+      "querySource": "repl_main_thread",
+      "supersedesUuids": [
+        "retained-row-uuid"
+      ],
+      "cwd": "/project",
+      "userType": "external",
+      "sessionId": "session-8",
+      "version": "2.1.288",
+      "gitBranch": "branch",
+      "slug": "slug-8"
+    },
+    "serializedJsonlRecord": "{\"parentUuid\":null,\"isSidechain\":false,\"type\":\"assistant\",\"timestamp\":\"2023-11-14T22:13:20.000Z\",\"message\":{\"id\":\"provider-inner-id\",\"model\":\"served-model\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}],\"stop_reason\":\"end_turn\"},\"requestId\":\"request-8\",\"requestRef\":\"request-ref-8\",\"uuid\":\"incoming-row-uuid\",\"querySource\":\"repl_main_thread\",\"supersedesUuids\":[\"retained-row-uuid\"],\"cwd\":\"/project\",\"userType\":\"external\",\"sessionId\":\"session-8\",\"version\":\"2.1.288\",\"gitBranch\":\"branch\",\"slug\":\"slug-8\"}"
+  },
+  "chainCases": [
+    {
+      "name": "nearest-prior-any-row-type-on-missing-parent",
+      "input": [
+        {
+          "uuid": "old-progress",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:01.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "latest",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:02.000Z",
+          "isSidechain": false,
+          "parentUuid": "missing"
+        }
+      ],
+      "lastUuid": "latest",
+      "output": [
+        "old-progress",
+        "latest"
+      ]
+    },
+    {
+      "name": "exactly-5000ms-is-included",
+      "input": [
+        {
+          "uuid": "edge",
+          "type": "system",
+          "timestamp": "1970-01-01T00:00:01.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "latest",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:06.000Z",
+          "isSidechain": false,
+          "parentUuid": "missing"
+        }
+      ],
+      "lastUuid": "latest",
+      "output": [
+        "edge",
+        "latest"
+      ]
+    },
+    {
+      "name": "5001ms-is-outside-window",
+      "input": [
+        {
+          "uuid": "too-old",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:00.999Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "latest",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:06.000Z",
+          "isSidechain": false,
+          "parentUuid": "missing"
+        }
+      ],
+      "lastUuid": "latest",
+      "output": [
+        "latest"
+      ]
+    },
+    {
+      "name": "sidechain-must-match-exactly",
+      "input": [
+        {
+          "uuid": "main-row",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:01.500Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "side-row",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:01.800Z",
+          "isSidechain": true
+        },
+        {
+          "uuid": "latest",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:02.000Z",
+          "isSidechain": false,
+          "parentUuid": "missing"
+        }
+      ],
+      "lastUuid": "latest",
+      "output": [
+        "main-row",
+        "latest"
+      ]
+    },
+    {
+      "name": "cycle-recovers-through-nearest-unvisited-prior-row",
+      "input": [
+        {
+          "uuid": "prior",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:01.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "a",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:02.000Z",
+          "isSidechain": false,
+          "parentUuid": "b"
+        },
+        {
+          "uuid": "b",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:03.000Z",
+          "isSidechain": false,
+          "parentUuid": "a"
+        }
+      ],
+      "lastUuid": "b",
+      "output": [
+        "prior",
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "equal-distance-tie-keeps-first-map-candidate",
+      "input": [
+        {
+          "uuid": "first",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:01.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "second",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:01.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "latest",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:02.000Z",
+          "isSidechain": false,
+          "parentUuid": "missing"
+        }
+      ],
+      "lastUuid": "latest",
+      "output": [
+        "first",
+        "latest"
+      ]
+    },
+    {
+      "name": "twenty-row-chain-recovers-across-one-missing-link",
+      "input": [
+        {
+          "uuid": "row-0",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:10.000Z",
+          "isSidechain": false
+        },
+        {
+          "uuid": "row-1",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:10.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-0"
+        },
+        {
+          "uuid": "row-2",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:11.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-1"
+        },
+        {
+          "uuid": "row-3",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:11.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-2"
+        },
+        {
+          "uuid": "row-4",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:12.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-3"
+        },
+        {
+          "uuid": "row-5",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:12.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-4"
+        },
+        {
+          "uuid": "row-6",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:13.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-5"
+        },
+        {
+          "uuid": "row-7",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:13.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-6"
+        },
+        {
+          "uuid": "row-8",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:14.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-7"
+        },
+        {
+          "uuid": "row-9",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:14.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-8"
+        },
+        {
+          "uuid": "row-10",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:15.000Z",
+          "isSidechain": false,
+          "parentUuid": "deleted-row"
+        },
+        {
+          "uuid": "row-11",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:15.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-10"
+        },
+        {
+          "uuid": "row-12",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:16.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-11"
+        },
+        {
+          "uuid": "row-13",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:16.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-12"
+        },
+        {
+          "uuid": "row-14",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:17.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-13"
+        },
+        {
+          "uuid": "row-15",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:17.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-14"
+        },
+        {
+          "uuid": "row-16",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:18.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-15"
+        },
+        {
+          "uuid": "row-17",
+          "type": "assistant",
+          "timestamp": "1970-01-01T00:00:18.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-16"
+        },
+        {
+          "uuid": "row-18",
+          "type": "progress",
+          "timestamp": "1970-01-01T00:00:19.000Z",
+          "isSidechain": false,
+          "parentUuid": "row-17"
+        },
+        {
+          "uuid": "row-19",
+          "type": "user",
+          "timestamp": "1970-01-01T00:00:19.500Z",
+          "isSidechain": false,
+          "parentUuid": "row-18"
+        }
+      ],
+      "lastUuid": "row-19",
+      "output": [
+        "row-0",
+        "row-1",
+        "row-2",
+        "row-3",
+        "row-4",
+        "row-5",
+        "row-6",
+        "row-7",
+        "row-8",
+        "row-9",
+        "row-10",
+        "row-11",
+        "row-12",
+        "row-13",
+        "row-14",
+        "row-15",
+        "row-16",
+        "row-17",
+        "row-18",
+        "row-19"
+      ]
+    }
+  ]
+}

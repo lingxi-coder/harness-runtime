@@ -17,7 +17,7 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "ok".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));

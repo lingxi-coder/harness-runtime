@@ -66,7 +66,7 @@ async fn single_turn_conversation_against_mock_http() {
     let final_message = ConversationMessage::Assistant {
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "Hello!".into(),
+            text: "Hello!".into(), citations: None,
         }],
         stop_reason: Some("end_turn".into()),
     };

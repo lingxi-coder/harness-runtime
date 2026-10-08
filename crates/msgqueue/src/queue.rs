@@ -25,13 +25,22 @@
 //!   [`tokio_util::sync::CancellationToken`] (twin of
 //!   `subscribeToCommandQueue` ⇒ `abortController.abort()` in print.ts).
 
-use lingxi_core::types::{AgentId, HookId, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::{raw_json_serde, Utf16JsonProjection},
+    AgentId, HookId, MessageId, ToolUseId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
+
+fn source_string(text: impl Into<String>) -> Utf16JsonProjection {
+    let text = text.into();
+    Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect())
+        .expect("Rust strings are valid UTF-16 projections")
+}
 
 use crate::operations::{QueueOperation, QueueOperationRecorder};
 
@@ -112,7 +121,12 @@ impl QueuedCommand {
         match &self.content {
             QueuedCommandContent::SlashCommand { .. } => true,
             QueuedCommandContent::UserInput { text } => {
-                !self.skip_slash_commands && text.trim_start().starts_with('/')
+                !self.skip_slash_commands
+                    && text
+                        .string_at("")
+                        .unwrap_or_default()
+                        .trim_start()
+                        .starts_with('/')
             }
             _ => false,
         }
@@ -123,6 +137,16 @@ impl QueuedCommand {
     #[must_use]
     pub fn text(&self) -> Option<&str> {
         match &self.content {
+            QueuedCommandContent::UserInput { text } => text.string_at(""),
+            _ => None,
+        }
+    }
+
+    /// Exact queued text for model/history paths. `text()` is a display view
+    /// for UI-only consumers and must not be used to rebuild model input.
+    #[must_use]
+    pub fn text_projection(&self) -> Option<&Utf16JsonProjection> {
+        match &self.content {
             QueuedCommandContent::UserInput { text } => Some(text),
             _ => None,
         }
@@ -132,10 +156,20 @@ impl QueuedCommand {
 /// The payload of a [`QueuedCommand`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QueuedCommandContent {
+    /// Wake a main conversation for an already admitted peer report. The
+    /// recipient owns the body and its independent consumption acknowledgment;
+    /// this marker must never be joined into human prompt text.
+    HandbackWake {
+        /// Session and activation pinned by trusted reporting admission.
+        scope: lingxi_core::host::handback::HandbackSessionScope,
+        /// Stable report identity, separate from this queue marker's UUID.
+        message_id: MessageId,
+    },
     /// Raw text from the human user.
     UserInput {
-        /// User-supplied text.
-        text: String,
+        /// User-supplied root string, preserving every UTF-16 code unit.
+        #[serde(with = "raw_json_serde")]
+        text: Utf16JsonProjection,
     },
     /// A parsed slash-command invocation.
     SlashCommand {
@@ -222,8 +256,12 @@ pub enum QueuePriority {
 /// Where a queued command came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueueSource {
+    /// An admitted ordinary subagent report, with Peer authority.
+    SubagentHandback,
     /// Direct prompt input from the user.
     PromptInput,
+    /// Slash command queued by a Mod's `$.command.run` call.
+    Plugin,
     /// Subagent task completion notification.
     TaskCompletion,
     /// Inter-agent `send_message`.
@@ -257,8 +295,38 @@ pub struct MessageQueueManager {
 }
 
 impl MessageQueueManager {
+    /// Wake a host at next priority without carrying report text through user
+    /// prompt processing. Queue removal acknowledges only this wake marker.
+    pub async fn enqueue_handback_wake(
+        &self,
+        scope: lingxi_core::host::handback::HandbackSessionScope,
+        message_id: MessageId,
+    ) {
+        self.enqueue(QueuedCommand {
+            uuid: format!(
+                "handback-wake:{}:{}",
+                scope.activation_epoch,
+                message_id.as_uuid()
+            ),
+            content: QueuedCommandContent::HandbackWake { scope, message_id },
+            priority: QueuePriority::Next,
+            queued_at: SystemTime::now(),
+            source: QueueSource::SubagentHandback,
+            agent_id: None,
+            skip_slash_commands: true,
+            is_meta: true,
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+        })
+        .await;
+    }
     /// Enqueue a passive goal retry through the ordinary host turn lifecycle.
-    pub async fn enqueue_goal_retry(&self, uuid: String, body: String, cancel: CancellationToken) {
+    pub async fn enqueue_goal_retry(
+        &self,
+        uuid: String,
+        body: Utf16JsonProjection,
+        cancel: CancellationToken,
+    ) {
         self.enqueue(QueuedCommand {
             uuid: uuid.clone(),
             content: QueuedCommandContent::UserInput { text: body },
@@ -352,18 +420,27 @@ impl MessageQueueManager {
     /// remains queued after cancelling the active token so the between-turn
     /// driver can run it as the interrupting turn; `Later` waits for the normal
     /// between-turn drain.
-    pub async fn take_mid_turn_prompt(&self) -> Option<String> {
+    pub async fn take_mid_turn_prompt(&self) -> Option<Utf16JsonProjection> {
+        let batch = self.take_mid_turn_commands().await?;
+        join_prompt_values(&batch).map(|(joined, _)| joined)
+    }
+
+    /// Consume the same batch while retaining each command's source for
+    /// session.receive screening at the host boundary.
+    pub async fn take_mid_turn_commands(&self) -> Option<Vec<QueuedCommand>> {
         let batch = self
             .get_by_max_priority(QueuePriority::Next, |command| {
                 command.is_main_thread()
                     && !command.is_slash_command()
                     && command.priority == QueuePriority::Next
+                    && !matches!(command.content, QueuedCommandContent::HandbackWake { .. })
             })
             .await;
-        let (joined, consumed) = join_prompt_values(&batch)?;
+        let (_, consumed) = join_prompt_values(&batch)?;
+        let selected = batch.into_iter().take(consumed.len()).collect();
         self.consume(&consumed, "drained mid-turn into running turn")
             .await;
-        Some(joined)
+        Some(selected)
     }
 
     /// Append `cmd` to the queue; wakes one waiter and logs an `Enqueue`.
@@ -589,25 +666,36 @@ impl MessageQueueManager {
 /// drain order. Stops at the first non-batchable command so a slash command or
 /// a notification breaks the run (the caller handles those separately).
 #[must_use]
-pub fn join_prompt_values(commands: &[QueuedCommand]) -> Option<(String, Vec<String>)> {
-    let mut texts = Vec::new();
+pub fn join_prompt_values(
+    commands: &[QueuedCommand],
+) -> Option<(Utf16JsonProjection, Vec<String>)> {
+    let mut units = Vec::new();
     let mut uuids = Vec::new();
+    let mut joined_any = false;
     for cmd in commands {
         if cmd.is_slash_command() {
             break;
         }
-        match cmd.text() {
-            Some(t) => {
-                texts.push(t.to_string());
+        match cmd.text_projection() {
+            Some(text) => {
+                if joined_any {
+                    units.push(b'\n' as u16);
+                }
+                units.extend(text.string_units("")?);
                 uuids.push(cmd.uuid.clone());
+                joined_any = true;
             }
             None => break,
         }
     }
-    if texts.is_empty() {
+    if uuids.is_empty() {
         None
     } else {
-        Some((texts.join("\n"), uuids))
+        let display = String::from_utf16_lossy(&units);
+        Some((
+            Utf16JsonProjection::root_string(display, units).ok()?,
+            uuids,
+        ))
     }
 }
 
@@ -627,7 +715,9 @@ mod tests {
             scheduled_task_id: None,
             scheduled_fire_id: None,
             uuid: text.into(),
-            content: QueuedCommandContent::UserInput { text: text.into() },
+            content: QueuedCommandContent::UserInput {
+                text: source_string(text),
+            },
             priority,
             queued_at: SystemTime::now(),
             source: QueueSource::PromptInput,
@@ -635,6 +725,46 @@ mod tests {
             skip_slash_commands: false,
             is_meta: false,
         }
+    }
+
+    #[tokio::test]
+    async fn handback_wake_retains_target_and_never_blocks_or_joins_human_prompts() {
+        let queue = MessageQueueManager::new();
+        let scope = lingxi_core::host::handback::HandbackSessionScope {
+            session_id: lingxi_core::types::SessionId::new(),
+            activation_epoch: 7,
+        };
+        let message_id = MessageId::new();
+        let active = CancellationToken::new();
+        queue.register_active_turn(active.clone()).await;
+        queue.enqueue_handback_wake(scope, message_id).await;
+        queue.enqueue(mk(QueuePriority::Next, "human input")).await;
+        assert!(
+            !active.is_cancelled(),
+            "next-priority reporting does not interrupt its caller"
+        );
+        let snapshot = queue.snapshot().await;
+        let marker: QueuedCommand =
+            serde_json::from_str(&serde_json::to_string(&snapshot[0]).unwrap()).unwrap();
+        assert_eq!(marker.source, QueueSource::SubagentHandback);
+        assert!(marker.is_meta && marker.skip_slash_commands);
+        assert!(marker.text().is_none());
+        assert!(
+            matches!(marker.content, QueuedCommandContent::HandbackWake { scope: restored, message_id: restored_id }
+            if restored == scope && restored_id == message_id)
+        );
+        assert_eq!(
+            queue
+                .take_mid_turn_prompt()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("human input")
+        );
+        assert!(matches!(
+            queue.dequeue_main_thread().await.unwrap().content,
+            QueuedCommandContent::HandbackWake { .. }
+        ));
     }
 
     #[test]
@@ -931,7 +1061,13 @@ mod tests {
         q.enqueue(mk(QueuePriority::Now, "urgent")).await;
         q.enqueue(mk(QueuePriority::Later, "later")).await;
 
-        assert_eq!(q.take_mid_turn_prompt().await.as_deref(), Some("first"));
+        assert_eq!(
+            q.take_mid_turn_prompt()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some("first")
+        );
         let remaining = q.snapshot().await;
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].text(), Some("urgent"));
@@ -945,7 +1081,7 @@ mod tests {
             mk(QueuePriority::Next, "second"),
         ];
         let (text, uuids) = join_prompt_values(&cmds).unwrap();
-        assert_eq!(text, "first\nsecond");
+        assert_eq!(text.string_at(""), Some("first\nsecond"));
         assert_eq!(uuids, vec!["first", "second"]);
 
         // A slash command breaks the batch.
@@ -954,7 +1090,36 @@ mod tests {
             mk(QueuePriority::Next, "/clear"),
         ];
         let (text2, uuids2) = join_prompt_values(&cmds2).unwrap();
-        assert_eq!(text2, "p");
+        assert_eq!(text2.string_at(""), Some("p"));
         assert_eq!(uuids2, vec!["p"]);
+    }
+
+    #[test]
+    fn queue_serialization_and_batching_keep_unpaired_utf16_units() {
+        let exact = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let command = QueuedCommand {
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+            uuid: "source".into(),
+            content: QueuedCommandContent::UserInput {
+                text: exact.clone(),
+            },
+            priority: QueuePriority::Next,
+            queued_at: SystemTime::now(),
+            source: QueueSource::PromptInput,
+            agent_id: None,
+            skip_slash_commands: false,
+            is_meta: false,
+        };
+        let serialized = serde_json::to_string(&command).unwrap();
+        assert!(serialized.contains(r#""text":"\ud800""#));
+        let decoded: QueuedCommand = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            decoded.text_projection().unwrap().string_units(""),
+            Some(vec![0xd800])
+        );
+
+        let (joined, _) = join_prompt_values(&[decoded]).unwrap();
+        assert_eq!(joined.string_units(""), Some(vec![0xd800]));
     }
 }

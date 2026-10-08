@@ -16,7 +16,7 @@ impl InteractiveOnlyHandler {
     #[must_use]
     pub fn new(name: &str, description: &str) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             description: description.to_string(),
         }
     }
@@ -26,10 +26,9 @@ impl InteractiveOnlyHandler {
 impl BuiltinCommandHandler for InteractiveOnlyHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::Done {
-            display: Some(format!(
-                "/{} is available in interactive TUI mode only.",
-                self.name
-            )),
+            display: Some(
+                (format!("/{} is available in interactive TUI mode only.", self.name)).into(),
+            ),
         }
     }
 

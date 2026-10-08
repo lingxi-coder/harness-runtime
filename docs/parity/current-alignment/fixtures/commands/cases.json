@@ -1,0 +1,38 @@
+{
+  "native_version": "2.1.293",
+  "cwd_relative": "run-output/run/cwd",
+  "cases": [
+    {
+      "id": "slash-only",
+      "kind": "argv",
+      "prompt": "/",
+      "session_id": "00000000-0000-4000-8000-000000003001"
+    },
+    {
+      "id": "unknown-slash-command",
+      "kind": "argv",
+      "prompt": "/__native_unknown_293__ fixed-argument",
+      "session_id": "00000000-0000-4000-8000-000000003002"
+    },
+    {
+      "id": "unicode-skill-name",
+      "kind": "argv",
+      "prompt": "/skill-🧪-probe",
+      "session_id": "00000000-0000-4000-8000-000000003003",
+      "skill_name": "skill-🧪-probe"
+    },
+    {
+      "id": "punctuation-skill-name",
+      "kind": "argv",
+      "prompt": "/skill.alpha+beta",
+      "session_id": "00000000-0000-4000-8000-000000003004",
+      "skill_name": "skill.alpha+beta"
+    },
+    {
+      "id": "unpaired-surrogate-skill-name",
+      "kind": "stream-json",
+      "prompt_utf16le_hex": "2f0073006b0069006c006c005f0000d85f00700072006f0062006500",
+      "session_id": "00000000-0000-4000-8000-000000003005"
+    }
+  ]
+}

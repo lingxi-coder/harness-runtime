@@ -1,0 +1,34 @@
+{
+  "native_version": "2.1.293",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "plugin_name": "native-builtin-glob-output-probe",
+  "session_id": "00000000-0000-4000-8000-000000002f01",
+  "tool_use_id": "toolu_native_glob_output_probe_293",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Find the file matching *.fixture and report its path.",
+  "tool_input": {
+    "pattern": "*.fixture"
+  },
+  "expected_result": {
+    "durationMs": 1,
+    "numFiles": 1,
+    "filenames": [
+      "hook-return.fixture"
+    ],
+    "truncated": false,
+    "totalMatches": 1,
+    "countIsComplete": true
+  },
+  "native_cases": [
+    "override",
+    "unknown-top",
+    "duration-1e400",
+    "duration-infinity",
+    "duration-negative-infinity",
+    "duration-nan",
+    "duration-wrong-type",
+    "duration-missing",
+    "filenames-item-wrong-type",
+    "known-reversed"
+  ]
+}

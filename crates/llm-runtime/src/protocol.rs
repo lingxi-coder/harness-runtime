@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use lingxi_llm_client::protocol::JsonPayload;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -77,6 +78,7 @@ impl LlmRequest {
             content: vec![wire::ContentBlock::Text {
                 text: text.into(),
                 thought_signature: None,
+                citations: None,
             }],
             native_options: Vec::new(),
         });
@@ -214,11 +216,13 @@ pub struct ProviderRequest {
     /// Normalized single-value request headers.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// JSON request body.
-    pub body_json: Value,
+    /// Authoritative source-backed JSON request body.
+    pub body_json: lingxi_llm_client::protocol::JsonPayload,
+    /// Serialization semantics of the selected wire protocol.
+    pub json_encoding: lingxi_llm_client::exact_json::JsonEncoding,
     /// Exact UTF-16 overrides for specific JSON string leaves inside
-    /// [`body_json`], keyed by JSON Pointer. When empty, body serialization is
-    /// identical to `body_json.to_string()`.
+    /// [`body_json`], keyed by canonical JSON Pointer. The selected JSON encoding
+    /// also applies when no exact strings are present.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub json_string_overrides: BTreeMap<String, Vec<u16>>,
     /// Which transport should be used for streaming this request.
@@ -228,7 +232,7 @@ pub struct ProviderRequest {
     /// Responses providers that explicitly support WebSocket transport.
     #[serde(default)]
     pub stream_transport: ProviderStreamTransport,
-    /// Optional raw request body; takes precedence over `body_json` when set.
+    /// Optional exact raw request bytes; takes precedence over the source body when set.
     ///
     /// Retains an exact authenticated byte image, including UTF-16 overrides.
     /// Independent file operations use the SDK resource API directly.
@@ -245,12 +249,16 @@ pub struct ProviderRequest {
 impl ProviderRequest {
     /// Create a POST request with a JSON body.
     #[must_use]
-    pub fn post_json(url: impl Into<String>, body_json: Value) -> Self {
+    pub fn post_json(
+        url: impl Into<String>,
+        body_json: lingxi_llm_client::protocol::JsonPayload,
+    ) -> Self {
         Self {
             method: "POST".to_string(),
             url: url.into(),
             headers: BTreeMap::new(),
             body_json,
+            json_encoding: Default::default(),
             json_string_overrides: BTreeMap::new(),
             stream_transport: ProviderStreamTransport::Http,
             body_bytes: None,
@@ -258,14 +266,20 @@ impl ProviderRequest {
         }
     }
 
-    /// Serialize the request body exactly as the transport/signing layers will
-    /// send it on the wire.
+    /// Serialize the current source-backed body using the selected provider
+    /// codec semantics. An explicit raw byte image takes precedence. Native
+    /// Claude generation normalization is applied later by the SDK at seal,
+    /// so this method describes an unsealed draft unless `body_bytes` is set.
     pub fn wire_body_bytes(&self) -> Result<Vec<u8>, LlmError> {
         if let Some(body_bytes) = &self.body_bytes {
             return Ok(body_bytes.clone());
         }
-        lingxi_llm_client::exact_json::serialize(&self.body_json, &self.json_string_overrides)
-            .map_err(crate::upstream::error)
+        lingxi_llm_client::exact_json::serialize_json_payload_with_overrides(
+            &self.body_json,
+            &self.json_string_overrides,
+            self.json_encoding,
+        )
+        .map_err(crate::upstream::error)
     }
 }
 
@@ -278,7 +292,7 @@ pub struct ProviderResponse {
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// JSON response body.
-    pub body_json: Value,
+    pub body_json: JsonPayload,
     /// Optional provider request id.
     pub request_id: Option<String>,
 }
@@ -290,7 +304,8 @@ impl ProviderResponse {
         Self {
             status,
             headers: BTreeMap::new(),
-            body_json,
+            body_json: JsonPayload::from_generated_value(&body_json)
+                .expect("host-generated provider response is serializable"),
             request_id: None,
         }
     }
@@ -298,29 +313,13 @@ impl ProviderResponse {
 
 /// Extract cross-provider streaming control metadata from normalized headers.
 #[must_use]
-pub fn stream_provider_metadata_from_headers(headers: &BTreeMap<String, String>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    for (name, value) in headers {
-        let key = name.to_ascii_lowercase();
-        if is_stream_metadata_header(&key) {
-            metadata.insert(key, Value::String(value.clone()));
-        }
-    }
-    if metadata.is_empty() {
-        Value::Null
-    } else {
-        Value::Object(metadata)
-    }
-}
-
-fn is_stream_metadata_header(name: &str) -> bool {
-    name == "openai-model"
-        || name == "x-models-etag"
-        || name == "x-reasoning-included"
-        || name == "x-request-id"
-        || name == "x-codex-turn-state"
-        || name == "retry-after"
-        || name.starts_with("x-ratelimit-")
+pub fn stream_provider_metadata_from_headers(headers: &BTreeMap<String, String>) -> JsonPayload {
+    let headers = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let metadata = lingxi_llm_client::providers::response_headers::stream_metadata(&headers);
+    JsonPayload::from_generated_value(&metadata).expect("header metadata is serializable")
 }
 
 /// Validate request capabilities before transport I/O.
@@ -396,7 +395,6 @@ pub fn validate_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn request_serialization_has_one_canonical_model_input_and_no_host_authority() {
@@ -432,7 +430,10 @@ mod tests {
     fn wire_body_bytes_preserve_registered_utf16_override() {
         let mut request = ProviderRequest::post_json(
             "https://example.test",
-            json!({"messages":[{"content":[{"text":"A[]"}]}]}),
+            lingxi_llm_client::protocol::JsonPayload::parse(
+                r#"{"messages":[{"content":[{"text":"A[]"}]}]}"#,
+            )
+            .unwrap(),
         );
         request.json_string_overrides.insert(
             "/messages/0/content/0/text".into(),
@@ -443,8 +444,21 @@ mod tests {
     }
 
     #[test]
+    fn wire_body_bytes_preserve_source_backed_lone_surrogate() {
+        let mut request = ProviderRequest::post_json(
+            "https://example.test",
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"text":"\ud800"}"#).unwrap(),
+        );
+        request.json_encoding = lingxi_llm_client::exact_json::JsonEncoding::JavaScript;
+        assert_eq!(request.wire_body_bytes().unwrap(), br#"{"text":"\ud800"}"#);
+    }
+
+    #[test]
     fn wire_body_bytes_prefer_body_bytes_over_json_and_overrides() {
-        let mut request = ProviderRequest::post_json("https://example.test", json!({"a":"b"}));
+        let mut request = ProviderRequest::post_json(
+            "https://example.test",
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"a":"b"}"#).unwrap(),
+        );
         request
             .json_string_overrides
             .insert("/a".into(), vec![0x0062, 0xD83D]);
@@ -454,7 +468,10 @@ mod tests {
 
     #[test]
     fn wire_body_bytes_reject_missing_utf16_override_target() {
-        let mut request = ProviderRequest::post_json("https://example.test", json!({"a":"b"}));
+        let mut request = ProviderRequest::post_json(
+            "https://example.test",
+            lingxi_llm_client::protocol::JsonPayload::parse(r#"{"a":"b"}"#).unwrap(),
+        );
         request
             .json_string_overrides
             .insert("/missing".into(), vec![0xD83D]);

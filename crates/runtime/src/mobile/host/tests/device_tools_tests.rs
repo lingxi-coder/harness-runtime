@@ -165,7 +165,9 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                 ("mobile-personal-context", "location", "calendar"),
             ] {
                 assert!(
-                    listing.iter().any(|entry| entry.name == name),
+                    listing
+                        .iter()
+                        .any(|entry| entry.name.string_at("") == Some(name)),
                     "{name} must stay discoverable in {mode:?} after reload={reloaded}"
                 );
                 let skill = runtime
@@ -182,7 +184,9 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
                 assert!(body.contains(&format!("## {section}\n")));
                 assert!(!body.contains(&format!("## {absent_section}\n")));
             }
-            assert!(!listing.iter().any(|entry| entry.name == "mobile-media"));
+            assert!(!listing
+                .iter()
+                .any(|entry| entry.name.string_at("") == Some("mobile-media")));
         }
     }
 }
@@ -213,7 +217,9 @@ async fn missing_device_backends_do_not_advertise_tools_or_skills() {
         ));
         let listing = runtime.wired_skill_listing_provider.skill_entries().await;
         for name in DEVICE_SKILLS {
-            assert!(!listing.iter().any(|entry| entry.name == *name));
+            assert!(!listing
+                .iter()
+                .any(|entry| entry.name.string_at("") == Some(*name)));
             assert!(runtime
                 .wired_skill_loader
                 .load(name)

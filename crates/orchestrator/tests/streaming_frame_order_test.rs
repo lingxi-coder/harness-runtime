@@ -110,8 +110,11 @@ impl Tool for ExclusiveTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "Exclusive".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -173,7 +176,7 @@ async fn a_ready_result_waits_behind_an_executing_exclusive_tool() {
 
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -183,7 +186,7 @@ async fn a_ready_result_waits_behind_an_executing_exclusive_tool() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     orch.run_turn_streaming("call both").await.expect("ok");
 

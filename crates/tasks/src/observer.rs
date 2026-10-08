@@ -6,6 +6,7 @@ use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskContext, TaskError, TaskSpawnInput};
 use agent::observer_text as agent_observer_text;
 use lingxi_core::host::{SubagentInheritance, SubagentSpawnRequest};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 
 impl TaskRegistry {
@@ -82,7 +83,7 @@ impl TaskRegistry {
         handler
             .send_message(
                 task_id,
-                digest,
+                digest.into(),
                 TaskContext {
                     fs: self.fs.clone(),
                     runtime: self.runtime.clone(),
@@ -148,11 +149,18 @@ impl TaskRegistry {
         request.query_source_label =
             Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE.into());
         request.creator_agent_id = None;
-        request.prompt = format!("{}\n\n{}", request.prompt, digest);
-        let description = request
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("Observer {}", request.subagent_type));
+        let mut prompt_units = request
+            .prompt
+            .string_units("")
+            .expect("subagent prompt is a root-string projection");
+        prompt_units.extend("\n\n".encode_utf16());
+        prompt_units.extend(digest.encode_utf16());
+        request.prompt =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&prompt_units), prompt_units)
+                .expect("observer prompt source is a valid UTF-16 string");
+        let description = request.description.clone().unwrap_or_else(|| {
+            Utf16JsonProjection::from(format!("Observer {}", request.subagent_type))
+        });
         let input = TaskSpawnInput::LocalAgent {
             agent_id: observer_task_id,
             subagent_type: request.subagent_type.clone(),

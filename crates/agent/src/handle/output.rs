@@ -1,6 +1,7 @@
 use super::FUSION_PANEL_QUERY_SOURCE;
 use crate::definition::AgentSource;
 use lingxi_core::host::subagent_spawn::{SubagentUsage, SubagentUsageRecorder};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::ConversationMessage;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,7 +85,7 @@ pub(super) fn observer_initial_message_index(messages: Option<&[ConversationMess
 /// the message JSON recursively for `type:"tool_use"` content blocks (robust to
 /// the message-envelope shape) and formats `Name(hint)`, where `hint` is the
 /// first string field of the tool input (file path / pattern / command).
-pub(super) fn subagent_tool_call_lines(message: &serde_json::Value) -> Vec<String> {
+pub(super) fn subagent_tool_call_lines(message: &Utf16JsonProjection) -> Vec<String> {
     let mut out = Vec::new();
     collect_tool_calls(message, &mut out);
     out
@@ -99,39 +100,75 @@ pub(super) fn subagent_tool_call_lines(message: &serde_json::Value) -> Vec<Strin
 /// the inner message to the stream-json sink, which re-emits its text/thinking
 /// blocks with `parent_tool_use_id` set. The final text/thinking gate lives at
 /// the sink, so this stays cheap and unconditional for assistant turns.
-pub(super) fn forward_subagent_message_line(message: &serde_json::Value) -> Option<String> {
-    if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+pub(super) fn forward_subagent_message_line(message: &Utf16JsonProjection) -> Option<String> {
+    if message.string_at("/role") != Some("assistant") {
         return None;
     }
+    Utf16JsonProjection::object(vec![(
+        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL.to_owned(),
+        message.clone(),
+    )])
+    .and_then(|envelope| envelope.to_json_string())
+    .ok()
+}
+
+/// Encode a nested server-fallback tombstone on the existing Agent progress
+/// channel. The orchestrator recognizes the private envelope and sends the
+/// typed tombstone through `OutputStream`, which retracts nested progress by
+/// UUID and block identity without manufacturing a tool result.
+pub(super) fn forward_subagent_tombstone_line(
+    message: &lingxi_core::host::ServerFallbackTombstoneMessage,
+    display_only: bool,
+) -> Option<String> {
     serde_json::to_string(&serde_json::json!({
-        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
+        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL: {
+            "message": message,
+            "display_only": display_only,
+        }
     }))
     .ok()
 }
 
-pub(super) fn collect_tool_calls(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.get("type").and_then(serde_json::Value::as_str) == Some("tool_use") {
-                if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
-                    let hint = map.get("input").map(short_input_hint).unwrap_or_default();
-                    out.push(if hint.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{name}({hint})")
-                    });
-                }
-            }
-            for v in map.values() {
-                collect_tool_calls(v, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_tool_calls(v, out);
+pub(super) fn collect_tool_calls(value: &Utf16JsonProjection, out: &mut Vec<String>) {
+    let Some(root) = value.at_pointer("") else {
+        return;
+    };
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.get_property("type").and_then(JsonValueView::as_str) == Some("tool_use") {
+            if let Some(name) = node.get_property("name").and_then(JsonValueView::as_str) {
+                let hint = node
+                    .get_property("input")
+                    .map(short_input_hint_view)
+                    .unwrap_or_default();
+                out.push(if hint.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{name}({hint})")
+                });
             }
         }
-        _ => {}
+        if let Some(entries) = node.object_entries() {
+            pending.extend(entries.into_iter().rev().map(|entry| entry.value));
+        } else if let Some(length) = node.array_len() {
+            pending.extend((0..length).rev().filter_map(|index| node.get_index(index)));
+        }
+    }
+}
+
+fn short_input_hint_view(input: JsonValueView<'_>) -> String {
+    let Some(value) = input.object_entries().and_then(|entries| {
+        entries
+            .into_iter()
+            .find_map(|entry| entry.value.code_units())
+    }) else {
+        return String::new();
+    };
+    let value = String::from_utf16_lossy(value).trim().to_owned();
+    if value.chars().count() > 40 {
+        format!("{}\u{2026}", value.chars().take(40).collect::<String>())
+    } else {
+        value
     }
 }
 

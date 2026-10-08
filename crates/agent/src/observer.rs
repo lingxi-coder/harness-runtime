@@ -237,9 +237,16 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for ActivityObserv
         // what this used to send. A terminal event is a `<turn-ended>` whose
         // reason names how it ended.
         let (agent_id, activity) = match event {
-            SubagentObservation::Message { agent_id, message } => {
-                (agent_id, activity_from_message(&message))
+            SubagentObservation::Message { agent_id, message }
+            | SubagentObservation::MessageRow {
+                agent_id, message, ..
+            } => (agent_id, activity_from_message(&message)),
+            SubagentObservation::ServerFallbackApiErrorRow { agent_id, row, .. } => {
+                (agent_id, activity_from_message(&row.query_message()))
             }
+            // Tombstones retract transcript rows through the Runtime output
+            // stream. They are control events, not new observed activity.
+            SubagentObservation::ServerFallbackTombstone { .. } => return,
             SubagentObservation::Completed { agent_id, .. } => (
                 agent_id,
                 vec![ObservedActivity::TurnEnded {
@@ -308,6 +315,7 @@ mod tests {
 
     fn definition(name: &str, observer: Option<ObserverSpec>) -> AgentDefinition {
         AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: name.into(),
             when_to_use: String::new(),
@@ -335,6 +343,7 @@ mod tests {
             initial_prompt: None,
             color: None,
             observer,
+            offer_provider: None,
         }
     }
 

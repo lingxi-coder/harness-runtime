@@ -20,6 +20,7 @@
 //! - DNS error format: `"WebFetch: cannot resolve {host}"`
 
 use crate::persist::{append_binary_footer, is_binary_content_type};
+use crate::source::{self, generated, object, Source};
 use async_trait::async_trait;
 use lingxi_core::host::http::HttpError;
 use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
@@ -27,7 +28,6 @@ use lingxi_core::types::{HttpMethod, HttpRequest};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -169,76 +169,58 @@ impl FetchSource {
 /// the status/url/provenance metadata. Ordinary Agent WebFetch results remain
 /// byte-compatible and are not routed through this helper.
 fn cap_fusion_result_data(
-    mut data: Value,
+    mut data: Source,
     source: FetchSource,
     fetched_at_ms: u64,
-) -> Result<Value, String> {
-    if !data.is_object() {
+) -> Result<Source, String> {
+    if data.object_entries().is_none() {
         return Err("WebFetch result must be a JSON object".into());
     }
-    let body = data
-        .get("result")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    {
-        let object = data
-            .as_object_mut()
-            .expect("checked that Fusion result data is an object");
-        object.insert("source".into(), json!(source.source_label()));
-        object.insert("fetched_at_ms".into(), json!(fetched_at_ms));
-        object.insert("truncated".into(), json!(false));
-    }
-
+    let body = data.string_units("/result");
+    data.set_field("source", source.source_label().into())
+        .unwrap();
+    data.set_field("fetched_at_ms", generated(json!(fetched_at_ms)))
+        .unwrap();
+    data.set_field("truncated", generated(json!(false)))
+        .unwrap();
     let serialized_len =
-        |value: &Value| serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len());
+        |value: &Source| value.to_json_string().map_or(usize::MAX, |json| json.len());
     if serialized_len(&data) <= FUSION_WEBFETCH_RESULT_MAX_BYTES {
         return Ok(data);
     }
-
+    data.set_field("truncated", generated(json!(true))).unwrap();
     let Some(body) = body else {
-        // All successful WebFetch results currently carry a string body, but
-        // retain the metadata and cap contract if a future error shape does not.
-        data.as_object_mut()
-            .expect("Fusion result data object")
-            .insert("truncated".into(), json!(true));
-        if serialized_len(&data) <= FUSION_WEBFETCH_RESULT_MAX_BYTES {
-            return Ok(data);
-        }
-        return Err("WebFetch result metadata exceeds the 64KiB Fusion result limit".into());
+        return if serialized_len(&data) <= FUSION_WEBFETCH_RESULT_MAX_BYTES {
+            Ok(data)
+        } else {
+            Err("WebFetch result metadata exceeds the 64KiB Fusion result limit".into())
+        };
     };
-
-    data.as_object_mut()
-        .expect("Fusion result data object")
-        .insert("truncated".into(), json!(true));
-    // Search only UTF-8 character boundaries so escaping and Unicode never
-    // produce an invalid JSON string. The serialized size is monotonic as the
-    // prefix grows, so a binary search gives a deterministic largest prefix.
-    // No fitting JSON string can contain more raw body bytes than the full
-    // serialized cap. Limit the boundary index to that prefix so a permitted
-    // 10 MiB response cannot allocate an ~80 MiB `Vec<usize>` merely to find
-    // the largest ~64 KiB result.
-    let mut indexed_prefix_len = body.len().min(FUSION_WEBFETCH_RESULT_MAX_BYTES);
-    while !body.is_char_boundary(indexed_prefix_len) {
-        indexed_prefix_len -= 1;
+    // Keep complete scalar pairs while preserving any original lone units.
+    // A fitting JSON prefix cannot contain more code units than this byte cap.
+    let mut boundaries = vec![0];
+    let mut position = 0;
+    while position < body.len().min(FUSION_WEBFETCH_RESULT_MAX_BYTES) {
+        let pair = (0xd800..=0xdbff).contains(&body[position])
+            && body
+                .get(position + 1)
+                .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit));
+        position += if pair { 2 } else { 1 };
+        boundaries.push(position);
     }
-    let boundaries: Vec<usize> = body[..indexed_prefix_len]
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(indexed_prefix_len))
-        .collect();
-    let mut low = 0usize;
+    let mut low = 0;
     let mut high = boundaries.len();
-    let mut best = String::new();
+    let mut best: Source = "".into();
     while low < high {
         let mid = low + (high - low) / 2;
-        let candidate = format!(
-            "{}{}",
-            &body[..boundaries[mid]],
-            FUSION_WEBFETCH_TRUNCATION_SUFFIX
+        let candidate = source::text(
+            body[..boundaries[mid]]
+                .iter()
+                .copied()
+                .chain(FUSION_WEBFETCH_TRUNCATION_SUFFIX.encode_utf16())
+                .collect(),
         );
-        data.as_object_mut()
-            .expect("Fusion result data object")
-            .insert("result".into(), Value::String(candidate.clone()));
+        data.set_field("result", candidate.clone()).unwrap();
         if serialized_len(&data) <= FUSION_WEBFETCH_RESULT_MAX_BYTES {
             best = candidate;
             low = mid + 1;
@@ -246,9 +228,7 @@ fn cap_fusion_result_data(
             high = mid;
         }
     }
-    data.as_object_mut()
-        .expect("Fusion result data object")
-        .insert("result".into(), Value::String(best));
+    data.set_field("result", best).unwrap();
     if serialized_len(&data) > FUSION_WEBFETCH_RESULT_MAX_BYTES {
         return Err("WebFetch result metadata exceeds the 64KiB Fusion result limit".into());
     }
@@ -263,19 +243,18 @@ fn finish_fusion_result(
 ) -> Result<ToolCallResult, ToolError> {
     if matches!(policy, ToolExecutionPolicy::FusionPanel) {
         result.data = cap_fusion_result_data(result.data, source, fetched_at_ms)
-            .map_err(ToolError::Transport)?;
+            .map_err(|message| ToolError::Transport(message.into()))?;
     }
     Ok(result)
 }
 
 /// Input schema for `WebFetchTool`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WebFetchInput {
     /// Absolute URL to fetch. Must be `https://` or `http://`.
-    pub url: String,
+    pub url: Source,
     /// Optional prompt for downstream model use (not consumed by the tool itself).
-    #[serde(default)]
-    pub prompt: Option<String>,
+    pub prompt: Option<Source>,
 }
 
 /// Validate that `url_str` parses and passes the SSRF/abuse gate.
@@ -300,7 +279,7 @@ pub struct WebFetchInput {
 /// # Errors
 /// Returns an error if the URL fails to parse or fails the SSRF/abuse gate.
 pub fn validate_url(url_str: &str) -> Result<url::Url, String> {
-    let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
+    let parsed = url::Url::parse(&url_str).map_err(|e| format!("invalid URL: {e}"))?;
     // claude-code `validateURL` SSRF/abuse gate: overlong URL, embedded
     // credentials, single-label/internal hostname (the latter also rejects
     // host-less schemes such as `file:`/`data:`, matching `oqa`).
@@ -455,10 +434,10 @@ pub fn format_redirect_message(
     original_url: &str,
     redirect_url: &str,
     status_code: u16,
-    prompt: &str,
-) -> String {
+    prompt: &Source,
+) -> Source {
     let status_text = status_reason_phrase(status_code);
-    format!(
+    let prefix = format!(
         "REDIRECT DETECTED: The URL redirects to a different host.\n\
          \n\
          Original URL: {original_url}\n\
@@ -468,8 +447,9 @@ pub fn format_redirect_message(
          To complete your request, I need to fetch content from the redirected URL. \
          Please use WebFetch again with these parameters:\n\
          - url: \"{redirect_url}\"\n\
-         - prompt: \"{prompt}\""
-    )
+         - prompt: \""
+    );
+    source::affix(&prefix, prompt, "\"")
 }
 
 /// Whether a redirect from `original_url` to `redirect_url` is safe to follow —
@@ -622,8 +602,8 @@ impl WebFetchTool {
         client: &std::sync::Arc<dyn sidequery::SideQueryClient>,
         is_preapproved: bool,
         markdown: &str,
-        prompt: &str,
-    ) -> Option<String> {
+        prompt: &Source,
+    ) -> Option<Source> {
         use lingxi_core::types::{ConversationMessage, MessageId};
         use sidequery::{QuerySource, SideQueryRequest};
         let truncated = crate::markdown::truncate_markdown(markdown.to_string());
@@ -634,7 +614,18 @@ impl WebFetchTool {
             model: self.apply_model(),
             profile: None,
             system_prompt: None,
-            messages: vec![ConversationMessage::user(MessageId::new(), model_prompt)],
+            system_prompt_input: None,
+            messages: vec![{
+                let mut message = ConversationMessage::user(MessageId::new(), String::new());
+                if let ConversationMessage::User { content, .. } = &mut message {
+                    *content = vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                        text: model_prompt.string_at("").unwrap().to_owned(),
+                        utf16_code_units: model_prompt.string_units("").unwrap(),
+                        citations: None,
+                    }];
+                }
+                message
+            }],
             tools: vec![],
             tool_choice: None,
             output_format: None,
@@ -655,7 +646,10 @@ impl WebFetchTool {
             .ok()
             .and_then(|resp| resp.text)
             .and_then(|text| {
-                if text.trim().is_empty() {
+                if text
+                    .string_units("")
+                    .is_none_or(|units| units.iter().all(|unit| source::js_whitespace(*unit)))
+                {
                     None
                 } else {
                     Some(text)
@@ -691,15 +685,15 @@ impl WebFetchTool {
         is_preapproved: bool,
         content_type: &str,
         content: &str,
-        prompt: Option<&str>,
+        prompt: Option<&Source>,
         policy: ToolExecutionPolicy,
-    ) -> String {
+    ) -> Source {
         // Fusion panels are trusted host-selected read-only workers. Their
         // WebFetch path is retrieval + local HTML conversion only; never spend
         // an internal SideQuery call, regardless of model-supplied prompt,
         // URL, or JSON fields.
         if matches!(policy, ToolExecutionPolicy::FusionPanel) {
-            return content.to_string();
+            return content.into();
         }
         // Raw fast-path: preapproved + text/markdown + under the 100k-UTF-16-unit
         // cap. Measured by `encode_utf16().count()` to match TS `content.length <
@@ -708,19 +702,24 @@ impl WebFetchTool {
             && content_type.contains("text/markdown")
             && content.encode_utf16().count() < WEBFETCH_MAX_MARKDOWN_LEN
         {
-            return content.to_string();
+            return content.into();
         }
         // Apply step is the default whenever a model (side_query) is wired.
         if let Some(client) = self.side_query.as_ref() {
             if let Some(applied) = self
-                .apply_prompt(client, is_preapproved, content, prompt.unwrap_or(""))
+                .apply_prompt(
+                    client,
+                    is_preapproved,
+                    content,
+                    prompt.unwrap_or(&"".into()),
+                )
                 .await
             {
                 return applied;
             }
         }
         // Degraded path (no model wired): return the raw body.
-        content.to_string()
+        content.into()
     }
 
     /// No-op fallback when `web-markdown` is disabled: always the raw body.
@@ -731,10 +730,10 @@ impl WebFetchTool {
         _is_preapproved: bool,
         _content_type: &str,
         content: &str,
-        _prompt: Option<&str>,
+        _prompt: Option<&Source>,
         _policy: ToolExecutionPolicy,
-    ) -> String {
-        content.to_string()
+    ) -> Source {
+        content.into()
     }
 
     /// Persist the RAW response `body` to a temp file when `content_type` is a
@@ -851,8 +850,8 @@ impl WebFetchTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Source> = Lazy::new(|| {
+    generated(json!({
         "type": "object",
         "additionalProperties": false,
         // claude-code zod (binary @201712484):
@@ -869,8 +868,96 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "url": { "type": "string", "format": "uri", "description": "The URL to fetch content from" },
             "prompt": { "type": "string", "description": "The prompt to run on the fetched content" }
         }
-    })
+    }))
 });
+
+/// Claude Code 2.1.287 WebFetch output, including the optional artifact-read
+/// observation attached by an Artifact URL fetch.
+static OUTPUT_SCHEMA: Lazy<Source> = Lazy::new(|| {
+    generated(json!({
+        "type":"object",
+        "required":["bytes","code","codeText","result","durationMs","url"],
+        "properties":{
+            "bytes":{"type":"number"},
+            "code":{"type":"number"},
+            "codeText":{"type":"string"},
+            "result":{"type":"string"},
+            "durationMs":{"type":"number"},
+            "url":{"type":"string"},
+            "artifactRead":{"type":"object","required":["slug"],"properties":{
+                "slug":{"type":"string"},
+                "ver":{"type":"string"},
+                "seeded":{"const":false}
+            }}
+        }
+    }))
+});
+
+fn parse_web_fetch_output(output: &Source) -> Result<Source, ToolError> {
+    use tool_api::native_output as o;
+    o::parse_object(
+        output,
+        TOOL_NAME,
+        &[
+            o::OutputField {
+                name: "bytes",
+                kind: o::OutputFieldType::Number,
+                required: true,
+            },
+            o::OutputField {
+                name: "code",
+                kind: o::OutputFieldType::Number,
+                required: true,
+            },
+            o::OutputField {
+                name: "codeText",
+                kind: o::OutputFieldType::String,
+                required: true,
+            },
+            o::OutputField {
+                name: "result",
+                kind: o::OutputFieldType::String,
+                required: true,
+            },
+            o::OutputField {
+                name: "durationMs",
+                kind: o::OutputFieldType::Number,
+                required: true,
+            },
+            o::OutputField {
+                name: "url",
+                kind: o::OutputFieldType::String,
+                required: true,
+            },
+            o::OutputField {
+                name: "artifactRead",
+                kind: o::OutputFieldType::ObjectShape(&[
+                    o::OutputField {
+                        name: "slug",
+                        kind: o::OutputFieldType::String,
+                        required: true,
+                    },
+                    o::OutputField {
+                        name: "ver",
+                        kind: o::OutputFieldType::String,
+                        required: false,
+                    },
+                    o::OutputField {
+                        name: "seeded",
+                        kind: o::OutputFieldType::False,
+                        required: false,
+                    },
+                ]),
+                required: false,
+            },
+        ],
+        o::UnknownOutputKeys::Strip,
+    )
+}
+
+#[cfg(test)]
+#[path = "web_fetch_native_293_test.rs"]
+mod native_output_293_tests;
 
 #[async_trait]
 impl Tool for WebFetchTool {
@@ -879,11 +966,30 @@ impl Tool for WebFetchTool {
     }
 
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("fetch and extract content from a URL")
+    fn search_hint(&self) -> Option<Source> {
+        Some("fetch and extract content from a URL".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn input_schema(&self) -> &Source {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Source> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(&self, output: &Source) -> Result<Source, ToolError> {
+        parse_web_fetch_output(output)
+    }
+    fn map_result_text(&self, result: &Source) -> Option<Source> {
+        source::string_field(result, "result").ok()
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -891,28 +997,28 @@ impl Tool for WebFetchTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Source) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Source) -> bool {
         true
     }
-    fn is_open_world(&self, _input: &Value) -> bool {
+    fn is_open_world(&self, _input: &Source) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _input: &Source) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
 
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Source, _ctx: &ToolUseContext) -> PermissionResult {
         // Preapproved-host short-circuit (`WebFetchTool.ts:108-121`): if the URL's
         // host+path is on the preapproved allowlist, allow with the "Preapproved
         // host" reason BEFORE any rule lookup. A parse failure falls through to the
         // default gate (TS catches and continues). The downstream rule-based
         // deny/ask machinery is not ported in this batch, so a non-preapproved host
         // continues to the M4-03 allow-all default.
-        if let Some(url_str) = input.get("url").and_then(Value::as_str) {
-            if let Ok(parsed) = url::Url::parse(url_str) {
+        if let Some(url_str) = input.string_at("/url") {
+            if let Ok(parsed) = url::Url::parse(&url_str) {
                 if let Some(host) = parsed.host_str() {
                     if crate::markdown::is_preapproved_host(host, parsed.path()) {
                         return PermissionResult::Allow {
@@ -940,7 +1046,7 @@ impl Tool for WebFetchTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(&self, _input: &Source, _opts: &DescriptionOptions) -> String {
         // Byte-locked VERBATIM to claude-code `DESCRIPTION`
         // (`WebFetchTool/prompt.ts:3-21`). The TS constant is a template literal
         // that begins and ends with a newline; reproduced exactly.
@@ -964,7 +1070,7 @@ Usage notes:\n\
   - For GitHub URLs, prefer an authenticated GitHub tool; when available, this can be an MCP integration or the gh CLI through a registered shell tool.\n"
             .into()
     }
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Source {
         // 1:1 with claude-code `CXc(model, hasArtifactTool)` (binary @280151) —
         // WebFetch DOES have a model-gated `prompt()` (the prior "no separate
         // prompt()" note was STALE vs v2.1.185). `Dh(model)` (the shared
@@ -993,11 +1099,11 @@ Usage notes:\n\
             };
             format!(
                 "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.{artifact_exception}\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL."
-            )
+            ).into()
         } else {
             let description = self
                 .description(
-                    &Value::Null,
+                    &Source::parse("null").unwrap(),
                     &DescriptionOptions {
                         is_non_interactive_session: false,
                     },
@@ -1013,7 +1119,7 @@ Usage notes:\n\
             };
             format!(
                 "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{artifact_bullet}{description}"
-            )
+            ).into()
         }
     }
 
@@ -1027,13 +1133,16 @@ Usage notes:\n\
     /// passes this gate and is rejected in `call()`.
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Source,
         _ctx: &ToolUseContext,
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
-        let url = input.get("url").and_then(Value::as_str).unwrap_or("");
-        if url::Url::parse(url).is_err() {
-            return Err(tool_api::tool_trait::ValidationError(format!(
-                "Error: Invalid URL \"{url}\". The URL provided could not be parsed."
+        let source_url = source::string_field(input, "url").unwrap_or_else(|_| "".into());
+        let url = source_url.string_at("").unwrap();
+        if url::Url::parse(&url).is_err() {
+            return Err(tool_api::tool_trait::ValidationError(source::affix(
+                "Error: Invalid URL \"",
+                &source_url,
+                "\". The URL provided could not be parsed.",
             )));
         }
         Ok(())
@@ -1041,14 +1150,23 @@ Usage notes:\n\
 
     async fn call(
         &self,
-        input: Value,
+        input: Source,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let policy = ctx.tool_execution_policy;
-        let parsed_input: WebFetchInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
-        let mut parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
+        let parsed_input = (|| -> Result<WebFetchInput, String> {
+            Ok(WebFetchInput {
+                url: source::string_field(&input, "url")?,
+                prompt: source::optional_string(&input, "prompt")?,
+            })
+        })()
+        .map_err(|error| ToolError::InvalidInput(format!("invalid input: {error}").into()))?;
+        // WHATWG URL takes a USVString at this boundary; retain the original
+        // source in the tool result and use the scalar view only for URL I/O.
+        let url = parsed_input.url.string_at("").unwrap();
+        let mut parsed_url =
+            validate_url(&url).map_err(|message| ToolError::InvalidInput(message.into()))?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         // `durationMs` baseline for the result `data` object — claude-code stamps
         // `durationMs: Date.now() - l` (l = the tool-call start) on EVERY path,
@@ -1065,12 +1183,8 @@ Usage notes:\n\
             parsed_url.path(),
         );
 
-        self.emit_started(
-            &invocation_id,
-            &parsed_input.url,
-            parsed_input.prompt.is_some(),
-        )
-        .await;
+        self.emit_started(&invocation_id, &url, parsed_input.prompt.is_some())
+            .await;
 
         // Cache check (keyed by the *original* URL), before the http→https
         // upgrade — mirrors `utils.ts:392-404`, which short-circuits on a hit
@@ -1093,7 +1207,7 @@ Usage notes:\n\
                     is_preapproved,
                     &hit.content_type,
                     &hit.content,
-                    parsed_input.prompt.as_deref(),
+                    parsed_input.prompt.as_ref(),
                     policy,
                 )
                 .await;
@@ -1114,19 +1228,23 @@ Usage notes:\n\
                     // the HTTP reason phrase, `code` the numeric status). NOTE: the
                     // LingXi-internal `truncated` flag is NOT part of claude-code's
                     // contract and is intentionally omitted.
-                    data: json!({
-                        "bytes": hit.bytes,
-                        "code": hit.status,
-                        "codeText": status_reason_phrase(hit.status),
-                        "result": out_content,
-                        "durationMs": call_started.elapsed().as_millis() as u64,
-                        "url": parsed_input.url,
-                    }),
+                    data: object([
+                        ("bytes", generated(json!(hit.bytes))),
+                        ("code", generated(json!(hit.status))),
+                        ("codeText", (status_reason_phrase(hit.status)).into()),
+                        ("result", out_content),
+                        (
+                            "durationMs",
+                            generated(json!(call_started.elapsed().as_millis() as u64)),
+                        ),
+                        ("url", parsed_input.url.clone()),
+                    ]),
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 },
                 policy,
                 FetchSource::Cache,
@@ -1154,15 +1272,15 @@ Usage notes:\n\
                 crate::blocklist::DomainCheckResult::Blocked => {
                     self.emit_failed(&invocation_id, "domain_blocked", None, 0)
                         .await;
-                    return Err(ToolError::Transport(crate::blocklist::domain_blocked_msg(
-                        &host,
-                    )));
+                    return Err(ToolError::Transport(
+                        crate::blocklist::domain_blocked_msg(&host).into(),
+                    ));
                 }
                 crate::blocklist::DomainCheckResult::CheckFailed(_) => {
                     self.emit_failed(&invocation_id, "domain_check_failed", None, 0)
                         .await;
                     return Err(ToolError::Transport(
-                        crate::blocklist::domain_check_failed_msg(&host),
+                        crate::blocklist::domain_check_failed_msg(&host).into(),
                     ));
                 }
             }
@@ -1204,10 +1322,13 @@ Usage notes:\n\
                 if std::time::Instant::now() >= deadline {
                     self.emit_failed(&invocation_id, "deadline_exceeded", None, 0)
                         .await;
-                    return Err(ToolError::Io(format!(
-                        "Request to {} timed out",
-                        fetch_url.host_str().unwrap_or("the server")
-                    )));
+                    return Err(ToolError::Io(
+                        format!(
+                            "Request to {} timed out",
+                            fetch_url.host_str().unwrap_or("the server")
+                        )
+                        .into(),
+                    ));
                 }
             }
             let req = HttpRequest {
@@ -1250,19 +1371,25 @@ Usage notes:\n\
                                 .await;
                             return finish_fusion_result(
                                 ToolCallResult {
-                                    data: json!({
-                                        "bytes": 0,
-                                        "code": resp.status,
-                                        "codeText": code_text,
-                                        "result": message,
-                                        "durationMs": call_started.elapsed().as_millis() as u64,
-                                        "url": parsed_input.url,
-                                    }),
+                                    data: object([
+                                        ("bytes", generated(json!(0))),
+                                        ("code", generated(json!(resp.status))),
+                                        ("codeText", (code_text).into()),
+                                        ("result", (message).into()),
+                                        (
+                                            "durationMs",
+                                            generated(json!(
+                                                call_started.elapsed().as_millis() as u64
+                                            )),
+                                        ),
+                                        ("url", parsed_input.url.clone()),
+                                    ]),
                                     model_content: None,
                                     new_messages: vec![],
                                     context_modifier: None,
                                     is_error: false,
                                     mcp_meta: None,
+                                    subagent_hooks_fired: false,
                                 },
                                 policy,
                                 FetchSource::Network,
@@ -1287,9 +1414,12 @@ Usage notes:\n\
                                 elapsed_ms,
                             )
                             .await;
-                            return Err(ToolError::Transport(format!(
+                            return Err(ToolError::Transport(
+                                format!(
                                 "WebFetch: too many redirects (exceeded {WEBFETCH_MAX_REDIRECTS})"
-                            )));
+                            )
+                                .into(),
+                            ));
                         }
                         // Follow the permitted redirect (parse failure => fall
                         // through to the redirect notice rather than loop forever).
@@ -1305,31 +1435,37 @@ Usage notes:\n\
                         &current,
                         &redirect_url,
                         resp.status,
-                        parsed_input.prompt.as_deref().unwrap_or(""),
+                        parsed_input.prompt.as_ref().unwrap_or(&"".into()),
                     );
+                    let message_bytes =
+                        message.string_at("").expect("redirect notice string").len();
                     self.emit_completed(
                         &invocation_id,
                         resp.status,
-                        message.len() as u64,
+                        message_bytes as u64,
                         false,
                         elapsed_ms,
                     )
                     .await;
                     return finish_fusion_result(
                         ToolCallResult {
-                            data: json!({
-                                "bytes": message.len(),
-                                "code": resp.status,
-                                "codeText": status_text,
-                                "result": message,
-                                "durationMs": call_started.elapsed().as_millis() as u64,
-                                "url": parsed_input.url,
-                            }),
+                            data: object([
+                                ("bytes", generated(json!(message_bytes))),
+                                ("code", generated(json!(resp.status))),
+                                ("codeText", (status_text).into()),
+                                ("result", (message).into()),
+                                (
+                                    "durationMs",
+                                    generated(json!(call_started.elapsed().as_millis() as u64)),
+                                ),
+                                ("url", parsed_input.url.clone()),
+                            ]),
                             model_content: None,
                             new_messages: vec![],
                             context_modifier: None,
                             is_error: false,
                             mcp_meta: None,
+                            subagent_hooks_fired: false,
                         },
                         policy,
                         FetchSource::Network,
@@ -1370,19 +1506,23 @@ Usage notes:\n\
                     .await;
                 finish_fusion_result(
                     ToolCallResult {
-                        data: json!({
-                            "bytes": 0,
-                            "code": resp.status,
-                            "codeText": code_text,
-                            "result": message,
-                            "durationMs": call_started.elapsed().as_millis() as u64,
-                            "url": parsed_input.url,
-                        }),
+                        data: object([
+                            ("bytes", generated(json!(0))),
+                            ("code", generated(json!(resp.status))),
+                            ("codeText", (code_text).into()),
+                            ("result", (message).into()),
+                            (
+                                "durationMs",
+                                generated(json!(call_started.elapsed().as_millis() as u64)),
+                            ),
+                            ("url", parsed_input.url.clone()),
+                        ]),
                         model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
+                        subagent_hooks_fired: false,
                     },
                     policy,
                     FetchSource::Network,
@@ -1414,7 +1554,7 @@ Usage notes:\n\
                     .await;
                     return Err(ToolError::Transport(format!(
                         "WebFetch: response body ({body_bytes} bytes) exceeds maximum allowed size ({WEBFETCH_MAX_TRANSFER_BYTES} bytes)"
-                    )));
+                    ).into()));
                 }
 
                 let content_type = resp
@@ -1490,7 +1630,7 @@ Usage notes:\n\
                         is_preapproved,
                         &content_type,
                         &content,
-                        parsed_input.prompt.as_deref(),
+                        parsed_input.prompt.as_ref(),
                         policy,
                     )
                     .await;
@@ -1505,19 +1645,23 @@ Usage notes:\n\
 
                 finish_fusion_result(
                     ToolCallResult {
-                        data: json!({
-                            "bytes": body_bytes,
-                            "code": status,
-                            "codeText": status_reason_phrase(status),
-                            "result": out_content,
-                            "durationMs": call_started.elapsed().as_millis() as u64,
-                            "url": parsed_input.url,
-                        }),
+                        data: object([
+                            ("bytes", generated(json!(body_bytes))),
+                            ("code", generated(json!(status))),
+                            ("codeText", (status_reason_phrase(status)).into()),
+                            ("result", out_content),
+                            (
+                                "durationMs",
+                                generated(json!(call_started.elapsed().as_millis() as u64)),
+                            ),
+                            ("url", parsed_input.url.clone()),
+                        ]),
                         model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
+                        subagent_hooks_fired: false,
                     },
                     policy,
                     FetchSource::Network,
@@ -1536,19 +1680,23 @@ Usage notes:\n\
                     .await;
                 finish_fusion_result(
                     ToolCallResult {
-                        data: json!({
-                            "bytes": 0,
-                            "code": status,
-                            "codeText": code_text,
-                            "result": message,
-                            "durationMs": call_started.elapsed().as_millis() as u64,
-                            "url": parsed_input.url,
-                        }),
+                        data: object([
+                            ("bytes", generated(json!(0))),
+                            ("code", generated(json!(status))),
+                            ("codeText", (code_text).into()),
+                            ("result", (message).into()),
+                            (
+                                "durationMs",
+                                generated(json!(call_started.elapsed().as_millis() as u64)),
+                            ),
+                            ("url", parsed_input.url.clone()),
+                        ]),
                         model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
+                        subagent_hooks_fired: false,
                     },
                     policy,
                     FetchSource::Network,
@@ -1559,25 +1707,25 @@ Usage notes:\n\
                 let err_msg = fmt_dns_error(&host);
                 self.emit_failed(&invocation_id, "dns", None, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Err(ToolError::Transport(err_msg.into()))
             }
             Err(HttpError::Connection(msg)) => {
                 let err_msg = format!("WebFetch: connection failed: {msg}");
                 self.emit_failed(&invocation_id, "connection", None, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Err(ToolError::Transport(err_msg.into()))
             }
             Err(HttpError::Timeout(_)) => {
                 let err_msg = "WebFetch: request timed out".to_string();
                 self.emit_failed(&invocation_id, "timeout", None, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Err(ToolError::Transport(err_msg.into()))
             }
             Err(other) => {
                 let err_msg = format!("WebFetch: invalid response: {other}");
                 self.emit_failed(&invocation_id, "invalid_response", None, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Err(ToolError::Transport(err_msg.into()))
             }
         }
     }

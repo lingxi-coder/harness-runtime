@@ -91,7 +91,7 @@
 //! guidance for the (identical) interactive surface, so it is ported
 //! byte-exact rather than reworded.
 
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{trim_source_text, BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{ForkOutcome, OrchestratorHandle};
@@ -121,10 +121,13 @@ impl ForkHandler {
 impl BuiltinCommandHandler for ForkHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         // `let r = n.trim(); if (!r) return e("Usage: /fork <directive>", ...)`.
-        let directive = args.raw_args.trim();
-        if directive.is_empty() {
+        let directive = trim_source_text(&args.raw_args);
+        if directive
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
             return CommandResult::Done {
-                display: Some("Usage: /fork \\<directive\\>".to_string()),
+                display: Some(("Usage: /fork \\<directive\\>".to_string()).into()),
             };
         }
 
@@ -135,7 +138,8 @@ impl BuiltinCommandHandler for ForkHandler {
             return CommandResult::Done {
                 display: Some(
                     "Forking is not available in coordinator sessions. Use /branch instead."
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ),
             };
         }
@@ -151,17 +155,20 @@ impl BuiltinCommandHandler for ForkHandler {
         );
         if !has_first_turn {
             return CommandResult::Done {
-                display: Some("Cannot fork before the first conversation turn".to_string()),
+                display: Some(
+                    ("Cannot fork before the first conversation turn".to_string()).into(),
+                ),
             };
         }
 
-        match self.handle.fork_conversation(directive).await {
+        match self.handle.fork_conversation(&directive).await {
             Ok(ForkOutcome { name, agent_id }) => {
                 // `o.agentId.slice(-4)` — last 4 chars (or fewer, for a
                 // shorter id). Agent ids are ASCII, so a byte slice is safe.
                 let tail = &agent_id[agent_id.len().saturating_sub(4)..];
+                let name = name.string_at("").unwrap_or_default();
                 CommandResult::Done {
-                    display: Some(format!("{FORK_ICON} forked {name} ({tail})")),
+                    display: Some((format!("{FORK_ICON} forked {name} ({tail})")).into()),
                 }
             }
             Err(e) => {
@@ -172,7 +179,7 @@ impl BuiltinCommandHandler for ForkHandler {
                 // inventing a byte-exact claim this port can't verify.
                 let msg = e.to_string();
                 CommandResult::Done {
-                    display: Some(format!("Could not fork conversation: {msg}")),
+                    display: Some((format!("Could not fork conversation: {msg}")).into()),
                 }
             }
         }
@@ -234,10 +241,10 @@ impl BuiltinCommandHandler for ForkBackgroundHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         // `argumentHint:"[prompt]"` — the prompt is OPTIONAL; a bare `/fork`
         // copies the conversation into a background session with no seed turn.
-        let prompt = args.raw_args.trim();
-        match self.handle.fork_to_background_session(prompt).await {
+        let prompt = trim_source_text(&args.raw_args);
+        match self.handle.fork_to_background_session(&prompt).await {
             Ok(display) => CommandResult::Done {
-                display: Some(display),
+                display: Some((display.string_at("").unwrap_or_default().to_owned()).into()),
             },
             Err(e) => {
                 // No upstream call handler exists for `vAd` (special dispatcher),
@@ -246,7 +253,7 @@ impl BuiltinCommandHandler for ForkBackgroundHandler {
                 // inventing an unverifiable claim.
                 let msg = e.to_string();
                 CommandResult::Done {
-                    display: Some(format!("Could not fork to background session: {msg}")),
+                    display: Some((format!("Could not fork to background session: {msg}")).into()),
                 }
             }
         }
@@ -269,9 +276,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "fork".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "fork".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

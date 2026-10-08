@@ -184,7 +184,12 @@ fn load_skills_from_dirs(
             };
             rows.push(FileSkillRow {
                 name: dir_name,
-                description: skill.description,
+                description: skill
+                    .frontmatter
+                    .description
+                    .string_at("")
+                    .expect("file-backed skill descriptions are UTF-8 source strings")
+                    .to_owned(),
                 when_to_use: skill.frontmatter.when_to_use,
                 source_dir,
             });

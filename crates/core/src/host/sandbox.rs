@@ -190,6 +190,7 @@ pub struct SandboxedCommand {
     plan: Option<BackendPlanHandle>,
     background: Option<crate::host::process::BackgroundTaskBinding>,
     auto_background_on_timeout: bool,
+    background_timeout: Option<std::time::Duration>,
     process_owner: Option<String>,
 }
 
@@ -237,6 +238,7 @@ impl SandboxedCommand {
             plan: None,
             background: None,
             auto_background_on_timeout: true,
+            background_timeout: None,
             process_owner: None,
         }
     }
@@ -257,6 +259,7 @@ impl SandboxedCommand {
             plan: Some(plan),
             background: None,
             auto_background_on_timeout: true,
+            background_timeout: None,
             process_owner: None,
         }
     }
@@ -302,6 +305,21 @@ impl SandboxedCommand {
     #[must_use]
     pub fn auto_background_on_timeout(&self) -> bool {
         self.auto_background_on_timeout
+    }
+
+    /// Bound the time a command may run after it enters the background.
+    /// Independent of the foreground timeout; `None` leaves background lifetime
+    /// to the caller (for example Monitor, which owns its own deadline).
+    #[must_use]
+    pub fn with_background_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.background_timeout = timeout;
+        self
+    }
+
+    /// Deadline measured from explicit background start or foreground handoff.
+    #[must_use]
+    pub fn background_timeout(&self) -> Option<std::time::Duration> {
+        self.background_timeout
     }
 
     /// Access the underlying [`ProcessCommand`] (for the runner to actually

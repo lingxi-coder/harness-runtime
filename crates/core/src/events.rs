@@ -25,6 +25,23 @@ pub enum Event {
         /// Raw text content from the user.
         content: String,
     },
+    /// A user-role message injected by a JavaScript hook whose exact UTF-16
+    /// code units include an isolated surrogate.
+    UserMessageJsUtf16 {
+        /// Identifier assigned to the injected message.
+        message_id: MessageId,
+        /// Identifier for the request this message kicks off.
+        request_id: RequestId,
+        /// Display-safe UTF-8 text.
+        content: String,
+        /// Authoritative JavaScript string units used by the model wire path.
+        utf16_code_units: Vec<u16>,
+    },
+    /// An admitted subagent report. Its typed peer provenance never grants
+    /// user authority or user-only attachment/slash-command processing.
+    PeerMessage {
+        envelope: crate::host::handback::HandbackEnvelope,
+    },
     /// The user cancelled the in-flight request (e.g. Ctrl+C).
     UserInterrupt,
     /// The user requested to exit the session.

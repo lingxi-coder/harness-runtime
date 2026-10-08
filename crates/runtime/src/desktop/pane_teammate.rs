@@ -13,6 +13,7 @@ use lingxi_core::host::swarm::{PaneId, PanePosition, SwarmBackend};
 use lingxi_core::host::team_spawn::{PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam};
 use lingxi_core::host::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
 use lingxi_core::host::OutputStream;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, SessionId};
 use tasks::handlers::TaskStatusSink;
 use tasks::registry::TaskRegistry;
@@ -87,7 +88,7 @@ async fn authenticate_until_ready<R: AsyncBufRead + Unpin>(
         match message {
             WorkerToParent::Ready { .. } => return Ok(early),
             WorkerToParent::Hello { .. } => {
-                return Err(internal("Repeated teammate authentication"))
+                return Err(internal("Repeated teammate authentication"));
             }
             WorkerToParent::State {
                 ref status,
@@ -142,6 +143,8 @@ struct PaneTask {
     terminated: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     pane: PaneId,
+    member_name: String,
+    team_name: String,
     directory: PathBuf,
     metadata: Option<PaneLaunchMetadata>,
     backend: Arc<dyn SwarmBackend>,
@@ -209,6 +212,39 @@ impl PaneTeammateSpawner {
     ) -> Self {
         self.backend_selector = Some(selector);
         self
+    }
+
+    async fn set_member_active(&self, team_name: &str, member_name: &str, active: bool) {
+        let Some(home) = self.team.config_home().map(Path::to_path_buf) else {
+            return;
+        };
+        if let Err(error) =
+            coordinator::team_file::set_team_member_active(&home, team_name, member_name, active)
+                .await
+        {
+            tracing::warn!(%error, team_name, member_name, active, "failed to persist teammate active state");
+        }
+    }
+
+    async fn member_identity_for_task(&self, task_id: &str) -> Option<(String, String)> {
+        if let Some(task) = self.tasks.lock().await.get(task_id).cloned() {
+            return Some((task.team_name, task.member_name));
+        }
+        let task = self.registry.get(task_id).await?;
+        let agent_id = match task {
+            tasks::state::TaskState::InProcessTeammate(teammate) => teammate.agent_id,
+            _ => return None,
+        };
+        let worker = self.team.find_by_agent_id(&agent_id).await?;
+        let team_name = self.team.team_name().await?;
+        Some((team_name, worker.name))
+    }
+
+    async fn set_task_member_active(&self, task_id: &str, active: bool) {
+        if let Some((team_name, member_name)) = self.member_identity_for_task(task_id).await {
+            self.set_member_active(&team_name, &member_name, active)
+                .await;
+        }
     }
 
     async fn write(writer: &ControlWriter, value: ParentToWorker) -> Result<(), TeamSpawnError> {
@@ -289,6 +325,12 @@ impl PaneTeammateSpawner {
         task_id: &str,
         terminal: Option<(TaskStatus, Option<String>)>,
     ) -> Result<(), TeamSpawnError> {
+        if matches!(terminal.as_ref(), Some((TaskStatus::Failed, _))) {
+            if let Some(task) = self.tasks.lock().await.get(task_id).cloned() {
+                self.set_member_active(&task.team_name, &task.member_name, false)
+                    .await;
+            }
+        }
         // A terminal worker report does not confirm external pane teardown.
         // Keep the task Running and stoppable until cleanup actually succeeds.
         self.cleanup(task_id).await?;
@@ -315,6 +357,8 @@ impl PaneTeammateSpawner {
         let task = self.tasks.lock().await.get(task_id).cloned();
         if let Some(task) = task {
             task.stopping.store(true, Ordering::Release);
+            self.set_member_active(&task.team_name, &task.member_name, false)
+                .await;
             if let Some(writer) = &task.writer {
                 let _ = Self::write(writer, ParentToWorker::Shutdown).await;
             }
@@ -370,6 +414,8 @@ impl PaneTeammateSpawner {
         team_name: String,
         request: SubagentSpawnRequest,
     ) -> Result<String, TeamSpawnError> {
+        let member_name = name.clone();
+        let member_team_name = team_name.clone();
         let backend = self
             .backend
             .as_ref()
@@ -407,7 +453,10 @@ impl PaneTeammateSpawner {
                 let task_id = self.registry.create(TaskType::InProcessTeammate,
                     TaskSpawnInput::InProcessTeammate { agent_id, name: name.clone(), team_name: team_name.clone(),
                         description: request.prompt.clone(), spawn_request: Some(request.clone()), inheritance: None },
-                    request.description.clone().unwrap_or_default()).await.map_err(internal)?;
+                    request
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| Utf16JsonProjection::from(""))).await.map_err(internal)?;
             let pane = match backend.create_teammate_pane(&agent_id, PanePosition::Right).await {
                 Ok(pane) => pane,
                 Err(error) => {
@@ -449,7 +498,7 @@ impl PaneTeammateSpawner {
                 let writer = Arc::new(ControlWriter::new(write));
                 let stopping = Arc::new(AtomicBool::new(false));
                 self.tasks.lock().await.insert(task_id.clone(), PaneTask {
-                    writer: Some(writer.clone()), teardown: Arc::new(Mutex::new(())), terminated: Arc::new(AtomicBool::new(false)), stopping: stopping.clone(), pane: pane.clone(), directory: directory.clone(), metadata: Some(metadata), backend: backend.clone(),
+                    writer: Some(writer.clone()), teardown: Arc::new(Mutex::new(())), terminated: Arc::new(AtomicBool::new(false)), stopping: stopping.clone(), pane: pane.clone(), member_name: member_name.clone(), team_name: member_team_name.clone(), directory: directory.clone(), metadata: Some(metadata), backend: backend.clone(),
                 });
                 self.registry.register_external_teammate_task(&task_id).await;
                 registered = true;
@@ -482,7 +531,9 @@ impl PaneTeammateSpawner {
                                 match message {
                                     WorkerToParent::Output { text } => {
                                         if let Ok(path) = owner.registry.output_manager.path_for(&watched_id) {
-                                            let _ = owner.registry.output_manager.append(&path, &text).await;
+                                            if let Some(display) = text.string_at("") {
+                                                let _ = owner.registry.output_manager.append(&path, display).await;
+                                            }
                                         }
                                     }
                                     WorkerToParent::State { status, error, awaiting_plan_approval } => {
@@ -508,7 +559,11 @@ impl PaneTeammateSpawner {
                                         sink.set_status(&watched_id, status).await;
                                     }
                                     WorkerToParent::CoordinatorMessage { message } => {
-                                        if let Ok(mut message) = serde_json::from_value::<coordinator::mailbox::TeammateMessage>(message) {
+                                        let decoded_message = message
+                                            .to_json_string()
+                                            .ok()
+                                            .and_then(|source| serde_json::from_str::<coordinator::mailbox::TeammateMessage>(&source).ok());
+                                        if let Some(mut message) = decoded_message {
                                             // Attribute the authenticated channel to its member,
                                             // never to the untrusted payload's supplied sender.
                                             message.from = coordinator::mailbox::MessageSender::Teammate(agent_id);
@@ -521,7 +576,14 @@ impl PaneTeammateSpawner {
                                         drop(rx);
                                         let (result, is_error) = match tool.call(input, ctx.clone(), tx).await {
                                             Ok(result) => (result.data, result.is_error),
-                                            Err(error) => (serde_json::json!({"error":error.to_string()}), true),
+                                            Err(error) => (
+                                                Utf16JsonProjection::object(vec![(
+                                                    "error".into(),
+                                                    error.model_facing_message(),
+                                                )])
+                                                .expect("tool error result is a JSON object"),
+                                                true,
+                                            ),
                                         };
                                         if Self::write(&writer, ParentToWorker::SendMessageResult { id, result, is_error }).await.is_err() { break; }
                                     }
@@ -551,7 +613,10 @@ impl PaneTeammateSpawner {
                             // No terminal child report + unconfirmed backend kill
                             // means the task must stay stoppable through TaskStop.
                             tracing::warn!(task_id = %watched_id, %error, "Pane cleanup remains retryable");
-                            owner.output.emit_system_notice(&format!("Teammate transport closed, but its pane could not be terminated: {error}. Stop the task again to retry."), true).await;
+                            let notice = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                format!("Teammate transport closed, but its pane could not be terminated: {error}. Stop the task again to retry."),
+                            );
+                            owner.output.emit_system_notice(&notice, true).await;
                         }
                     }
                 })).await;
@@ -563,7 +628,11 @@ impl PaneTeammateSpawner {
                         }
                         Err(cleanup_error) => {
                             let message = format!("Teammate reader failed to start for task {task_id}: {error}. Pane termination could not be confirmed: {cleanup_error}. Stop task {task_id} to retry.");
-                            self.output.emit_system_notice(&message, true).await;
+                            self.set_member_active(&member_team_name, &member_name, false).await;
+                            let notice = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                message.clone(),
+                            );
+                            self.output.emit_system_notice(&notice, true).await;
                             return Err(internal(message));
                         }
                     }
@@ -580,13 +649,17 @@ impl PaneTeammateSpawner {
                     if let Some(cleanup_error) = cleanup_error {
                         self.tasks.lock().await.insert(task_id.clone(), PaneTask {
                             writer: None, teardown: Arc::new(Mutex::new(())), terminated: Arc::new(AtomicBool::new(false)),
-                            stopping: Arc::new(AtomicBool::new(true)), pane: pane.clone(), directory: directory.clone(),
+                            stopping: Arc::new(AtomicBool::new(true)), pane: pane.clone(), member_name: member_name.clone(), team_name: member_team_name.clone(), directory: directory.clone(),
                             metadata: None, backend: backend.clone(),
                         });
                         self.registry.register_external_teammate_task(&task_id).await;
                         let _ = self.registry.set_status(&task_id, TaskStatus::Running).await;
                         let message = format!("Teammate startup failed: {startup_error}. Pane termination could not be confirmed: {cleanup_error}. Stop task {task_id} to retry.");
-                        self.output.emit_system_notice(&message, true).await;
+                        self.set_member_active(&member_team_name, &member_name, false).await;
+                        let notice = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                            message.clone(),
+                        );
+                        self.output.emit_system_notice(&notice, true).await;
                         return Err(internal(message));
                     }
                     let _ = self.registry.set_status(&task_id, TaskStatus::Failed).await;
@@ -615,7 +688,7 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
         agent_id: AgentId,
         name: String,
         team_name: String,
-        description: String,
+        description: Utf16JsonProjection,
     ) -> Result<String, TeamSpawnError> {
         self.registry
             .spawn_teammate(agent_id, name, team_name, description)
@@ -640,36 +713,48 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
                 .spawn_teammate_request(agent_id, name, team_name, request, inherit)
                 .await;
         }
-        if let Some(error) = &self.backend_error {
+        let active_member_name = name.clone();
+        let active_team_name = team_name.clone();
+        let result = if let Some(error) = &self.backend_error {
             if self.explicit {
-                return Err(internal(error));
-            }
-            tracing::warn!(
-                "[handleSpawn] No pane backend available, falling back to in-process: {error}"
-            );
-            if !self.fallback_warned.swap(true, Ordering::SeqCst) {
-                let hint = if std::env::var("TERM_PROGRAM").as_deref() == Ok("iTerm.app") {
-                    "To force iTerm2 panes, set teammateMode: \"iterm2\" in settings and enable the iTerm2 Python API (Preferences > General > Magic)."
-                } else {
-                    "To use terminal panes, set teammateMode: \"tmux\" in settings."
-                };
-                self.output
-                    .emit_system_notice(
-                        &format!(
-                            "Couldn't open a teammate pane — running in-process instead. {hint}"
-                        ),
-                        false,
-                    )
-                    .await;
+                Err(internal(error))
+            } else {
+                tracing::warn!(
+                    "[handleSpawn] No pane backend available, falling back to in-process: {error}"
+                );
+                if !self.fallback_warned.swap(true, Ordering::SeqCst) {
+                    let hint = if std::env::var("TERM_PROGRAM").as_deref() == Ok("iTerm.app") {
+                        "To force iTerm2 panes, set teammateMode: \"iterm2\" in settings and enable the iTerm2 Python API (Preferences > General > Magic)."
+                    } else {
+                        "To use terminal panes, set teammateMode: \"tmux\" in settings."
+                    };
+                    self.output
+                        .emit_system_notice(
+                            &lingxi_core::types::utf16_json::Utf16JsonProjection::from(format!(
+                                "Couldn't open a teammate pane — running in-process instead. {hint}"
+                            )),
+                            false,
+                        )
+                        .await;
+                }
+                self.registry
+                    .spawn_teammate_request(agent_id, name, team_name, request, inherit)
+                    .await
             }
         } else if self.backend.is_some() {
-            return self.launch_owned(agent_id, name, team_name, request).await;
+            self.launch_owned(agent_id, name, team_name, request).await
         } else if self.explicit {
-            return Err(internal("No terminal backend available"));
+            Err(internal("No terminal backend available"))
+        } else {
+            self.registry
+                .spawn_teammate_request(agent_id, name, team_name, request, inherit)
+                .await
+        };
+        if result.is_err() {
+            self.set_member_active(&active_team_name, &active_member_name, false)
+                .await;
         }
-        self.registry
-            .spawn_teammate_request(agent_id, name, team_name, request, inherit)
-            .await
+        result
     }
     async fn pane_metadata(&self, task_id: &str) -> Option<PaneLaunchMetadata> {
         self.tasks
@@ -678,7 +763,11 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
             .get(task_id)
             .and_then(|task| task.metadata.clone())
     }
-    async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+    async fn send_message(
+        &self,
+        task_id: &str,
+        message: Utf16JsonProjection,
+    ) -> Result<(), TeamSpawnError> {
         let writer = self
             .tasks
             .lock()
@@ -727,6 +816,7 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
                 .map_err(internal)?;
             receive.await.map_err(internal)?
         } else {
+            self.set_task_member_active(task_id, false).await;
             self.registry.kill(task_id).await.map_err(internal)
         }
     }
@@ -851,7 +941,7 @@ mod tests {
     struct QuietOutput;
     #[async_trait]
     impl OutputStream for QuietOutput {
-        async fn emit_text(&self, _: &str) {}
+        async fn emit_text(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
         async fn emit_tool_call(
             &self,
             _: &lingxi_core::types::ToolUseId,
@@ -868,6 +958,44 @@ mod tests {
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    }
+
+    struct InactiveBeforeFailureOutput {
+        config_path: PathBuf,
+        observed: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl OutputStream for InactiveBeforeFailureOutput {
+        async fn emit_text(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
+        async fn emit_tool_call(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &serde_json::Value,
+        ) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) {
+        }
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+        async fn emit_coordinator_worker(
+            &self,
+            worker: &lingxi_core::host::team_registry::WorkerInfo,
+        ) {
+            if worker.name == "scout" {
+                let config: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&self.config_path).expect("team config remains readable"),
+                )
+                .expect("team config remains valid JSON");
+                assert_eq!(config["members"][0]["isActive"], false);
+                self.observed.store(true, Ordering::SeqCst);
+            }
+        }
     }
 
     struct FailingBackend {
@@ -1116,6 +1244,235 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_persists_member_inactive_before_shutdown_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private-launch");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("launch.json"), "private token").unwrap();
+        let config_path = coordinator::team_file::team_file_path(root.path(), "session");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "name":"session",
+                "members":[{"agentId":"scout@session","name":"scout","isActive":true,"future":"preserve"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let spool = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(platform_posix::PosixRuntime::new());
+        let fs = Arc::new(platform_posix::PosixFileSystem::new(
+            spool.path().to_owned(),
+        ));
+        let registry = Arc::new(TaskRegistry::new(
+            runtime.clone(),
+            fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(
+                spool.path().to_owned(),
+                fs,
+            )),
+        ));
+        let agent_id = AgentId::new();
+        let task_id = registry
+            .create(
+                TaskType::InProcessTeammate,
+                TaskSpawnInput::InProcessTeammate {
+                    agent_id,
+                    name: "scout".into(),
+                    team_name: "session".into(),
+                    description: "work".into(),
+                    spawn_request: None,
+                    inheritance: None,
+                },
+                "work".into(),
+            )
+            .await
+            .unwrap();
+        let team =
+            Arc::new(TeamRegistry::new(AgentId::new()).with_config_home(root.path().to_owned()));
+        team.set_team_name(Some("session".into())).await;
+        team.register_worker(agent_id, "explorer".into(), "scout".into(), task_id.clone())
+            .await
+            .unwrap();
+        registry.register_external_teammate_task(&task_id).await;
+        registry
+            .set_status(&task_id, TaskStatus::Running)
+            .await
+            .unwrap();
+
+        let backend = Arc::new(FailingBackend {
+            created: AtomicUsize::new(0),
+            killed: AtomicUsize::new(0),
+            kill_failures: AtomicUsize::new(0),
+            root: root.path().to_owned(),
+            invalid_auth: false,
+        });
+        let spawner = Arc::new(PaneTeammateSpawner::new(
+            registry.clone(),
+            team,
+            runtime,
+            Arc::new(QuietOutput),
+            SessionId::new(),
+            root.path().to_owned(),
+            Some(backend.clone()),
+            true,
+            std::env::current_exe().unwrap(),
+        ));
+        let (stream, peer) = tokio::net::UnixStream::pair().unwrap();
+        let (_read, write) = stream.into_split();
+        let writer = Arc::new(ControlWriter::new(write));
+        spawner.tasks.lock().await.insert(
+            task_id.clone(),
+            PaneTask {
+                writer: Some(writer),
+                teardown: Arc::new(Mutex::new(())),
+                terminated: Arc::new(AtomicBool::new(false)),
+                stopping: Arc::new(AtomicBool::new(false)),
+                pane: PaneId { raw: "%9".into() },
+                member_name: "scout".into(),
+                team_name: "session".into(),
+                directory,
+                metadata: None,
+                backend,
+            },
+        );
+
+        let stop_spawner = spawner.clone();
+        let stop_task_id = task_id.clone();
+        let stop = tokio::spawn(async move { stop_spawner.stop_pane(&stop_task_id).await });
+        let mut peer = BufReader::new(peer);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ParentToWorker>(&line).unwrap(),
+            ParentToWorker::Shutdown
+        ));
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
+        assert_eq!(config["members"][0]["isActive"], false);
+        assert_eq!(config["members"][0]["future"], "preserve");
+        stop.await.unwrap().unwrap();
+        assert_eq!(
+            registry.get(&task_id).await.unwrap().base().status,
+            TaskStatus::Killed
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_pane_marks_member_inactive_before_failure_notification() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private-launch");
+        std::fs::create_dir(&directory).unwrap();
+        let config_path = coordinator::team_file::team_file_path(root.path(), "session");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "name":"session",
+                "members":[{"agentId":"scout@session","name":"scout","isActive":true}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let spool = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(platform_posix::PosixRuntime::new());
+        let fs = Arc::new(platform_posix::PosixFileSystem::new(
+            spool.path().to_owned(),
+        ));
+        let registry = Arc::new(TaskRegistry::new(
+            runtime.clone(),
+            fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(
+                spool.path().to_owned(),
+                fs,
+            )),
+        ));
+        let agent_id = AgentId::new();
+        let task_id = registry
+            .create(
+                TaskType::InProcessTeammate,
+                TaskSpawnInput::InProcessTeammate {
+                    agent_id,
+                    name: "scout".into(),
+                    team_name: "session".into(),
+                    description: "work".into(),
+                    spawn_request: None,
+                    inheritance: None,
+                },
+                "work".into(),
+            )
+            .await
+            .unwrap();
+        let team =
+            Arc::new(TeamRegistry::new(AgentId::new()).with_config_home(root.path().to_owned()));
+        team.set_team_name(Some("session".into())).await;
+        team.register_worker(agent_id, "explorer".into(), "scout".into(), task_id.clone())
+            .await
+            .unwrap();
+        registry.register_external_teammate_task(&task_id).await;
+        registry
+            .set_status(&task_id, TaskStatus::Running)
+            .await
+            .unwrap();
+        let backend = Arc::new(FailingBackend {
+            created: AtomicUsize::new(0),
+            killed: AtomicUsize::new(0),
+            kill_failures: AtomicUsize::new(0),
+            root: root.path().to_owned(),
+            invalid_auth: false,
+        });
+        let observed = Arc::new(AtomicBool::new(false));
+        let spawner = PaneTeammateSpawner::new(
+            registry.clone(),
+            team,
+            runtime,
+            Arc::new(InactiveBeforeFailureOutput {
+                config_path: config_path.clone(),
+                observed: observed.clone(),
+            }),
+            SessionId::new(),
+            root.path().to_owned(),
+            Some(backend.clone()),
+            true,
+            std::env::current_exe().unwrap(),
+        );
+        spawner.tasks.lock().await.insert(
+            task_id.clone(),
+            PaneTask {
+                writer: None,
+                teardown: Arc::new(Mutex::new(())),
+                terminated: Arc::new(AtomicBool::new(false)),
+                stopping: Arc::new(AtomicBool::new(false)),
+                pane: PaneId { raw: "%10".into() },
+                member_name: "scout".into(),
+                team_name: "session".into(),
+                directory,
+                metadata: None,
+                backend,
+            },
+        );
+
+        spawner
+            .finish_pane(
+                &task_id,
+                Some((TaskStatus::Failed, Some("provider failed".into()))),
+            )
+            .await
+            .unwrap();
+        assert!(observed.load(Ordering::SeqCst));
+        assert_eq!(
+            registry.get(&task_id).await.unwrap().base().status,
+            TaskStatus::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn stop_reaps_pane_and_private_material_when_writer_lock_is_stuck() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("private-launch");
@@ -1180,6 +1537,8 @@ mod tests {
                 terminated: Arc::new(AtomicBool::new(false)),
                 stopping: Arc::new(AtomicBool::new(false)),
                 pane: PaneId { raw: "%9".into() },
+                member_name: "scout".into(),
+                team_name: "session".into(),
                 directory: directory.clone(),
                 metadata: Some(PaneLaunchMetadata {
                     session_name: "current".into(),
@@ -1270,6 +1629,8 @@ mod tests {
                 terminated: Arc::new(AtomicBool::new(false)),
                 stopping: Arc::new(AtomicBool::new(false)),
                 pane: PaneId { raw: "%9".into() },
+                member_name: "scout".into(),
+                team_name: "session".into(),
                 directory: directory.clone(),
                 metadata: Some(PaneLaunchMetadata {
                     session_name: "current".into(),
@@ -1400,7 +1761,9 @@ mod tests {
         let shared_task = serde_json::json!({"id":"1", "subject":"Fix parser", "description":"work",
             "owner":"scout", "status":"in_progress", "blocks":[], "blockedBy":[]});
         std::fs::write(&shared_task_path, serde_json::to_vec(&shared_task).unwrap()).unwrap();
-        let config_before = std::fs::read(&config_path).unwrap();
+        let mut inactive_config = config.clone();
+        inactive_config["members"][1]["isActive"] = false.into();
+        let config_after_activity = serde_json::to_vec_pretty(&inactive_config).unwrap();
         let task_before = std::fs::read(&shared_task_path).unwrap();
         let spawner = PaneTeammateSpawner::new(
             registry.clone(),
@@ -1424,6 +1787,8 @@ mod tests {
                 terminated: Arc::new(AtomicBool::new(false)),
                 stopping: Arc::new(AtomicBool::new(false)),
                 pane: PaneId { raw: "%9".into() },
+                member_name: "scout".into(),
+                team_name: "session".into(),
                 directory: directory.clone(),
                 metadata: Some(PaneLaunchMetadata {
                     session_name: "current".into(),
@@ -1471,7 +1836,9 @@ mod tests {
             ParentToWorker::Shutdown
         ));
         drop(child); // The approval reached the child; it has now exited.
-        assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+                     // UserExit publishes inactivity before pane teardown. A failed backend
+                     // kill must retain membership/tasks, but must not undo that activity fact.
+        assert_eq!(std::fs::read(&config_path).unwrap(), config_after_activity);
         assert_eq!(std::fs::read(&shared_task_path).unwrap(), task_before);
         assert_eq!(
             registry.get(&task_id).await.unwrap().base().status,
@@ -1505,7 +1872,7 @@ mod tests {
             .load(Ordering::Acquire));
         assert_eq!(backend.killed.load(Ordering::SeqCst), 2);
         assert!(mailbox.drain().is_empty());
-        assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+        assert_eq!(std::fs::read(&config_path).unwrap(), config_after_activity);
         assert_eq!(std::fs::read(&shared_task_path).unwrap(), task_before);
         drop(held_config);
         public.kill(&task_id).await.unwrap();
@@ -1655,7 +2022,7 @@ mod tests {
                         agent_id,
                         name,
                         team_name: "session".into(),
-                        description: String::new(),
+                        description: Utf16JsonProjection::from(""),
                         spawn_request: None,
                         inheritance: None,
                     },

@@ -29,6 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use tool_api::tool_trait::source_text_projection_units;
 
 use crate::mailbox::{TeammateMailbox, TeammateMessage};
 
@@ -49,7 +51,7 @@ const DELIVERY_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// wraps every non-user sender in `<teammate-message>`, preserving the optional
 /// summary attribute; only an actual user-origin message stays raw.
 #[must_use]
-fn message_text(msg: &TeammateMessage) -> String {
+fn message_text(msg: &TeammateMessage) -> Utf16JsonProjection {
     // One exhaustive match over the sender, so `User` is handled exactly once:
     // it is the single path that skips BOTH the envelope and the tag escaping,
     // and a second `User` arm below the early return read as a contradiction.
@@ -69,18 +71,25 @@ fn message_text(msg: &TeammateMessage) -> String {
     tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary(
         from,
         &msg.content,
-        msg.summary.as_deref(),
+        msg.summary.as_ref(),
     )
 }
 
 /// Render one atomically drained mailbox batch as the oracle's single next
 /// prompt. FIFO order and the two-line-feed separator are byte-significant.
-fn message_batch_text(messages: &[TeammateMessage]) -> String {
-    messages
-        .iter()
-        .map(message_text)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+fn message_batch_text(messages: &[TeammateMessage]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
+        units.extend(
+            message_text(message)
+                .string_units("")
+                .expect("mailbox message rendering returns a source string"),
+        );
+    }
+    source_text_projection_units(&units)
 }
 
 /// Run the mailbox → runner pump loop for ONE teammate until the teammate is
@@ -209,22 +218,25 @@ async fn deliver_batch_with_backoff(
 ) -> DeliverOutcome {
     let mut ordinary = Vec::new();
     for message in messages {
-        let frame = serde_json::from_str::<serde_json::Value>(&message.content).ok();
-        if frame
-            .as_ref()
-            .and_then(|frame| frame.get("type"))
-            .and_then(serde_json::Value::as_str)
+        let frame = message
+            .content
+            .string_units("")
+            .and_then(|units| Utf16JsonProjection::parse_utf16_json(&units).ok());
+        if frame.as_ref().and_then(|frame| frame.string_at("/type"))
             == Some("plan_approval_response")
         {
             if !matches!(message.from, crate::mailbox::MessageSender::Coordinator) {
                 continue;
             }
-            let Some(response) = frame.and_then(|value| {
-                serde_json::from_value::<lingxi_core::host::teammate_plan::PlanApprovalResponse>(
-                    value,
-                )
-                .ok()
-            }) else {
+            let response = frame
+                .and_then(|value| value.to_json_string().ok())
+                .and_then(|source| {
+                    serde_json::from_str::<lingxi_core::host::teammate_plan::PlanApprovalResponse>(
+                        &source,
+                    )
+                    .ok()
+                });
+            let Some(response) = response else {
                 continue;
             };
             let mut delay = initial_backoff.min(max_backoff);
@@ -277,9 +289,9 @@ async fn deliver_batch_with_backoff(
 async fn deliver_batch(
     spawn_seam: &Arc<dyn TeamSpawnSeam>,
     task_id: &str,
-    text: &str,
+    text: &Utf16JsonProjection,
 ) -> DeliverOutcome {
-    match spawn_seam.send_message(task_id, text.to_string()).await {
+    match spawn_seam.send_message(task_id, text.clone()).await {
         Ok(()) => DeliverOutcome::Continue,
         // The teammate's runner is gone — stop pumping (no resume; Rust
         // teammates are persistent and only leave the loop on kill).
@@ -325,7 +337,7 @@ mod tests {
     /// text (in call order), and can be configured to return `Terminated` after
     /// a given number of successful deliveries (to drive the stop path).
     struct RecordingSeam {
-        received: StdMutex<Vec<String>>,
+        received: StdMutex<Vec<Utf16JsonProjection>>,
         approvals: StdMutex<Vec<lingxi_core::host::teammate_plan::PlanApprovalResponse>>,
         calls: AtomicUsize,
         /// After this many successful sends, the next `send_message` returns
@@ -350,7 +362,7 @@ mod tests {
                 stopped: Arc::new(tokio::sync::Notify::new()),
             })
         }
-        fn received(&self) -> Vec<String> {
+        fn received(&self) -> Vec<Utf16JsonProjection> {
             self.received.lock().unwrap().clone()
         }
     }
@@ -358,7 +370,7 @@ mod tests {
     struct FailThenSucceedSeam {
         failures_before_success: usize,
         attempts: AtomicUsize,
-        received: StdMutex<Vec<String>>,
+        received: StdMutex<Vec<Utf16JsonProjection>>,
     }
 
     #[async_trait]
@@ -380,7 +392,7 @@ mod tests {
         async fn send_message(
             &self,
             _task_id: &str,
-            message: String,
+            message: Utf16JsonProjection,
         ) -> Result<(), TeamSpawnError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) < self.failures_before_success {
                 return Err(TeamSpawnError::Internal("try again".into()));
@@ -415,7 +427,7 @@ mod tests {
         async fn send_message(
             &self,
             _task_id: &str,
-            message: String,
+            message: Utf16JsonProjection,
         ) -> Result<(), TeamSpawnError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n >= self.terminate_after {
@@ -434,7 +446,7 @@ mod tests {
         TeammateMessage {
             from: MessageSender::Coordinator,
             from_name: "team-lead".to_string(),
-            content: content.to_string(),
+            content: content.into(),
             summary: None,
             message_id: format!("m-{content}"),
             timestamp: SystemTime::now(),
@@ -442,28 +454,52 @@ mod tests {
         }
     }
 
+    fn envelope(content: &str) -> Utf16JsonProjection {
+        tasks::handlers::in_process_teammate::teammate_message_envelope(
+            "team-lead",
+            &Utf16JsonProjection::from(content),
+        )
+    }
+
     #[test]
     fn message_text_preserves_sender_and_summary_envelope_bytes() {
         let mut message = msg("review the patch");
         message.from = MessageSender::Teammate(AgentId::new());
         message.from_name = "reviewer".to_string();
-        message.summary = Some("  patch review  ".to_string());
+        message.summary = Some("  patch review  ".into());
         assert_eq!(
-            message_text(&message),
-            "<teammate-message teammate_id=\"reviewer\" summary=\"patch review\">\nreview the patch\n</teammate-message>"
+            message_text(&message).string_at(""),
+            Some("<teammate-message teammate_id=\"reviewer\" summary=\"patch review\">\nreview the patch\n</teammate-message>")
         );
     }
 
     #[test]
     fn message_batch_joins_all_pending_messages_into_one_prompt() {
-        assert_eq!(
-            message_batch_text(&[msg("one"), msg("two")]),
-            format!(
-                "{}\n\n{}",
-                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "one",),
-                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "two",),
-            )
+        let one = Utf16JsonProjection::from("one");
+        let two = Utf16JsonProjection::from("two");
+        let expected = format!(
+            "{}\n\n{}",
+            tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", &one)
+                .string_at("")
+                .unwrap(),
+            tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", &two)
+                .string_at("")
+                .unwrap(),
         );
+        assert_eq!(
+            message_batch_text(&[msg("one"), msg("two")]).string_at(""),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn user_message_batch_retains_unpaired_utf16_units() {
+        let units = vec![u16::from(b'a'), 0xd800, u16::from(b'b')];
+        let mut message = msg("");
+        message.from = MessageSender::User;
+        message.content = source_text_projection_units(&units);
+
+        assert_eq!(message_batch_text(&[message]).string_units(""), Some(units));
     }
 
     #[tokio::test]
@@ -555,16 +591,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let expected = ["one", "two", "three"]
-            .into_iter()
-            .map(|content| {
-                tasks::handlers::in_process_teammate::teammate_message_envelope(
-                    "team-lead",
-                    content,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let expected = message_batch_text(&[msg("one"), msg("two"), msg("three")]);
         assert_eq!(
             seam.received(),
             vec![expected],
@@ -607,22 +634,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let backlog = ["a", "b"]
-            .into_iter()
-            .map(|content| {
-                tasks::handlers::in_process_teammate::teammate_message_envelope(
-                    "team-lead",
-                    content,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let backlog = message_batch_text(&[msg("a"), msg("b")]);
         assert_eq!(
             seam.received(),
-            vec![
-                backlog,
-                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "c",),
-            ],
+            vec![backlog, envelope("c"),],
             "backlog drained first (FIFO), then the post-startup message"
         );
 
@@ -664,15 +679,7 @@ mod tests {
 
         // Exactly the first message reached the runner; the second triggered
         // the terminal stop and was not recorded.
-        assert_eq!(
-            seam.received(),
-            vec![
-                tasks::handlers::in_process_teammate::teammate_message_envelope(
-                    "team-lead",
-                    "first",
-                )
-            ]
-        );
+        assert_eq!(seam.received(), vec![envelope("first")]);
     }
 
     /// A backlog whose FIRST send terminates stops the pump immediately
@@ -760,27 +767,12 @@ mod tests {
         // A message delivered after the re-parks still lands.
         mailbox.deliver(msg("late")).unwrap();
         for _ in 0..200 {
-            if seam.received()
-                == vec![
-                    tasks::handlers::in_process_teammate::teammate_message_envelope(
-                        "team-lead",
-                        "late",
-                    ),
-                ]
-            {
+            if seam.received() == vec![envelope("late")] {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(
-            seam.received(),
-            vec![
-                tasks::handlers::in_process_teammate::teammate_message_envelope(
-                    "team-lead",
-                    "late",
-                )
-            ]
-        );
+        assert_eq!(seam.received(), vec![envelope("late")]);
 
         pump.abort();
     }

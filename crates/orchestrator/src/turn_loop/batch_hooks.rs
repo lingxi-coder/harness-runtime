@@ -1,9 +1,36 @@
 use crate::conversation::ConversationOrchestrator;
+use hooks::attachment::HookPublicationGuard;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ConversationMessage, MessageId, ToolUseId};
+use std::sync::Arc;
 use tool_api::context::ToolUseContext;
 use tool_api::ContextModifier;
+
+/// Host-only carrier for a Native `PostToolBatch` event and the session/W1
+/// generation that owns its publications. The guard never enters HookEvent or
+/// transcript JSONL.
+#[derive(Default)]
+pub(crate) struct PostToolBatchDispatch {
+    pub(crate) tool_calls: Vec<hooks::events::PostToolBatchCall>,
+    pub(crate) publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+}
+
+impl PostToolBatchDispatch {
+    pub(crate) fn unguarded(tool_calls: Vec<hooks::events::PostToolBatchCall>) -> Self {
+        Self {
+            tool_calls,
+            publication_guard: None,
+        }
+    }
+}
+
+pub(crate) struct PostToolBatchOutcome {
+    pub(crate) prevent_continuation: bool,
+    pub(crate) injected_messages: Vec<(ConversationMessage, ToolUseId)>,
+    pub(crate) publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+}
 
 /// Fire the once-per-model-response `PostToolBatch` event after all tool
 /// results have been appended and persisted.
@@ -13,9 +40,9 @@ use tool_api::ContextModifier;
 /// runs and records the batch hook, but does not let it re-enter the model.
 pub(crate) async fn run_post_tool_batch_hooks(
     orch: &ConversationOrchestrator,
-    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
-) -> (bool, Vec<(ConversationMessage, ToolUseId)>) {
-    run_post_tool_batch_hooks_inner(orch, post_tool_batch_calls, false).await
+    dispatch: PostToolBatchDispatch,
+) -> PostToolBatchOutcome {
+    run_post_tool_batch_hooks_inner(orch, dispatch, false).await
 }
 
 /// Forced-end twin of [`run_post_tool_batch_hooks`]. Claude still executes the
@@ -23,20 +50,40 @@ pub(crate) async fn run_post_tool_batch_hooks(
 /// `hook_stopped_continuation`, and does not surface `additionalContext`.
 pub(crate) async fn run_post_tool_batch_hooks_after_turn_end(
     orch: &ConversationOrchestrator,
-    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
-) -> Vec<(ConversationMessage, ToolUseId)> {
-    run_post_tool_batch_hooks_inner(orch, post_tool_batch_calls, true)
-        .await
-        .1
+    dispatch: PostToolBatchDispatch,
+) -> PostToolBatchOutcome {
+    run_post_tool_batch_hooks_inner(orch, dispatch, true).await
 }
 
 pub(super) async fn run_post_tool_batch_hooks_inner(
     orch: &ConversationOrchestrator,
-    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    dispatch: PostToolBatchDispatch,
     turn_already_ended: bool,
-) -> (bool, Vec<(ConversationMessage, ToolUseId)>) {
-    if post_tool_batch_calls.is_empty() {
-        return (false, Vec::new());
+) -> PostToolBatchOutcome {
+    if dispatch.tool_calls.is_empty() {
+        return PostToolBatchOutcome {
+            prevent_continuation: false,
+            injected_messages: Vec::new(),
+            publication_guard: dispatch.publication_guard,
+        };
+    }
+    // Direct tracked-dispatch/recovery/host paths have no W1 child executor.
+    // Capture the current session generation at this host-only dispatch
+    // boundary; streaming callers supply their exact originating W1 fence.
+    let publication_guard = dispatch.publication_guard.unwrap_or_else(|| {
+        let (root, lock) = orch
+            .lifecycle_runtime
+            .session_tool_hook_generation
+            .current();
+        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(root, lock))
+            as Arc<dyn HookPublicationGuard>
+    });
+    if !publication_guard.is_current() {
+        return PostToolBatchOutcome {
+            prevent_continuation: false,
+            injected_messages: Vec::new(),
+            publication_guard: Some(publication_guard),
+        };
     }
     // Populate `transcript_path` + `permission_mode` from the same live
     // sources as the per-tool hook contexts.
@@ -56,13 +103,14 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
         cwd: orch.current_cwd(),
         transcript_path,
         permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
+        publication_guard: Some(Arc::clone(&publication_guard)),
         ..Default::default()
     };
     let batch_agg = orch
         .hooks
         .execute(
             HookEvent::PostToolBatch {
-                tool_calls: post_tool_batch_calls,
+                tool_calls: dispatch.tool_calls,
             },
             batch_ctx,
         )
@@ -70,6 +118,14 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
     let mut injected_messages = Vec::new();
     let identity = post_tool_batch_identity();
     let batch_id = lingxi_core::types::ToolUseId::from(identity.tool_use_id.clone());
+
+    if !publication_guard.is_current() {
+        return PostToolBatchOutcome {
+            prevent_continuation: false,
+            injected_messages,
+            publication_guard: Some(publication_guard),
+        };
+    }
 
     if turn_already_ended {
         // `eBn` yields only `fe.message` from the hook runner, then logs
@@ -88,51 +144,94 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
                 "PostToolBatch disposition discarded because a tool result ended the turn"
             );
         }
-        return (false, Vec::new());
+        return PostToolBatchOutcome {
+            prevent_continuation: false,
+            injected_messages: Vec::new(),
+            publication_guard: Some(publication_guard),
+        };
     }
 
     // `additionalContext` is yielded inside the per-hook loop; the stopped
     // record follows after the loop. Preserve that order when both occur.
     if !batch_agg.additional_contexts.is_empty() {
-        orch.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+        let attachment = hooks::additional_context_attachment(
             &identity.hook_name,
             &identity.tool_use_id,
             &identity.hook_event,
-            &batch_agg.additional_contexts,
-        ))
-        .await;
-        for ctx in &batch_agg.additional_contexts {
-            injected_messages.push((
-                ConversationMessage::user_meta(
-                    MessageId::new(),
-                    format!(
-                        "<system-reminder>\nPostToolBatch hook additional context: {ctx}\n</system-reminder>"
-                    ),
-                ),
-                batch_id.clone(),
-            ));
+            batch_agg.additional_contexts.as_slice(),
+        );
+        let body = hooks::ExactHookText::join(&batch_agg.additional_contexts, "\n");
+        let reminder = hooks::ExactHookText::wrapped(
+            "<system-reminder>\nPostToolBatch hook additional context: ",
+            &body,
+            "\n</system-reminder>",
+        );
+        let message = ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            reminder.display,
+            reminder.utf16_code_units,
+        );
+        let committed = publication_guard
+            .commit_if_current(Box::pin(async {
+                orch.persist_hook_attachment_to_jsonl(attachment).await;
+                orch.register_mod_persisted_attachment(
+                    &message,
+                    "hook_additional_context",
+                    serde_json::json!({"kind":"hook","event":"PostToolBatch"}),
+                )
+                .await;
+                orch.prompt_runtime
+                    .remember_guarded_prompt_message(message.id(), Arc::clone(&publication_guard))
+                    .await;
+            }))
+            .await;
+        if committed {
+            injected_messages.push((message, batch_id.clone()));
         }
     }
 
     let stop_reason = post_tool_batch_stop_reason(&batch_agg);
     if let Some(reason) = &stop_reason {
-        orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
-            &identity, reason,
-        ))
-        .await;
-        injected_messages.push((
-            // Ephemeral rendering of the attachment above. The attachment is
-            // the sole durable transcript record (`In(...)` in the oracle).
-            ConversationMessage::user_meta(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nPostToolBatch hook stopped continuation: {reason}\n</system-reminder>"
-                ),
-            ),
-            batch_id,
-        ));
+        let attachment = hooks::stopped_continuation_attachment(&identity, reason);
+        // Ephemeral rendering of the attachment above. The attachment is the
+        // sole durable transcript record (`In(...)` in the oracle).
+        let mut message_units = "<system-reminder>\nPostToolBatch hook stopped continuation: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        message_units.extend(
+            reason
+                .string_units("")
+                .expect("stop reason is a root string projection"),
+        );
+        message_units.extend("\n</system-reminder>".encode_utf16());
+        let message = ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            String::from_utf16_lossy(&message_units),
+            message_units,
+        );
+        let committed = publication_guard
+            .commit_if_current(Box::pin(async {
+                orch.persist_hook_attachment_to_jsonl(attachment).await;
+                orch.register_mod_persisted_attachment(
+                    &message,
+                    "hook_stopped_continuation",
+                    serde_json::json!({"kind":"hook","event":"PostToolBatch"}),
+                )
+                .await;
+                orch.prompt_runtime
+                    .remember_guarded_prompt_message(message.id(), Arc::clone(&publication_guard))
+                    .await;
+            }))
+            .await;
+        if committed {
+            injected_messages.push((message, batch_id));
+        }
     }
-    (stop_reason.is_some(), injected_messages)
+    PostToolBatchOutcome {
+        prevent_continuation: stop_reason.is_some() && publication_guard.is_current(),
+        injected_messages,
+        publication_guard: Some(publication_guard),
+    }
 }
 
 /// Identity for the once-per-batch `PostToolBatch` records.
@@ -173,18 +272,20 @@ pub(super) fn post_tool_batch_identity() -> hooks::HookAttachmentIdentity {
 ///   (`executor.rs`), so reading it here preserves that ordering.
 pub(super) fn post_tool_batch_stop_reason(
     agg: &hooks::response::AggregateHookResult,
-) -> Option<String> {
+) -> Option<Utf16JsonProjection> {
     let stopped = agg.prevent_continuation
         || matches!(agg.decision, Some(hooks::response::HookDecision::Block));
     if !stopped {
         return None;
     }
-    Some(
-        agg.reason
-            .clone()
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| "Execution stopped by PostToolBatch hook".to_string()),
-    )
+    let reason = agg
+        .reason
+        .clone()
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| {
+            hooks::ExactHookText::from_text("Execution stopped by PostToolBatch hook")
+        });
+    Some(reason.into_projection())
 }
 
 /// Append tool/hook-injected messages to live history and persist only their
@@ -194,22 +295,38 @@ pub(super) fn post_tool_batch_stop_reason(
 pub(crate) async fn append_tool_injected_messages(
     orch: &ConversationOrchestrator,
     messages: Vec<(ConversationMessage, ToolUseId)>,
+    publication_guard: Option<Arc<dyn HookPublicationGuard>>,
 ) {
     if messages.is_empty() {
         return;
     }
-    {
-        let mut s = orch.session.lock().await;
-        for (message, source_id) in &messages {
-            s.history.push(message.clone());
-            s.injected_message_sources
-                .insert(message.id(), source_id.clone());
+    for (message, source_id) in messages {
+        let guard = match publication_guard.as_ref() {
+            Some(guard) => Some(Arc::clone(guard)),
+            None => {
+                orch.prompt_runtime
+                    .guarded_prompt_message_guard(message.id())
+                    .await
+            }
+        };
+        if let Some(guard) = guard {
+            orch.append_guarded_injected_message(&message, source_id, guard)
+                .await;
+            continue;
         }
-    }
-    for (message, _) in &messages {
-        if !message.is_meta() {
-            orch.persist_message_to_jsonl(message).await;
-        }
+        let append = async {
+            {
+                let mut session = orch.session.lock().await;
+                session.history.push(message.clone());
+                session
+                    .injected_message_sources
+                    .insert(message.id(), source_id);
+            }
+            if !message.is_meta() {
+                orch.persist_message_to_jsonl(&message).await;
+            }
+        };
+        append.await;
     }
 }
 
@@ -236,49 +353,73 @@ pub(crate) async fn apply_model_context_modifiers(
     if modifiers.is_empty() {
         return;
     }
-    let (current, current_profile) = {
-        let s = orch.session.lock().await;
-        (s.model.clone(), s.model_profile.clone())
-    };
+    let current = orch.session.lock().await.model.clone();
     let resolved = modifiers
         .into_iter()
-        .fold(ToolUseContext::model_seed(current.clone()), |ctx, m| m(ctx))
+        .fold(ToolUseContext::model_seed(current), |ctx, modifier| {
+            modifier(ctx)
+        })
         .options
         .main_loop_model;
-    if resolved != current {
-        let listings = orch.api.list_model_listings();
-        let (target_model, explicit_profile) =
-            lingxi_core::host::parse_model_ref(&resolved, &listings);
-        let target_profile = explicit_profile.or_else(|| {
-            current_profile
-                .as_ref()
-                .filter(|profile| {
-                    listings.iter().any(|listing| {
-                        listing.provider_id.as_str() == profile.as_str()
-                            && listing.request_model == target_model
-                    })
-                })
-                .cloned()
-                .or_else(|| {
-                    let mut matches = listings
-                        .iter()
-                        .filter(|listing| listing.request_model == target_model);
-                    let first = matches.next()?;
-                    matches.next().is_none().then(|| first.provider_id.clone())
-                })
-        });
-        {
-            let mut s = orch.session.lock().await;
-            s.model.clone_from(&target_model);
-            s.model_profile.clone_from(&target_profile);
-        }
-        orch.run_post_model_switch_hooks(
-            &current,
-            &target_model,
-            None,
-            target_profile.as_deref(),
-            "auto",
-        )
-        .await;
+    apply_resolved_model_context(orch, resolved).await;
+}
+
+/// Apply the model layer already folded by the owned streaming scheduler. The
+/// one-shot callbacks have been consumed at Native's unsafe/ended-run barrier;
+/// this final projection preserves the same profile selection and post-switch
+/// hooks without replaying a callback.
+pub(crate) async fn apply_model_context_state(
+    orch: &ConversationOrchestrator,
+    state: lingxi_core::host::tool_invoker::ToolInvocationContextState,
+) -> Result<(), crate::error::OrchestratorError> {
+    let context = state.downcast_arc::<ToolUseContext>().map_err(|error| {
+        crate::error::OrchestratorError::StreamingProtocol(format!(
+            "streaming tool context state is invalid: {error}"
+        ))
+    })?;
+    apply_resolved_model_context(orch, context.options.main_loop_model.clone()).await;
+    Ok(())
+}
+
+async fn apply_resolved_model_context(orch: &ConversationOrchestrator, resolved: String) {
+    let (current, current_profile) = {
+        let session = orch.session.lock().await;
+        (session.model.clone(), session.model_profile.clone())
+    };
+    if resolved == current {
+        return;
     }
+    let listings = orch.api.list_model_listings();
+    let (target_model, explicit_profile) = lingxi_core::host::parse_model_ref(&resolved, &listings);
+    let target_profile = explicit_profile.or_else(|| {
+        current_profile
+            .as_ref()
+            .filter(|profile| {
+                listings.iter().any(|listing| {
+                    listing.provider_id.as_str() == profile.as_str()
+                        && listing.request_model == target_model
+                })
+            })
+            .cloned()
+            .or_else(|| {
+                let mut matches = listings
+                    .iter()
+                    .filter(|listing| listing.request_model == target_model);
+                let first = matches.next()?;
+                matches.next().is_none().then(|| first.provider_id.clone())
+            })
+    });
+    {
+        let mut session = orch.session.lock().await;
+        session.model.clone_from(&target_model);
+        session.model_profile.clone_from(&target_profile);
+    }
+    orch.run_post_model_switch_hooks(
+        &current,
+        &target_model,
+        None,
+        target_profile.as_deref(),
+        "auto",
+    )
+    .await;
 }

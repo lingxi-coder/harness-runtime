@@ -167,7 +167,7 @@ impl PendingApprovedDeparture {
         );
         router.route(&self.leader, crate::mailbox::TeammateMessage {
             from: self.from.clone(), from_name: self.from_name.clone(),
-            content: serde_json::json!({"type":"teammate_terminated", "message":notification_message}).to_string(),
+            content: serde_json::json!({"type":"teammate_terminated", "message":notification_message}).to_string().into(),
             summary: None, message_id: tool_api::util::ids::ulid_or_uuid(), timestamp: SystemTime::now(),
             request_id: Some(self.request_id.clone()),
         }).await.map_err(|error| format!("Notify teammate departure: {error}"))?;
@@ -686,7 +686,8 @@ mod tests {
                 },
             ],
         );
-        let value: serde_json::Value = serde_json::from_str(&messages[0].content).unwrap();
+        let content = messages[0].content.to_json_string().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(value["message"], expected);
     }
 
@@ -788,7 +789,10 @@ mod tests {
         assert_eq!(messages[0].request_id.as_deref(), Some("approval-1"));
         assert_eq!(messages[0].from_name, "nova");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&messages[0].content).unwrap(),
+            serde_json::from_str::<serde_json::Value>(
+                &messages[0].content.to_json_string().unwrap(),
+            )
+            .unwrap(),
             serde_json::json!({"type":"teammate_terminated", "message":"nova has shut down."})
         );
     }

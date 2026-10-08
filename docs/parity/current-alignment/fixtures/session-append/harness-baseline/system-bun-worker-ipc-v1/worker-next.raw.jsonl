@@ -1,0 +1,1 @@
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":3,"kind":"next","callId":1,"input":{"message":{"type":"system","content":[{"type":"text","text":"system-prefix:system-before-\ud800-after"}]},"door":"notice","origin":{"kind":"engine"},"uuid":"00000000-0000-4000-8000-000000000015"}},"numberBits":[]}

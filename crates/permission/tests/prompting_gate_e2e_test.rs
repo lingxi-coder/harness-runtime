@@ -10,17 +10,17 @@
 
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::{
     InteractivePromptingGate, PermissionRequest, PromptDefault, PromptError, PromptingGate,
 };
-use serde_json::json;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 fn make_request(tool_name: &str, default: PromptDefault) -> PermissionRequest {
     PermissionRequest::ToolUseConfirm {
         tool_name: tool_name.to_string(),
-        tool_input: json!({}),
+        tool_input: Utf16JsonProjection::parse("{}").expect("empty test input is valid JSON"),
         default_decision: default,
         suppress_always_allow_rule: false,
     }

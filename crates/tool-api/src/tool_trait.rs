@@ -5,13 +5,30 @@
 //! concurrency safety, validation, execution).
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 use permission::PermissionResult;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
+
+/// The four source facts Native `Mx` checks before exposing a wrapped V1
+/// tool through `$.tool.call`. A wrapper is hidden only when the tool declares
+/// every fact with the matching Native type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeModToolBatchWrapperFacts<'a> {
+    /// Defined string field `underlyingV1ToolName`.
+    pub underlying_v1_tool_name: Option<&'a str>,
+    /// Defined string field `entryFieldName`.
+    pub entry_field_name: Option<&'a str>,
+    /// Whether `perEntryHookInputs` is a function.
+    pub per_entry_hook_inputs_is_function: bool,
+    /// Whether `reassemble` is a function.
+    pub reassemble_is_function: bool,
+}
 
 /// Contract implemented by every tool the agent can call.
 ///
@@ -31,6 +48,14 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Exact wrapper-shape facts consumed by Native `$.tool.call` catalog
+    /// filtering. Ordinary tools must return the default (all missing) value;
+    /// the unrelated [`Self::underlying_v1_tool_name`] pool-matching field is
+    /// not enough to identify a batch wrapper.
+    fn native_mod_tool_batch_wrapper_facts(&self) -> NativeModToolBatchWrapperFacts<'_> {
+        NativeModToolBatchWrapperFacts::default()
+    }
+
     /// Canonical V1 tool identity used by tool-pool configuration matching.
     fn underlying_v1_tool_name(&self) -> Option<&str> {
         None
@@ -42,7 +67,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Short hint shown in tool-search UIs, if any.
-    fn search_hint(&self) -> Option<&str> {
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
         None
     }
 
@@ -54,15 +79,33 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// JSON Schema for the tool's input parameters.
-    fn input_schema(&self) -> &Value;
+    /// Source-owned JSON Schema for the tool's input parameters.
+    fn input_schema(&self) -> &Utf16JsonProjection;
 
     /// Owned schema snapshot for capabilities that can change while a
     /// registry is live. The wire builder calls this for each model request,
     /// so a capability update cannot leave a stale action list in the schema
     /// cache or ToolSearch view. Static tools keep the borrowed schema above.
-    fn input_schema_snapshot(&self) -> Option<Value> {
+    fn input_schema_snapshot(&self) -> Option<Utf16JsonProjection> {
         None
+    }
+
+    /// Authoritative source facts used by the pre-row streamed-input repair.
+    /// `Unknown` is not equivalent to an absent schema or an absent exemption
+    /// callback. Production registration and dispatch must reject it instead
+    /// of silently skipping native input repair.
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata;
+
+    /// Apply Native's tool-specific streamed-row normalization after the
+    /// schema-directed and Unicode repair stages. Native only has this switch
+    /// for Read, Skill, Bash, Edit, and Write; every other tool keeps its input
+    /// unchanged at this phase. This is deliberately separate from the later
+    /// local Zod/native validation path.
+    fn prepare_input_before_row(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        Ok(input.clone())
     }
 
     /// Revision token for a live schema snapshot. Include every non-content
@@ -73,10 +116,69 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Provider-native desktop adaptation for this registered tool, when supported.
+    fn native_computer_capabilities(
+        &self,
+    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
+        None
+    }
+
+    /// Convert protocol data into this tool's ordinary input without executing it.
+    fn lower_computer_operation(
+        &self,
+        _operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
+        _frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::InvalidInput(
+            "native computer adaptation unavailable".into(),
+        ))
+    }
+
+    /// Return an authorized, current observation belonging to the calling owner.
+    async fn native_computer_frame(
+        &self,
+        _ctx: &ToolUseContext,
+    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
+        Ok(None)
+    }
+
+    /// Retain desktop ownership across an ordered native sequence and its observation.
+    async fn begin_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// End a sequence while retaining ownership of inputs still held by the owner.
+    async fn end_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Release inputs held by this owner at cancellation or lifecycle completion.
+    async fn cleanup_computer_inputs(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Apply the final model-visible observation after output hooks and Mods.
+    async fn computer_model_output(
+        &self,
+        _ctx: &ToolUseContext,
+        _content: &Utf16JsonProjection,
+        _blocks: Option<&[Utf16JsonProjection]>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Require a fresh observation after recovery or a host geometry reset.
+    async fn invalidate_computer_observation(
+        &self,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     /// Runtime parser schema, distinct from advertised foreign JSON Schema.
     /// MCP server schemas are inputJSONSchema on the wire; their local parser
     /// is the passthrough object inherited from H4 (Claude Code 2.1.263).
-    fn input_validation_schema(&self) -> &Value {
+    fn input_validation_schema(&self) -> &Utf16JsonProjection {
         self.input_schema()
     }
 
@@ -85,7 +187,7 @@ pub trait Tool: Send + Sync {
     /// diagnostic is ZodError.message (JSON.stringify(issues, null, 2)).
     /// Return only refinement/custom checks; structural validation runs first.
     /// Validators must skip refinements on inputs whose base types cannot parse.
-    fn input_validation_issues(&self, _input: &Value) -> Vec<Value> {
+    fn input_validation_issues(&self, _input: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
         Vec::new()
     }
 
@@ -100,8 +202,8 @@ pub trait Tool: Send + Sync {
     /// Tools with refinements may override this while retaining the shared issue formatter.
     fn parse_native_input(
         &self,
-        input: &Value,
-    ) -> Option<Result<Value, crate::native_schema::NativeSchemaError>> {
+        input: &Utf16JsonProjection,
+    ) -> Option<Result<Utf16JsonProjection, crate::native_schema::NativeSchemaError>> {
         if !self.native_input_validation() {
             return None;
         }
@@ -118,7 +220,41 @@ pub trait Tool: Send + Sync {
     }
 
     /// Optional JSON Schema for the tool's output.
-    fn output_schema(&self) -> Option<&Value> {
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        None
+    }
+
+    /// Parse a tool result through the tool's Native output parser, returning
+    /// its parsed value (the equivalent of Zod `safeParse(...).data`). Tools
+    /// without an output schema keep their input unchanged. A schema-bearing
+    /// tool must provide its source-native parser; it must not silently treat
+    /// the schema as an Ajv profile or accept the unparsed input.
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        if self.output_schema().is_none() {
+            Ok(output.clone())
+        } else {
+            Err(ToolError::InvalidInput(
+                format!(
+                    "Native output parser is not mapped for schema-bearing tool '{}'",
+                    self.name()
+                )
+                .into(),
+            ))
+        }
+    }
+
+    /// Model-facing text for a Mod-supplied result. Returning `None` selects
+    /// the shared generic result mapper. This must not execute the tool body.
+    fn map_result_text(&self, _result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        None
+    }
+
+    /// Error bit produced by a tool-specific result mapper. For example,
+    /// Bash marks an interrupted result as an error even when it has output.
+    fn map_result_is_error(&self, _result: &Utf16JsonProjection) -> Option<bool> {
         None
     }
 
@@ -131,12 +267,23 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Trusted per-call ceiling projected on the Native Mod `tool.check`
+    /// surface. Implementations return a value only when they have an
+    /// authoritative host fact for this exact input; the dispatcher does not
+    /// infer organization policy from `is_mcp`, tool names, or payload fields.
+    async fn tool_check_permission_ceiling(
+        &self,
+        _input: &Utf16JsonProjection,
+    ) -> Option<lingxi_core::host::McpPermissionCeiling> {
+        None
+    }
+
     /// Observe a static JSON-schema rejection before the dispatcher returns it
     /// to the model. Implementations may use this for rejection telemetry; the
     /// default deliberately has no side effects.
     async fn on_input_schema_rejected(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _tool_use_id: Option<&str>,
         _assistant_message_id: Option<&lingxi_core::types::MessageId>,
     ) {
@@ -149,6 +296,19 @@ pub trait Tool: Send + Sync {
     /// decide per invocation. The default keeps every existing tool unchanged.
     fn result_ends_turn(&self, _result: &ToolCallResult) -> bool {
         false
+    }
+
+    /// Require the bound Auto classifier even when rules or hooks allow the
+    /// call. Policy is host-owned tool metadata, never model arguments.
+    fn classifier_only(&self) -> Option<lingxi_core::host::permission_gate::ClassifierOnlyPolicy> {
+        None
+    }
+
+    /// Action reviewed by the classifier-only path after native input parsing.
+    fn classifier_only_action(&self, input: &Utf16JsonProjection) -> String {
+        input
+            .to_json_string()
+            .expect("validated source input serializes as JSON")
     }
 
     /// Optional MCP server routing role.  Native and generic tools return
@@ -223,36 +383,36 @@ pub trait Tool: Send + Sync {
 
     /// Whether the tool is safe to run concurrently with other tools given
     /// this specific input. Read-only tools typically return `true`.
-    fn is_concurrency_safe(&self, input: &Value) -> bool;
+    fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool;
 
     /// Whether this invocation is read-only with respect to the workspace.
-    fn is_read_only(&self, input: &Value) -> bool;
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool;
 
     /// Whether this invocation can destroy data irreversibly.
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
 
     /// Whether the tool reaches outside the local workspace (network, etc.).
-    fn is_open_world(&self, _input: &Value) -> bool {
+    fn is_open_world(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
 
     /// Classify this invocation as search / read / list, if applicable.
     /// Used by the loader to fold "Search&Read" tools into one slot.
-    fn is_search_or_read(&self, _input: &Value) -> Option<SearchReadInfo> {
+    fn is_search_or_read(&self, _input: &Utf16JsonProjection) -> Option<SearchReadInfo> {
         None
     }
 
     /// How the tool should react when an in-flight call is interrupted.
-    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _input: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
     /// Normalize the input to a form suitable for replay / observability.
     ///
     /// Tools may strip secrets, redact paths, or canonicalize ordering.
-    fn backfill_observable_input(&self, _input: &mut Value) {}
+    fn backfill_observable_input(&self, _input: &mut Utf16JsonProjection) {}
 
     /// Normalize a model-supplied input BEFORE JSON-schema validation — the
     /// port of claude-code's `Tool.coerceInput(input)`.
@@ -278,7 +438,7 @@ pub trait Tool: Send + Sync {
     ///
     /// Defaults to `None` so every existing `Tool` impl is unaffected
     /// (frozen-trait rule).
-    fn coerce_input(&self, _input: &Value) -> Option<CoercedInput> {
+    fn coerce_input(&self, _input: &Utf16JsonProjection) -> Option<CoercedInput> {
         None
     }
 
@@ -290,7 +450,7 @@ pub trait Tool: Send + Sync {
     /// compiles).
     async fn validate_input(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
@@ -300,20 +460,24 @@ pub trait Tool: Send + Sync {
     ///
     /// The dispatcher calls this before invoking [`Tool::call`]. Hooks may
     /// override the result (e.g. allow / deny via `PreToolUse`).
-    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult;
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> PermissionResult;
 
     /// Filesystem path this invocation primarily targets, if any.
     ///
     /// Used by the permission engine and file-state cache.
-    fn get_path(&self, _input: &Value) -> Option<PathBuf> {
+    fn get_path(&self, _input: &Utf16JsonProjection) -> Option<PathBuf> {
         None
     }
 
     /// Human-readable description of what this invocation will do.
-    async fn description(&self, input: &Value, opts: &DescriptionOptions) -> String;
+    async fn description(&self, input: &Utf16JsonProjection, opts: &DescriptionOptions) -> String;
 
-    /// Long-form tool prompt used when assembling the system prompt.
-    async fn prompt(&self, opts: &PromptOptions) -> String;
+    /// Long-form source-backed tool prompt used when assembling the system prompt.
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection;
 
     /// Execute the tool.
     ///
@@ -322,14 +486,14 @@ pub trait Tool: Send + Sync {
     /// I/O issues, abort, or file-state cache violations.
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError>;
 
     /// Short verb phrase for activity displays
     /// (e.g. `"Reading file"`, `"Running command"`).
-    fn get_activity_description(&self, _input: &Value) -> Option<String> {
+    fn get_activity_description(&self, _input: &Utf16JsonProjection) -> Option<String> {
         None
     }
 
@@ -348,7 +512,7 @@ pub trait Tool: Send + Sync {
     /// requested subagent type.
     ///
     /// [`name`]: Tool::name
-    fn user_facing_name_for_input(&self, _input: &Value) -> Option<String> {
+    fn user_facing_name_for_input(&self, _input: &Utf16JsonProjection) -> Option<String> {
         None
     }
 
@@ -360,62 +524,8 @@ pub trait Tool: Send + Sync {
     /// configured color via `getAgentColor(subagent_type)`). claude returns a
     /// `keyof Theme`; the Rust analog returns the color name string. Defaults to
     /// `None` so every other `Tool` impl is unaffected (frozen-trait rule).
-    fn user_facing_name_background_color(&self, _input: &Value) -> Option<String> {
+    fn user_facing_name_background_color(&self, _input: &Utf16JsonProjection) -> Option<String> {
         None
-    }
-
-    /// Provider-native desktop adaptation for this registered tool, when supported.
-    fn native_computer_capabilities(
-        &self,
-    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
-        None
-    }
-
-    /// Convert protocol data into this tool's ordinary input without executing it.
-    fn lower_computer_operation(
-        &self,
-        _operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
-        _frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
-    ) -> Result<Value, ToolError> {
-        Err(ToolError::InvalidInput("native computer adaptation unavailable".into()))
-    }
-
-    /// Return an authorized, current observation belonging to the calling owner.
-    async fn native_computer_frame(
-        &self,
-        _ctx: &ToolUseContext,
-    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
-        Ok(None)
-    }
-
-    /// Retain desktop ownership across an ordered native sequence and its observation.
-    async fn begin_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// End a sequence while retaining ownership of inputs still held by the owner.
-    async fn end_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Release inputs held by this owner at cancellation or lifecycle completion.
-    async fn cleanup_computer_inputs(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Apply the final model-visible observation after output hooks and Mods.
-    async fn computer_model_output(
-        &self,
-        _ctx: &ToolUseContext,
-        _content: &str,
-        _blocks: Option<&[Value]>,
-    ) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Require a fresh observation after recovery or a host geometry reset.
-    async fn invalidate_computer_observation(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
     }
 }
 
@@ -449,6 +559,17 @@ pub struct DescriptionOptions {
     pub is_non_interactive_session: bool,
 }
 
+/// Model-visible skill suggestions for Bash's precommit guidance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct BashPrecommitSkills {
+    /// A model-visible `verify` skill loaded from a custom skill/command directory.
+    pub custom_verify: bool,
+    /// A model-visible `simplify` skill loaded from a custom skill/command directory.
+    pub custom_simplify: bool,
+    /// `code-review` is model-visible and its suggestion setting is enabled.
+    pub code_review: bool,
+}
+
 /// Options controlling [`Tool::prompt`] output.
 #[derive(Debug, Clone, Default)]
 pub struct PromptOptions {
@@ -467,6 +588,12 @@ pub struct PromptOptions {
     /// Tool prompts that need provider-specific wording should use this instead
     /// of request-builder internals.
     pub model_profile: Option<String>,
+    /// Skill suggestions from the owning session's current eligible skill set.
+    /// Callers suppress these when the request does not offer the `Skill` tool.
+    pub bash_precommit_skills: BashPrecommitSkills,
+    /// Registry-owned session activation generation. Clear/resume increments
+    /// it so a reused Bash tool starts a fresh precommit wording latch.
+    pub bash_precommit_session_generation: u64,
 }
 
 /// Information returned by [`Tool::is_search_or_read`] describing how an
@@ -481,6 +608,46 @@ pub struct SearchReadInfo {
     pub is_list: bool,
 }
 
+/// Provenance of a tool's input JSON Schema as carried in a host ToolSpec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInputSchemaProvenance {
+    /// Generated from a bounded, local builtin schema producer.
+    GeneratedBuiltin,
+    /// Received from a source-owned definition such as MCP, Mod, or plugin metadata.
+    SourceNative,
+}
+
+/// Which schema Native's pre-row JSON repair sees for a tool definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolInputRepairSchema {
+    /// Use the exact advertised Source schema (including the current live
+    /// schema snapshot, if present).
+    Advertised,
+    /// The Native tool has no `inputJSONSchema` for the repair call.
+    Absent,
+    /// A separately retained Source schema, only when authoritative metadata
+    /// proves Native's repair schema differs from the advertised schema.
+    SourceNative(Utf16JsonProjection),
+}
+
+/// Source facts required to apply the pre-row schema repair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolInputRepairMetadata {
+    /// The source did not establish repair facts. This is distinct from a
+    /// known-absent schema and must not silently suppress the repair stage.
+    Unknown,
+    /// Authoritative facts for the registered tool definition.
+    Known {
+        /// Native's schema selection for the pre-row repair stage.
+        schema: ToolInputRepairSchema,
+        /// Whether the schema was generated locally or retained from an external source.
+        schema_provenance: ToolInputSchemaProvenance,
+        /// `None` means no native exemption callback; `Some(empty)` is an
+        /// explicit empty callback result. Both exempt no keys.
+        exempt_top_level_keys: Option<HashSet<Vec<u16>>>,
+    },
+}
+
 /// A successful [`Tool::coerce_input`] rewrite — the port of the object
 /// claude-code's `coerceInput` returns (`{input, shapeClass}`).
 ///
@@ -493,7 +660,7 @@ pub struct SearchReadInfo {
 #[derive(Debug, Clone)]
 pub struct CoercedInput {
     /// The rewritten input the dispatcher must use from here on.
-    pub input: Value,
+    pub input: Utf16JsonProjection,
     /// Comma-joined list of coerced keys, in the order the tool applied them.
     pub shape_class: String,
 }
@@ -507,43 +674,19 @@ pub enum InterruptBehavior {
     Block,
 }
 
-/// Why a successful tool result ended the current turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolResultTurnEndSource {
-    /// The native tool result returned `endsTurn: true`.
-    Tool,
-    /// The tool result's MCP `_meta` block requested turn termination.
-    McpMeta,
-}
-
-impl ToolResultTurnEndSource {
-    /// Analytics wire value used by `tengu_mcp_tool_result_ended_turn`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tool => "tool",
-            Self::McpMeta => "mcp_meta",
-        }
-    }
-}
-
-/// Extra metadata for a successful tool result that ends the current turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolResultTurnEnd {
-    /// Marker that won the oracle's `tool`-before-`mcp_meta` precedence.
-    pub source: ToolResultTurnEndSource,
-}
+pub use lingxi_core::host::tool_invoker::{ToolResultTurnEnd, ToolResultTurnEndSource};
 
 /// Classify whether a successful tool result requests turn termination.
 ///
-/// This is the exact `qbt` precedence from Claude Code 2.1.252:
-/// `toolEndsTurn` wins over MCP metadata, and an error result never ends the
-/// turn even when either marker is present.
+/// Matches Claude Code 2.1.286's `dEo` in the dispatcher's single-result
+/// boolean domain: `toolEndsTurn` wins over MCP metadata, and an error result
+/// never ends the turn even when either marker is present. Whole raw frames
+/// and truthy non-booleans are separate native evidence, not coerced inputs.
 #[must_use]
 pub fn tool_result_turn_end(
     tool_ends_turn: bool,
     is_error: bool,
-    mcp_meta: Option<&serde_json::Value>,
+    mcp_meta: Option<&Utf16JsonProjection>,
 ) -> Option<ToolResultTurnEnd> {
     if is_error {
         return None;
@@ -554,16 +697,18 @@ pub fn tool_result_turn_end(
         });
     }
     mcp_meta
-        .and_then(serde_json::Value::as_object)
-        .and_then(|meta| meta.get("_meta"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|meta| meta.get("claude/endTurn"))
-        .and_then(serde_json::Value::as_bool)
+        .and_then(|meta| meta.get_property("_meta"))
+        .and_then(|meta| meta.get_property("claude/endTurn"))
+        .and_then(JsonValueView::as_bool)
         .filter(|value| *value)
         .map(|_| ToolResultTurnEnd {
             source: ToolResultTurnEndSource::McpMeta,
         })
 }
+
+#[cfg(test)]
+#[path = "tool_turn_end_oracle_tests.rs"]
+mod tool_turn_end_oracle_tests;
 
 /// A one-shot mutator a tool returns to adjust the turn's [`ToolUseContext`] —
 /// the Rust twin of claude-code's `ToolResult.contextModifier`.
@@ -584,30 +729,34 @@ pub type ContextModifier = Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Se
 /// metadata threaded through for MCP tools.
 pub struct ToolCallResult {
     /// JSON payload returned to the model.
-    pub data: Value,
+    pub data: Utf16JsonProjection,
     /// Optional faithful model-facing string. When `Some`, the dispatch uses
     /// this verbatim as the tool's model text (and the SDK frame's
     /// `tool_result.content`), keeping `data` as pure metadata. When `None`,
     /// the dispatch falls back to deriving the model text out of `data`.
-    pub model_content: Option<String>,
+    pub model_content: Option<Utf16JsonProjection>,
     /// Extra conversation messages to inject after this call.
     pub new_messages: Vec<lingxi_core::types::ConversationMessage>,
     /// Optional one-shot mutator for the [`ToolUseContext`].
     pub context_modifier: Option<ContextModifier>,
     /// Opaque per-call metadata (used by MCP tools).
-    pub mcp_meta: Option<serde_json::Value>,
+    pub mcp_meta: Option<Utf16JsonProjection>,
     /// Whether this result is an ERROR — drives the `tool_result` block's
     /// `is_error` flag. `false` for every native tool's success path (a native
     /// failure surfaces as an `Err`, which the dispatch flags separately); MCP
     /// tools set it from the server's `isError` so an MCP error RESULT (a logical
     /// failure, not a transport error) is flagged to the model 1:1 with claude-code.
     pub is_error: bool,
+    /// Host-only signal that this Agent call already fired its SubagentStart
+    /// hook. It must not be encoded in model-visible JSON, since output
+    /// parsing strips unknown fields and Mod hooks may replace the payload.
+    pub subagent_hooks_fired: bool,
 }
 
 impl ToolCallResult {
     /// Build a result from a `data` payload only — the model text is derived
     /// from `data` by the dispatch (`model_content` stays `None`).
-    pub fn from_data(data: Value) -> Self {
+    pub fn from_data(data: Utf16JsonProjection) -> Self {
         Self {
             data,
             model_content: None,
@@ -615,8 +764,58 @@ impl ToolCallResult {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         }
     }
+
+    /// Attach a Rust-owned UTF-8 model-facing string. When text originates in
+    /// an external source, use `source_text_projection_units` with its exact
+    /// UTF-16 code units instead.
+    #[must_use]
+    pub fn with_model_text(mut self, text: &str) -> Self {
+        self.model_content = Some(source_text_projection(text));
+        self
+    }
+}
+
+/// Import a schema generated locally from a bounded builtin definition.
+/// Never use this for MCP, Mod, plugin, or other source-owned metadata.
+#[must_use]
+pub fn generated_builtin_schema(schema: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(schema)
+        .expect("locally generated builtin schema is representable as JSON")
+}
+
+/// Import a locally generated builtin result assembled only from literals,
+/// validated typed values, or UTF-8-decoded process/filesystem text. Do not
+/// use this for arbitrary values, or for MCP, Mod, plugin, or other source-owned
+/// payloads; when a Source projection already exists, pass it directly.
+#[must_use]
+pub fn generated_builtin_result(result: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(result)
+        .expect("locally generated builtin result is representable as JSON")
+}
+
+/// Build a JSON string projection for Rust-owned UTF-8 tool text. External
+/// MCP/plugin text that already has UTF-16 source units must use
+/// [`source_text_projection_units`] instead.
+#[must_use]
+pub fn source_text_projection(text: &str) -> Utf16JsonProjection {
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_string(text);
+    builder
+        .finish(root)
+        .expect("a single Rust string is a valid JSON projection")
+}
+
+/// Build a JSON string projection without replacing unpaired UTF-16 units.
+#[must_use]
+pub fn source_text_projection_units(units: &[u16]) -> Utf16JsonProjection {
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_string_units(units.to_vec());
+    builder
+        .finish(root)
+        .expect("a single UTF-16 string is a valid JSON projection")
 }
 
 impl std::fmt::Debug for ToolCallResult {
@@ -628,16 +827,17 @@ impl std::fmt::Debug for ToolCallResult {
             .field("new_messages", &self.new_messages)
             .field("mcp_meta", &self.mcp_meta)
             .field("is_error", &self.is_error)
+            .field("subagent_hooks_fired", &self.subagent_hooks_fired)
             .finish_non_exhaustive()
     }
 }
 
 /// Error returned by [`Tool::validate_input`].
 #[derive(Debug, Clone, Error)]
-#[error("invalid tool input: {0}")]
+#[error("invalid tool input")]
 pub struct ValidationError(
-    /// Human-readable validation error message.
-    pub String,
+    /// Human-readable validation error message as an exact root-string source.
+    pub Utf16JsonProjection,
 );
 
 /// Error returned by [`Tool::call`] and related dispatcher operations.
@@ -648,14 +848,18 @@ pub enum ToolError {
     #[error("tool not found: {0}")]
     NotFound(String),
     /// Input failed validation (schema or tool-specific checks).
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
+    // The model-facing message is source text and may contain unpaired UTF-16
+    // units. Keep it as a root-string projection; Display remains a concise
+    // logging label while `model_facing_message` returns the exact payload.
+    #[error("invalid input")]
+    InvalidInput(Utf16JsonProjection),
     /// Permission engine denied the call.
-    #[error("permission denied: {0}")]
-    PermissionDenied(String),
-    /// Underlying I/O failure (network, disk, etc.).
-    #[error("io: {0}")]
-    Io(String),
+    #[error("permission denied: {}", .0.string_at("").unwrap_or_default())]
+    PermissionDenied(Utf16JsonProjection),
+    /// Underlying I/O failure (network, disk, etc.). The model-facing detail
+    /// remains an exact source string; `Display` is a logging label.
+    #[error("io")]
+    Io(Utf16JsonProjection),
     /// The call was aborted (interrupt, cancellation).
     #[error("aborted")]
     Aborted,
@@ -729,24 +933,25 @@ pub enum ToolError {
         limit: usize,
     },
     /// M4-05: subagent loop crashed.
-    #[error("subagent failed: {0}")]
-    SubagentFailed(String),
+    #[error("subagent failed: {}", .0.string_at("").unwrap_or_default())]
+    SubagentFailed(Utf16JsonProjection),
     /// M4-07: MCP server reported a tool-call failure.
-    #[error("MCP tool error: {server}/{tool}: {detail}")]
+    #[error("MCP tool error: {server}/{tool}")]
     McpFailure {
         /// MCP server identifier.
         server: String,
         /// MCP tool name.
         tool: String,
         /// Server-supplied detail string.
-        detail: String,
+        detail: Utf16JsonProjection,
     },
-    /// M4-07: LSP request failed.
-    #[error("LSP tool error: {0}")]
-    LspFailure(String),
+    /// M4-07: LSP request failed. The model-facing message preserves the
+    /// exact source text; `Display` remains a short logging label.
+    #[error("LSP tool error")]
+    LspFailure(Utf16JsonProjection),
     /// M4-03: HTTP transport error (DNS, connect, TLS, status code).
-    #[error("transport error: {0}")]
-    Transport(String),
+    #[error("transport error: {}", .0.string_at("").unwrap_or_default())]
+    Transport(Utf16JsonProjection),
 }
 
 impl ToolError {
@@ -768,22 +973,34 @@ impl ToolError {
     /// rendering — that text IS the message claude would surface, and there is
     /// no spurious prefix to strip.
     #[must_use]
-    pub fn model_facing_message(&self) -> String {
+    pub fn model_facing_message(&self) -> Utf16JsonProjection {
         match self {
+            ToolError::InvalidInput(message)
+            | ToolError::PermissionDenied(message)
+            | ToolError::SubagentFailed(message)
+            | ToolError::Transport(message)
+            | ToolError::Io(message)
+            | ToolError::LspFailure(message) => message.clone(),
+            ToolError::McpFailure {
+                server,
+                tool,
+                detail,
+            } => {
+                let mut units = format!("MCP tool error: {server}/{tool}: ")
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                units.extend(detail.string_units("").unwrap_or_default());
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                    .expect("MCP error message is a valid source string")
+            }
             // Single-string variants whose `Display` prepends a non-meaningful
             // prefix: the inner string is the claude `error.message`.
-            ToolError::NotFound(s)
-            | ToolError::InvalidInput(s)
-            | ToolError::PermissionDenied(s)
-            | ToolError::Io(s)
-            | ToolError::Internal(s)
-            | ToolError::InteractionRequired(s)
-            | ToolError::SubagentFailed(s)
-            | ToolError::LspFailure(s)
-            | ToolError::Transport(s) => s.clone(),
+            ToolError::NotFound(s) | ToolError::Internal(s) | ToolError::InteractionRequired(s) => {
+                s.clone().into()
+            }
             // Structured / prefix-free variants: `Display` already renders the
             // exact model-facing message (no LingXi-only prefix to strip).
-            other => other.to_string(),
+            other => other.to_string().into(),
         }
     }
 }
@@ -851,35 +1068,73 @@ mod m4_01_error_variant_tests {
             "Agent type 'x' not found. Available agents: general-purpose".into(),
         );
         assert_eq!(
-            invalid.model_facing_message(),
-            "Agent type 'x' not found. Available agents: general-purpose"
+            invalid.model_facing_message().string_at(""),
+            Some("Agent type 'x' not found. Available agents: general-purpose")
         );
-        // Display keeps the prefix (logging path) — the divergence the fix targets.
+        // Display is a concise UTF-8 logging label; the exact source message
+        // remains available through `model_facing_message` and Debug.
+        assert_eq!(invalid.to_string(), "invalid input");
+
+        let exact_message = Utf16JsonProjection::parse(r#""bad \ud800 value""#).unwrap();
+        let exact_error = ToolError::InvalidInput(exact_message.clone());
+        assert_eq!(exact_error.model_facing_message(), exact_message);
         assert_eq!(
-            invalid.to_string(),
-            "invalid input: Agent type 'x' not found. Available agents: general-purpose"
+            exact_error.model_facing_message().string_units(""),
+            Some(vec![
+                'b' as u16, 'a' as u16, 'd' as u16, ' ' as u16, 0xd800, ' ' as u16, 'v' as u16,
+                'a' as u16, 'l' as u16, 'u' as u16, 'e' as u16,
+            ])
         );
 
         let internal = ToolError::Internal(
             "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none.".into(),
         );
         assert_eq!(
-            internal.model_facing_message(),
-            "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none."
+            internal.model_facing_message().string_at(""),
+            Some("Agent 'x' requires MCP servers matching: github. MCP servers with tools: none.")
         );
 
         // Other single-string variants are bare too.
         assert_eq!(
-            ToolError::SubagentFailed("boom".into()).model_facing_message(),
-            "boom"
+            ToolError::SubagentFailed("boom".into())
+                .model_facing_message()
+                .string_at(""),
+            Some("boom")
         );
 
         // Structured variants keep their full Display (no spurious prefix).
         let timeout = ToolError::Timeout { timeout_ms: 5000 };
         assert_eq!(
-            timeout.model_facing_message(),
-            "command timed out after 5000ms"
+            timeout.model_facing_message().string_at(""),
+            Some("command timed out after 5000ms")
         );
+    }
+
+    #[test]
+    fn source_error_variants_keep_lone_utf16_units_in_model_messages() {
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xD800]), vec![0xD800])
+                .expect("source error is a valid root string");
+        assert_eq!(ToolError::Io(source.clone()).model_facing_message(), source);
+        assert_eq!(
+            ToolError::LspFailure(source.clone()).model_facing_message(),
+            source
+        );
+
+        let detail =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xDFFF]), vec![0xDFFF])
+                .expect("source MCP detail is a valid root string");
+        let message = ToolError::McpFailure {
+            server: "srv".into(),
+            tool: "read".into(),
+            detail,
+        }
+        .model_facing_message();
+        let mut expected = "MCP tool error: srv/read: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.push(0xDFFF);
+        assert_eq!(message.string_units(""), Some(expected));
     }
 }
 
@@ -892,7 +1147,8 @@ mod user_facing_name_default_tests {
     /// `user_facing_name` / `user_facing_name_background_color` (G9 frozen-trait
     /// rule: every non-`AgentTool` tool sees `None`).
     struct BareTool {
-        schema: Value,
+        schema: Utf16JsonProjection,
+        has_output_schema: bool,
     }
 
     #[async_trait]
@@ -900,8 +1156,18 @@ mod user_facing_name_default_tests {
         fn name(&self) -> &str {
             "Bare"
         }
-        fn input_schema(&self) -> &Value {
+        fn input_schema(&self) -> &Utf16JsonProjection {
             &self.schema
+        }
+        fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+            self.has_output_schema.then_some(&self.schema)
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
@@ -909,24 +1175,28 @@ mod user_facing_name_default_tests {
         fn max_result_size_chars(&self) -> usize {
             0
         }
-        fn is_concurrency_safe(&self, _: &Value) -> bool {
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _: &Value) -> bool {
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
             true
         }
-        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        async fn check_permissions(
+            &self,
+            _: &Utf16JsonProjection,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
             unimplemented!("not exercised")
         }
-        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
             String::new()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            Utf16JsonProjection::from("")
         }
         async fn call(
             &self,
-            _: Value,
+            _: Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -937,9 +1207,10 @@ mod user_facing_name_default_tests {
     #[test]
     fn user_facing_name_methods_default_to_none() {
         let t = BareTool {
-            schema: serde_json::json!({"type": "object"}),
+            schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+            has_output_schema: false,
         };
-        let input = serde_json::json!({});
+        let input = Utf16JsonProjection::parse("{}").unwrap();
         assert_eq!(t.user_facing_name_for_input(&input), None);
         assert_eq!(t.user_facing_name_background_color(&input), None);
     }
@@ -950,11 +1221,44 @@ mod user_facing_name_default_tests {
     #[test]
     fn coerce_input_defaults_to_none() {
         let t = BareTool {
-            schema: serde_json::json!({"type": "object"}),
+            schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+            has_output_schema: false,
         };
-        assert!(t
-            .coerce_input(&serde_json::json!({ "timeout_ms": 5000 }))
-            .is_none());
+        let input = Utf16JsonProjection::parse(r#"{"timeout_ms":5000}"#).unwrap();
+        assert!(t.coerce_input(&input).is_none());
+    }
+
+    #[tokio::test]
+    async fn output_parser_is_identity_without_schema_and_fails_closed_with_unmapped_schema() {
+        let input = Utf16JsonProjection::parse(r#"{"value":"\ud800"}"#).unwrap();
+        let bare = BareTool {
+            schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+            has_output_schema: false,
+        };
+        assert!(bare
+            .parse_output(&input)
+            .await
+            .unwrap()
+            .semantically_eq(&input));
+
+        let schema_bearing = BareTool {
+            schema: Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+            has_output_schema: true,
+        };
+        let error = schema_bearing.parse_output(&input).await.unwrap_err();
+        let ToolError::InvalidInput(message) = error else {
+            panic!("expected an explicit missing-parser error")
+        };
+        assert_eq!(
+            message.string_at(""),
+            Some("Native output parser is not mapped for schema-bearing tool 'Bare'")
+        );
+    }
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)*)).unwrap()
+        };
     }
 
     #[test]
@@ -962,7 +1266,7 @@ mod user_facing_name_default_tests {
         let detected = tool_result_turn_end(
             false,
             false,
-            Some(&serde_json::json!({
+            Some(&source_json!({
                 "_meta": { "claude/endTurn": true }
             })),
         );
@@ -976,7 +1280,7 @@ mod user_facing_name_default_tests {
             tool_result_turn_end(
                 true,
                 false,
-                Some(&serde_json::json!({ "_meta": { "claude/endTurn": true } })),
+                Some(&source_json!({ "_meta": { "claude/endTurn": true } })),
             ),
             Some(ToolResultTurnEnd {
                 source: ToolResultTurnEndSource::Tool,
@@ -985,7 +1289,7 @@ mod user_facing_name_default_tests {
         assert!(tool_result_turn_end(
             false,
             false,
-            Some(&serde_json::json!({
+            Some(&source_json!({
                 "_meta": { "claude/endTurn": false }
             }))
         )
@@ -993,7 +1297,7 @@ mod user_facing_name_default_tests {
         assert!(tool_result_turn_end(
             false,
             false,
-            Some(&serde_json::json!({
+            Some(&source_json!({
                 "_meta": { "vendor/endTurn": true }
             }))
         )
@@ -1002,7 +1306,7 @@ mod user_facing_name_default_tests {
         assert!(tool_result_turn_end(
             false,
             true,
-            Some(&serde_json::json!({ "_meta": { "claude/endTurn": true } })),
+            Some(&source_json!({ "_meta": { "claude/endTurn": true } })),
         )
         .is_none());
     }

@@ -117,7 +117,7 @@ impl BuiltinHookHandler for AppendNoteOnReadHandler {
                     stderr: String::new(),
                     exit_code: None,
                     response: Some(HookResponse {
-                        system_message: Some("[hook: file accessed]".to_string()),
+                        system_message: Some("[hook: file accessed]".into()),
                         ..Default::default()
                     }),
                 };
@@ -188,8 +188,11 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     ) -> String {
         "bash stub".into()
     }
-    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &tool_api::tool_trait::PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -260,7 +263,7 @@ async fn pre_hook_blocks_bash_tool() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "stopped".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

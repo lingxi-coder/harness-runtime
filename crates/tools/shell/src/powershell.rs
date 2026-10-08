@@ -19,8 +19,8 @@ use telemetry::tengu::tool::{POWERSHELL_COMPLETED, POWERSHELL_FAILED, POWERSHELL
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
@@ -75,6 +75,15 @@ pub fn resolve_powershell_path() -> Option<PathBuf> {
     }
 }
 
+fn source_u64_at(
+    input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pointer: &str,
+) -> Option<u64> {
+    let value = input.number_at(pointer)?;
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < u64::MAX as f64)
+        .then_some(value as u64)
+}
+
 /// Build the PowerShell tool-result `data` payload for a finished command.
 ///
 /// `is_error` runs through the 2.1.196 exit-code reinterpretation
@@ -124,8 +133,8 @@ impl PowerShellTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "command":           { "type": "string", "description": "The PowerShell command to execute" },
@@ -136,7 +145,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         },
         "required": ["command"],
         "additionalProperties": false
-    })
+    }))
 });
 
 #[async_trait]
@@ -144,8 +153,15 @@ impl Tool for PowerShellTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -160,17 +176,21 @@ impl Tool for PowerShellTool {
     fn persistence_threshold(&self) -> Option<usize> {
         Some(MAX_TOOL_OUTPUT_LENGTH)
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-02 default)".into(),
@@ -181,34 +201,39 @@ impl Tool for PowerShellTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         input
-            .get("description")
-            .and_then(Value::as_str)
+            .string_at("/description")
             .map_or_else(|| "Running PowerShell command".to_string(), str::to_string)
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        "Run a PowerShell command.".into()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from("Run a PowerShell command.")
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let cmd = input
-            .get("command")
-            .and_then(Value::as_str)
+            .string_at("/command")
             .ok_or_else(|| ValidationError("missing `command`".into()))?;
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
         }
-        if let Some(t) = input.get("timeout").and_then(Value::as_u64) {
+        if let Some(t) = source_u64_at(input, "/timeout") {
             if t > POWERSHELL_MAX_TIMEOUT_MS {
-                return Err(ValidationError(format!(
-                    "timeout {t} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
-                )));
+                return Err(ValidationError(
+                    format!("timeout {t} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}").into(),
+                ));
             }
         }
         // Windows sandbox-policy refusal: PowerShell cannot be sandbox-wrapped on
@@ -228,7 +253,7 @@ impl Tool for PowerShellTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -236,18 +261,14 @@ impl Tool for PowerShellTool {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         let cmd_str = input
-            .get("command")
-            .and_then(Value::as_str)
+            .string_at("/command")
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
-        let timeout_ms = input
-            .get("timeout")
-            .and_then(Value::as_u64)
-            .unwrap_or(POWERSHELL_DEFAULT_TIMEOUT_MS);
+        let timeout_ms = source_u64_at(&input, "/timeout").unwrap_or(POWERSHELL_DEFAULT_TIMEOUT_MS);
         if timeout_ms > POWERSHELL_MAX_TIMEOUT_MS {
-            return Err(ToolError::InvalidInput(format!(
-                "timeout {timeout_ms} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
-            )));
+            return Err(ToolError::InvalidInput(
+                format!("timeout {timeout_ms} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}").into(),
+            ));
         }
 
         // (/sandbox) Effective sandbox config for this command: frozen config
@@ -274,7 +295,7 @@ impl Tool for PowerShellTool {
             None => {
                 return Err(ToolError::InvalidInput(
                     "pwsh not found in PATH; install PowerShell to use this tool".into(),
-                ))
+                ));
             }
         };
 
@@ -300,8 +321,8 @@ impl Tool for PowerShellTool {
         // the Windows exclusion is folded into the `sandbox_available` arg so the
         // decision falls to `NoSandbox` (branch 1 of `should_use_sandbox`).
         let dangerously_disable_sandbox = input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
+            .at_pointer("/dangerouslyDisableSandbox")
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
         // Resolve the session cwd ONCE for this command (worktree parity
         // plan, Task 2) — reused below for the sandbox wrap and the spawned
@@ -351,10 +372,10 @@ impl Tool for PowerShellTool {
                 {
                     Ok(w) => w,
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
-                        return Err(ToolError::InvalidInput(s));
+                        return Err(ToolError::InvalidInput(s.into()));
                     }
                     Err(sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
-                        return Err(ToolError::Io(s));
+                        return Err(ToolError::Io(s.into()));
                     }
                 }
             }
@@ -428,12 +449,13 @@ impl Tool for PowerShellTool {
                 self.ctx.bus.log_event(POWERSHELL_COMPLETED, meta).await;
 
                 Ok(ToolCallResult {
-                    data,
+                    data: tool_api::tool_trait::generated_builtin_result(&data),
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 })
             }
             Err(e) => {
@@ -443,7 +465,7 @@ impl Tool for PowerShellTool {
                     AnalyticsValue::String("spawn_failed".into()),
                 );
                 self.ctx.bus.log_event(POWERSHELL_FAILED, meta).await;
-                Err(ToolError::Io(format!("{e}")))
+                Err(ToolError::Io(format!("{e}").into()))
             }
         }
     }
@@ -451,6 +473,26 @@ impl Tool for PowerShellTool {
 
 #[cfg(test)]
 mod tests {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    fn source_json_value(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
+    }
+
+    macro_rules! source_json {
+        ($($tokens:tt)*) => {
+            source_json_value(json!($($tokens)*))
+        };
+    }
+
+    fn data_value(value: &Utf16JsonProjection) -> serde_json::Value {
+        serde_json::from_str(&value.to_json_string().expect("test data serializes"))
+            .expect("test data is JSON")
+    }
+
+    fn model_text(value: &Option<Utf16JsonProjection>) -> Option<&str> {
+        value.as_ref()?.string_at("")
+    }
+
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use std::ffi::OsString;
@@ -525,7 +567,7 @@ mod tests {
         std::fs::set_permissions(&fake, p).unwrap();
         let _path = PathOverride::set(dir.path());
 
-        tool.call(json!({"command": command}), fresh_ctx(), fresh_tx())
+        tool.call(source_json!({"command": command}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         telemetry::otel::prometheus_text().expect("prometheus registry")
@@ -675,7 +717,7 @@ mod tests {
         let tool = PowerShellTool::new(ctx);
         let r = tool
             .validate_input(
-                &json!({"command": "Get-Date", "timeout": 600_001}),
+                &source_json!({"command": "Get-Date", "timeout": 600_001}),
                 &fresh_ctx(),
             )
             .await;
@@ -697,7 +739,11 @@ mod tests {
         });
         let tool = PowerShellTool::new(ctx);
         let r = tool
-            .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "Get-Date"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await;
         let err = r.expect_err("pwsh missing");
         let msg = err.to_string();
@@ -726,11 +772,15 @@ mod tests {
 
         let _path = PathOverride::set(dir.path());
         let res = tool
-            .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "Get-Date"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await;
         let r = res.expect("ok");
-        assert_eq!(r.data["exit_code"], 0);
-        assert_eq!(r.data["stdout"], "ok\n");
+        assert_eq!(data_value(&r.data)["exit_code"], 0);
+        assert_eq!(data_value(&r.data)["stdout"], "ok\n");
     }
 
     /// Task 10 — assert the M2-04 locked sandbox-refusal literal is still in
@@ -815,7 +865,11 @@ mod tests {
 
         let _path = PathOverride::set(dir.path());
         let res = tool
-            .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_json!({"command": "Get-Date"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await;
         res.expect("ok");
 
@@ -841,59 +895,67 @@ mod tests {
     #[test]
     fn powershell_input_schema_byte_parity() {
         let schema = &*INPUT_SCHEMA;
-        let props = &schema["properties"];
 
         // Field named `timeout` (not `timeout_ms`), type `number` (not integer), no minimum/maximum.
         assert!(
-            props.get("timeout").is_some(),
+            schema.at_pointer("/properties/timeout").is_some(),
             "schema must expose `timeout`"
         );
         assert!(
-            props.get("timeout_ms").is_none(),
+            schema.at_pointer("/properties/timeout_ms").is_none(),
             "schema must NOT expose `timeout_ms`"
         );
         assert_eq!(
-            props["timeout"]["type"], "number",
+            schema.string_at("/properties/timeout/type"),
+            Some("number"),
             "timeout type must be number"
         );
         assert!(
-            props["timeout"].get("minimum").is_none(),
+            schema.at_pointer("/properties/timeout/minimum").is_none(),
             "timeout must have no minimum"
         );
         assert!(
-            props["timeout"].get("maximum").is_none(),
+            schema.at_pointer("/properties/timeout/maximum").is_none(),
             "timeout must have no maximum"
         );
 
         // dangerouslyDisableSandbox present with boolean type and byte-exact description.
         assert!(
-            props.get("dangerouslyDisableSandbox").is_some(),
+            schema
+                .at_pointer("/properties/dangerouslyDisableSandbox")
+                .is_some(),
             "dangerouslyDisableSandbox must be present"
         );
-        assert_eq!(props["dangerouslyDisableSandbox"]["type"], "boolean");
         assert_eq!(
-            props["dangerouslyDisableSandbox"]["description"],
-            "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
+            schema.string_at("/properties/dangerouslyDisableSandbox/type"),
+            Some("boolean")
+        );
+        assert_eq!(
+            schema.string_at("/properties/dangerouslyDisableSandbox/description"),
+            Some("Set this to true to dangerously override sandbox mode and run commands without sandboxing.")
         );
 
         // additionalProperties:false (strictObject).
         assert_eq!(
-            schema["additionalProperties"], false,
+            schema
+                .at_pointer("/additionalProperties")
+                .and_then(|value| value.as_bool()),
+            Some(false),
             "must have additionalProperties:false"
         );
 
         // Per-field descriptions present.
         assert_eq!(
-            props["command"]["description"],
-            "The PowerShell command to execute"
+            schema.string_at("/properties/command/description"),
+            Some("The PowerShell command to execute")
         );
         assert_eq!(
-            props["description"]["description"],
-            "Clear, concise description of what this command does in active voice."
+            schema.string_at("/properties/description/description"),
+            Some("Clear, concise description of what this command does in active voice.")
         );
         assert_eq!(
-            props["run_in_background"]["description"],
-            "Set to true to run this command in the background."
+            schema.string_at("/properties/run_in_background/description"),
+            Some("Set to true to run this command in the background.")
         );
     }
 
@@ -904,8 +966,7 @@ mod tests {
         // Instead, use the powershell schema as our target here and let bash.rs tests cover bash.
         // This test covers the PowerShell side only (bash.rs has its own test module).
         let schema = &*INPUT_SCHEMA;
-        let timeout = &schema["properties"]["timeout"];
-        assert_eq!(timeout["type"], "number");
-        assert!(timeout.get("minimum").is_none());
+        assert_eq!(schema.string_at("/properties/timeout/type"), Some("number"));
+        assert!(schema.at_pointer("/properties/timeout/minimum").is_none());
     }
 }

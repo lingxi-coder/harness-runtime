@@ -49,7 +49,7 @@ impl CommitHandler {
 impl BuiltinCommandHandler for CommitHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::InjectMessage {
-            content: build_prompt(),
+            content: build_prompt().into(),
         }
     }
 
@@ -116,11 +116,12 @@ You have the capability to call multiple tools in a single response. Stage and c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "commit".to_string(),
-            raw_args: String::new(),
+            name: "commit".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }
@@ -152,8 +153,8 @@ mod tests {
         };
         let with_args = match h
             .handle(&ParsedSlashCommand {
-                name: "commit".to_string(),
-                raw_args: "some user note".to_string(),
+                name: "commit".into(),
+                raw_args: "some user note".into(),
                 positional_args: vec![],
             })
             .await

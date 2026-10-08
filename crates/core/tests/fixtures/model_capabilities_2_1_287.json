@@ -1,0 +1,1766 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "Vtr current baked catalog",
+      "start": 179126176,
+      "end": 179143678,
+      "sha256": "c00274e499755bf30086402d9dc8d3770a9b402da99ef7e8c6736c45a9867f67"
+    },
+    {
+      "label": "S/ny/bzt/L8r/zQe/N8r/m current lookup",
+      "start": 179147331,
+      "end": 179148108,
+      "sha256": "b950ee16193f68e02b126682a50495d1c3c223a79aea01753022350ba3c56e62"
+    },
+    {
+      "label": "capability feature admission",
+      "start": 179147242,
+      "end": 179147290,
+      "sha256": "7d64bd8913284f635db977b083b9ffefb68e95f65102038688a8b7d742612172"
+    },
+    {
+      "label": "Ry current fast model gate",
+      "start": 180875455,
+      "end": 180875633,
+      "sha256": "80d2b2e2c40baeea3e2959e1fe6b72b0163c873cfaf89248171e9c9a0ef77985"
+    },
+    {
+      "label": "Yr current standard prompt gate",
+      "start": 181769451,
+      "end": 181769773,
+      "sha256": "a2bc2e53a9b08acda77521ad7a9c354b995122d7b5900eb624b49c47e85a73b5"
+    }
+  ],
+  "models": [
+    {
+      "id": "claude-3-5-haiku",
+      "capabilities": []
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-3-5-sonnet",
+      "capabilities": []
+    },
+    {
+      "id": "claude-3-7-sonnet",
+      "capabilities": []
+    },
+    {
+      "id": "claude-sonnet-4-0",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "adaptive_thinking",
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "mid_conv_system",
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "context_management",
+        "rejects_disabled_thinking",
+        "per_turn_effort",
+        "lean_prompt",
+        "refusal_fallback",
+        "silent_turn_reminder",
+        "org_locked_thinking"
+      ]
+    },
+    {
+      "id": "claude-opus-4-0",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-opus-4-1",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-opus-4-5",
+      "capabilities": [
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-opus-4-6",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "adaptive_thinking",
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-opus-4-7",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "context_management"
+      ]
+    },
+    {
+      "id": "claude-opus-4-8",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "context_management",
+        "fast_mode",
+        "lean_prompt"
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "context_management",
+        "thinking_disabled_effort_cap",
+        "fast_mode",
+        "lean_prompt",
+        "refusal_fallback",
+        "opus_5_prompt_bundle"
+      ]
+    },
+    {
+      "id": "claude-opus-5-5",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "rejects_disabled_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "per_turn_effort",
+        "per_turn_timing",
+        "context_management",
+        "fast_mode",
+        "lean_prompt",
+        "refusal_fallback",
+        "opus_5_5_prompt_bundle"
+      ]
+    },
+    {
+      "id": "claude-fable-5",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "rejects_disabled_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "context_management",
+        "lean_prompt",
+        "fable_5_mitigations",
+        "refusal_fallback"
+      ]
+    },
+    {
+      "id": "claude-fable-5-1",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "rejects_disabled_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "per_turn_effort",
+        "per_turn_timing",
+        "context_management",
+        "lean_prompt",
+        "fable_5_mitigations",
+        "refusal_fallback",
+        "fable_5_1_prompt_bundle"
+      ]
+    },
+    {
+      "id": "claude-mythos-5",
+      "capabilities": []
+    },
+    {
+      "id": "claude-mythos-5-1",
+      "capabilities": [
+        "effort",
+        "max_effort",
+        "xhigh_effort",
+        "adaptive_thinking",
+        "rejects_disabled_thinking",
+        "mid_conv_system",
+        "mid_conv_tool_change",
+        "per_turn_timing",
+        "context_management",
+        "lean_prompt",
+        "fable_5_mitigations",
+        "fable_5_1_prompt_bundle"
+      ]
+    }
+  ],
+  "fastCases": [
+    {
+      "model": "claude-3-5-haiku",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": null,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": null,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": null,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": true,
+      "global": true,
+      "expected": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": null,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": null,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": false,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": false,
+      "global": true,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": true,
+      "global": false,
+      "expected": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": true,
+      "global": true,
+      "expected": true
+    }
+  ],
+  "leanCases": [
+    {
+      "model": "claude-3-5-haiku",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-0",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-0",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-1",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-6",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": null,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": null,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-7",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-4-8",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-opus-5-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-fable-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-fable-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": null,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": null,
+      "firstParty": true,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": false,
+      "firstParty": false,
+      "standard": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": false,
+      "firstParty": true,
+      "standard": true
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": true,
+      "firstParty": false,
+      "standard": false
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "support": true,
+      "firstParty": true,
+      "standard": false
+    }
+  ],
+  "scope": "Exact current baked capability arrays and actual Ry/ny fast and Yr standard-prompt gates. Identity, global To/od and absent early-access gate supplied; served/account acquisition, full model initialization, prompt section contents and dynamic overrides remain separate."
+}

@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -42,8 +43,9 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, DescriptionOptions, InterruptBehavior,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 // -- Inlined 5-field cron parser (mirrors cron::schedule) -------------
@@ -351,7 +353,7 @@ fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime
 fn reject_six_field(expr: &str) -> Result<(), ToolError> {
     let parts: usize = expr.split_whitespace().count();
     if parts == 6 {
-        return Err(ToolError::InvalidInput(SIX_FIELD_REJECTION.into()));
+        return Err(invalid_tool_input(SIX_FIELD_REJECTION));
     }
     Ok(())
 }
@@ -375,10 +377,10 @@ pub fn cron_to_human(cron: &str) -> String {
 
 /// Match the upstream boolean preprocessor: only exact "true"/"false" strings
 /// become booleans. Schema validation rejects all other supplied non-booleans.
-fn semantic_bool(v: Option<&Value>, default: bool) -> bool {
+fn semantic_bool(v: Option<JsonValueView<'_>>, default: bool) -> bool {
     match v {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => match s.as_str() {
+        Some(value) if value.as_bool().is_some() => value.as_bool().unwrap_or(default),
+        Some(value) if value.as_str().is_some() => match value.as_str().unwrap_or_default() {
             "true" => true,
             "false" => false,
             _ => default,
@@ -457,8 +459,8 @@ impl CronCreateTool {
     }
 }
 
-static SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
@@ -481,16 +483,21 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "required": ["cron", "prompt"]
-    })
+    }))
 });
 
 pub(crate) fn durable_enabled() -> bool {
     telemetry::flag_bool("tengu_kairos_cron_durable", true)
 }
 
-static SESSION_ONLY_SCHEMA: Lazy<Value> = Lazy::new(|| {
+static SESSION_ONLY_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     let mut schema = SCHEMA.clone();
-    schema["properties"]["durable"]["description"] = json!("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this Claude session ends).");
+    schema
+        .replace_pointer_projection(
+            "/properties/durable/description",
+            tool_api::tool_trait::source_text_projection("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this Claude session ends)."),
+        )
+        .expect("generated session-only schema description exists");
     schema
 });
 
@@ -568,29 +575,44 @@ impl Tool for CronCreateTool {
     }
     /// 2.1.206 tool-definition `searchHint` — the def that validates a 5-field
     /// cron expression (byte-verified against the binary).
-    fn search_hint(&self) -> Option<&str> {
-        Some("schedule a recurring or one-shot prompt")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some(("schedule a recurring or one-shot prompt").into())
     }
     fn native_input_validation(&self) -> bool {
         true
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         if durable_enabled() {
             &SCHEMA
         } else {
             &SESSION_ONLY_SCHEMA
         }
     }
-    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn coerce_input(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Option<tool_api::tool_trait::CoercedInput> {
         let mut updated = input.clone();
         let mut keys = Vec::new();
         for key in ["recurring", "durable"] {
-            let value = match input.get(key).and_then(Value::as_str) {
+            let value = match input.string_at(&format!("/{key}")) {
                 Some("true") => true,
                 Some("false") => false,
                 _ => continue,
             };
-            updated[key] = json!(value);
+            updated
+                .replace_pointer_projection(
+                    &format!("/{key}"),
+                    generated_builtin_result(&json!(value)),
+                )
+                .expect("existing boolean-coercion field is replaceable");
             keys.push(key);
         }
         (!keys.is_empty()).then(|| tool_api::tool_trait::CoercedInput {
@@ -610,28 +632,32 @@ impl Tool for CronCreateTool {
     fn should_defer(&self) -> bool {
         true
     }
-    fn get_path(&self, _: &Value) -> Option<std::path::PathBuf> {
+    fn get_path(&self, _: &Utf16JsonProjection) -> Option<std::path::PathBuf> {
         Some(cron::tasks_file::session_scheduled_tasks_path(
             &self.ctx.session_cwd.project_root(),
         ))
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "CronCreate persists a cron job to .claude/scheduled_tasks.json".into(),
@@ -642,7 +668,7 @@ impl Tool for CronCreateTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         if !durable_enabled() {
             return "Schedule a prompt to run at a future time within this Claude session — either recurring on a cron schedule, or once at a specific time.".into();
         }
@@ -650,26 +676,37 @@ impl Tool for CronCreateTool {
         "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to .claude/scheduled_tasks.json; otherwise session-only.".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        build_prompt_text()
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+        build_prompt_text().into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         call_ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let cron = input
-            .get("cron")
-            .and_then(Value::as_str)
+        let cron_units = input
+            .string_units("/cron")
             .ok_or_else(|| ValidationError("CronCreate: missing or non-string cron".into()))?;
+        let cron = match String::from_utf16(&cron_units) {
+            Ok(cron) => cron,
+            Err(_) => {
+                return Err(ValidationError(source_wrapped_text(
+                    "Invalid cron expression '",
+                    &cron_units,
+                    "'. Expected 5 fields: M H DoM Mon DoW.",
+                )));
+            }
+        };
 
         // Invalid cron (not 5 fields / parse fail).
-        let parsed = match parse_cron(cron) {
+        let parsed = match parse_cron(&cron) {
             Ok(p) => p,
             Err(_) => {
-                return Err(ValidationError(format!(
-                    "Invalid cron expression '{cron}'. Expected 5 fields: M H DoM Mon DoW."
+                return Err(ValidationError(source_wrapped_text(
+                    "Invalid cron expression '",
+                    &cron_units,
+                    "'. Expected 5 fields: M H DoM Mon DoW.",
                 )));
             }
         };
@@ -677,23 +714,26 @@ impl Tool for CronCreateTool {
         // No calendar date in the next year satisfies the expression.
         let now = self.ctx.clock.now();
         if next_fire_after(&parsed, now).is_none() {
-            return Err(ValidationError(format!(
-                "Cron expression '{cron}' does not match any calendar date in the next year."
-            )));
+            return Err(ValidationError(
+                format!(
+                    "Cron expression '{cron}' does not match any calendar date in the next year."
+                )
+                .into(),
+            ));
         }
 
         // Too many scheduled jobs already (durable + this session's in-memory
         // jobs, exactly the set CronList exposes).
         if count_existing_jobs(&self.ctx).await >= MAX_JOBS {
-            return Err(ValidationError(format!(
-                "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
-            )));
+            return Err(ValidationError(
+                format!("Too many scheduled jobs (max {MAX_JOBS}). Cancel one first.").into(),
+            ));
         }
 
         // Only refuse a durability the tool would actually honour: with the gate
         // off the schema tells the caller `durable` "has no effect", so refusing
         // a teammate for sending it denies a job that would have been created.
-        if semantic_bool(input.get("durable"), false)
+        if semantic_bool(input.at_pointer("/durable"), false)
             && durable_enabled()
             && teammate_owner(call_ctx).is_some()
         {
@@ -706,28 +746,46 @@ impl Tool for CronCreateTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         call_ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let cron = match input.get("cron").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let cron_units = input.string_units("/cron");
+        let cron = match cron_units
+            .as_deref()
+            .and_then(|units| String::from_utf16(units).ok())
+        {
+            Some(s) => s,
             None => {
-                emit_failed(&bus, "missing_cron", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "CronCreate: missing or non-string cron".into(),
-                ));
+                emit_failed(
+                    &bus,
+                    if cron_units.is_some() {
+                        "parse_error"
+                    } else {
+                        "missing_cron"
+                    },
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                if let Some(units) = cron_units.as_deref() {
+                    return Err(ToolError::InvalidInput(source_wrapped_text(
+                        "Invalid cron expression '",
+                        units,
+                        "'. Expected 5 fields: M H DoM Mon DoW.",
+                    )));
+                }
+                return Err(invalid_tool_input("CronCreate: missing or non-string cron"));
             }
         };
-        let prompt = match input.get("prompt").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let prompt = match source_prompt(&input) {
+            Some(prompt) => prompt,
             None => {
                 emit_failed(&bus, "missing_prompt", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "CronCreate: missing or non-string prompt".into(),
+                return Err(invalid_tool_input(
+                    "CronCreate: missing or non-string prompt",
                 ));
             }
         };
@@ -736,25 +794,29 @@ impl Tool for CronCreateTool {
             Ok(c) => c,
             Err(_) => {
                 emit_failed(&bus, "parse_error", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(format!(
-                    "Invalid cron expression '{cron}'. Expected 5 fields: M H DoM Mon DoW."
+                let units = cron.encode_utf16().collect::<Vec<_>>();
+                return Err(ToolError::InvalidInput(source_wrapped_text(
+                    "Invalid cron expression '",
+                    &units,
+                    "'. Expected 5 fields: M H DoM Mon DoW.",
                 )));
             }
         };
 
-        let recurring = semantic_bool(input.get("recurring"), true);
-        let durable = semantic_bool(input.get("durable"), false);
+        let recurring = semantic_bool(input.at_pointer("/recurring"), true);
+        let durable = semantic_bool(input.at_pointer("/durable"), false);
         let owner = teammate_owner(&call_ctx);
         if durable && durable_enabled() && owner.is_some() {
-            return Err(ToolError::InvalidInput(
-                "durable crons are not supported for teammates (teammates do not persist across sessions)".into(),
+            return Err(invalid_tool_input(
+                "durable crons are not supported for teammates (teammates do not persist across sessions)",
             ));
         }
 
         let durable = durable && durable_enabled();
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("_PROTO_cron".into(), pii_str(&cron));
-        md.insert("_PROTO_prompt".into(), pii_str(&prompt));
+        let prompt_display = source_display(&prompt);
+        md.insert("_PROTO_prompt".into(), pii_str(&prompt_display));
         bus.log_event(SCHEDULE_CRON_STARTED, md).await;
 
         let now = self.ctx.clock.now();
@@ -790,10 +852,9 @@ impl Tool for CronCreateTool {
                 Ok(guard) => guard,
                 Err(e) => {
                     emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
-                    return Err(ToolError::Io(format!(
-                        "CronCreate: io error at {}: {e}",
-                        path.display()
-                    )));
+                    return Err(ToolError::Io(
+                        format!("CronCreate: io error at {}: {e}", path.display()).into(),
+                    ));
                 }
             };
             // Read-modify-write the single `{ "tasks": [...] }` document: load the
@@ -815,15 +876,15 @@ impl Tool for CronCreateTool {
                 }
                 Err(e) => {
                     emit_failed(&bus, "io_read", started.elapsed().as_millis() as u64).await;
-                    return Err(ToolError::Io(format!(
-                        "Failed to read scheduled tasks: {e}"
-                    )));
+                    return Err(ToolError::Io(
+                        format!("Failed to read scheduled tasks: {e}").into(),
+                    ));
                 }
             };
             // Re-check under the lock; validate_input's early check is only a
             // UX fast path and cannot enforce the cap against concurrent writers.
             if schedulable_job_count(&doc) >= MAX_JOBS {
-                return Err(ToolError::InvalidInput(format!(
+                return Err(invalid_tool_input(format!(
                     "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
                 )));
             }
@@ -865,10 +926,9 @@ impl Tool for CronCreateTool {
             .await
             {
                 emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!(
-                    "CronCreate: io error at {}: {e}",
-                    path.display()
-                )));
+                return Err(ToolError::Io(
+                    format!("CronCreate: io error at {}: {e}", path.display()).into(),
+                ));
             }
         }
 
@@ -925,20 +985,46 @@ impl Tool for CronCreateTool {
         let content = build_result_content(&id, &human, recurring, durable);
 
         Ok(ToolCallResult {
-            data: json!({
+            data: generated_builtin_result(&json!({
                 "id": id,
                 "humanSchedule": human,
                 "recurring": recurring,
                 "durable": durable,
                 "content": content,
-            }),
+            })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
+}
+
+fn source_display(value: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&value.string_units("").unwrap_or_default())
+}
+
+fn source_wrapped_text(prefix: &str, value_units: &[u16], suffix: &str) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend_from_slice(value_units);
+    units.extend(suffix.encode_utf16());
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("generated diagnostic has matching display and UTF-16 units")
+}
+
+fn source_prompt(input: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    input
+        .at_pointer("/prompt")
+        .filter(|value| value.as_str().is_some())?;
+    input.subprojection("/prompt").ok()
 }
 
 #[cfg(test)]
@@ -990,6 +1076,10 @@ mod tests {
 
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
+
+    fn source_json(source: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(source).expect("valid test JSON source")
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1050,11 +1140,24 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
         ));
         let coerced = tool
-            .coerce_input(&json!({"recurring":"false", "durable":"true"}))
+            .coerce_input(&source_json(r#"{"recurring":"false", "durable":"true"}"#))
             .unwrap();
-        assert_eq!(coerced.input, json!({"recurring":false, "durable":true}));
+        assert!(coerced
+            .input
+            .semantically_eq(&source_json(r#"{"recurring":false, "durable":true}"#)));
+        let opaque = source_json(r#"{"recurring":"false","prompt":"\ud800"}"#);
+        let coerced_opaque = tool.coerce_input(&opaque).unwrap();
+        assert_eq!(
+            coerced_opaque.input.string_units("/prompt"),
+            Some(vec![0xd800])
+        );
         for invalid in ["FALSE", "yes", "1", " true "] {
-            assert!(tool.coerce_input(&json!({"recurring":invalid})).is_none());
+            let input = Utf16JsonProjection::object(vec![(
+                "recurring".into(),
+                tool_api::tool_trait::source_text_projection(invalid),
+            )])
+            .expect("test input object");
+            assert!(tool.coerce_input(&input).is_none());
         }
     }
 
@@ -1062,18 +1165,18 @@ mod tests {
     fn semantic_bool_parsing() {
         assert!(semantic_bool(None, true));
         assert!(!semantic_bool(None, false));
-        assert!(semantic_bool(Some(&json!(true)), false));
-        assert!(!semantic_bool(Some(&json!(false)), true));
-        assert!(semantic_bool(Some(&json!("true")), false));
-        assert!(!semantic_bool(Some(&json!("false")), true));
-        for invalid in [
-            json!("TRUE"),
-            json!("yes"),
-            json!("1"),
-            json!(" true "),
-            json!(5),
+        for (source, expected) in [
+            ("true", true),
+            ("false", false),
+            (r#""true""#, true),
+            (r#""false""#, false),
         ] {
-            assert!(!semantic_bool(Some(&invalid), false));
+            let value = source_json(source);
+            assert_eq!(semantic_bool(value.at_pointer(""), !expected), expected);
+        }
+        for invalid in [r#""TRUE""#, r#""yes""#, r#""1""#, r#"" true ""#, "5"] {
+            let value = source_json(invalid);
+            assert!(!semantic_bool(value.at_pointer(""), false));
         }
     }
 
@@ -1114,7 +1217,7 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let error = tool
             .call(
-                json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi"}),
+                source_json(r#"{"cron":"*/5 9-17 * * 1-5","prompt":"echo hi"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1144,13 +1247,15 @@ mod tests {
         call_ctx.origin_session_id = Some(owner);
         let out = tool
             .call(
-                json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi", "durable": true}),
+                source_json(
+                    r#"{"cron":"*/5 9-17 * * 1-5","prompt":"\ud800 echo hi","durable":true}"#,
+                ),
                 call_ctx,
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let id = out.data["id"].as_str().unwrap().to_string();
+        let id = out.data.string_at("/id").unwrap().to_string();
 
         // The single `{ "tasks": [...] }` file carries one CronTask with the
         // camelCase, epoch-MILLISECONDS shape — and NO durable / next-fire keys.
@@ -1158,7 +1263,7 @@ mod tests {
         let written = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(written.contains("\"tasks\""));
         assert!(written.contains("\"cron\": \"*/5 9-17 * * 1-5\""));
-        assert!(written.contains("\"prompt\": \"echo hi\""));
+        assert!(written.contains(r#""prompt": "\ud800 echo hi""#));
         assert!(written.contains("\"createdAt\""));
         assert!(written.contains("\"recurring\": true"));
         assert!(!written.contains("durable"));
@@ -1171,6 +1276,10 @@ mod tests {
         let doc = read_doc(tmp.path()).await;
         assert_eq!(doc.tasks.len(), 1);
         assert_eq!(doc.tasks[0].id, id);
+        assert_eq!(
+            doc.tasks[0].prompt,
+            Utf16JsonProjection::parse(r#""\ud800 echo hi""#).unwrap()
+        );
         assert_eq!(doc.tasks[0].recurring, Some(true));
         assert_eq!(doc.tasks[0].last_fired_at, None);
         assert_eq!(doc.tasks[0].session_id, None);
@@ -1213,7 +1322,7 @@ mod tests {
         assert_eq!(count_existing_jobs(&ctx).await, 0);
         let tool = CronCreateTool::new(ctx);
         tool.call(
-            json!({"cron":"* * * * *", "prompt":"new", "durable":true}),
+            source_json(r#"{"cron":"* * * * *","prompt":"new","durable":true}"#),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1245,7 +1354,7 @@ mod tests {
 
         let err = tool
             .call(
-                json!({"cron": "*/5 * * * *", "prompt": "escape", "durable": true}),
+                source_json(r#"{"cron":"*/5 * * * *","prompt":"escape","durable":true}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1268,7 +1377,18 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         for cron in ["*/5 * * * *", "0 9 * * *"] {
             tool.call(
-                json!({"cron": cron, "prompt": "p", "durable": true}),
+                Utf16JsonProjection::object(vec![
+                    (
+                        "cron".into(),
+                        tool_api::tool_trait::source_text_projection(cron),
+                    ),
+                    (
+                        "prompt".into(),
+                        tool_api::tool_trait::source_text_projection("p"),
+                    ),
+                    ("durable".into(), generated_builtin_result(&json!(true))),
+                ])
+                .expect("test input object"),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1289,12 +1409,12 @@ mod tests {
         let second = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
 
         let first_call = first.call(
-            json!({"cron": "*/5 * * * *", "prompt": "first", "durable": true}),
+            source_json(r#"{"cron":"*/5 * * * *","prompt":"first","durable":true}"#),
             fresh_ctx(),
             fresh_tx(),
         );
         let second_call = second.call(
-            json!({"cron": "0 9 * * *", "prompt": "second", "durable": true}),
+            source_json(r#"{"cron":"0 9 * * *","prompt":"second","durable":true}"#),
             fresh_ctx(),
             fresh_tx(),
         );
@@ -1307,7 +1427,7 @@ mod tests {
         let mut prompts = doc
             .tasks
             .iter()
-            .map(|task| task.prompt.as_str())
+            .map(|task| source_display(&task.prompt))
             .collect::<Vec<_>>();
         prompts.sort_unstable();
         assert_eq!(prompts, ["first", "second"]);
@@ -1322,16 +1442,22 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
-                json!({"cron": "30 14 28 2 *", "prompt": "remind me", "recurring": false, "durable": true}),
+                source_json(r#"{"cron":"30 14 28 2 *","prompt":"remind me","recurring":false,"durable":true}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["recurring"], json!(false));
-        assert_eq!(out.data["durable"], json!(true));
-        assert_eq!(out.data["humanSchedule"], json!("30 14 28 2 *"));
-        let content = out.data["content"].as_str().unwrap();
+        assert_eq!(
+            out.data.at_pointer("/recurring").unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            out.data.at_pointer("/durable").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(out.data.string_at("/humanSchedule"), Some("30 14 28 2 *"));
+        let content = out.data.string_at("/content").unwrap();
         assert!(content.contains("Scheduled one-shot task"));
         // A durable job is authoritative on disk whether or not this host runs a
         // live scheduler (mobile fires it from its own OS wake), so the result
@@ -1356,14 +1482,22 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
-                json!({"cron": "0 9 * * *", "prompt": "x", "recurring": "false", "durable": "true"}),
+                source_json(
+                    r#"{"cron":"0 9 * * *","prompt":"x","recurring":"false","durable":"true"}"#,
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["recurring"], json!(false));
-        assert_eq!(out.data["durable"], json!(true));
+        assert_eq!(
+            out.data.at_pointer("/recurring").unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            out.data.at_pointer("/durable").unwrap().as_bool(),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -1375,11 +1509,11 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let mut call_ctx = fresh_ctx();
         call_ctx.agent_name = Some("researcher".into());
-        let input = json!({"cron": "0 9 * * *", "prompt": "x", "durable": true});
+        let input = source_json(r#"{"cron":"0 9 * * *","prompt":"x","durable":true}"#);
 
         let validation = tool.validate_input(&input, &call_ctx).await.unwrap_err();
         assert_eq!(
-            validation.0,
+            source_display(&validation.0),
             "durable crons are not supported for teammates (teammates do not persist across sessions)"
         );
         let error = tool
@@ -1396,7 +1530,7 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .call(
-                json!({"cron": "not a cron", "prompt": "x"}),
+                source_json(r#"{"cron":"not a cron","prompt":"x"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1416,7 +1550,7 @@ mod tests {
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .call(
-                json!({"cron": "0 */5 9-17 * * 1-5", "prompt": "x"}),
+                source_json(r#"{"cron":"0 */5 9-17 * * 1-5","prompt":"x"}"#),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1431,12 +1565,32 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
-            .validate_input(&json!({"cron": "not a cron", "prompt": "x"}), &fresh_ctx())
+            .validate_input(
+                &source_json(r#"{"cron":"not a cron","prompt":"x"}"#),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("garbage");
-        assert!(err
-            .0
+        assert!(source_display(&err.0)
             .contains("Invalid cron expression 'not a cron'. Expected 5 fields: M H DoM Mon DoW."));
+    }
+
+    #[tokio::test]
+    async fn invalid_cron_diagnostic_keeps_lone_utf16_units() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let error = tool
+            .validate_input(
+                &source_json(r#"{"cron":"\ud800","prompt":"x"}"#),
+                &fresh_ctx(),
+            )
+            .await
+            .expect_err("a lone-surrogate cron is not a valid schedule");
+        let expected = Utf16JsonProjection::parse(
+            r#""Invalid cron expression '\ud800'. Expected 5 fields: M H DoM Mon DoW.""#,
+        )
+        .unwrap();
+        assert_eq!(error.0, expected);
     }
 
     // -- CRON.3: day-of-week 7 (Sunday alias) normalizes to 0 -----------------
@@ -1500,11 +1654,14 @@ mod tests {
         // byte-exact "Invalid cron expression" message (errorCode 1 in TS),
         // NOT the "does not match any calendar date" message (errorCode 2).
         let err = tool
-            .validate_input(&json!({"cron": "99 * * * *", "prompt": "x"}), &fresh_ctx())
+            .validate_input(
+                &source_json(r#"{"cron":"99 * * * *","prompt":"x"}"#),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("out of range");
         assert_eq!(
-            err.0,
+            source_display(&err.0),
             "Invalid cron expression '99 * * * *'. Expected 5 fields: M H DoM Mon DoW."
         );
     }
@@ -1518,7 +1675,10 @@ mod tests {
         // 30-day decompose wrongly rejected — is now correctly satisfiable; see
         // `day_of_month_31_is_satisfiable`.)
         let err = tool
-            .validate_input(&json!({"cron": "0 0 30 2 *", "prompt": "x"}), &fresh_ctx())
+            .validate_input(
+                &source_json(r#"{"cron":"0 0 30 2 *","prompt":"x"}"#),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("unsatisfiable");
         assert!(err
@@ -1560,7 +1720,7 @@ mod tests {
             assert_eq!(
                 create
                     .description(
-                        &json!({}),
+                        &source_json("{}"),
                         &DescriptionOptions {
                             is_non_interactive_session: false
                         }
@@ -1569,8 +1729,11 @@ mod tests {
                 case["description"].as_str().unwrap()
             );
             assert_eq!(
-                create.input_schema()["properties"]["durable"]["description"],
-                case["durableDescription"]
+                create
+                    .input_schema()
+                    .string_at("/properties/durable/description")
+                    .unwrap(),
+                case["durableDescription"].as_str().unwrap()
             );
             assert_eq!(
                 delete.prompt(&PromptOptions::default()).await,

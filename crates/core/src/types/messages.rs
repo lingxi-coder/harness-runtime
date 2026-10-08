@@ -4,17 +4,372 @@
 //! provider adapters in `lingxi-api-client` map their native shapes to these.
 
 use crate::types::ids::{MessageId, ToolUseId};
-use serde::{Deserialize, Serialize};
+use crate::types::utf16_json::Utf16JsonProjection;
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt;
+
+fn deserialize_present_nullable_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_nullable_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Value>::deserialize(deserializer).map(Some)
+}
+
+fn serialize_json_projection<S>(
+    projection: &Utf16JsonProjection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let source = projection
+        .to_json_string()
+        .map_err(serde::ser::Error::custom)?;
+    let raw = RawValue::from_string(source).map_err(serde::ser::Error::custom)?;
+    raw.serialize(serializer)
+}
+
+fn serialize_optional_projection<S>(
+    projection: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match projection {
+        Some(projection) => serialize_json_projection(projection, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn serialize_present_nullable_projection<S>(
+    projection: &Option<Option<Utf16JsonProjection>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match projection {
+        None | Some(None) => serializer.serialize_none(),
+        Some(Some(projection)) => serialize_json_projection(projection, serializer),
+    }
+}
+
+fn deserialize_present_nullable_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Utf16JsonProjection>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    if raw.get().trim() == "null" {
+        Ok(Some(None))
+    } else {
+        Utf16JsonProjection::parse(raw.get())
+            .map(Some)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_json_projection<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)
+}
+
+fn null_json_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+}
+
+/// An object whose member values remain raw JSON source until their semantic
+/// field is selected. This bypasses serde's internally-tagged-enum
+/// `ContentVisitor`, which eagerly buffers nested values and cannot carry
+/// `RawValue` fields without recursively building a JSON tree.
+struct RawObject(HashMap<String, Box<RawValue>>);
+
+impl<'de> Deserialize<'de> for RawObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawObjectVisitor;
+
+        impl<'de> Visitor<'de> for RawObjectVisitor {
+            type Value = RawObject;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object with raw member values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut fields = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    // Match JSON.parse's last-member-wins behavior. Importantly,
+                    // the value is captured as source before any typed branch
+                    // can recursively deserialize it.
+                    fields.insert(key, map.next_value::<Box<RawValue>>()?);
+                }
+                Ok(RawObject(fields))
+            }
+        }
+
+        deserializer.deserialize_map(RawObjectVisitor)
+    }
+}
+
+fn raw_required<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<T, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    let raw = fields.remove(name).ok_or_else(|| E::missing_field(name))?;
+    serde_json::from_str(raw.get()).map_err(E::custom)
+}
+
+fn raw_optional<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<T>, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    fields
+        .remove(name)
+        .map(|raw| serde_json::from_str(raw.get()).map_err(E::custom))
+        .transpose()
+}
+
+fn raw_optional_string<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<String>, E>
+where
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        None => Ok(None),
+        Some(raw) if raw.get().trim() == "null" => Ok(None),
+        Some(raw) => serde_json::from_str(raw.get()).map(Some).map_err(E::custom),
+    }
+}
+
+fn raw_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Utf16JsonProjection, E>
+where
+    E: serde::de::Error,
+{
+    let raw = fields.remove(name).ok_or_else(|| E::missing_field(name))?;
+    Utf16JsonProjection::parse(raw.get()).map_err(E::custom)
+}
+
+fn raw_optional_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<Utf16JsonProjection>, E>
+where
+    E: serde::de::Error,
+{
+    fields
+        .remove(name)
+        .map(|raw| Utf16JsonProjection::parse(raw.get()).map_err(E::custom))
+        .transpose()
+}
+
+fn raw_string_json_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Utf16JsonProjection, E>
+where
+    E: serde::de::Error,
+{
+    let projection = raw_projection(fields, name)?;
+    if projection.string_units("").is_none() {
+        return Err(E::custom(format!("field {name} must be a JSON string")));
+    }
+    Ok(projection)
+}
+
+fn raw_projection_or_null<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Utf16JsonProjection, E>
+where
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        Some(raw) => Utf16JsonProjection::parse(raw.get()).map_err(E::custom),
+        None => Ok(null_json_projection()),
+    }
+}
+
+fn raw_projection_array_optional<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<Utf16JsonProjection>, E>
+where
+    E: serde::de::Error,
+{
+    let Some(raw) = fields.remove(name) else {
+        return Ok(None);
+    };
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(E::custom)?;
+    if projection
+        .at_pointer("")
+        .and_then(|root| root.array_len())
+        .is_none()
+    {
+        return Err(E::custom(format!("field {name} must be a JSON array")));
+    }
+    Ok(Some(projection))
+}
+
+fn raw_projection_array_or_empty<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Utf16JsonProjection, E>
+where
+    E: serde::de::Error,
+{
+    match raw_projection_array_optional(fields, name)? {
+        Some(projection) => Ok(projection),
+        None => Utf16JsonProjection::parse("[]").map_err(E::custom),
+    }
+}
+
+fn raw_string_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<(String, Vec<u16>), E>
+where
+    E: serde::de::Error,
+{
+    let raw = fields.remove(name).ok_or_else(|| E::missing_field(name))?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(E::custom)?;
+    let display = projection
+        .string_at("")
+        .ok_or_else(|| E::custom(format!("field {name} must be a JSON string")))?
+        .to_owned();
+    let units = projection
+        .string_units("")
+        .ok_or_else(|| E::custom(format!("field {name} must be a JSON string")))?;
+    Ok((display, units))
+}
+
+fn raw_present_nullable<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<Option<T>>, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        None => Ok(None),
+        Some(raw) if raw.get().trim() == "null" => Ok(Some(None)),
+        Some(raw) => serde_json::from_str(raw.get())
+            .map(Some)
+            .map(Some)
+            .map_err(E::custom),
+    }
+}
+
+fn raw_present_nullable_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<Option<Utf16JsonProjection>>, E>
+where
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        None => Ok(None),
+        Some(raw) if raw.get().trim() == "null" => Ok(Some(None)),
+        Some(raw) => Utf16JsonProjection::parse(raw.get())
+            .map(Some)
+            .map(Some)
+            .map_err(E::custom),
+    }
+}
+
+fn raw_content_blocks<E>(raw: Box<RawValue>) -> Result<Vec<ContentBlock>, E>
+where
+    E: serde::de::Error,
+{
+    struct RawArray(Vec<Box<RawValue>>);
+    impl<'de> Deserialize<'de> for RawArray {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            struct RawArrayVisitor;
+            impl<'de> Visitor<'de> for RawArrayVisitor {
+                type Value = RawArray;
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("an array with raw JSON elements")
+                }
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let mut items = Vec::new();
+                    while let Some(item) = seq.next_element::<Box<RawValue>>()? {
+                        items.push(item);
+                    }
+                    Ok(RawArray(items))
+                }
+            }
+            deserializer.deserialize_seq(RawArrayVisitor)
+        }
+    }
+
+    let RawArray(items) = serde_json::from_str(raw.get()).map_err(E::custom)?;
+    items
+        .into_iter()
+        .map(|item| serde_json::from_str(item.get()).map_err(E::custom))
+        .collect()
+}
 
 /// Whether a raw nested tool-result value represents provider-visible media.
 ///
 /// This is shared by the delegation collector and the final provider media cap
 /// so both paths retain the same set of image/document blocks.
 #[must_use]
-pub fn is_nested_media_value(value: &Value) -> bool {
+pub fn is_nested_media_value(value: crate::types::utf16_json::JsonValueView<'_>) -> bool {
     matches!(
-        value.get("type").and_then(Value::as_str),
+        value.get_property("type").and_then(|value| value.as_str()),
         Some("image") | Some("image_url") | Some("document")
     )
 }
@@ -31,8 +386,21 @@ pub enum MessageRole {
     System,
 }
 
+/// Native outer-envelope annotation on a user message produced by the
+/// turn-companion flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageLimitNote {
+    /// The companion is wrapping up a turn near its usage limit.
+    WrapUp,
+    /// The companion is releasing control at the current turn boundary.
+    Release,
+    /// The companion is announcing that the usage limit is near.
+    NearLimit,
+}
+
 /// One block of structured content within a message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Provider-native replay data. Never executed as an application tool.
@@ -40,12 +408,22 @@ pub enum ContentBlock {
         /// Communication protocol which owns this payload.
         protocol: String,
         /// Unmodified provider content, including signed/encrypted reasoning.
-        value: Value,
+        #[serde(serialize_with = "serialize_json_projection")]
+        value: Utf16JsonProjection,
     },
     /// Plain UTF-8 text.
     Text {
         /// The text body.
         text: String,
+        /// Exact provider field presence. The outer option distinguishes an
+        /// absent key from a present key; the inner option preserves JSON null.
+        #[serde(
+            default,
+            serialize_with = "serialize_present_nullable_projection",
+            deserialize_with = "deserialize_present_nullable_projection",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Utf16JsonProjection>>,
     },
     /// Display-safe text carrying an exact JS UTF-16 request-wire image.
     ///
@@ -58,6 +436,14 @@ pub enum ContentBlock {
         text: String,
         /// Exact UTF-16 code units that must be emitted on the provider wire.
         utf16_code_units: Vec<u16>,
+        /// Exact provider field presence. See [`ContentBlock::Text::citations`].
+        #[serde(
+            default,
+            serialize_with = "serialize_present_nullable_projection",
+            deserialize_with = "deserialize_present_nullable_projection",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Utf16JsonProjection>>,
     },
     /// A tool invocation requested by the assistant.
     ToolUse {
@@ -65,8 +451,12 @@ pub enum ContentBlock {
         id: ToolUseId,
         /// Tool name (e.g. `"Read"`, `"Bash"`).
         name: String,
-        /// Tool-specific structured input.
-        input: Value,
+        /// Tool-specific exact JSON input.
+        #[serde(
+            serialize_with = "serialize_json_projection",
+            deserialize_with = "deserialize_json_projection"
+        )]
+        input: Utf16JsonProjection,
         /// Verbatim provider-issued tool-call id (e.g. Anthropic `"toolu_01…"`,
         /// `OpenAI` `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
         /// provider string, so the original is preserved here and replayed
@@ -82,9 +472,16 @@ pub enum ContentBlock {
         tool_use_id: ToolUseId,
         /// Stringified output payload (the model-facing TEXT / display form, and
         /// the egress `tool_result.content` when [`content_blocks`] is `None`).
-        content: String,
-        /// Whether the tool reported failure.
-        is_error: bool,
+        #[serde(serialize_with = "serialize_json_projection")]
+        content: Utf16JsonProjection,
+        /// Whether the tool reported failure. `None` also preserves the native
+        /// omission of this optional field; `Some(false)` remains explicit.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_bool",
+            skip_serializing_if = "Option::is_none"
+        )]
+        is_error: Option<bool>,
         /// Verbatim provider id of the `ToolUse` this answers — copied from the
         /// paired [`ContentBlock::ToolUse::provider_id`] so the egress
         /// `tool_result.tool_use_id` matches the provider-issued `tool_use.id`.
@@ -100,7 +497,11 @@ pub enum ContentBlock {
         /// stringified [`content`]. Every non-MCP tool leaves this `None`, so its
         /// wire form is unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        content_blocks: Option<Vec<serde_json::Value>>,
+        #[serde(
+            serialize_with = "serialize_optional_projection",
+            deserialize_with = "deserialize_json_projection"
+        )]
+        content_blocks: Option<Utf16JsonProjection>,
     },
     /// Extended-thinking reasoning trace.
     Thinking {
@@ -140,8 +541,12 @@ pub enum ContentBlock {
         /// Name of the server tool being invoked.
         name: String,
         /// Tool input arguments (provider-specific JSON shape).
-        #[serde(default)]
-        input: Value,
+        #[serde(
+            default = "null_json_projection",
+            serialize_with = "serialize_json_projection",
+            deserialize_with = "deserialize_json_projection"
+        )]
+        input: Utf16JsonProjection,
     },
     /// Anthropic Connector-Text block.
     ///
@@ -164,7 +569,11 @@ pub enum ContentBlock {
         tool_use_id: String,
         /// Tool result content (provider-specific JSON shape).
         #[serde(default)]
-        content: Value,
+        #[serde(
+            serialize_with = "serialize_json_projection",
+            deserialize_with = "deserialize_json_projection"
+        )]
+        content: Utf16JsonProjection,
         /// Whether the tool reported an error.
         #[serde(default)]
         is_error: bool,
@@ -177,6 +586,91 @@ pub enum ContentBlock {
         /// Structured delegated-media analysis payload.
         analysis: MediaAnalysis,
     },
+}
+
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawObject(mut fields) = RawObject::deserialize(deserializer)?;
+        let tag = raw_required::<String, D::Error>(&mut fields, "type")?;
+        match tag.as_str() {
+            "provider_content" => Ok(Self::ProviderContent {
+                protocol: raw_required(&mut fields, "protocol")?,
+                value: raw_projection(&mut fields, "value")?,
+            }),
+            "text" => {
+                let (text, units) = raw_string_projection(&mut fields, "text")?;
+                let citations = raw_present_nullable_projection(&mut fields, "citations")?;
+                if String::from_utf16(&units).is_ok() {
+                    Ok(Self::Text { text, citations })
+                } else {
+                    Ok(Self::TextJsUtf16 {
+                        text,
+                        utf16_code_units: units,
+                        citations,
+                    })
+                }
+            }
+            "text_js_utf16" => {
+                let text = raw_required(&mut fields, "text")?;
+                let utf16_code_units = raw_required(&mut fields, "utf16_code_units")?;
+                let citations = raw_present_nullable_projection(&mut fields, "citations")?;
+                Ok(Self::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    citations,
+                })
+            }
+            "tool_use" => Ok(Self::ToolUse {
+                id: raw_required(&mut fields, "id")?,
+                name: raw_required(&mut fields, "name")?,
+                input: raw_projection(&mut fields, "input")?,
+                provider_id: raw_optional_string(&mut fields, "provider_id")?,
+            }),
+            "tool_result" => Ok(Self::ToolResult {
+                tool_use_id: raw_required(&mut fields, "tool_use_id")?,
+                content: raw_string_json_projection(&mut fields, "content")?,
+                is_error: raw_optional(&mut fields, "is_error")?,
+                provider_tool_use_id: raw_optional_string(&mut fields, "provider_tool_use_id")?,
+                content_blocks: raw_projection_array_optional(&mut fields, "content_blocks")?,
+            }),
+            "thinking" => Ok(Self::Thinking {
+                thinking: raw_required(&mut fields, "thinking")?,
+                signature: raw_optional_string(&mut fields, "signature")?,
+            }),
+            "image" => Ok(Self::Image {
+                source: raw_required(&mut fields, "source")?,
+            }),
+            "document" => Ok(Self::Document {
+                source: raw_required(&mut fields, "source")?,
+            }),
+            "redacted_thinking" => Ok(Self::RedactedThinking {
+                data: raw_required(&mut fields, "data")?,
+            }),
+            "server_tool_use" => Ok(Self::ServerToolUse {
+                id: raw_required(&mut fields, "id")?,
+                name: raw_required(&mut fields, "name")?,
+                input: raw_projection_or_null(&mut fields, "input")?,
+            }),
+            "connector_text" => Ok(Self::ConnectorText {
+                connector_text: raw_optional(&mut fields, "connector_text")?.unwrap_or_default(),
+                signature: raw_optional_string(&mut fields, "signature")?,
+            }),
+            "advisor_tool_result" => Ok(Self::AdvisorToolResult {
+                tool_use_id: raw_required(&mut fields, "tool_use_id")?,
+                content: raw_projection_or_null(&mut fields, "content")?,
+                is_error: raw_optional(&mut fields, "is_error")?.unwrap_or(false),
+            }),
+            "media_analysis" => Ok(Self::MediaAnalysis {
+                analysis: raw_required(&mut fields, "analysis")?,
+            }),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown conversation content block type {tag:?}"
+            ))),
+        }
+    }
 }
 
 /// Structured vision-delegation analysis persisted into conversation history.
@@ -317,13 +811,19 @@ pub struct PreservedMessages {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactActiveGoalState {
     /// User-supplied goal condition.
-    pub condition: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub condition: Utf16JsonProjection,
     /// When the goal became active.
     #[serde(alias = "setAt")]
     pub set_at: std::time::SystemTime,
     /// Most recent stop-time evaluation reason, when available.
-    #[serde(default, alias = "lastReason")]
-    pub last_reason: Option<String>,
+    #[serde(
+        default,
+        alias = "lastReason",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub last_reason: Option<Utf16JsonProjection>,
     /// Stop evaluations completed while the goal was active.
     #[serde(default)]
     pub iterations: u64,
@@ -369,8 +869,13 @@ pub struct CompactBoundaryMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// User-context snapshot taken at compaction time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_context: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub user_context: Option<Utf16JsonProjection>,
     /// Number of messages replaced by the summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages_summarized: Option<u32>,
@@ -394,8 +899,28 @@ pub struct CompactBoundaryMetadata {
     pub logical_parent_uuid: Option<String>,
 }
 
+impl ContentBlock {
+    /// Text a user-facing renderer may display from this block.
+    ///
+    /// Anthropic text blocks with unknown native fields stay as one raw
+    /// `ProviderContent` block for replay. Their `text` member remains visible
+    /// through this projection without synthesizing a second transcript block.
+    #[must_use]
+    pub fn visible_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } | Self::TextJsUtf16 { text, .. } => Some(text),
+            Self::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages" && value.string_at("/type") == Some("text") =>
+            {
+                value.string_at("/text")
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A single message in a conversation, role-tagged for serde.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 // Keep compact metadata inline: boxing this public enum field would introduce
 // a source-level compatibility break for every constructor and pattern match.
@@ -431,6 +956,41 @@ pub enum ConversationMessage {
             skip_serializing_if = "std::ops::Not::not"
         )]
         is_visible_in_transcript_only: bool,
+        /// Native outer-envelope marker identifying a turn-companion user
+        /// message. This is host history metadata, not provider message text.
+        #[serde(
+            default,
+            rename = "turnCompanion",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_companion: Option<Option<bool>>,
+        /// Native outer-envelope usage-limit annotation. It stays outside the
+        /// nested `{role,content}` provider-facing message.
+        #[serde(
+            default,
+            rename = "usageLimitNote",
+            skip_serializing_if = "Option::is_none"
+        )]
+        usage_limit_note: Option<Option<UsageLimitNote>>,
+        /// Exact task-notification or other native origin metadata. This is
+        /// an outer history field and never enters provider message content.
+        #[serde(
+            default,
+            rename = "origin",
+            serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        origin: Option<Utf16JsonProjection>,
+        /// Exact Native turn-origin tag, stored outside nested provider text.
+        #[serde(
+            default,
+            rename = "turnOrigin",
+            serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_origin: Option<Utf16JsonProjection>,
     },
     /// Assistant-authored message — may include tool-use blocks.
     Assistant {
@@ -440,13 +1000,27 @@ pub enum ConversationMessage {
         content: Vec<ContentBlock>,
         /// Provider-reported stop reason, if any.
         stop_reason: Option<String>,
+        /// Exact inbound Anthropic resumable metadata. This is response/history
+        /// state and is never copied into the provider request message.
+        #[serde(
+            default,
+            rename = "resumable",
+            serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+            deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        resumable: Option<Utf16JsonProjection>,
     },
     /// System prompt — flat string, no tool blocks.
     System {
         /// Stable message identifier.
         id: MessageId,
-        /// The system prompt body.
-        content: String,
+        /// The system prompt body, retained as exact JavaScript UTF-16 source.
+        #[serde(
+            serialize_with = "crate::types::utf16_json::raw_json_serde::serialize",
+            deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize"
+        )]
+        content: Utf16JsonProjection,
         /// Structured system-message subtype, when present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype: Option<String>,
@@ -457,6 +1031,13 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         compact_metadata: Option<CompactBoundaryMetadata>,
+        /// Typed query-local model-fallback notice.
+        #[serde(
+            default,
+            rename = "modelFallback",
+            skip_serializing_if = "Option::is_none"
+        )]
+        model_fallback: Option<ModelFallbackMetadata>,
         /// Typed refusal-fallback metadata, on `subtype ==
         /// "model_refusal_fallback"` only.
         #[serde(
@@ -468,6 +1049,91 @@ pub enum ConversationMessage {
     },
 }
 
+impl<'de> Deserialize<'de> for ConversationMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawObject(mut fields) = RawObject::deserialize(deserializer)?;
+        let role = raw_required::<String, D::Error>(&mut fields, "role")?;
+        match role.as_str() {
+            "user" => {
+                let raw_content = fields
+                    .remove("content")
+                    .ok_or_else(|| serde::de::Error::missing_field("content"))?;
+                Ok(Self::User {
+                    id: raw_required(&mut fields, "id")?,
+                    content: raw_content_blocks::<D::Error>(raw_content)?,
+                    is_meta: raw_optional(&mut fields, "is_meta")?.unwrap_or(false),
+                    is_compact_summary: raw_optional(&mut fields, "isCompactSummary")?
+                        .unwrap_or(false),
+                    is_visible_in_transcript_only: raw_optional(
+                        &mut fields,
+                        "isVisibleInTranscriptOnly",
+                    )?
+                    .unwrap_or(false),
+                    turn_companion: raw_optional(&mut fields, "turnCompanion")?,
+                    usage_limit_note: raw_optional(&mut fields, "usageLimitNote")?,
+                    origin: raw_optional_projection(&mut fields, "origin")?,
+                    turn_origin: raw_optional_projection(&mut fields, "turnOrigin")?,
+                })
+            }
+            "assistant" => {
+                let raw_content = fields
+                    .remove("content")
+                    .ok_or_else(|| serde::de::Error::missing_field("content"))?;
+                Ok(Self::Assistant {
+                    id: raw_required(&mut fields, "id")?,
+                    content: raw_content_blocks::<D::Error>(raw_content)?,
+                    stop_reason: raw_optional_string(&mut fields, "stop_reason")?,
+                    resumable: raw_optional_projection(&mut fields, "resumable")?,
+                })
+            }
+            "system" => Ok(Self::System {
+                id: raw_required(&mut fields, "id")?,
+                content: raw_string_json_projection(&mut fields, "content")?,
+                subtype: raw_optional_string(&mut fields, "subtype")?,
+                compact_metadata: raw_optional(&mut fields, "compactMetadata")?,
+                model_fallback: raw_optional(&mut fields, "modelFallback")?,
+                refusal_fallback: raw_optional(&mut fields, "refusalFallback")?,
+            }),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown conversation message role {role:?}"
+            ))),
+        }
+    }
+}
+
+/// The current query's serving-model transition. User model settings are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFallbackMetadata {
+    /// Native trigger, such as `server_error` or `overloaded`.
+    pub trigger: String,
+    /// Failed serving model.
+    pub original_model: String,
+    /// Model serving this query after the transition.
+    pub fallback_model: String,
+}
+
+impl ModelFallbackMetadata {
+    /// Current SDK system envelope, independent of optional provider partial events.
+    #[must_use]
+    pub fn sdk_frame(
+        &self,
+        id: MessageId,
+        session_id: crate::types::SessionId,
+        content: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system", "subtype": "model_fallback", "uuid": id.as_uuid().to_string(),
+            "trigger": self.trigger, "original_model": self.original_model,
+            "fallback_model": self.fallback_model, "content": content,
+            "session_id": session_id.as_uuid().to_string(),
+        })
+    }
+}
+
 /// The `model_refusal_fallback` system message's payload.
 ///
 /// claude-code carries the refusal notice as a TYPED system message in the
@@ -477,13 +1143,9 @@ pub enum ConversationMessage {
 /// earlier ones it superseded, which is what makes them filterable rather than
 /// merely stale.
 ///
-/// ## What this port does NOT carry, and why
-///
-/// Upstream's object also has `apiRefusalExplanation` and `sawCyberRefusal`.
-/// Neither has a source here — the cascade records a category but no
-/// explanation, and nothing classifies a cyber refusal — so they are omitted
-/// rather than serialized as permanent `null`s that read like a wired field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Native optional fields survive persistence even when a local producer has
+/// no corresponding observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusalFallbackMetadata {
     /// What provoked the swap. `"refusal"` for the refusal cascade.
@@ -505,6 +1167,12 @@ pub struct RefusalFallbackMetadata {
     /// The API's refusal category for this hop, when the provider gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_refusal_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_refusal_explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saw_cyber_refusal: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutralized_by_fork: Option<bool>,
     /// Earlier notices this one supersedes. A consumer rebuilding the
     /// conversation drops the messages named here rather than showing a swap
     /// the session has already moved past.
@@ -513,6 +1181,31 @@ pub struct RefusalFallbackMetadata {
     /// The user message that was refused, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_user_message_uuid: Option<String>,
+    /// Host-only provider-profile companion to the previous app-state route.
+    /// Resume applies it only when a notice in the route chain identifies the
+    /// same selected model. The outer option distinguishes absent metadata
+    /// from an explicitly profile-less route (`null`).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub previous_profile: Option<Option<String>>,
+    /// Host-only provider-profile companion to the fallback model. Resume
+    /// applies it only when that fallback model was selected independently
+    /// from an assistant row or live route. The same outer/inner option
+    /// convention distinguishes absent metadata from an explicit null.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub serving_profile: Option<Option<String>>,
+    /// Host-only enqueue timestamp for the native queued notice. The JSONL
+    /// exporter maps this to the outer transcript `timestamp`; it is never a
+    /// refusal-metadata wire field.
+    #[serde(skip)]
+    pub notice_timestamp: Option<String>,
 }
 
 impl ConversationMessage {
@@ -521,10 +1214,17 @@ impl ConversationMessage {
     pub fn user(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -536,11 +1236,59 @@ impl ConversationMessage {
     pub fn user_meta(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
+    }
+
+    /// Mark a user message as a Native turn-companion message and attach its
+    /// exact current usage-limit reason.
+    #[must_use]
+    pub fn with_turn_companion(mut self, note: UsageLimitNote) -> Self {
+        if let Self::User {
+            turn_companion,
+            usage_limit_note,
+            ..
+        } = &mut self
+        {
+            *turn_companion = Some(Some(true));
+            *usage_limit_note = Some(Some(note));
+        }
+        self
+    }
+
+    /// Attach exact Native origin metadata to a user message.
+    #[must_use]
+    pub fn with_origin(mut self, origin: Utf16JsonProjection) -> Self {
+        if let Self::User {
+            origin: current, ..
+        } = &mut self
+        {
+            *current = Some(origin);
+        }
+        self
+    }
+
+    /// Attach the exact Native turn-origin tag to a user message.
+    #[must_use]
+    pub fn with_turn_origin(mut self, turn_origin: Utf16JsonProjection) -> Self {
+        if let Self::User {
+            turn_origin: current,
+            ..
+        } = &mut self
+        {
+            *current = Some(turn_origin);
+        }
+        self
     }
 
     /// Construct a synthetic/meta user message whose text block preserves an
@@ -552,10 +1300,15 @@ impl ConversationMessage {
             content: vec![ContentBlock::TextJsUtf16 {
                 text,
                 utf16_code_units,
+                citations: None,
             }],
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -568,6 +1321,10 @@ impl ConversationMessage {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -576,10 +1333,17 @@ impl ConversationMessage {
     pub fn compact_summary(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: true,
             is_visible_in_transcript_only: true,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -592,9 +1356,10 @@ impl ConversationMessage {
     ) -> Self {
         Self::System {
             id,
-            content,
+            content: content.into(),
             subtype: Some("compact_boundary".to_string()),
             compact_metadata: Some(metadata),
+            model_fallback: None,
             refusal_fallback: None,
         }
     }
@@ -624,7 +1389,10 @@ impl ConversationMessage {
     pub fn user_with_images(id: MessageId, text: String, images: Vec<ImageSource>) -> Self {
         let mut content = Vec::with_capacity(1 + images.len());
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text });
+            content.push(ContentBlock::Text {
+                text,
+                citations: None,
+            });
         }
         for source in images {
             content.push(ContentBlock::Image { source });
@@ -635,6 +1403,10 @@ impl ConversationMessage {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -647,7 +1419,10 @@ impl ConversationMessage {
     ) -> Self {
         let mut content = Vec::new();
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text });
+            content.push(ContentBlock::Text {
+                text,
+                citations: None,
+            });
         }
         for source in documents {
             content.push(ContentBlock::Document { source });
@@ -658,6 +1433,10 @@ impl ConversationMessage {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -697,6 +1476,10 @@ impl ConversationMessage {
             self,
             Self::User {
                 is_visible_in_transcript_only: true,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
                 ..
             }
         )
@@ -716,15 +1499,12 @@ impl ConversationMessage {
         match self {
             Self::User { content, .. } | Self::Assistant { content, .. } => content
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
+                .filter_map(ContentBlock::visible_text)
                 .collect::<Vec<_>>()
                 .join(""),
-            Self::System { content, .. } => content.clone(),
+            // This convenience API returns display text. Exact source remains
+            // available on the System variant's `content` projection.
+            Self::System { content, .. } => content.string_at("").unwrap_or_default().to_owned(),
         }
     }
 
@@ -776,12 +1556,51 @@ pub use crate::types::scope::MemoryEntryTier;
 mod tests {
     use super::*;
 
+    fn projection(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).unwrap()
+    }
+
+    fn string_projection(value: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect()).unwrap()
+    }
+
+    fn decode_value<T: serde::de::DeserializeOwned>(value: Value) -> T {
+        let source = serde_json::to_string(&value).unwrap();
+        serde_json::from_str(&source).unwrap()
+    }
+
     #[test]
     fn user_message_constructs() {
         let id = MessageId::new();
         let m = ConversationMessage::user(id, "hello".to_string());
         assert!(matches!(m.role(), MessageRole::User));
         assert_eq!(m.text_content(), "hello");
+    }
+
+    #[test]
+    fn text_content_includes_native_anthropic_text_once() {
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: projection(serde_json::json!({
+                        "type":"text",
+                        "text":"visible",
+                        "future_annotation":{"keep":true}
+                    })),
+                },
+                ContentBlock::ProviderContent {
+                    protocol: "openai_chat_completions".into(),
+                    value: projection(serde_json::json!({"type":"text","text":"hidden"})),
+                },
+            ],
+            stop_reason: None,
+
+            resumable: None,
+        };
+
+        assert_eq!(message.text_content(), "visible");
     }
 
     #[test]
@@ -820,7 +1639,7 @@ mod tests {
         match &m {
             ConversationMessage::User { content, .. } => {
                 assert_eq!(content.len(), 2);
-                assert!(matches!(&content[0], ContentBlock::Text { text } if text == "look:"));
+                assert!(matches!(&content[0], ContentBlock::Text { text, .. } if text == "look:"));
                 assert!(matches!(&content[1], ContentBlock::Image { source } if *source == img));
             }
             _ => panic!("expected user message"),
@@ -852,7 +1671,7 @@ mod tests {
                 "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
             })
         );
-        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        let back: ContentBlock = decode_value(v);
         assert_eq!(back, block);
     }
 
@@ -872,7 +1691,7 @@ mod tests {
                 "source": { "type": "base64", "media_type": "application/pdf", "data": "JVBERi0=" }
             })
         );
-        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        let back: ContentBlock = decode_value(v);
         assert_eq!(back, block);
     }
 
@@ -903,6 +1722,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let line = serde_json::to_string(&m).unwrap();
         // A non-meta user message must NOT serialize an `is_meta` field
@@ -931,6 +1754,35 @@ mod tests {
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
         assert!(back.is_meta());
+    }
+
+    #[test]
+    fn user_native_outer_metadata_roundtrips_exactly_outside_provider_content() {
+        let origin = Utf16JsonProjection::parse(
+            r#"{"kind":"task-notification","producer":"session-task","detail":"\ud800"}"#,
+        )
+        .unwrap();
+        let turn_origin = Utf16JsonProjection::root_string(
+            "task_notification".into(),
+            "task_notification".encode_utf16().collect(),
+        )
+        .unwrap();
+        let message = ConversationMessage::user_meta(MessageId::new(), "notification".into())
+            .with_turn_companion(UsageLimitNote::NearLimit)
+            .with_origin(origin.clone())
+            .with_turn_origin(turn_origin.clone());
+        let line = serde_json::to_string(&message).unwrap();
+        let row = Utf16JsonProjection::parse(&line).unwrap();
+        assert_eq!(
+            row.at_pointer("/turnCompanion").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(row.string_at("/usageLimitNote"), Some("near_limit"));
+        assert_eq!(row.string_units("/origin/detail"), Some(vec![0xd800]));
+        assert_eq!(row.string_at("/turnOrigin"), Some("task_notification"));
+        assert!(row.at_pointer("/content/0/origin").is_none());
+        let decoded: ConversationMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(decoded, message);
     }
 
     #[test]
@@ -968,15 +1820,39 @@ mod tests {
         );
         let message = ConversationMessage::System {
             id,
-            content: "notice".to_string(),
+            content: "notice".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert_eq!(
             serde_json::to_string(&message).unwrap(),
             r#"{"role":"system","id":"22222222-2222-2222-2222-222222222222","content":"notice"}"#
         );
+    }
+
+    #[test]
+    fn system_message_preserves_unpaired_utf16_in_raw_json_roundtrip() {
+        let message: ConversationMessage = serde_json::from_str(
+            r#"{"role":"system","id":"22222222-2222-2222-2222-222222222222","content":"before\ud800after"}"#,
+        )
+        .unwrap();
+        let ConversationMessage::System { content, .. } = &message else {
+            panic!("expected system message");
+        };
+        let mut expected_units = "before".encode_utf16().collect::<Vec<_>>();
+        expected_units.push(0xd800);
+        expected_units.extend("after".encode_utf16());
+        assert_eq!(content.string_units(""), Some(expected_units.clone()));
+
+        let wire = serde_json::to_string(&message).unwrap();
+        assert!(wire.contains(r#""content":"before\ud800after""#), "{wire}");
+        let roundtrip: ConversationMessage = serde_json::from_str(&wire).unwrap();
+        let ConversationMessage::System { content, .. } = roundtrip else {
+            panic!("expected system message");
+        };
+        assert_eq!(content.string_units(""), Some(expected_units));
     }
 
     #[test]
@@ -994,7 +1870,7 @@ mod tests {
             Some(&serde_json::json!(true))
         );
         assert_eq!(
-            serde_json::from_value::<ConversationMessage>(value).unwrap(),
+            serde_json::from_str::<ConversationMessage>(&value.to_string()).unwrap(),
             message
         );
     }
@@ -1015,8 +1891,13 @@ mod tests {
         .expect("SDK camelCase active goal must deserialize");
 
         let goal = metadata.active_goal.expect("active goal");
-        assert_eq!(goal.condition, "all checks pass");
-        assert_eq!(goal.last_reason.as_deref(), Some("still working"));
+        assert_eq!(goal.condition.string_at(""), Some("all checks pass"));
+        assert_eq!(
+            goal.last_reason
+                .as_ref()
+                .and_then(|reason| reason.string_at("")),
+            Some("still working")
+        );
     }
 
     #[test]
@@ -1039,15 +1920,18 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "I'll read the file.".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: "Read".into(),
-                    input: serde_json::json!({"path": "/tmp/x"}),
+                    input: projection(serde_json::json!({"path": "/tmp/x"})),
                     provider_id: None,
                 },
             ],
             stop_reason: None,
+
+            resumable: None,
         };
         assert!(m.has_tool_use());
         assert_eq!(m.tool_calls().len(), 1);
@@ -1060,7 +1944,7 @@ mod tests {
         let block = ContentBlock::ToolUse {
             id: ToolUseId::from("toolu_01ABC"),
             name: "Read".into(),
-            input: serde_json::json!({"path": "/tmp/x"}),
+            input: projection(serde_json::json!({"path": "/tmp/x"})),
             provider_id: None,
         };
         let v = serde_json::to_value(&block).unwrap();
@@ -1075,7 +1959,7 @@ mod tests {
         let block = ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "Read".into(),
-            input: serde_json::json!({}),
+            input: projection(serde_json::json!({})),
             provider_id: Some("toolu_01ABC".into()),
         };
         let v = serde_json::to_value(&block).unwrap();
@@ -1084,7 +1968,7 @@ mod tests {
             Some("toolu_01ABC")
         );
         // Round-trips back identically.
-        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        let back: ContentBlock = decode_value(v);
         assert_eq!(back, block);
     }
 
@@ -1098,7 +1982,7 @@ mod tests {
             "name": "Read",
             "input": {"path": "/tmp/x"}
         });
-        let block: ContentBlock = serde_json::from_value(legacy).unwrap();
+        let block: ContentBlock = decode_value(legacy);
         match block {
             ContentBlock::ToolUse { provider_id, .. } => assert_eq!(provider_id, None),
             other => panic!("expected ToolUse, got {other:?}"),
@@ -1106,11 +1990,116 @@ mod tests {
     }
 
     #[test]
+    fn text_citations_preserve_absence_null_and_value() {
+        for (input, expected) in [
+            (serde_json::json!({"type":"text","text":"x"}), None),
+            (
+                serde_json::json!({"type":"text","text":"x","citations":null}),
+                Some(serde_json::Value::Null),
+            ),
+            (
+                serde_json::json!({"type":"text","text":"x","citations":[]}),
+                Some(serde_json::json!([])),
+            ),
+        ] {
+            let block: ContentBlock = decode_value(input);
+            let output = serde_json::to_value(&block).unwrap();
+            assert_eq!(output.get("citations"), expected.as_ref());
+        }
+    }
+
+    #[test]
+    fn conversation_message_json_retains_mod_presence_for_resume() {
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "accepted Mod text".into(),
+                    citations: Some(None),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: ToolUseId::from("toolu_01ABC"),
+                    content: string_projection("done"),
+                    is_error: None,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                },
+            ],
+            stop_reason: None,
+
+            resumable: None,
+        };
+        let stored = serde_json::to_value(&message).unwrap();
+        assert!(stored["content"][0].get("citations").is_some());
+        assert_eq!(stored["content"][0]["citations"], serde_json::Value::Null);
+        assert!(stored["content"][1].get("is_error").is_none());
+
+        let resumed: ConversationMessage = serde_json::from_str(&stored.to_string()).unwrap();
+        assert_eq!(resumed, message);
+    }
+
+    #[test]
+    fn tool_result_is_error_preserves_omission_and_explicit_false() {
+        let mut input = serde_json::json!({
+            "type":"tool_result",
+            "tool_use_id":"toolu_01ABC",
+            "content":"ok"
+        });
+        let absent: ContentBlock = decode_value(input.clone());
+        assert_eq!(
+            absent,
+            ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::from("toolu_01ABC"),
+                content: string_projection("ok"),
+                is_error: None,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }
+        );
+        assert!(serde_json::to_value(absent)
+            .unwrap()
+            .get("is_error")
+            .is_none());
+
+        input["is_error"] = serde_json::Value::Bool(false);
+        let explicit_false: ContentBlock = decode_value(input.clone());
+        assert!(matches!(
+            explicit_false,
+            ContentBlock::ToolResult {
+                is_error: Some(false),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(explicit_false).unwrap()["is_error"],
+            false
+        );
+
+        input["is_error"] = serde_json::Value::Bool(true);
+        let explicit_true: ContentBlock = decode_value(input.clone());
+        assert!(matches!(
+            explicit_true,
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(explicit_true).unwrap()["is_error"],
+            true
+        );
+
+        input["is_error"] = serde_json::Value::Null;
+        let source = serde_json::to_string(&input).unwrap();
+        assert!(serde_json::from_str::<ContentBlock>(&source).is_err());
+    }
+
+    #[test]
     fn tool_result_provider_tool_use_id_skipped_when_none_preserved_when_some() {
         let none_block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_01ABC"),
-            content: "ok".into(),
-            is_error: false,
+            content: string_projection("ok"),
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         };
@@ -1119,8 +2108,8 @@ mod tests {
 
         let some_block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
-            content: "ok".into(),
-            is_error: false,
+            content: string_projection("ok"),
+            is_error: Some(false),
             provider_tool_use_id: Some("toolu_01ABC".into()),
             content_blocks: None,
         };
@@ -1138,7 +2127,7 @@ mod tests {
         let block = ContentBlock::ToolUse {
             id: ToolUseId::from("toolu_01ABC"),
             name: "Read".into(),
-            input: serde_json::json!({}),
+            input: projection(serde_json::json!({})),
             provider_id: None,
         };
         let s = serde_json::to_string(&block).unwrap();
@@ -1152,8 +2141,8 @@ mod tests {
     fn tool_result_canonical_id_serializes_as_bare_provider_string() {
         let block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_01ABC"),
-            content: "ok".into(),
-            is_error: false,
+            content: string_projection("ok"),
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         };
@@ -1183,7 +2172,7 @@ mod tests {
         let block = ContentBlock::ServerToolUse {
             id: "srvtoolu_01".into(),
             name: "web_search".into(),
-            input: serde_json::json!({"query": "rust"}),
+            input: projection(serde_json::json!({"query": "rust"})),
         };
         let json = serde_json::to_string(&block).unwrap();
         assert_eq!(
@@ -1222,7 +2211,7 @@ mod tests {
     fn advisor_tool_result_round_trips_with_wire_tag() {
         let block = ContentBlock::AdvisorToolResult {
             tool_use_id: "srvtoolu_01".into(),
-            content: serde_json::json!([{"type": "text", "text": "ok"}]),
+            content: projection(serde_json::json!([{"type": "text", "text": "ok"}])),
             is_error: false,
         };
         let json = serde_json::to_string(&block).unwrap();
@@ -1259,7 +2248,7 @@ mod tests {
         };
         let value = serde_json::to_value(&block).unwrap();
         assert_eq!(value["type"], "media_analysis");
-        let back: ContentBlock = serde_json::from_value(value).unwrap();
+        let back: ContentBlock = decode_value(value);
         assert_eq!(back, block);
     }
 
@@ -1290,5 +2279,141 @@ mod tests {
         let line = serde_json::to_string(&message).unwrap();
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, message);
+    }
+
+    #[test]
+    fn raw_tagged_content_ingress_keeps_deep_tool_input_and_tag_order() {
+        let mut deep = r#""\ud800""#.to_owned();
+        for _ in 0..384 {
+            deep = format!("[{deep}]");
+        }
+        let source = format!(
+            r#"{{"input":{{"nested":{deep},"\ud800":"\udc00"}},"id":"11111111-1111-4111-8111-111111111111","name":"Bash","type":"tool_use"}}"#
+        );
+
+        let block: ContentBlock = serde_json::from_str(&source).unwrap();
+        let ContentBlock::ToolUse { input, .. } = &block else {
+            panic!("expected a tool-use block");
+        };
+        assert_eq!(input.at_pointer("/nested").unwrap().array_len(), Some(1));
+        assert_eq!(
+            input
+                .at_pointer("")
+                .unwrap()
+                .get_property_units(&[0xd800])
+                .unwrap()
+                .code_units(),
+            Some([0xdc00].as_slice())
+        );
+
+        let encoded = serde_json::to_string(&block).unwrap();
+        assert!(encoded.contains(r#""input":{"nested":["#), "{encoded}");
+        assert!(encoded.contains(r#""\ud800":"\udc00""#), "{encoded}");
+        let decoded: ContentBlock = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, block);
+    }
+
+    #[test]
+    fn raw_role_ingress_preserves_tool_result_lone_utf16_as_json_string() {
+        let source = r#"{"content":[{"content":"error: \ud800","tool_use_id":"11111111-1111-4111-8111-111111111111","type":"tool_result"}],"id":"22222222-2222-4222-8222-222222222222","role":"user"}"#;
+        let message: ConversationMessage = serde_json::from_str(source).unwrap();
+        let ConversationMessage::User { content, .. } = &message else {
+            panic!("expected a user message");
+        };
+        let ContentBlock::ToolResult { content, .. } = &content[0] else {
+            panic!("expected a tool result");
+        };
+        assert_eq!(
+            content.string_units(""),
+            Some(vec![101, 114, 114, 111, 114, 58, 32, 0xd800])
+        );
+
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(
+            encoded.contains(r#""content":"error: \ud800""#),
+            "{encoded}"
+        );
+        let decoded: ConversationMessage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn assistant_resumable_preserves_absence_null_and_exact_json_source() {
+        let base = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: Vec::new(),
+            stop_reason: Some("max_tokens".into()),
+            resumable: None,
+        };
+        let absent = serde_json::to_string(&base).expect("assistant serializes");
+        assert!(!absent.contains("resumable"));
+        let decoded: ConversationMessage =
+            serde_json::from_str(&absent).expect("assistant deserializes");
+        assert!(matches!(
+            decoded,
+            ConversationMessage::Assistant {
+                resumable: None,
+                ..
+            }
+        ));
+
+        for source in ["null", "false", r#"{"text":"\ud800"}"#] {
+            let projection = Utf16JsonProjection::parse(source).expect("valid exact JSON");
+            let message = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: Vec::new(),
+                stop_reason: Some("max_tokens".into()),
+                resumable: Some(projection.clone()),
+            };
+            let serialized = serde_json::to_string(&message).expect("assistant serializes");
+            assert!(serialized.contains(&format!(r#""resumable":{source}"#)));
+            let decoded: ConversationMessage =
+                serde_json::from_str(&serialized).expect("assistant deserializes");
+            let ConversationMessage::Assistant {
+                resumable: Some(actual),
+                ..
+            } = decoded
+            else {
+                panic!("resumable field is present")
+            };
+            assert_eq!(actual, projection);
+        }
+    }
+
+    #[test]
+    fn compact_goal_and_user_context_keep_exact_utf16_source() {
+        let exact = |units: Vec<u16>| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("source text is valid JSON")
+        };
+        let condition_units = vec![b'g' as u16, 0xd800];
+        let reason_units = vec![b'r' as u16, 0xdfff];
+        let context_units = vec![b'c' as u16, 0xd800];
+        let metadata = CompactBoundaryMetadata {
+            user_context: Some(exact(context_units.clone())),
+            active_goal: Some(CompactActiveGoalState {
+                condition: exact(condition_units.clone()),
+                set_at: std::time::SystemTime::UNIX_EPOCH,
+                last_reason: Some(exact(reason_units.clone())),
+                iterations: 3,
+                tokens_at_start: 11,
+                origin: CompactGoalOrigin::User,
+            }),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_string(&metadata).expect("serialize compact metadata");
+        let restored: CompactBoundaryMetadata =
+            serde_json::from_str(&serialized).expect("restore compact metadata");
+        let goal = restored.active_goal.expect("active goal remains present");
+        assert_eq!(goal.condition.string_units(""), Some(condition_units));
+        assert_eq!(
+            goal.last_reason.unwrap().string_units(""),
+            Some(reason_units)
+        );
+        assert_eq!(
+            restored.user_context.unwrap().string_units(""),
+            Some(context_units)
+        );
     }
 }

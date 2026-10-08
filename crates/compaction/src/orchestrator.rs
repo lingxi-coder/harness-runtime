@@ -24,6 +24,7 @@ use crate::thresholds::{
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, MAX_CONSECUTIVE_RAPID_REFILLS,
 };
 use cost::Usage;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -31,28 +32,23 @@ use std::time::SystemTime;
 fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
     messages
         .iter()
-        .filter_map(|message| match message {
-            ConversationMessage::User {
-                id,
-                content,
-                is_meta,
-                is_compact_summary,
-                is_visible_in_transcript_only,
-            } => {
-                let analysis_blocks = content
-                    .iter()
-                    .filter(|block| matches!(block, ContentBlock::MediaAnalysis { .. }))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (!analysis_blocks.is_empty()).then(|| ConversationMessage::User {
-                    id: *id,
-                    content: analysis_blocks,
-                    is_meta: *is_meta,
-                    is_compact_summary: *is_compact_summary,
-                    is_visible_in_transcript_only: *is_visible_in_transcript_only,
-                })
+        .filter_map(|message| {
+            let ConversationMessage::User { content, .. } = message else {
+                return None;
+            };
+            let blocks: Vec<_> = content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::MediaAnalysis { .. }))
+                .cloned()
+                .collect();
+            if blocks.is_empty() {
+                return None;
             }
-            ConversationMessage::Assistant { .. } | ConversationMessage::System { .. } => None,
+            let mut result = message.clone();
+            if let ConversationMessage::User { content, .. } = &mut result {
+                *content = blocks;
+            }
+            Some(result)
         })
         .collect()
 }
@@ -63,7 +59,7 @@ pub struct IterationCompactionResult {
     /// Compacted message list.
     pub messages: Vec<ConversationMessage>,
     /// Trimmed original model summary for the `PostCompact` hook payload.
-    pub raw_summary_text: String,
+    pub raw_summary_text: Utf16JsonProjection,
     /// Layers that actually fired this iteration, in order.
     pub layers_applied: Vec<CompactionLayer>,
     /// Approximate tokens freed across all layers.
@@ -256,14 +252,13 @@ impl CompactionOrchestrator {
     /// Manual compaction is deliberately separate from the automatic
     /// threshold/circuit-breaker pipeline: Claude Code invokes the summarizer
     /// whenever the history has a valid prefix/tail split, even when the
-    /// context is far below the automatic threshold. It summarizes the complete
-    /// history (`messagesToKeep: []`); suffix preservation is reserved for
-    /// automatic/reactive compaction. Too-short histories return the byte-exact
-    /// user-facing error instead of a successful zero-delta pass.
+    /// context is far below the automatic threshold. It preserves recent API
+    /// rounds when possible; 2.1.286 also permits a short-history summarize-all
+    /// fallback. Fewer than two groups returns the byte-exact user-facing error.
     pub async fn process_forced(
         &self,
         messages: Vec<ConversationMessage>,
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&Utf16JsonProjection>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         if crate::grouping::group_messages_by_api_round(&messages).len() < 2 {
             return Err(CompactionError::NotEnoughMessages);
@@ -315,7 +310,7 @@ impl CompactionOrchestrator {
         &self,
         context: Vec<ConversationMessage>,
         summarized: &[ConversationMessage],
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&Utf16JsonProjection>,
         direction: crate::prompt::SummarizeDirection,
     ) -> Result<IterationCompactionResult, CompactionError> {
         // Vision sidecars from the SUMMARIZED half only: the kept half still
@@ -352,14 +347,14 @@ impl CompactionOrchestrator {
         &self,
         messages: Vec<ConversationMessage>,
         tracking: &mut AutoCompactTrackingState,
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&Utf16JsonProjection>,
         initial_token_gap: Option<u64>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let rapid_refill = rapid_refill_count(tracking);
         if rapid_refill >= MAX_CONSECUTIVE_RAPID_REFILLS {
             return Ok(IterationCompactionResult {
                 messages,
-                raw_summary_text: String::new(),
+                raw_summary_text: Utf16JsonProjection::from(""),
                 layers_applied: Vec::new(),
                 total_tokens_freed: 0,
                 cache_hit: false,
@@ -458,7 +453,7 @@ impl CompactionOrchestrator {
         messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&Utf16JsonProjection>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         self.process_iteration_tracked_with_instructions_and_timing(
             messages,
@@ -480,7 +475,7 @@ impl CompactionOrchestrator {
         mut messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
-        custom_instructions: Option<&str>,
+        custom_instructions: Option<&Utf16JsonProjection>,
         last_assistant_at: Option<SystemTime>,
         now: SystemTime,
     ) -> Result<IterationCompactionResult, CompactionError> {
@@ -568,7 +563,7 @@ impl CompactionOrchestrator {
         let mut was_compacted = false;
         let mut compaction_usage = None;
         let mut compaction_model = None;
-        let mut raw_summary_text = String::new();
+        let mut raw_summary_text = Utf16JsonProjection::from("");
         // #58: the preserved tail the autocompact layer carries out, if any.
         // Empty unless autocompact fires AND `DRn` selected a preservable tail.
         let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
@@ -713,6 +708,7 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "user text".into(),
+                    citations: None,
                 },
                 ContentBlock::MediaAnalysis {
                     analysis: analysis.clone(),
@@ -721,6 +717,10 @@ mod tests {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
 
         let preserved = media_analysis_messages(&[
@@ -758,7 +758,8 @@ mod tests {
     async fn forced_orchestrator(threshold: u64) -> CompactionOrchestrator {
         let slot = Arc::new(CacheSafeParamsSlot::new());
         slot.save(CacheSafeParams {
-            system_prompt: Arc::from("test system"),
+            system_prompt: Arc::new("test system".into()),
+            system_prompt_input: None,
             user_context: HashMap::new(),
             system_context: HashMap::new(),
             user_context_message: None,
@@ -803,8 +804,12 @@ mod tests {
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         }
     }
 
@@ -893,22 +898,16 @@ mod tests {
         assert_eq!(err.to_string(), "Not enough messages to compact.");
     }
 
-    /// Binary-verified (`Nto` with `s = 1`): manual `/compact` on a single
-    /// complete exchange `[user, assistant]` groups as `[u],[a]` (assistant-led
-    /// `uQt` split, o = 2), then bails `too_few_groups` because the summarize
-    /// prefix (`[u]`) has no assistant message — CC surfaces
-    /// `Not enough messages to compact.`. (An earlier revision asserted the
-    /// full-history `messagesToKeep: []` path here; that is `Pto`, which the
-    /// binary only ever calls with `isAutoCompact: !0` — never manual.)
+    /// The 2.1.286 Hre last resort summarizes a complete single exchange.
     #[tokio::test]
-    async fn forced_compact_rejects_one_complete_exchange() {
+    async fn forced_compact_summarizes_one_complete_exchange() {
         let orch = forced_orchestrator(u64::MAX).await;
-        let err = orch
+        let result = orch
             .process_forced(vec![long_user(0), assistant("only reply")], None)
             .await
-            .expect_err("one exchange: summarize prefix has no assistant → too_few_groups");
-        assert!(matches!(err, CompactionError::NotEnoughMessages));
-        assert_eq!(err.to_string(), "Not enough messages to compact.");
+            .expect("286 summarize_all covers one complete exchange");
+        assert!(result.was_compacted);
+        assert!(result.messages_to_preserve.is_empty());
     }
 
     /// Binary-verified: the manual path preserves the LAST API-round group
@@ -942,7 +941,7 @@ mod tests {
             ConversationMessage::Assistant { content, .. } => {
                 assert!(matches!(
                     &content[0],
-                    ContentBlock::Text { text } if text == "second reply"
+                    ContentBlock::Text { text, .. } if text == "second reply"
                 ));
             }
             other => panic!("preserved tail must be the final assistant reply, got {other:?}"),
@@ -985,10 +984,14 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id,
                 name: name.into(),
-                input: json!({}),
+                input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &json!({}),
+                )
+                .expect("empty object is valid JSON"),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -998,13 +1001,17 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,
                 content: content.into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 

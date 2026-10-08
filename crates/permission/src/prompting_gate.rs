@@ -33,6 +33,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -165,7 +166,7 @@ pub(crate) fn resolve_outcome(outcome: ParseOutcome, default: PromptDefault) -> 
 
 #[async_trait]
 impl PermissionGate for InteractivePromptingGate {
-    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+    async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision {
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: name.to_string(),
             tool_input: input.clone(),
@@ -177,15 +178,17 @@ impl PermissionGate for InteractivePromptingGate {
         };
         match self.prompt_user(&request).await {
             Ok(d) if d.allow => PermissionDecision::Allow,
-            Ok(d) => PermissionDecision::Deny { reason: d.reason },
+            Ok(d) => PermissionDecision::Deny {
+                reason: d.reason.into(),
+            },
             Err(PromptError::InvalidInput { attempts }) => PermissionDecision::Deny {
-                reason: format!("invalid permission input after {attempts} attempts"),
+                reason: format!("invalid permission input after {attempts} attempts").into(),
             },
             Err(PromptError::Cancelled { reason }) => PermissionDecision::Deny {
-                reason: format!("prompt cancelled: {reason}"),
+                reason: format!("prompt cancelled: {reason}").into(),
             },
             Err(PromptError::Io(reason)) => PermissionDecision::Deny {
-                reason: format!("prompt io: {reason}"),
+                reason: format!("prompt io: {reason}").into(),
             },
         }
     }
@@ -209,16 +212,16 @@ impl PermissionGate for InteractivePromptingGate {
                 decision_classification: None,
             },
             Ok(decision) => crate::gate::PermissionOutcome::Deny {
-                reason: decision.reason,
+                reason: decision.reason.into(),
             },
             Err(PromptError::InvalidInput { attempts }) => crate::gate::PermissionOutcome::Deny {
-                reason: format!("invalid permission input after {attempts} attempts"),
+                reason: format!("invalid permission input after {attempts} attempts").into(),
             },
             Err(PromptError::Cancelled { reason }) => crate::gate::PermissionOutcome::Deny {
-                reason: format!("prompt cancelled: {reason}"),
+                reason: format!("prompt cancelled: {reason}").into(),
             },
             Err(PromptError::Io(reason)) => crate::gate::PermissionOutcome::Deny {
-                reason: format!("prompt io: {reason}"),
+                reason: format!("prompt io: {reason}").into(),
             },
         }
     }
@@ -536,7 +539,7 @@ mod tests {
         let decision = gate
             .prompt_user(&PermissionRequest::ToolUseConfirm {
                 tool_name: "Bash".to_string(),
-                tool_input: serde_json::json!({}),
+                tool_input: Utf16JsonProjection::parse("{}").unwrap(),
                 default_decision: PromptDefault::DenyByDefault,
                 suppress_always_allow_rule: false,
             })

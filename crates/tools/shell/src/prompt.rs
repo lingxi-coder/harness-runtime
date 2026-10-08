@@ -48,7 +48,11 @@
 //! `cwd = workspace`, so this sentence is currently ASPIRATIONAL until BASH.4
 //! lands the per-session cwd carry-over.
 
-use crate::bash::{bash_default_timeout_ms, bash_max_timeout_ms};
+use crate::bash::{
+    bash_background_max_timeout_ms, bash_default_timeout_ms, bash_max_timeout_ms,
+    BASH_BACKGROUND_DEFAULT_TIMEOUT_MS,
+};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use sandbox::runtime_config::SandboxRuntimeConfig;
 
 // ===== Wire tool-name literals (string literals, NOT cross-crate imports) ====
@@ -167,7 +171,7 @@ fn cheap_commands_bullet_enabled() -> bool {
 /// and that its default made the env the only observable gate. Both were wrong:
 /// `Ge()` reads it at the TOP level, and a settings `false` is observable
 /// whenever the env var is absent — which is the normal case.)
-fn should_include_git_instructions() -> bool {
+pub(crate) fn should_include_git_instructions() -> bool {
     include_git_instructions_from(
         env_tristate("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
         lingxi_core::host::session_flags::include_git_instructions(),
@@ -240,15 +244,74 @@ const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/cl
 /// wiring a settings source later is a one-line change here and nothing else.
 /// `hvt()`'s outer session-URL decoration (`ecT(e, url, …)`, gated on
 /// `I_l()` — remote/teleport sessions only) is EXCLUDED surface.
-fn attribution_texts() -> (String, String) {
+struct AttributionTexts {
+    commit_units: Vec<u16>,
+    pr_units: Vec<u16>,
+}
+
+fn attribution_texts() -> AttributionTexts {
     let (commit, pr) = lingxi_core::host::session_flags::attribution();
-    resolve_attribution(
+    let (commit, pr) = resolve_attribution(
         commit,
         pr,
         lingxi_core::host::session_flags::include_co_authored_by(),
         COMMIT_ATTRIBUTION,
         PR_ATTRIBUTION,
-    )
+    );
+    AttributionTexts {
+        commit_units: commit
+            .string_units("")
+            .expect("attribution is a root string"),
+        pr_units: pr.string_units("").expect("attribution is a root string"),
+    }
+}
+
+struct AttributionMarkers {
+    commit: String,
+    pr: String,
+}
+
+impl AttributionMarkers {
+    fn choose(dynamic_texts: &[&str]) -> Self {
+        for nonce in 0_u64.. {
+            let commit = format!("\0LingXiSourcePromptCommit{nonce}\0");
+            let pr = format!("\0LingXiSourcePromptPr{nonce}\0");
+            if dynamic_texts
+                .iter()
+                .all(|text| !text.contains(&commit) && !text.contains(&pr))
+            {
+                return Self { commit, pr };
+            }
+        }
+        unreachable!("the prompt attribution marker namespace is unbounded")
+    }
+}
+
+fn project_prompt_with_attribution(
+    template: &str,
+    attribution: &AttributionTexts,
+    markers: &AttributionMarkers,
+) -> Utf16JsonProjection {
+    let template_units = template.encode_utf16().collect::<Vec<_>>();
+    let commit_marker = markers.commit.encode_utf16().collect::<Vec<_>>();
+    let pr_marker = markers.pr.encode_utf16().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(template_units.len());
+    let mut cursor = 0;
+    while cursor < template_units.len() {
+        if template_units[cursor..].starts_with(&commit_marker) {
+            output.extend_from_slice(&attribution.commit_units);
+            cursor += commit_marker.len();
+        } else if template_units[cursor..].starts_with(&pr_marker) {
+            output.extend_from_slice(&attribution.pr_units);
+            cursor += pr_marker.len();
+        } else {
+            output.push(template_units[cursor]);
+            cursor += 1;
+        }
+    }
+    let display = String::from_utf16_lossy(&output);
+    Utf16JsonProjection::root_string(display, output)
+        .expect("generated prompt text is a valid exact root string")
 }
 
 /// The settings arms of `$gs()`, pure so the ARM ORDER is testable without a
@@ -270,22 +333,25 @@ fn attribution_texts() -> (String, String) {
 /// * `?? n` is null-coalescing, so an explicit EMPTY STRING is kept as a value
 ///   — that is how a user disables one trailer while keeping the other.
 fn resolve_attribution(
-    commit: Option<String>,
-    pr: Option<String>,
+    commit: Option<Utf16JsonProjection>,
+    pr: Option<Utf16JsonProjection>,
     include_co_authored_by: Option<bool>,
     default_commit: &str,
     default_pr: &str,
-) -> (String, String) {
+) -> (Utf16JsonProjection, Utf16JsonProjection) {
     if commit.is_some() || pr.is_some() {
         return (
-            commit.unwrap_or_else(|| default_commit.to_string()),
-            pr.unwrap_or_else(|| default_pr.to_string()),
+            commit.unwrap_or_else(|| Utf16JsonProjection::from(default_commit)),
+            pr.unwrap_or_else(|| Utf16JsonProjection::from(default_pr)),
         );
     }
     if include_co_authored_by == Some(false) {
-        return (String::new(), String::new());
+        return (Utf16JsonProjection::from(""), Utf16JsonProjection::from(""));
     }
-    (default_commit.to_string(), default_pr.to_string())
+    (
+        Utf16JsonProjection::from(default_commit),
+        Utf16JsonProjection::from(default_pr),
+    )
 }
 
 // ===== Sandbox section ======================================================
@@ -647,7 +713,11 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
 /// The `ant` undercover/skills branches are dropped. Returns an empty string
 /// when [`should_include_git_instructions`] is false (matching the TS
 /// `undercoverSection` early return, which is empty on the external path).
-fn commit_and_pr_instructions() -> String {
+fn commit_and_pr_instructions(
+    precommit_suggestion: &str,
+    attribution: &AttributionTexts,
+    markers: &AttributionMarkers,
+) -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
@@ -660,21 +730,30 @@ fn commit_and_pr_instructions() -> String {
     // Note the THREE-space indent on both commit slots — the oracle indents them
     // to match the surrounding numbered-step / HEREDOC body, and the PR footer is
     // NOT indented.
-    let (commit_attribution, pr_attribution) = attribution_texts();
-    let commit_step_suffix = if commit_attribution.is_empty() {
+    let commit_marker = if attribution.commit_units.is_empty() {
+        String::new()
+    } else {
+        markers.commit.clone()
+    };
+    let pr_marker = if attribution.pr_units.is_empty() {
+        String::new()
+    } else {
+        markers.pr.clone()
+    };
+    let commit_step_suffix = if commit_marker.is_empty() {
         ".".to_string()
     } else {
-        format!(" ending with:\n   {commit_attribution}")
+        format!(" ending with:\n   {commit_marker}")
     };
-    let commit_heredoc_suffix = if commit_attribution.is_empty() {
+    let commit_heredoc_suffix = if commit_marker.is_empty() {
         String::new()
     } else {
-        format!("\n\n   {commit_attribution}")
+        format!("\n\n   {commit_marker}")
     };
-    let pr_body_suffix = if pr_attribution.is_empty() {
+    let pr_body_suffix = if pr_marker.is_empty() {
         String::new()
     } else {
-        format!("\n\n{pr_attribution}")
+        format!("\n\n{pr_marker}")
     };
 
     // `r=tH()?$F:_U`: the task-management tool name is `TaskCreate` when V2
@@ -734,7 +813,7 @@ git commit -m \"$(cat <<'EOF'
    )\"
 </example>
 
-# Creating pull requests
+{PRECOMMIT_SUGGESTION}# Creating pull requests
 Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
 
 IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
@@ -772,6 +851,14 @@ Important:
         .replace("{COMMIT_STEP_SUFFIX}", &commit_step_suffix)
         .replace("{COMMIT_HEREDOC_SUFFIX}", &commit_heredoc_suffix)
         .replace("{PR_BODY_SUFFIX}", &pr_body_suffix)
+        .replace(
+            "{PRECOMMIT_SUGGESTION}",
+            &if precommit_suggestion.is_empty() {
+                String::new()
+            } else {
+                format!("{precommit_suggestion}\n\n")
+            },
+        )
 }
 
 // ===== Public entry point ===================================================
@@ -781,7 +868,18 @@ Important:
 /// `sandbox` drives [`sandbox_section`]; pass the live
 /// `BuiltinToolContext::sandbox_runtime`.
 #[must_use]
-pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
+pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> Utf16JsonProjection {
+    simple_prompt_with_precommit(sandbox, "")
+}
+
+/// Build the verbose Bash description with the session's precommit guidance.
+pub(crate) fn simple_prompt_with_precommit(
+    sandbox: &SandboxRuntimeConfig,
+    precommit_suggestion: &str,
+) -> Utf16JsonProjection {
+    let attribution = attribution_texts();
+    let sandbox_text = sandbox_section(sandbox);
+    let markers = AttributionMarkers::choose(&[precommit_suggestion, &sandbox_text]);
     let max_timeout_ms = bash_max_timeout_ms();
     let default_timeout_ms = bash_default_timeout_ms();
 
@@ -835,9 +933,12 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
         Bullet::Item("Always quote file paths that contain spaces with double quotes in your command (e.g., cd \"path with spaces/file.txt\")".into()),
         Bullet::Item("Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it. In particular, never prepend `cd <current-directory>` to a `git` command \u{2014} `git` already operates on the current working tree, and the compound triggers a permission prompt.".into()),
         Bullet::Item(format!(
-            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes).",
+            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes). With `run_in_background` the timeout is instead how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}ms / {} minutes, max {}ms / {} hours); at that limit it is stopped and you are notified.",
             max_timeout_ms / 60_000,
-            default_timeout_ms / 60_000
+            default_timeout_ms / 60_000,
+            BASH_BACKGROUND_DEFAULT_TIMEOUT_MS / 60_000,
+            bash_background_max_timeout_ms(),
+            bash_background_max_timeout_ms() / 3_600_000
         )),
     ];
     if let Some(note) = background_note {
@@ -863,15 +964,16 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     lines.push(String::new());
     lines.push("# Instructions".into());
     lines.extend(prepend_bullets(&instruction_items));
-    lines.push(sandbox_section(sandbox));
+    lines.push(sandbox_text);
 
-    let git = commit_and_pr_instructions();
+    let git = commit_and_pr_instructions(precommit_suggestion, &attribution, &markers);
     if !git.is_empty() {
         lines.push(String::new());
         lines.push(git);
     }
 
-    lines.join("\n")
+    let template = lines.join("\n");
+    project_prompt_with_attribution(&template, &attribution, &markers)
 }
 
 // ===== CONCISE (current-gen) variant ========================================
@@ -908,32 +1010,37 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
 ///   appended to the `- Commit or push only when the user asks…` bullet as
 ///   `${a?`\n${a}`:""}`. The attribution VALUE is NOT indented — it sits at
 ///   column 0 on its own line under each bullet.
-fn concise_git_section() -> String {
+fn concise_git_section(
+    precommit_suggestion: &str,
+    attribution: &AttributionTexts,
+    markers: &AttributionMarkers,
+) -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
-    // `c`/`a`/`l` (pre-ship gate, `bash_lean` extras) are all empty in the
-    // shipped build, so the section is the three fixed bullets plus the
-    // attribution block.
     let mut section = "# Git\n\
      - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
      - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
      - Commit or push only when the user asks. If on the default branch, branch first."
         .to_string();
 
-    let (commit_attribution, pr_attribution) = attribution_texts();
     let mut attribution_lines: Vec<String> = Vec::new();
-    if !commit_attribution.is_empty() {
+    if !attribution.commit_units.is_empty() {
         attribution_lines.push(format!(
-            "- End git commit messages with:\n{commit_attribution}"
+            "- End git commit messages with:\n{}",
+            markers.commit
         ));
     }
-    if !pr_attribution.is_empty() {
-        attribution_lines.push(format!("- End PR bodies with:\n{pr_attribution}"));
+    if !attribution.pr_units.is_empty() {
+        attribution_lines.push(format!("- End PR bodies with:\n{}", markers.pr));
     }
     if !attribution_lines.is_empty() {
         section.push('\n');
         section.push_str(&attribution_lines.join("\n"));
+    }
+    if !precommit_suggestion.is_empty() {
+        section.push_str("\n- ");
+        section.push_str(precommit_suggestion);
     }
     section
 }
@@ -994,7 +1101,21 @@ fn concise_git_section() -> String {
 ///
 /// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
 #[must_use]
-pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str>) -> String {
+pub fn simple_prompt_concise(
+    sandbox: &SandboxRuntimeConfig,
+    _model: Option<&str>,
+) -> Utf16JsonProjection {
+    simple_prompt_concise_with_precommit(sandbox, "")
+}
+
+/// Build the concise Bash description with the session's precommit guidance.
+pub(crate) fn simple_prompt_concise_with_precommit(
+    sandbox: &SandboxRuntimeConfig,
+    precommit_suggestion: &str,
+) -> Utf16JsonProjection {
+    let attribution = attribution_texts();
+    let sandbox_text = sandbox_section(sandbox);
+    let markers = AttributionMarkers::choose(&[precommit_suggestion, &sandbox_text]);
     // CONCISE avoid-list — claude-code 2.1.238 `hcT` picks it with the SAME
     // `VH()` (embedded-search-tools) predicate the VERBOSE builder `Yhm` uses:
     //   VH() ? "`cat`, …" : "`find`, `grep`, `cat`, …"
@@ -1030,23 +1151,23 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str
     // `s` — the detached-run bullet, present iff the background note exists.
     // `sq()` (Monitor / amber sentinel) is default-false ⇒ no Monitor clause.
     if background_usage_note().is_some() {
-        lines.push("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.".into());
+        lines.push(format!("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}, max {}); at that limit it is stopped and you are re-invoked. No `&` needed.", bash_background_max_timeout_ms()));
     }
 
     // `r=yXa()` — sandbox section (same as VERBOSE), appended when non-empty.
-    let sandbox_text = sandbox_section(sandbox);
     if !sandbox_text.is_empty() {
         lines.push(sandbox_text);
     }
 
     // `n=$Up(e)` — CONCISE git section, preceded by a blank line when non-empty.
-    let git = concise_git_section();
+    let git = concise_git_section(precommit_suggestion, &attribution, &markers);
     if !git.is_empty() {
         lines.push(String::new());
         lines.push(git);
     }
 
-    lines.join("\n")
+    let template = lines.join("\n");
+    project_prompt_with_attribution(&template, &attribution, &markers)
 }
 
 /// One lock for every test in this crate that reads or writes the
@@ -1086,11 +1207,18 @@ mod tests {
         SandboxRuntimeConfig::default()
     }
 
+    fn prompt_text(prompt: Utf16JsonProjection) -> String {
+        prompt
+            .string_at("")
+            .expect("prompt is a root string")
+            .to_owned()
+    }
+
     #[test]
     fn prompt_contains_locked_anchors() {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
 
         // Header.
         assert!(
@@ -1151,7 +1279,7 @@ mod tests {
 
         // Default (V2 tasks enabled) → "TaskCreate or Agent".
         std::env::remove_var("LINGXI_ENABLE_TASKS");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         assert!(
             p.contains("- NEVER use the TaskCreate or Agent tools"),
             "default NEVER bullet"
@@ -1167,7 +1295,7 @@ mod tests {
 
         // Defined-falsy LINGXI_ENABLE_TASKS → "TodoWrite or Agent".
         std::env::set_var("LINGXI_ENABLE_TASKS", "0");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         assert!(
             p.contains("- NEVER use the TodoWrite or Agent tools"),
             "disabled NEVER bullet"
@@ -1183,7 +1311,7 @@ mod tests {
     fn timeout_sentence_substitutes_locked_constants() {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         // 120000ms / 600000ms substituted from BASH_DEFAULT_TIMEOUT_MS /
         // BASH_MAX_TIMEOUT_MS — and the minute conversions.
         assert_eq!(crate::bash::BASH_MAX_TIMEOUT_MS, 600_000);
@@ -1199,7 +1327,7 @@ mod tests {
     #[test]
     fn tool_preference_bullets_steer_to_builtin_tools() {
         let _g = env_lock();
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         assert!(p.contains(" - File search: Use Glob (NOT find or ls)"));
         assert!(p.contains(" - Content search: Use Grep (NOT grep or rg)"));
         assert!(p.contains(" - Read files: Use Read (NOT cat/head/tail)"));
@@ -1211,7 +1339,7 @@ mod tests {
     fn background_note_absent_when_env_disabled() {
         let _g = env_lock();
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         assert!(
             !p.contains("You can use the `run_in_background` parameter"),
@@ -1226,11 +1354,12 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
-            simple_prompt(&disabled_sandbox()).contains("# Committing changes with git"),
+            prompt_text(simple_prompt(&disabled_sandbox()))
+                .contains("# Committing changes with git"),
             "git section present by default"
         );
         std::env::set_var("LINGXI_DISABLE_GIT_INSTRUCTIONS", "1");
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
             !p.contains("# Committing changes with git"),
@@ -1241,7 +1370,7 @@ mod tests {
     #[test]
     fn sandbox_section_absent_when_disabled() {
         let _g = env_lock();
-        let p = simple_prompt(&disabled_sandbox());
+        let p = prompt_text(simple_prompt(&disabled_sandbox()));
         assert!(
             !p.contains("## Command sandbox"),
             "sandbox section should be absent when sandbox disabled"
@@ -1260,7 +1389,7 @@ mod tests {
             Some("claude-opus-4-8"),
             Some("claude-fable-5-1"),
         ] {
-            let p = simple_prompt_concise(&disabled_sandbox(), model);
+            let p = prompt_text(simple_prompt_concise(&disabled_sandbox(), model));
             assert!(p.contains(bullet), "missing for model {model:?}");
             assert!(
                 p.contains("IMPORTANT: Avoid using this tool"),
@@ -1275,7 +1404,10 @@ mod tests {
         // the non-embedded branch (Glob/Grep are real tools), so both prompts
         // must carry the find/grep-INCLUSIVE list.
         let long = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
-        let p = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
+        let p = prompt_text(simple_prompt_concise(
+            &disabled_sandbox(),
+            Some("claude-opus-5[1m]"),
+        ));
         assert!(
             p.contains(long),
             "concise avoid-list must include find/grep"
@@ -1301,7 +1433,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
         assert!(p.contains("## Command sandbox"), "sandbox section missing");
         assert!(
             p.contains("By default, your command will be run in a sandbox."),
@@ -1335,7 +1467,7 @@ mod tests {
             allow_unsandboxed_commands: true,
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
         assert!(
             p.contains("You should always default to running commands within the sandbox."),
             "allow-unsandboxed override branch missing"
@@ -1359,7 +1491,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
         assert!(
             p.contains("\"read\":{\"denyOnly\":[\"/etc\"],\"allowWithinDeny\":[\"/etc/hosts\"]}"),
             "read object should carry denyOnly then allowWithinDeny in order; got:\n{p}"
@@ -1374,7 +1506,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p2 = simple_prompt(&cfg2);
+        let p2 = prompt_text(simple_prompt(&cfg2));
         assert!(
             !p2.contains("allowWithinDeny"),
             "allowWithinDeny must be absent when allow_read empty; got:\n{p2}"
@@ -1430,7 +1562,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
         // Six lists × one marker each (allowedHosts no longer render).
         assert_eq!(
             p.matches("... and 10 more (truncated for prompt size)")
@@ -1459,7 +1591,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
         assert!(
             p.contains("\"deniedHosts\":[\"b.com\"],\"allowUnixSockets\":[\"/s\"]"),
             "network keys must be deniedHosts,allowUnixSockets in order; got:\n{p}"
@@ -1478,7 +1610,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p2 = simple_prompt(&cfg2);
+        let p2 = prompt_text(simple_prompt(&cfg2));
         assert!(
             !p2.contains("deniedHosts"),
             "deniedHosts must be absent when denied_domains empty; got:\n{p2}"
@@ -1509,7 +1641,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let p = simple_prompt(&cfg);
+        let p = prompt_text(simple_prompt(&cfg));
 
         match prior {
             Some(v) => std::env::set_var("LINGXI_TMPDIR", v),
@@ -1535,7 +1667,7 @@ mod tests {
             allow_unsandboxed_commands: false,
             ..Default::default()
         };
-        let p = simple_prompt(&disabled);
+        let p = prompt_text(simple_prompt(&disabled));
         assert!(
             p.contains("All commands MUST run in sandbox mode"),
             "policy-disabled branch missing when allow_unsandboxed_commands=false; got:\n{p}"
@@ -1547,7 +1679,7 @@ mod tests {
             allow_unsandboxed_commands: true,
             ..Default::default()
         };
-        let p2 = simple_prompt(&allowed);
+        let p2 = prompt_text(simple_prompt(&allowed));
         assert!(
             p2.contains("You should always default to running commands within the sandbox."),
             "default-to-sandbox branch missing when allow_unsandboxed_commands=true; got:\n{p2}"
@@ -1561,13 +1693,34 @@ mod tests {
         assert_eq!(out, vec![" - top".to_string(), "  - sub".to_string()]);
     }
 
+    #[test]
+    fn prompt_projection_preserves_exact_attribution_units_at_repeated_slots() {
+        let units = vec![b'x' as u16, 0xd800, b'y' as u16];
+        let commit =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let attribution = AttributionTexts {
+            commit_units: commit.string_units("").unwrap(),
+            pr_units: Vec::new(),
+        };
+        let markers = AttributionMarkers::choose(&[]);
+        let template = format!("start {} middle {} end", markers.commit, markers.commit);
+        let rendered = project_prompt_with_attribution(&template, &attribution, &markers);
+        let mut expected = "start ".encode_utf16().collect::<Vec<_>>();
+        expected.extend_from_slice(&units);
+        expected.extend(" middle ".encode_utf16());
+        expected.extend_from_slice(&units);
+        expected.extend(" end".encode_utf16());
+        assert_eq!(rendered.string_units(""), Some(expected));
+    }
+
     /// With no settings at all, both trailers keep their defaults — the arm the
     /// port has always had, and the one every other test here depends on.
     #[test]
     fn no_attribution_settings_keeps_both_defaults() {
         let (commit, pr) = resolve_attribution(None, None, None, "COMMIT", "PR");
-        assert_eq!(commit, "COMMIT");
-        assert_eq!(pr, "PR");
+        assert_eq!(commit.string_at(""), Some("COMMIT"));
+        assert_eq!(pr.string_at(""), Some("PR"));
     }
 
     /// `{ commit: i.commit ?? n, pr: i.pr ?? r }` — naming ONE field overrides
@@ -1576,12 +1729,16 @@ mod tests {
     #[test]
     fn naming_one_trailer_leaves_the_other_at_its_default() {
         let (commit, pr) = resolve_attribution(Some("mine".into()), None, None, "COMMIT", "PR");
-        assert_eq!(commit, "mine");
-        assert_eq!(pr, "PR", "an unnamed trailer must not be erased");
+        assert_eq!(commit.string_at(""), Some("mine"));
+        assert_eq!(
+            pr.string_at(""),
+            Some("PR"),
+            "an unnamed trailer must not be erased"
+        );
 
         let (commit, pr) = resolve_attribution(None, Some("mine".into()), None, "COMMIT", "PR");
-        assert_eq!(commit, "COMMIT");
-        assert_eq!(pr, "mine");
+        assert_eq!(commit.string_at(""), Some("COMMIT"));
+        assert_eq!(pr.string_at(""), Some("mine"));
     }
 
     /// `?? ` is null-coalescing, so an explicit EMPTY STRING is a VALUE, not an
@@ -1590,9 +1747,23 @@ mod tests {
     /// the direction that keeps emitting the trailer.
     #[test]
     fn an_empty_string_disables_just_that_trailer() {
-        let (commit, pr) = resolve_attribution(Some(String::new()), None, None, "COMMIT", "PR");
-        assert_eq!(commit, "", "an explicit empty commit trailer is honoured");
-        assert_eq!(pr, "PR", "and does not touch the PR line");
+        let (commit, pr) = resolve_attribution(
+            Some(Utf16JsonProjection::from("")),
+            None,
+            None,
+            "COMMIT",
+            "PR",
+        );
+        assert_eq!(
+            commit.string_at(""),
+            Some(""),
+            "an explicit empty commit trailer is honoured"
+        );
+        assert_eq!(
+            pr.string_at(""),
+            Some("PR"),
+            "and does not touch the PR line"
+        );
     }
 
     /// `if (o.includeCoAuthoredBy === !1) return { commit: "", pr: "" }` — the
@@ -1601,13 +1772,22 @@ mod tests {
     #[test]
     fn include_co_authored_by_false_empties_both_but_unset_does_not() {
         let (commit, pr) = resolve_attribution(None, None, Some(false), "COMMIT", "PR");
-        assert_eq!((commit.as_str(), pr.as_str()), ("", ""));
+        assert_eq!(
+            (commit.string_at(""), pr.string_at("")),
+            (Some(""), Some(""))
+        );
 
         let (commit, pr) = resolve_attribution(None, None, None, "COMMIT", "PR");
-        assert_eq!((commit.as_str(), pr.as_str()), ("COMMIT", "PR"));
+        assert_eq!(
+            (commit.string_at(""), pr.string_at("")),
+            (Some("COMMIT"), Some("PR"))
+        );
 
         let (commit, pr) = resolve_attribution(None, None, Some(true), "COMMIT", "PR");
-        assert_eq!((commit.as_str(), pr.as_str()), ("COMMIT", "PR"));
+        assert_eq!(
+            (commit.string_at(""), pr.string_at("")),
+            (Some("COMMIT"), Some("PR"))
+        );
     }
 
     /// ARM ORDER: the object is tested FIRST, so a named trailer still applies
@@ -1619,11 +1799,13 @@ mod tests {
         let (commit, pr) =
             resolve_attribution(Some("mine".into()), None, Some(false), "COMMIT", "PR");
         assert_eq!(
-            commit, "mine",
+            commit.string_at(""),
+            Some("mine"),
             "an explicit trailer survives the coarse switch"
         );
         assert_eq!(
-            pr, "PR",
+            pr.string_at(""),
+            Some("PR"),
             "and the unnamed one falls back to its DEFAULT, not to empty"
         );
     }

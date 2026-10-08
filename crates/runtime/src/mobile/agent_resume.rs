@@ -11,7 +11,7 @@ impl lingxi_core::host::fork_resume_gate::ForkResumeGate for MobileForkResumeGat
     async fn check_resume(
         &self,
         agent_id: lingxi_core::types::AgentId,
-        task_forked_skill_name: Option<&str>,
+        task_forked_skill_name: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<(), String> {
         let transcript = self
             .spawner

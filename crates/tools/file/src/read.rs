@@ -9,6 +9,7 @@
 //!   [`format_binary`]).
 
 use crate::shared::{decode_utf8_strict, looks_binary, NUL_SCAN_WINDOW};
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -31,7 +32,7 @@ use tool_api::tool_trait::{
 };
 use tool_api::util::ids::ulid_or_uuid;
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -373,7 +374,7 @@ async fn read_text_range_streaming<R: Read>(
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|error| ToolError::Io(error.to_string()))?;
+            .map_err(|error| ToolError::Io(error.to_string().into()))?;
         if n == 0 {
             break;
         }
@@ -383,13 +384,14 @@ async fn read_text_range_streaming<R: Read>(
         let scan = nul_scan_remaining.min(n);
         if scan > 0 {
             if looks_binary(&chunk[..scan]) {
-                return Err(ToolError::Io(format_binary(canon)));
+                return Err(ToolError::Io(format_binary(canon).into()));
             }
             nul_scan_remaining -= scan;
         }
 
-        validate_utf8_stream_chunk(&mut utf8_tail, chunk)
-            .map_err(|()| ToolError::Io(format!("File {} is not valid UTF-8", canon.display())))?;
+        validate_utf8_stream_chunk(&mut utf8_tail, chunk).map_err(|()| {
+            ToolError::Io(format!("File {} is not valid UTF-8", canon.display()).into())
+        })?;
 
         for &byte in chunk {
             let selecting = current_line >= offset && current_line < end_line;
@@ -397,17 +399,18 @@ async fn read_text_range_streaming<R: Read>(
                 selected.push(byte);
                 selected_line_bytes += 1;
                 if selected_line_bytes > max_line_bytes {
-                    return Err(ToolError::Io(format_line_too_long(canon, current_line)));
+                    return Err(ToolError::Io(
+                        format_line_too_long(canon, current_line).into(),
+                    ));
                 }
                 if selected.len() > max_selected_bytes {
                     let estimate = u64::try_from(selected.len())
                         .unwrap_or(u64::MAX)
                         .saturating_add(bytes_per_token / 2)
                         / bytes_per_token;
-                    return Err(ToolError::Io(format_max_tokens_exceeded(
-                        estimate,
-                        max_output_tokens,
-                    )));
+                    return Err(ToolError::Io(
+                        format_max_tokens_exceeded(estimate, max_output_tokens).into(),
+                    ));
                 }
             }
             if byte == b'\n' {
@@ -422,17 +425,17 @@ async fn read_text_range_streaming<R: Read>(
     }
 
     if !utf8_tail.is_empty() {
-        return Err(ToolError::Io(format!(
-            "File {} is not valid UTF-8",
-            canon.display()
-        )));
+        return Err(ToolError::Io(
+            format!("File {} is not valid UTF-8", canon.display()).into(),
+        ));
     }
     if selected_line_bytes > 0 && current_line >= offset && current_line < end_line {
         read_lines += 1;
     }
 
-    let content = String::from_utf8(selected)
-        .map_err(|_| ToolError::Io(format!("File {} is not valid UTF-8", canon.display())))?;
+    let content = String::from_utf8(selected).map_err(|_| {
+        ToolError::Io(format!("File {} is not valid UTF-8", canon.display()).into())
+    })?;
     let total_lines = if total_bytes_read == 0 {
         0
     } else {
@@ -748,7 +751,7 @@ pub(crate) const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working dir
 /// [`suggest_path_under_cwd`] prefix comparison both use the same resolved form.
 #[must_use]
 pub(crate) fn file_not_found_message(
-    canon: &std::path::Path,
+    requested_path: &std::path::Path,
     live_cwd: &std::path::Path,
 ) -> String {
     let cwd = std::fs::canonicalize(live_cwd).unwrap_or_else(|_| live_cwd.to_path_buf());
@@ -758,9 +761,9 @@ pub(crate) fn file_not_found_message(
     );
     // The cwd "dropped repo folder" suggestion takes PRECEDENCE over the
     // same-stem sibling. Both suffixes are the VERBATIM `" Did you mean {x}?"`.
-    if let Some(cwd_suggestion) = suggest_path_under_cwd(canon, &cwd) {
+    if let Some(cwd_suggestion) = suggest_path_under_cwd(requested_path, &cwd) {
         message.push_str(&format!(" Did you mean {cwd_suggestion}?"));
-    } else if let Some(similar) = find_similar_file(canon) {
+    } else if let Some(similar) = find_similar_file(requested_path) {
         message.push_str(&format!(" Did you mean {similar}?"));
     }
     message
@@ -965,8 +968,7 @@ pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The conte
 /// emits in 2.1.220 (renderer @235742950:
 /// `content: e.source==="seeded" ? vou(...) : Eou()`). The em-dash is U+2014,
 /// matching the binary literal exactly.
-pub const FILE_UNCHANGED_SHORT: &str =
-    "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead.";
+pub const FILE_UNCHANGED_SHORT: &str = "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead.";
 
 /// `Tou` (2.1.220 binary offset 229141864) — the constant PREFIX of the SEEDED
 /// dedup stub built by
@@ -1096,6 +1098,88 @@ pub fn add_line_numbers(content: &str, start_line: u64) -> String {
         .join("\n")
 }
 
+/// Source-preserving counterpart of [`add_line_numbers`]. Each line keeps its
+/// original UTF-16 units while generated line numbers and separators are added.
+#[must_use]
+pub fn add_line_numbers_source(
+    content: &Utf16JsonProjection,
+    start_line: u64,
+) -> Utf16JsonProjection {
+    let Some(units) = content.string_units("") else {
+        return Utf16JsonProjection::from("");
+    };
+    if units.is_empty() {
+        return Utf16JsonProjection::from("");
+    }
+    let mut output = Vec::with_capacity(units.len() + 16);
+    for (offset, line) in units.split(|unit| *unit == b'\n' as u16).enumerate() {
+        if offset > 0 {
+            output.push(b'\n' as u16);
+        }
+        let line_number = start_line.saturating_add(offset as u64);
+        output.extend(line_number.to_string().encode_utf16());
+        output.push(b'\t' as u16);
+        let line = line.strip_suffix(&[b'\r' as u16]).unwrap_or(line);
+        output.extend_from_slice(line);
+    }
+    let display = String::from_utf16_lossy(&output);
+    Utf16JsonProjection::root_string(display, output)
+        .expect("display text is derived from the same UTF-16 units")
+}
+
+/// Re-run Read's model-text mapper for a result supplied by a Mod. The result
+/// is already structured; this path must not read the file or update read state.
+fn map_read_result_text(data: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    match data.string_at("/type")? {
+        "text" => {
+            let content = data.subprojection("/file/content").ok()?;
+            let content_units = content.string_units("")?;
+            let start = crate::unsigned_integer_at(data, "/file/startLine")?;
+            let total = crate::unsigned_integer_at(data, "/file/totalLines")?;
+            let count = crate::unsigned_integer_at(data, "/file/numLines")?;
+            Some(if content_units.is_empty() {
+                if count >= 1 && total > 1 {
+                    format!("{start}\t").into()
+                } else if count >= 1 || total == 0 {
+                    EMPTY_FILE_WARNING.into()
+                } else {
+                    format_offset_beyond_eof(start, total).into()
+                }
+            } else {
+                add_line_numbers_source(&content, start)
+            })
+        }
+        "file_unchanged" => Some(if data.string_at("/source") == Some("seeded") {
+            format_file_unchanged_seeded(std::path::Path::new(data.string_at("/file/filePath")?))
+                .into()
+        } else {
+            FILE_UNCHANGED_SHORT.into()
+        }),
+        "notebook" => crate::notebook_read::render_cells_model_text_source(
+            &data.subprojection("/file/cells").ok()?,
+        ),
+        "image" => Some("[Image content provided in tool result.]".into()),
+        "pdf" => Some(
+            format!(
+                "PDF file read: {} ({})",
+                data.string_at("/file/filePath")?,
+                format_file_size(crate::unsigned_integer_at(data, "/file/originalSize")?)
+            )
+            .into(),
+        ),
+        "parts" => Some(
+            format!(
+                "PDF pages extracted: {} page(s) from {} ({})",
+                crate::unsigned_integer_at(data, "/file/count")?,
+                data.string_at("/file/filePath")?,
+                format_file_size(crate::unsigned_integer_at(data, "/file/originalSize")?)
+            )
+            .into(),
+        ),
+        _ => None,
+    }
+}
+
 /// `FileReadTool` — reads a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileReadTool {
     ctx: BuiltinToolContext,
@@ -1134,6 +1218,18 @@ fn open_rooted_file(
         ));
     };
     lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+}
+
+fn check_read_cancelled(ctx: &ToolUseContext) -> Result<(), ToolError> {
+    if ctx
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        Err(ToolError::Aborted)
+    } else {
+        Ok(())
+    }
 }
 
 fn symlink_resolution_changed_message(path: &str) -> String {
@@ -1374,7 +1470,7 @@ impl FileReadTool {
     async fn file_not_found(
         &self,
         invocation_id: &str,
-        canon: &std::path::Path,
+        requested_path: &std::path::Path,
         err: &std::io::Error,
     ) -> Result<ToolCallResult, ToolError> {
         // Faithful NotFound gate: only ENOENT gets the cwd-note message (TS
@@ -1382,13 +1478,15 @@ impl FileReadTool {
         // the NotFound branch; this makes the contract explicit + bulletproof.
         if err.kind() != std::io::ErrorKind::NotFound {
             self.emit_failed(invocation_id, "io_metadata").await;
-            return Err(ToolError::Io(err.to_string()));
+            return Err(ToolError::Io(err.to_string().into()));
         }
         self.emit_failed(invocation_id, "io_metadata").await;
         // `getCwd()` analog: the LIVE cwd (`Ct()`), realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
         let live_cwd = self.cwd_now();
-        Err(ToolError::Io(file_not_found_message(canon, &live_cwd)))
+        Err(ToolError::Io(
+            file_not_found_message(requested_path, &live_cwd).into(),
+        ))
     }
 
     /// Process an image file and return it as multimodal content. The pixels
@@ -1413,20 +1511,22 @@ impl FileReadTool {
         // are.
         if bytes.is_empty() {
             self.emit_failed(invocation_id, "image_empty").await;
-            return Err(ToolError::Io(crate::image_read::format_image_empty(canon)));
+            return Err(ToolError::Io(
+                crate::image_read::format_image_empty(canon).into(),
+            ));
         }
         if crate::image_read::sniff_image_media_type(&bytes).is_none() {
             self.emit_failed(invocation_id, "image_bad_magic").await;
-            return Err(ToolError::Io(crate::image_read::format_image_bad_magic(
-                canon, &bytes,
-            )));
+            return Err(ToolError::Io(
+                crate::image_read::format_image_bad_magic(canon, &bytes).into(),
+            ));
         }
 
         let processed = match crate::image_read::process_image(bytes) {
             Ok(p) => p,
             Err(e) => {
                 self.emit_failed(invocation_id, "image_process").await;
-                return Err(ToolError::Io(e));
+                return Err(ToolError::Io(e.into()));
             }
         };
 
@@ -1478,16 +1578,17 @@ impl FileReadTool {
             });
         }
         Ok(ToolCallResult {
-            data: serde_json::json!({ "type": "image", "file": file }),
+            data: crate::generated_result(&serde_json::json!({ "type": "image", "file": file })),
             // The image reaches the model INSIDE the tool_result content array
             // (the dispatch loop derives `content_blocks` from `data` — the port
             // of claude's result-mapper `case "image"`), so this text is
             // display-only (TUI/transcript); claude's wire form has no text.
-            model_content: Some("[Image content provided in tool result.]".to_string()),
+            model_content: Some("[Image content provided in tool result.]".into()),
             new_messages,
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 
@@ -1508,7 +1609,9 @@ impl FileReadTool {
                 Ok(p) => p,
                 Err(e) => {
                     self.emit_failed(invocation_id, e.telemetry_code()).await;
-                    return Err(ToolError::Io(e.message(&canon.display().to_string())));
+                    return Err(ToolError::Io(
+                        e.message(&canon.display().to_string()).into(),
+                    ));
                 }
             };
         let (sources, data, model_content) =
@@ -1516,7 +1619,7 @@ impl FileReadTool {
                 Ok(v) => v,
                 Err(e) => {
                     self.emit_failed(invocation_id, "pdf_page_encode").await;
-                    return Err(ToolError::Io(e));
+                    return Err(ToolError::Io(e.into()));
                 }
             };
         let msg = lingxi_core::types::ConversationMessage::user_with_images(
@@ -1531,12 +1634,13 @@ impl FileReadTool {
         )
         .await;
         Ok(ToolCallResult {
-            data,
-            model_content: Some(model_content),
+            data: crate::generated_result(&data),
+            model_content: Some(model_content.into()),
             new_messages: vec![msg],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 
@@ -1574,17 +1678,19 @@ impl FileReadTool {
         // the page-count gate) and, if small + supported, inlines garbage.
         if bytes.is_empty() {
             self.emit_failed(invocation_id, "pdf_empty").await;
-            return Err(ToolError::Io(format!(
-                "PDF file is empty: {}",
-                canon.display()
-            )));
+            return Err(ToolError::Io(
+                format!("PDF file is empty: {}", canon.display()).into(),
+            ));
         }
         if !crate::pdf_read::looks_like_pdf(&bytes) {
             self.emit_failed(invocation_id, "pdf_invalid").await;
-            return Err(ToolError::Io(format!(
-                "File is not a valid PDF (missing %PDF- header): {}",
-                canon.display()
-            )));
+            return Err(ToolError::Io(
+                format!(
+                    "File is not a valid PDF (missing %PDF- header): {}",
+                    canon.display()
+                )
+                .into(),
+            ));
         }
 
         // Model comes from the per-call `ToolUseContext` (`ctx.options.
@@ -1603,7 +1709,7 @@ impl FileReadTool {
                 self.emit_failed(invocation_id, "pdf_pages_invalid").await;
                 return Err(ToolError::Io(format!(
                     "Invalid pages parameter: \"{p}\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed."
-                )));
+                ).into()));
             };
             // Open-ended `"N-"` ranges are treated as exceeding the cap (TS
             // resolves the open end against the doc's page count, which can be
@@ -1618,7 +1724,7 @@ impl FileReadTool {
                 self.emit_failed(invocation_id, "pdf_pages_too_many").await;
                 return Err(ToolError::Io(format!(
                     "Page range \"{p}\" exceeds maximum of {PDF_MAX_PAGES_PER_READ} pages per request. Please use a smaller range."
-                )));
+                ).into()));
             }
             #[cfg(feature = "pdf-render")]
             {
@@ -1642,7 +1748,7 @@ impl FileReadTool {
                 // page extraction, so it has no analogous string. Desktop builds
                 // enable `pdf-render` and never reach this.
                 return Err(ToolError::Io(
-                    "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
+                    "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string().into(),
                 ));
             }
         }
@@ -1655,7 +1761,7 @@ impl FileReadTool {
                 self.emit_failed(invocation_id, "pdf_too_many_pages").await;
                 return Err(ToolError::Io(format!(
                     "This PDF has {count} pages, which is too many to read at once. Use the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Maximum {PDF_MAX_PAGES_PER_READ} pages per request."
-                )));
+                ).into()));
             }
         }
 
@@ -1665,17 +1771,20 @@ impl FileReadTool {
             self.emit_failed(invocation_id, "pdf_unsupported_model")
                 .await;
             return Err(ToolError::Io(
-                "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu.".to_string(),
+                "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu.".to_string().into(),
             ));
         }
         // Supported model: inline up to PDF_TARGET_RAW_SIZE (20 MB), else
         // too_large (claude-code readPDF, utils/pdf.ts:60-68).
         if original_size > crate::pdf_read::PDF_TARGET_RAW_SIZE {
             self.emit_failed(invocation_id, "pdf_too_large").await;
-            return Err(ToolError::Io(format!(
-                "PDF file exceeds maximum allowed size of {}.",
-                format_file_size(crate::pdf_read::PDF_TARGET_RAW_SIZE)
-            )));
+            return Err(ToolError::Io(
+                format!(
+                    "PDF file exceeds maximum allowed size of {}.",
+                    format_file_size(crate::pdf_read::PDF_TARGET_RAW_SIZE)
+                )
+                .into(),
+            ));
         }
 
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -1707,25 +1816,26 @@ impl FileReadTool {
         Ok(ToolCallResult {
             // binary `{type:"pdf", file:{filePath, base64, originalSize}}`; the
             // model receives the PDF as a document block via `new_messages`.
-            data: serde_json::json!({
+            data: crate::generated_result(&serde_json::json!({
                 "type": "pdf",
                 "file": {
                     "filePath": canon.display().to_string(),
                     "base64": data,
                     "originalSize": original_size,
                 },
-            }),
-            model_content: Some(model_content),
+            })),
+            model_content: Some(model_content.into()),
             new_messages: vec![msg],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["file_path"],
@@ -1735,7 +1845,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "limit":  { "type": "integer", "minimum": 1, "description": "The number of lines to read. Only provide if the file is too large to read at once." },
             "pages":  { "type": "string", "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request." }
         }
-    })
+    }))
 });
 
 #[async_trait]
@@ -1746,11 +1856,17 @@ impl Tool for FileReadTool {
 
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("read files, images, PDFs, notebooks")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("read files, images, PDFs, notebooks".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        map_read_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -1758,14 +1874,18 @@ impl Tool for FileReadTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -1776,13 +1896,17 @@ impl Tool for FileReadTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // Byte-locked VERBATIM to claude-code `DESCRIPTION`
         // (`FileReadTool/prompt.ts:12`).
         "Read a file from the local filesystem.".to_string()
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // Model-gated, mirroring claude-code `Yhi(e,…){if(Dh(e))return SHORT;
         // return LONG}` (binary offset 195602689). `Dh(model)` selects the terse
         // variant for current-gen default models (opus-4-8 / fable-5 / mythos-5)
@@ -1790,43 +1914,32 @@ impl Tool for FileReadTool {
         // models and `None` (the `Dh(undefined)` path) get the verbose one. The
         // predicate is shared with TodoWrite via `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            READ_PROMPT_SHORT.to_string()
+            READ_PROMPT_SHORT.into()
         } else {
-            READ_PROMPT_LONG.to_string()
+            READ_PROMPT_LONG.into()
         }
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
-        input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
+        crate::input_string(input, "file_path").map(PathBuf::from)
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        // `ctx` is consumed only by the PDF dispatch (model id for PDF support
-        // gating), which is `pdf-read`-feature-gated. Without that feature the
-        // text/image paths never read `ctx`; discard it so the default build does
-        // not warn. (The former cyber-risk reminder used to read it here; that was
-        // removed per parity verdict 12/14.)
-        #[cfg(not(feature = "pdf-read"))]
-        let _ = &ctx;
         let invocation_id = ulid_or_uuid();
-        let file_path = input
-            .get("file_path")
-            .and_then(Value::as_str)
+        let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
+        check_read_cancelled(&ctx)?;
         // Raw input values, preserved verbatim for the read-state registry
         // (TS `readFileState.set` stores the `offset`/`limit` as provided —
         // `undefined` when absent). `offset` below defaults to `1` only for
         // slicing; the registry records the un-defaulted `Option`.
-        let input_offset = input.get("offset").and_then(Value::as_u64);
-        let input_limit = input.get("limit").and_then(Value::as_u64);
+        let input_offset = crate::input_u64(&input, "offset");
+        let input_limit = crate::input_u64(&input, "limit");
         let offset = input_offset.unwrap_or(1);
         let limit = input_limit;
 
@@ -1844,19 +1957,23 @@ impl Tool for FileReadTool {
         } else {
             None
         };
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        // Native `VE(file_path)` resolves against the current session cwd and
+        // normalizes dot segments without following symlinks. Use that lexical
+        // route as the read-state key and capture it beside any translated host
+        // spelling. `canon` below remains the permission/I/O identity.
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, false) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), false) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::InvalidInput(message));
+                return Err(ToolError::InvalidInput(message.into()));
             }
         };
-        self.emit_started(&invocation_id, &path).await;
+        self.emit_started(&invocation_id, &requested_path).await;
 
         // #11: refuse blocking device/special files (claude-code `$3p` in
         // validateInput, BEFORE symlink resolution). Checked on the supplied
@@ -1866,7 +1983,7 @@ impl Tool for FileReadTool {
             self.emit_failed(&invocation_id, "device_file").await;
             return Err(ToolError::InvalidInput(format!(
                 "Cannot read '{file_path}': this device file would block or produce infinite output."
-            )));
+            ).into()));
         }
 
         // `tengu_file_read_limits_override` (`FileReadTool.ts:511-516`): TS fires
@@ -1944,7 +2061,7 @@ impl Tool for FileReadTool {
                     // tries the macOS-screenshot AM/PM space variant (regular space ⇄
                     // thin space, U+202F), then reports the friendly message if that
                     // variant is also absent.
-                    if let Some(alt) = get_alternate_screenshot_path(&canon) {
+                    if let Some(alt) = get_alternate_screenshot_path(&requested_path) {
                         if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
                             match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
                                 Ok(snapshot) => {
@@ -1957,24 +2074,24 @@ impl Tool for FileReadTool {
                                     let not_found =
                                         std::io::Error::from(std::io::ErrorKind::NotFound);
                                     return self
-                                        .file_not_found(&invocation_id, &canon, &not_found)
+                                        .file_not_found(&invocation_id, &requested_path, &not_found)
                                         .await;
                                 }
                                 Err(error) => {
                                     self.emit_failed(&invocation_id, "io_metadata").await;
-                                    return Err(ToolError::Io(error.to_string()));
+                                    return Err(ToolError::Io(error.to_string().into()));
                                 }
                             }
                         } else {
                             let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                             return self
-                                .file_not_found(&invocation_id, &canon, &not_found)
+                                .file_not_found(&invocation_id, &requested_path, &not_found)
                                 .await;
                         }
                     } else {
                         let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                         return self
-                            .file_not_found(&invocation_id, &canon, &not_found)
+                            .file_not_found(&invocation_id, &requested_path, &not_found)
                             .await;
                     }
                 }
@@ -1984,9 +2101,9 @@ impl Tool for FileReadTool {
                 ) => {
                     self.emit_failed(&invocation_id, "symlink_resolution_changed")
                         .await;
-                    return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
-                        file_path,
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        symlink_resolution_changed_message(file_path).into(),
+                    ));
                 }
                 Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile)
                     if std::path::Path::new(file_path)
@@ -1997,15 +2114,21 @@ impl Tool for FileReadTool {
                     self.emit_failed(&invocation_id, "notebook_not_regular_file")
                         .await;
                     return Err(ToolError::Io(
-                        crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
+                        crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE
+                            .to_string()
+                            .into(),
                     ));
                 }
                 Err(error) => {
                     self.emit_failed(&invocation_id, "io_metadata").await;
-                    return Err(ToolError::Io(error.to_string()));
+                    return Err(ToolError::Io(error.to_string().into()));
                 }
             }
         };
+        // Rooted filesystem operations are synchronous in this implementation.
+        // Observe cancellation immediately after they return, before parsing or
+        // writing the result into shared Read state.
+        check_read_cancelled(&ctx)?;
         let size = snapshot.size;
         // Floor-truncated mtime in ms, matching TS `Math.floor(mtimeMs)` for
         // the read-state registry (`readFileState.set`). A missing mtime
@@ -2051,7 +2174,9 @@ impl Tool for FileReadTool {
         //   * it gates on the DEFAULTED `offset` (`t===1`), not the raw
         //     `input_offset`, so an explicit `offset: 1` still dedups — whereas
         //     the non-seeded `range_match` below would refuse it.
-        if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
+        if let Some(entry) =
+            tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+        {
             // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a
             // read-state entry (the `if(m)` in claude-code), BEFORE the dedup
             // short-circuit. `priorOp` is a THREE-way (@235740900:
@@ -2073,18 +2198,19 @@ impl Tool for FileReadTool {
                 && input_limit.is_none()
                 && mtime_ms == entry.mtime_ms
             {
-                self.emit_file_read_dedup(&canon, Some("seeded")).await;
+                self.emit_file_read_dedup(&requested_path, Some("seeded"))
+                    .await;
                 self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
                     .await;
                 return Ok(ToolCallResult {
                     // binary `{type:"file_unchanged", file:{filePath:f},
                     // source:"seeded"}` (@235741583) — `f` is `fullFilePath`,
-                    // the canonicalized path on the Rust side.
-                    data: json!({
+                    // the normalized session-cwd route on the Rust side.
+                    data: crate::generated_result(&json!({
                         "type": "file_unchanged",
-                        "file": { "filePath": canon.display().to_string() },
+                        "file": { "filePath": requested_path.display().to_string() },
                         "source": "seeded",
-                    }),
+                    })),
                     // Renderer @235742950:
                     // `content = e.source==="seeded" ? vou(e.file.filePath) : Eou()`.
                     // The stub names the LEXICAL path, not `canon`. The oracle's
@@ -2096,11 +2222,12 @@ impl Tool for FileReadTool {
                     // this stub points at printed `/var/...`. Since the whole
                     // point of the stub is "see the block above", it has to name
                     // the path the block used.
-                    model_content: Some(format_file_unchanged_seeded(&path)),
+                    model_content: Some(format_file_unchanged_seeded(&requested_path).into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 });
             }
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
@@ -2110,8 +2237,8 @@ impl Tool for FileReadTool {
                 // the dedup short-circuit, before returning the `file_unchanged`
                 // stub. Metadata: `ext` only when present (the analytics ext of
                 // the resolved path). TS uses `fullFilePath` (`expandPath`); the
-                // Rust analog is the canonicalized path.
-                self.emit_file_read_dedup(&canon, None).await;
+                // Rust analog is the normalized session-cwd route.
+                self.emit_file_read_dedup(&requested_path, None).await;
                 // Behaves like the TS early return: the model sees the stub via
                 // `model_content`; the TUI payload `content` mirrors it (there
                 // is no fresh file body to render). `total_lines`/`line_range`
@@ -2124,18 +2251,19 @@ impl Tool for FileReadTool {
                     // oracle's third field `source:"seeded"` is set ONLY by the
                     // seeded branch above, so it is omitted here — matching the
                     // oracle's non-seeded return exactly.
-                    data: json!({
+                    data: crate::generated_result(&json!({
                         "type": "file_unchanged",
-                        "file": { "filePath": canon.display().to_string() },
-                    }),
+                        "file": { "filePath": file_path },
+                    })),
                     // Renderer @235742950 picks `Eou()` = `Sou` for a non-seeded
                     // `file_unchanged`. The long form `FOg` has no producer in
                     // 2.1.220 — see [`FILE_UNCHANGED_STUB`].
-                    model_content: Some(FILE_UNCHANGED_SHORT.to_string()),
+                    model_content: Some(FILE_UNCHANGED_SHORT.into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 });
             }
         }
@@ -2165,7 +2293,7 @@ impl Tool for FileReadTool {
         // the bytes then scans — here `looks_binary`).
         if has_binary_extension(&canon) && !is_image_path(&canon) && !is_pdf_path(&canon) {
             self.emit_failed(&invocation_id, "binary_file").await;
-            return Err(ToolError::Io(format_binary(&canon)));
+            return Err(ToolError::Io(format_binary(&canon).into()));
         }
 
         // FT-04: notebook stat guards. The oracle's `Sgm` dispatches the
@@ -2193,7 +2321,7 @@ impl Tool for FileReadTool {
         {
             self.emit_failed(&invocation_id, "notebook_too_large").await;
             return Err(ToolError::Io(
-                crate::notebook_read::notebook_too_large_message(),
+                crate::notebook_read::notebook_too_large_message().into(),
             ));
         }
 
@@ -2205,7 +2333,7 @@ impl Tool for FileReadTool {
         // the byte-locked template (fixture-pinned `error_template`).
         if !is_image && !is_pdf && input_limit.is_none() && size > MAX_FILE_READ_SIZE {
             self.emit_failed(&invocation_id, "file_too_large").await;
-            return Err(ToolError::Io(format_too_large(&canon, size)));
+            return Err(ToolError::Io(format_too_large(&canon, size).into()));
         }
 
         let ext = std::path::Path::new(file_path)
@@ -2260,17 +2388,17 @@ impl Tool for FileReadTool {
             {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
-                return Err(ToolError::Io(format_max_tokens_exceeded(
-                    token_estimate,
-                    max_output_tokens,
-                )));
+                return Err(ToolError::Io(
+                    format_max_tokens_exceeded(token_estimate, max_output_tokens).into(),
+                ));
             }
 
             let duration_ms = started.elapsed().as_millis() as u64;
             self.emit_completed(&invocation_id, size, duration_ms).await;
-            tool_api::read_file_state::set(
+            check_read_cancelled(&ctx)?;
+            tool_api::read_file_state::set_with_requested_aliases(
                 &self.ctx.read_file_state,
-                canon.clone(),
+                requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: slice.clone(),
                     mtime_ms,
@@ -2280,9 +2408,11 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
+                true,
+                vec![requested_path.clone(), path.clone()],
             );
             self.emit_session_file_read(
-                &canon,
+                &requested_path,
                 total_lines,
                 read_lines,
                 size,
@@ -2302,7 +2432,7 @@ impl Tool for FileReadTool {
                 add_line_numbers(&slice, offset)
             };
             let mut file = json!({
-                "filePath": canon.display().to_string(),
+                "filePath": file_path,
                 "content": std::mem::take(&mut slice),
                 "numLines": read_lines,
                 "startLine": line_range_start,
@@ -2312,12 +2442,13 @@ impl Tool for FileReadTool {
                 file["taskId"] = json!(id);
             }
             return Ok(ToolCallResult {
-                data: json!({ "type": "text", "file": file }),
-                model_content: Some(model_content),
+                data: crate::generated_result(&json!({ "type": "text", "file": file })),
+                model_content: Some(model_content.into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
 
@@ -2325,18 +2456,20 @@ impl Tool for FileReadTool {
 
         #[cfg(feature = "image-read")]
         if is_image {
-            return self
+            let result = self
                 .read_image_result(&invocation_id, &canon, bytes, size, started)
                 .await;
+            check_read_cancelled(&ctx)?;
+            if result.is_ok() {
+                ctx.nested_memory_triggers.enqueue(requested_path.clone());
+            }
+            return result;
         }
 
         #[cfg(feature = "pdf-read")]
         if is_pdf {
-            let pages = input
-                .get("pages")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            return self
+            let pages = crate::input_string(&input, "pages").map(str::to_string);
+            let result = self
                 .read_pdf_result(
                     &invocation_id,
                     &canon,
@@ -2347,22 +2480,23 @@ impl Tool for FileReadTool {
                     started,
                 )
                 .await;
+            check_read_cancelled(&ctx)?;
+            return result;
         }
 
         let head = &bytes[..bytes.len().min(NUL_SCAN_WINDOW)];
         if looks_binary(head) {
             self.emit_failed(&invocation_id, "binary_file").await;
-            return Err(ToolError::Io(format_binary(&canon)));
+            return Err(ToolError::Io(format_binary(&canon).into()));
         }
 
         let content = match decode_utf8_strict(&bytes) {
             Ok(s) => s,
             Err(_) => {
                 self.emit_failed(&invocation_id, "non_utf8").await;
-                return Err(ToolError::Io(format!(
-                    "File {} is not valid UTF-8",
-                    canon.display()
-                )));
+                return Err(ToolError::Io(
+                    format!("File {} is not valid UTF-8", canon.display()).into(),
+                ));
             }
         };
 
@@ -2382,7 +2516,7 @@ impl Tool for FileReadTool {
                 Ok(c) => c,
                 Err(e) => {
                     self.emit_failed(&invocation_id, "notebook_parse").await;
-                    return Err(ToolError::Io(e));
+                    return Err(ToolError::Io(e.into()));
                 }
             };
             let model_content = crate::notebook_read::render_cells_model_text(&cells);
@@ -2410,12 +2544,15 @@ impl Tool for FileReadTool {
             let cells_json_bytes = cells_json.len() as u64;
             if cells_json_bytes > MAX_FILE_READ_SIZE {
                 self.emit_failed(&invocation_id, "notebook_too_large").await;
-                return Err(ToolError::Io(format!(
-                    "Notebook content ({}) exceeds maximum allowed size ({}). {}",
-                    format_file_size(cells_json_bytes),
-                    format_file_size(MAX_FILE_READ_SIZE),
-                    crate::notebook_read::NOTEBOOK_JQ_GUIDANCE,
-                )));
+                return Err(ToolError::Io(
+                    format!(
+                        "Notebook content ({}) exceeds maximum allowed size ({}). {}",
+                        format_file_size(cells_json_bytes),
+                        format_file_size(MAX_FILE_READ_SIZE),
+                        crate::notebook_read::NOTEBOOK_JQ_GUIDANCE,
+                    )
+                    .into(),
+                ));
             }
 
             // Token-budget gate on the cells JSON — TS runs
@@ -2427,7 +2564,7 @@ impl Tool for FileReadTool {
             {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
-                return Err(ToolError::Io(msg));
+                return Err(ToolError::Io(msg.into()));
             }
 
             let duration_ms = started.elapsed().as_millis() as u64;
@@ -2442,9 +2579,10 @@ impl Tool for FileReadTool {
             // as the verbatim (un-defaulted) input — `None` for a full read —
             // matching `read.rs`'s text path. The stored `content` is the
             // cells JSON (so a same-range re-read dedups byte-for-byte).
-            tool_api::read_file_state::set(
+            check_read_cancelled(&ctx)?;
+            tool_api::read_file_state::set_with_requested_aliases(
                 &self.ctx.read_file_state,
-                canon.clone(),
+                requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: cells_json,
                     mtime_ms,
@@ -2454,20 +2592,25 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
+                true,
+                vec![requested_path.clone(), path.clone()],
             );
+
+            ctx.nested_memory_triggers.enqueue(requested_path.clone());
 
             return Ok(ToolCallResult {
                 // binary `{type:"notebook", file:{filePath, cells}}`; the rendered
                 // cells text rides on `model_content`.
-                data: json!({
+                data: crate::generated_result(&json!({
                     "type": "notebook",
-                    "file": { "filePath": canon.display().to_string(), "cells": cells },
-                }),
-                model_content: Some(model_content),
+                    "file": { "filePath": file_path, "cells": cells },
+                })),
+                model_content: Some(model_content.into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             });
         }
 
@@ -2531,7 +2674,7 @@ impl Tool for FileReadTool {
                     token_estimate,
                     max_output_tokens,
                     total_lines,
-                    &canon.display().to_string(),
+                    &requested_path.display().to_string(),
                 );
                 slice = trunc.content;
                 read_lines = trunc.line_count;
@@ -2539,10 +2682,9 @@ impl Tool for FileReadTool {
             } else {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded")
                     .await;
-                return Err(ToolError::Io(format_max_tokens_exceeded(
-                    token_estimate,
-                    max_output_tokens,
-                )));
+                return Err(ToolError::Io(
+                    format_max_tokens_exceeded(token_estimate, max_output_tokens).into(),
+                ));
             }
         }
 
@@ -2555,12 +2697,13 @@ impl Tool for FileReadTool {
         // limit})` (`FileReadTool.ts:1032`). `content` is the range-limited
         // slice TS stores (from `readFileInRange`), `mtime_ms` is floored, and
         // `offset`/`limit` are the verbatim (un-defaulted) input values. The
-        // key is the canonicalized absolute path. Behavior-neutral side-effect:
-        // nothing reads this map yet (staleness guards + Read dedup are later
-        // batches), so the tool's result shape is unchanged.
-        tool_api::read_file_state::set(
+        // key is Native's normalized absolute model route (`fullFilePath`).
+        // Canonical identity remains for permission and rooted I/O; the source
+        // route and translated host spelling are captured together.
+        check_read_cancelled(&ctx)?;
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: slice.clone(),
                 mtime_ms,
@@ -2587,7 +2730,11 @@ impl Tool for FileReadTool {
                 // full one.
                 is_partial_view: partial_note.is_some(),
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
+
+        ctx.nested_memory_triggers.enqueue(requested_path.clone());
 
         // `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
         // successful TEXT read, mirroring TS's site (after `readFileState.set`,
@@ -2601,7 +2748,7 @@ impl Tool for FileReadTool {
         // [`emit_session_file_read`] for the `ext` / `messageID` (omitted) /
         // session-flag handling.
         self.emit_session_file_read(
-            &canon,
+            &requested_path,
             total_lines,
             read_lines,
             content.len() as u64,
@@ -2655,7 +2802,7 @@ impl Tool for FileReadTool {
         // truncatedByTokenCap?}` — `truncatedByTokenCap` is added only on a
         // token-cap-shrunk read (binary spreads `{truncatedByTokenCap:!0}` last).
         let mut file = json!({
-            "filePath": canon.display().to_string(),
+            "filePath": file_path,
             "content": slice,
             "numLines": read_lines,
             "startLine": line_range_start,
@@ -2684,12 +2831,13 @@ impl Tool for FileReadTool {
         };
 
         Ok(ToolCallResult {
-            data: json!({ "type": "text", "file": file }),
-            model_content: Some(model_content),
+            data: crate::generated_result(&json!({ "type": "text", "file": file })),
+            model_content: Some(model_content.into()),
             new_messages,
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -2734,6 +2882,81 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    #[tokio::test]
+    async fn native_text_and_notebook_reads_enqueue_the_invocation_context() {
+        let tmp = TempDir::new().unwrap();
+        let text = tmp.path().join("source.rs");
+        let notebook = tmp.path().join("source.ipynb");
+        std::fs::write(&text, "fn source() {}\n").unwrap();
+        std::fs::write(&notebook, serde_json::to_vec(&json!({"cells":[{"cell_type":"code","source":["1+1"],"outputs":[],"metadata":{},"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5})).unwrap()).unwrap();
+        let (builtin, _) = make_ctx(&tmp);
+        let cwd = builtin.cwd();
+        let tool = FileReadTool::new(builtin);
+        for (path, kind) in [(text, "text"), (notebook, "notebook")] {
+            let context = fresh_ctx();
+            let queue = context.nested_memory_triggers.clone();
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"file_path":path})),
+                    context,
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(crate::test_data(&result.data)["type"], kind);
+            assert_eq!(
+                queue.queued(),
+                vec![crate::normalize_model_file_path(
+                    path.to_str().unwrap(),
+                    &cwd
+                )]
+            );
+        }
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn native_image_enqueue_follows_successful_decode() {
+        let tmp = TempDir::new().unwrap();
+        let good = tmp.path().join("good.png");
+        let bad = tmp.path().join("bad.png");
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        std::fs::write(&good, bytes).unwrap();
+        std::fs::write(&bad, b"not an image").unwrap();
+        let (builtin, _) = make_ctx(&tmp);
+        let cwd = builtin.cwd();
+        let tool = FileReadTool::new(builtin);
+        for (path, success) in [(good, true), (bad, false)] {
+            let context = fresh_ctx();
+            let queue = context.nested_memory_triggers.clone();
+            let result = tool
+                .call(
+                    crate::generated_result(&json!({"file_path":path})),
+                    context,
+                    fresh_tx(),
+                )
+                .await;
+            assert_eq!(result.is_ok(), success);
+            if success {
+                assert_eq!(
+                    queue.queued(),
+                    vec![crate::normalize_model_file_path(
+                        path.to_str().unwrap(),
+                        &cwd
+                    )]
+                );
+            } else {
+                assert!(queue.queued().is_empty());
+            }
+        }
+    }
 
     static READ_LIMIT_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -2781,17 +3004,63 @@ mod tests {
         std::fs::write(&target, "approved").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let route = crate::normalize_model_file_path(link.to_str().unwrap(), &ctx.cwd());
+        let target_identity = std::fs::canonicalize(&target).unwrap();
         let tool = FileReadTool::new(ctx);
 
         let result = tool
             .call(
-                json!({ "file_path": link.to_string_lossy() }),
+                crate::generated_result(&json!({ "file_path": link.to_string_lossy() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "approved");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "approved"
+        );
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["filePath"],
+            link.to_string_lossy().as_ref()
+        );
+        assert!(tool_api::read_file_state::get(&map, &route).is_some());
+        assert!(
+            tool_api::read_file_state::get(&map, &target_identity).is_none(),
+            "a direct Read records the observed lexical route, not the target realpath"
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_read_uses_session_cwd_and_normalized_lexical_state_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "relative route\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let normalized = crate::normalize_model_file_path("nested/../source.txt", &ctx.cwd());
+        assert_eq!(normalized, target);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                crate::generated_result(&json!({ "file_path": "nested/../source.txt" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["filePath"],
+            "nested/../source.txt"
+        );
+        assert_eq!(
+            tool_api::read_file_state::get(&map, &normalized)
+                .unwrap()
+                .content,
+            "relative route\n"
+        );
     }
 
     #[test]
@@ -2815,6 +3084,68 @@ mod tests {
     #[test]
     fn max_size_byte_locked() {
         assert_eq!(MAX_FILE_READ_SIZE, 262_144);
+    }
+
+    #[test]
+    fn mod_replacement_uses_reads_model_text_mapper() {
+        let text = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/a.txt","content":"one\ntwo","numLines":2,"startLine":4,"totalLines":9}
+        });
+        assert_eq!(
+            map_read_result_text(&crate::generated_result(&text))
+                .and_then(|text| text.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("4\tone\n5\ttwo")
+        );
+        let empty = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/empty.txt","content":"","numLines":0,"startLine":1,"totalLines":0}
+        });
+        assert_eq!(
+            map_read_result_text(&crate::generated_result(&empty))
+                .and_then(|text| text.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some(EMPTY_FILE_WARNING)
+        );
+        let blank_line = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/a.txt","content":"","numLines":1,"startLine":3,"totalLines":9}
+        });
+        assert_eq!(
+            map_read_result_text(&crate::generated_result(&blank_line))
+                .and_then(|text| text.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("3\t")
+        );
+        let unchanged = serde_json::json!({
+            "type": "file_unchanged", "file":{"filePath":"/tmp/a.txt"}
+        });
+        assert_eq!(
+            map_read_result_text(&crate::generated_result(&unchanged))
+                .and_then(|text| text.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some(FILE_UNCHANGED_SHORT)
+        );
+    }
+
+    #[test]
+    fn mod_read_mapper_preserves_lone_units_in_file_content() {
+        let data = Utf16JsonProjection::parse(
+            r#"{"type":"text","file":{"filePath":"/tmp/a.txt","content":"a\ud800b","numLines":1,"startLine":7,"totalLines":1}}"#,
+        )
+        .unwrap();
+        let mapped = map_read_result_text(&data).expect("text result maps");
+        assert_eq!(
+            mapped.string_units(""),
+            Some(
+                "7\ta"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain("b".encode_utf16())
+                    .collect()
+            )
+        );
     }
 
     #[tokio::test]
@@ -3010,20 +3341,23 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "hello\nworld\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "hello\nworld\n"
+        );
         // FILE.4: TS counts the trailing newline's empty final fragment as a line
         // ("hello\nworld\n" => 3, matching readFileInRange `lineIndex`).
-        assert_eq!(result.data["file"]["totalLines"], 3);
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 3);
         // Model-facing string: cat -n (compact tab format, 1-based from offset).
         // No cyber-risk reminder (parity verdict 12/14 — removed).
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             "1\thello\n2\tworld\n3\t"
         );
         let events = sink.events().await;
@@ -3057,11 +3391,16 @@ mod tests {
 
         let tool = FileReadTool::new(ctx);
         let result = tool
-            .call(json!({ "file_path": "rel.txt" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "file_path": "rel.txt" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         assert_eq!(
-            result.data["file"]["content"], "in the worktree\n",
+            crate::test_data(&result.data)["file"]["content"],
+            "in the worktree\n",
             "relative file_path must resolve under the SWAPPED worktree cwd"
         );
     }
@@ -3079,10 +3418,17 @@ mod tests {
 
         let tool = FileReadTool::new(ctx);
         let result = tool
-            .call(json!({ "file_path": "rel.txt" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "file_path": "rel.txt" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "at the boot cwd\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "at the boot cwd\n"
+        );
     }
 
     #[tokio::test]
@@ -3094,7 +3440,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3125,13 +3471,18 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ranged read of an oversize file must succeed");
-        assert_eq!(result.data["file"]["content"], "second\nthird\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "second\nthird\n"
+        );
     }
 
     #[tokio::test]
@@ -3143,7 +3494,9 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3169,7 +3522,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3194,7 +3547,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3218,7 +3571,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3266,7 +3619,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3274,24 +3627,24 @@ mod tests {
             .expect("no-limit read must succeed");
         // ALL 2500 lines returned (no cap).
         assert_eq!(
-            result.data["file"]["content"]
+            crate::test_data(&result.data)["file"]["content"]
                 .as_str()
                 .unwrap()
                 .lines()
                 .count(),
             2500
         );
-        assert!(result.data["file"]["content"]
+        assert!(crate::test_data(&result.data)["file"]["content"]
             .as_str()
             .unwrap()
             .ends_with("L2500\n"));
         // startLine = 1, numLines = 2500 (lines returned); totalLines = 2501
         // (trailing-newline phantom line).
-        assert_eq!(result.data["file"]["startLine"], 1);
-        assert_eq!(result.data["file"]["numLines"], 2500);
-        assert_eq!(result.data["file"]["totalLines"], 2501);
+        assert_eq!(crate::test_data(&result.data)["file"]["startLine"], 1);
+        assert_eq!(crate::test_data(&result.data)["file"]["numLines"], 2500);
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 2501);
         // NO truncation note of any kind.
-        let mc = result.model_content.as_deref().unwrap();
+        let mc = crate::test_model_text(result.model_content.as_ref()).unwrap();
         assert!(
             !mc.contains("Truncated") && !mc.contains("File truncated"),
             "within-budget full read must not surface any truncation note, got tail: {}",
@@ -3315,7 +3668,9 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "limit": 2200 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "limit": 2200 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3323,14 +3678,14 @@ mod tests {
             .expect("explicit-limit read must succeed");
         // 2200 lines returned (> 2000 — not clamped).
         assert_eq!(
-            result.data["file"]["content"]
+            crate::test_data(&result.data)["file"]["content"]
                 .as_str()
                 .unwrap()
                 .lines()
                 .count(),
             2200
         );
-        let mc = result.model_content.as_deref().unwrap();
+        let mc = crate::test_model_text(result.model_content.as_ref()).unwrap();
         assert!(
             !mc.contains("Truncated") && !mc.contains("File truncated"),
             "explicit limit must not emit a truncation note"
@@ -3344,7 +3699,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let desc = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -3356,8 +3711,11 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         // model:None ⇒ Dh(undefined)=false ⇒ LONG prompt.
         assert_eq!(prompt, READ_PROMPT_LONG);
         // Spot-check the VERBATIM template fragments.
@@ -3395,8 +3753,11 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(prompt, READ_PROMPT_SHORT);
         assert!(prompt.starts_with(
             "Reads a file from the local filesystem.\n\n- `file_path` must be an absolute path."
@@ -3417,15 +3778,20 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "line1\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line1\n");
         // cat -n numbers from offset=1. No cyber-risk reminder (verdict 12/14).
-        assert_eq!(result.model_content.as_deref().unwrap(), "1\tline1\n2\t");
+        assert_eq!(
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
+            "1\tline1\n2\t"
+        );
     }
 
     #[tokio::test]
@@ -3437,16 +3803,21 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "line2\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line2\n");
         // Numbering starts at the requested offset (2), not 1. No cyber-risk
         // reminder (verdict 12/14).
-        assert_eq!(result.model_content.as_deref().unwrap(), "2\tline2\n3\t");
+        assert_eq!(
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
+            "2\tline2\n3\t"
+        );
     }
 
     #[tokio::test]
@@ -3458,13 +3829,15 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 50 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 50 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "line2\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "line2\n");
     }
 
     #[tokio::test]
@@ -3476,15 +3849,18 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "alpha\nbeta\ngamma\n"
+        );
         // FILE.4: trailing newline => phantom final line ("...\n" => 4).
-        assert_eq!(result.data["file"]["totalLines"], 4);
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 4);
     }
 
     #[tokio::test]
@@ -3496,18 +3872,19 @@ mod tests {
         // Hold a handle to the shared registry BEFORE the ctx is moved into the
         // tool — the tool's `readFileState.set` mutates this same `Arc`.
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        // canonicalize the target the same way the tool keys the entry.
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
-            json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+            crate::generated_result(
+                &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+            ),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
         let entry =
-            tool_api::read_file_state::get(&map, &canon).expect("registry entry recorded on read");
+            tool_api::read_file_state::get(&map, &key).expect("registry entry recorded on read");
         // Content is the range-limited slice (TS stores `readFileInRange`'s
         // output), and offset/limit are the verbatim input values.
         assert_eq!(entry.content, "line2\n");
@@ -3524,16 +3901,16 @@ mod tests {
         std::fs::write(&target, "alpha\nbeta\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
-        let entry = tool_api::read_file_state::get(&map, &canon).unwrap();
+        let entry = tool_api::read_file_state::get(&map, &key).unwrap();
         assert_eq!(entry.content, "alpha\nbeta\n");
         assert_eq!(entry.offset, None);
         assert_eq!(entry.limit, None);
@@ -3548,7 +3925,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let _ = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3569,13 +3946,13 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "hello");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "hello");
     }
 
     #[cfg(unix)]
@@ -3597,7 +3974,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": link.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": link.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3630,13 +4007,16 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "hello from extra");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "hello from extra"
+        );
     }
 
     #[cfg(unix)]
@@ -3659,7 +4039,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": link.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": link.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3687,13 +4067,16 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": "/workspace/abc/note.txt" }),
+                crate::generated_result(&json!({ "file_path": "/workspace/abc/note.txt" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "guest sees host bytes");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "guest sees host bytes"
+        );
     }
 
     /// S2 (PathAtlas): guest space the filesystem refuses to host-back
@@ -3709,7 +4092,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": "/fenced/secret.txt" }),
+                crate::generated_result(&json!({ "file_path": "/fenced/secret.txt" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3717,7 +4100,11 @@ mod tests {
             .unwrap_err();
         match err {
             ToolError::InvalidInput(message) => {
-                assert!(message.contains("not host-backed"), "{message}");
+                assert!(
+                    message.string_at("").unwrap().contains("not host-backed"),
+                    "{}",
+                    message.string_at("").unwrap()
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -3732,7 +4119,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3740,9 +4127,12 @@ mod tests {
             .unwrap();
         // TUI payload `content` stays the raw (empty) slice; the model sees the
         // empty-file warning instead of an empty string.
-        assert_eq!(result.data["file"]["content"], "");
-        assert_eq!(result.data["file"]["totalLines"], 0);
-        assert_eq!(result.model_content.as_deref().unwrap(), EMPTY_FILE_WARNING);
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "");
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 0);
+        assert_eq!(
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
+            EMPTY_FILE_WARNING
+        );
     }
 
     #[tokio::test]
@@ -3754,17 +4144,19 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 10 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 10 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "");
         // FILE.4: "a\nb\nc\n" has 3 newlines => TS total_lines 4 (phantom final line).
-        assert_eq!(result.data["file"]["totalLines"], 4);
+        assert_eq!(crate::test_data(&result.data)["file"]["totalLines"], 4);
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             "<system-reminder>Warning: the file exists but is shorter than the provided offset (10). The file has 4 lines.</system-reminder>"
         );
     }
@@ -3818,15 +4210,16 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Notebook result variant: structured `cells`, NOT line-numbered text.
-        assert_eq!(result.data["type"], "notebook");
-        let cells = result.data["file"]["cells"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        assert_eq!(data["type"], "notebook");
+        let cells = data["file"]["cells"].as_array().unwrap();
         assert_eq!(cells.len(), 2);
         // Code cell: camelCase cellType, joined source, execution_count, language.
         assert_eq!(cells[0]["cellType"], "code");
@@ -3841,7 +4234,7 @@ mod tests {
         assert!(cells[1].get("language").is_none());
         // The model-facing string is the cell-block text projection.
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             "<cell id=\"c1\">print('hi')</cell id=\"c1\">\n\nhi\n\n<cell id=\"c2\"><cell_type>markdown</cell_type># Title</cell id=\"c2\">"
         );
     }
@@ -3853,16 +4246,16 @@ mod tests {
         std::fs::write(&target, sample_ipynb()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
-        let entry = tool_api::read_file_state::get(&map, &canon).expect("notebook read recorded");
+        let entry = tool_api::read_file_state::get(&map, &key).expect("notebook read recorded");
         // A no-range notebook read is a full view (offset/limit None) and is
         // flagged as Read-sourced so the staleness guard accepts a follow-up
         // NotebookEdit and the dedup gate sees a Read entry.
@@ -3883,7 +4276,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3911,7 +4304,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3919,7 +4312,10 @@ mod tests {
             .unwrap_err();
         match err {
             ToolError::Io(m) => {
-                assert_eq!(m, crate::notebook_read::INVALID_NOTEBOOK_SHAPE);
+                assert_eq!(
+                    m.string_at(""),
+                    Some(crate::notebook_read::INVALID_NOTEBOOK_SHAPE)
+                );
             }
             other => panic!("expected Io with the invalid-shape message, got {other:?}"),
         }
@@ -3945,7 +4341,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -3953,7 +4349,10 @@ mod tests {
             .unwrap_err();
         match err {
             ToolError::Io(m) => {
-                assert_eq!(m, crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE);
+                assert_eq!(
+                    m.string_at(""),
+                    Some(crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE)
+                );
             }
             other => panic!("expected Io with the not-a-regular-file message, got {other:?}"),
         }
@@ -3973,28 +4372,34 @@ mod tests {
         // First read populates the registry.
         let first = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(first.data["file"]["content"], "alpha\nbeta\n");
+        assert_eq!(
+            crate::test_data(&first.data)["file"]["content"],
+            "alpha\nbeta\n"
+        );
         // Second identical read → file_unchanged stub.
         let second = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(second.data["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
         // file_unchanged data = {type, file:{filePath}}; the stub rides on the
         // model_content channel, not inside data.
-        assert!(second.data.get("content").is_none());
-        assert!(second.data["file"]["filePath"].is_string());
-        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_SHORT));
+        assert!(crate::test_data(&second.data).get("content").is_none());
+        assert!(crate::test_data(&second.data)["file"]["filePath"].is_string());
+        assert_eq!(
+            crate::test_model_text(second.model_content.as_ref()),
+            Some(FILE_UNCHANGED_SHORT)
+        );
     }
 
     #[tokio::test]
@@ -4015,7 +4420,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4023,15 +4428,15 @@ mod tests {
         .unwrap();
         let second = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(second.data["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
         assert_eq!(
-            second.model_content.as_deref(),
+            crate::test_model_text(second.model_content.as_ref()),
             Some(
                 "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead."
             )
@@ -4048,7 +4453,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4059,16 +4464,17 @@ mod tests {
         set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
         let again = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Fresh content returned, not the stub.
-        assert_eq!(again.data["file"]["content"], "v1\n");
+        assert_eq!(crate::test_data(&again.data)["file"]["content"], "v1\n");
         assert_eq!(
-            again.data["type"], "text",
+            crate::test_data(&again.data)["type"],
+            "text",
             "fresh read is a text result, not a dedup"
         );
     }
@@ -4083,7 +4489,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4091,16 +4497,19 @@ mod tests {
         .unwrap();
         let ranged = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Different range → real content, no stub.
-        assert_eq!(ranged.data["file"]["content"], "l2\n");
+        assert_eq!(crate::test_data(&ranged.data)["file"]["content"], "l2\n");
         assert_eq!(
-            ranged.data["type"], "text",
+            crate::test_data(&ranged.data)["type"],
+            "text",
             "fresh read is a text result, not a dedup"
         );
     }
@@ -4114,6 +4523,7 @@ mod tests {
         let target = tmp.path().join("wr.txt");
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = {
             std::fs::write(&target, "seed\n").unwrap();
             std::fs::canonicalize(&target).unwrap()
@@ -4125,7 +4535,7 @@ mod tests {
         // Simulate a Write's post-write entry: full view, but NOT from a Read.
         tool_api::read_file_state::set(
             &map,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content: "seed\n".into(),
                 mtime_ms,
@@ -4139,16 +4549,17 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Real content returned (the write entry is not a dedup candidate).
-        assert_eq!(result.data["file"]["content"], "seed\n");
+        assert_eq!(crate::test_data(&result.data)["file"]["content"], "seed\n");
         assert_eq!(
-            result.data["type"], "text",
+            crate::test_data(&result.data)["type"],
+            "text",
             "fresh read is a text result, not a dedup"
         );
     }
@@ -4226,7 +4637,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let r = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -4241,9 +4652,8 @@ mod tests {
             "fixture must actually trigger the truncation branch"
         );
 
-        let canon = std::fs::canonicalize(&target).unwrap();
-        let entry =
-            tool_api::read_file_state::get(&map, &canon).expect("the read recorded an entry");
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), tmp.path());
+        let entry = tool_api::read_file_state::get(&map, &key).expect("the read recorded an entry");
         assert!(
             entry.is_partial_view,
             "a token-truncated read is a PARTIAL view, not a full read"
@@ -4283,14 +4693,14 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("over-budget full read must gracefully truncate, not error");
-        let mc = result.model_content.as_deref().unwrap();
-        let canon = std::fs::canonicalize(&target).unwrap();
+        let mc = crate::test_model_text(result.model_content.as_ref()).unwrap();
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), tmp.path());
         // FT-08 (delivery): the banner is NOT inside the tool_result. Upstream
         // `Sgm` returns `{data:L}` and stashes the banner via `daf(L,R)`; the
         // dispatcher republishes it as a `read_truncation_notice` attachment.
@@ -4315,7 +4725,7 @@ mod tests {
                 content
                     .iter()
                     .find_map(|b| match b {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .expect("truncation notice text block")
@@ -4327,7 +4737,7 @@ mod tests {
         assert!(
             banner.starts_with(&format!(
                 "[Truncated: PARTIAL view \u{2014} {}: showing lines 1-",
-                canon.display()
+                route.display()
             )),
             "the notice must carry the partial-view banner WITH the full path: {banner}"
         );
@@ -4336,7 +4746,7 @@ mod tests {
         assert!(banner.contains(" or Grep to find a specific section."));
         assert!(banner.contains("Do NOT answer from this page alone"));
         // The returned slice is strictly smaller than the whole file.
-        let returned_lines = result.data["file"]["content"]
+        let returned_lines = crate::test_data(&result.data)["file"]["content"]
             .as_str()
             .unwrap()
             .lines()
@@ -4371,7 +4781,9 @@ mod tests {
         // limit large enough that the slice still exceeds the budget.
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "limit": 50_000 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "limit": 50_000 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -4404,13 +4816,18 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 2 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 2 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("small slice of a huge file passes the token gate");
-        assert_eq!(result.data["file"]["content"], "first\nsecond\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "first\nsecond\n"
+        );
     }
 
     #[tokio::test]
@@ -4423,13 +4840,16 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "hello\nworld\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "hello\nworld\n"
+        );
     }
 
     #[test]
@@ -4490,13 +4910,16 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["file"]["content"], "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            crate::test_data(&result.data)["file"]["content"],
+            "alpha\nbeta\ngamma\n"
+        );
 
         let events = sink.events().await;
         let ev = find_event(&events, "tengu_session_file_read")
@@ -4542,7 +4965,9 @@ mod tests {
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+            crate::generated_result(
+                &json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+            ),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4614,27 +5039,27 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "# rules\nbe good\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\nbe good\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\nbe good\n", false);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(r.data["type"], "file_unchanged");
-        assert_eq!(r.data["source"], "seeded");
+        assert_eq!(crate::test_data(&r.data)["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&r.data)["source"], "seeded");
         // The stub names the LEXICAL path (`target`), not `canon`. The oracle's
         // `f` is `Li(e)` (@226620214) — `path.normalize`/`resolve`, no symlink
         // resolution — and the stub has to name the same path the memory block
         // above it printed. This expectation previously used `canon`, which only
         // agreed because the fixture happened to sit under a resolved path.
         assert_eq!(
-            r.model_content.as_deref(),
+            crate::test_model_text(r.model_content.as_ref()),
             Some(
                 format!(
                     "<system-reminder>This file is already in your context (see \"Contents of {}\" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>",
@@ -4655,20 +5080,22 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "# rules\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\n", false);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "offset": 1 }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "offset": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(r.data["type"], "file_unchanged");
-        assert_eq!(r.data["source"], "seeded");
+        assert_eq!(crate::test_data(&r.data)["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&r.data)["source"], "seeded");
     }
 
     #[tokio::test]
@@ -4678,24 +5105,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "a\nb\nc\n").unwrap();
-        let canon = std::fs::canonicalize(&target).unwrap();
 
         for input in [
             json!({ "file_path": target.to_str().unwrap(), "offset": 2 }),
             json!({ "file_path": target.to_str().unwrap(), "limit": 2 }),
         ] {
             let (ctx, _sink) = make_ctx(&tmp);
-            seed_entry(&ctx, &canon, "a\nb\nc\n", false);
+            let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+            seed_entry(&ctx, &route, "a\nb\nc\n", false);
             let tool = FileReadTool::new(ctx);
             let r = tool
-                .call(input.clone(), fresh_ctx(), fresh_tx())
+                .call(crate::generated_result(&input), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap();
             assert_ne!(
-                r.data["type"], "file_unchanged",
+                crate::test_data(&r.data)["type"],
+                "file_unchanged",
                 "ranged read must not dedup: {input}"
             );
-            assert!(r.data["file"]["content"].is_string(), "{input}");
+            assert!(
+                crate::test_data(&r.data)["file"]["content"].is_string(),
+                "{input}"
+            );
         }
     }
 
@@ -4708,20 +5139,20 @@ mod tests {
         let target = tmp.path().join("cond.md");
         std::fs::write(&target, "---\npaths: src/**\n---\nbody\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "---\npaths: src/**\n---\nbody\n", true);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "---\npaths: src/**\n---\nbody\n", true);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_ne!(r.data["type"], "file_unchanged");
-        assert!(r.data["file"]["content"].is_string());
+        assert_ne!(crate::test_data(&r.data)["type"], "file_unchanged");
+        assert!(crate::test_data(&r.data)["file"]["content"].is_string());
     }
 
     #[tokio::test]
@@ -4731,8 +5162,8 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "v1\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "v1\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "v1\n", false);
         // Rewrite with a clearly-advanced mtime.
         std::fs::write(&target, "v2\n").unwrap();
         filetime::set_file_mtime(
@@ -4744,14 +5175,14 @@ mod tests {
 
         let r = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_ne!(r.data["type"], "file_unchanged");
-        assert_eq!(r.data["file"]["content"], "v2\n");
+        assert_ne!(crate::test_data(&r.data)["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&r.data)["file"]["content"], "v2\n");
     }
 
     #[tokio::test]
@@ -4764,12 +5195,12 @@ mod tests {
         std::fs::write(&target, "# rules\n").unwrap();
         let (ctx, sink) = make_ctx(&tmp);
         ctx.bus.attach_sink(sink.clone()).await;
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\n", false);
         let tool = FileReadTool::new(ctx);
 
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4800,7 +5231,7 @@ mod tests {
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4809,15 +5240,18 @@ mod tests {
         sink.clear().await;
         let second = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(second.data["type"], "file_unchanged");
-        assert!(second.data.get("source").is_none());
-        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_SHORT));
+        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
+        assert!(crate::test_data(&second.data).get("source").is_none());
+        assert_eq!(
+            crate::test_model_text(second.model_content.as_ref()),
+            Some(FILE_UNCHANGED_SHORT)
+        );
         let events = sink.events().await;
         let md = &find_event(&events, "tengu_file_read_dedup")
             .expect("non-seeded dedup still fires")
@@ -4841,7 +5275,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         // First read populates the registry + fires session_file_read.
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4851,13 +5285,13 @@ mod tests {
         // Second identical read → dedup stub.
         let second = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(second.data["type"], "file_unchanged");
+        assert_eq!(crate::test_data(&second.data)["type"], "file_unchanged");
         let events = sink.events().await;
         let md = &find_event(&events, "tengu_file_read_dedup")
             .expect("dedup short-circuit must fire tengu_file_read_dedup")
@@ -4885,7 +5319,7 @@ mod tests {
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = FileReadTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap() }),
+            crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -4936,7 +5370,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let res = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -4947,13 +5381,15 @@ mod tests {
         // The dispatch loop derives the tool_result `content_blocks` from THIS
         // data (result-mapper `case "image"`), so the base64 + media type must be
         // present here — and the image must NOT also ride an injected message.
-        assert_eq!(res.data["type"], "image");
-        assert_eq!(res.data["file"]["type"], "image/png");
-        assert!(res.data["file"]["base64"]
+        assert_eq!(crate::test_data(&res.data)["type"], "image");
+        assert_eq!(crate::test_data(&res.data)["file"]["type"], "image/png");
+        assert!(crate::test_data(&res.data)["file"]["base64"]
             .as_str()
             .is_some_and(|b| !b.is_empty()));
         // An 8x8 PNG is not resized → no dimensions, no resize-note message.
-        assert!(res.data["file"].get("dimensions").is_none());
+        assert!(crate::test_data(&res.data)["file"]
+            .get("dimensions")
+            .is_none());
         assert!(
             res.new_messages.is_empty(),
             "unresized image must inject NO messages (the image rides the tool_result)"
@@ -4973,7 +5409,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -4981,13 +5417,13 @@ mod tests {
             .unwrap_err();
         let canon = std::fs::canonicalize(&target).unwrap();
         match err {
-            ToolError::Io(m) => assert_eq!(
-                m,
-                crate::image_read::format_image_bad_magic(
+            ToolError::Io(m) => {
+                let expected = crate::image_read::format_image_bad_magic(
                     &canon,
-                    b"<!DOCTYPE html><html><head><title>Login</title>"
-                )
-            ),
+                    b"<!DOCTYPE html><html><head><title>Login</title>",
+                );
+                assert_eq!(m.string_at(""), Some(expected.as_str()));
+            }
             other => panic!("expected Io with the bad-magic message, got {other:?}"),
         }
     }
@@ -5003,7 +5439,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5012,7 +5448,8 @@ mod tests {
         let canon = std::fs::canonicalize(&target).unwrap();
         match err {
             ToolError::Io(m) => {
-                assert_eq!(m, format!("Image file is empty: {}", canon.display()));
+                let expected = format!("Image file is empty: {}", canon.display());
+                assert_eq!(m.string_at(""), Some(expected.as_str()));
             }
             other => panic!("expected Io with the empty-image message, got {other:?}"),
         }
@@ -5036,7 +5473,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let res = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5044,7 +5481,10 @@ mod tests {
             .expect("image read must succeed");
 
         // Resized → data.file.dimensions present (claude tbo's dimensions).
-        assert_eq!(res.data["file"]["dimensions"]["originalWidth"], 4000);
+        assert_eq!(
+            crate::test_data(&res.data)["file"]["dimensions"]["originalWidth"],
+            4000
+        );
         // The ONLY injected message is the isMeta resize note — text, NO image
         // block (claude `newMessages: [Lr({content: y8t(dims), isMeta: true})]`).
         assert_eq!(res.new_messages.len(), 1);
@@ -5062,7 +5502,7 @@ mod tests {
                 let text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .expect("note text");
@@ -5091,7 +5531,9 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "pages": "1-25" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "pages": "1-25" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5113,7 +5555,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5134,7 +5576,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let res = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5142,7 +5584,7 @@ mod tests {
             .expect("small PDF read must succeed");
 
         // The tool-result data is text-only and tagged as a PDF.
-        assert_eq!(res.data["type"], "pdf");
+        assert_eq!(crate::test_data(&res.data)["type"], "pdf");
 
         // The PDF bytes ride on a single `new_messages` user message carrying a
         // base64 `ContentBlock::Document` with the application/pdf media type.
@@ -5177,7 +5619,7 @@ mod tests {
         call_ctx.options.main_loop_model = "claude-3-haiku-20240307".into();
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 call_ctx,
                 fresh_tx(),
             )
@@ -5208,13 +5650,13 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let res = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("4MB supported-model PDF must inline, not error");
-        assert_eq!(res.data["type"], "pdf");
+        assert_eq!(crate::test_data(&res.data)["type"], "pdf");
         assert_eq!(res.new_messages.len(), 1);
         let content = match &res.new_messages[0] {
             ConversationMessage::User { content, .. } => content,
@@ -5245,7 +5687,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5376,7 +5818,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": missing.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": missing.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5449,7 +5891,7 @@ mod tests {
 
         let err = tool
             .call(
-                json!({ "file_path": missing.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": missing.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5491,7 +5933,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": missing.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": missing.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5531,7 +5973,7 @@ mod tests {
         let tool = FileReadTool::new(ctx).with_live_cwd(cell);
         let err = tool
             .call(
-                json!({ "file_path": missing.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": missing.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -5566,7 +6008,7 @@ mod tests {
         let tool = FileReadTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": requested.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": requested.to_str().unwrap() })),
                 fresh_ctx(),
                 fresh_tx(),
             )

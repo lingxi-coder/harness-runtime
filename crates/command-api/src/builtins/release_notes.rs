@@ -41,7 +41,7 @@ impl ReleaseNotesHandler {
 impl BuiltinCommandHandler for ReleaseNotesHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::Done {
-            display: Some(format!("See the full changelog at: {CHANGELOG_URL}")),
+            display: Some((format!("See the full changelog at: {CHANGELOG_URL}")).into()),
         }
     }
 
@@ -85,8 +85,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "release-notes".to_string(),
-            raw_args: String::new(),
+            name: "release-notes".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

@@ -6,7 +6,7 @@
 //! non-remote interactive session (`userInvocable: true`, with no enable gate)
 //! and appends an optional `## User Request` section to the body.
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// The user-facing description from the 2.1.252 bundled-skill registry.
 pub(crate) const DATAVIZ_DESCRIPTION: &str = "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".";
@@ -41,11 +41,15 @@ pub const DATAVIZ_REFERENCE_FILES: &[(&str, &str)] = &[
 pub struct DatavizPromptFn;
 
 impl BundledPromptFn for DatavizPromptFn {
-    fn build(&self, args: &str) -> String {
-        if args.is_empty() {
-            DATAVIZ_BODY.to_string()
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            DATAVIZ_BODY.into()
         } else {
-            format!("{DATAVIZ_BODY}\n\n## User Request\n\n{args}")
+            let prefix = format!("{DATAVIZ_BODY}\n\n## User Request\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -53,6 +57,7 @@ impl BundledPromptFn for DatavizPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_frontmatter_stripped_and_provider_neutral() {
@@ -85,11 +90,13 @@ mod tests {
 
     #[test]
     fn empty_and_non_empty_requests_match_oracle_prompt_shape() {
-        assert_eq!(DatavizPromptFn.build(""), DATAVIZ_BODY);
-        let prompt = DatavizPromptFn.build("make the revenue trend readable");
         assert_eq!(
-            prompt,
-            format!("{DATAVIZ_BODY}\n\n## User Request\n\nmake the revenue trend readable")
+            DatavizPromptFn.build(&"".into()).string_at(""),
+            Some(DATAVIZ_BODY)
         );
+        let prompt = DatavizPromptFn.build(&"make the revenue trend readable".into());
+        let expected =
+            format!("{DATAVIZ_BODY}\n\n## User Request\n\nmake the revenue trend readable");
+        assert_eq!(prompt.string_at(""), Some(expected.as_str()));
     }
 }

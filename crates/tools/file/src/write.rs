@@ -8,6 +8,7 @@
 //! - Content is UTF-8; no BOM is written.
 
 use crate::structured_patch::count_patch_lines;
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -26,7 +27,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -121,11 +122,11 @@ fn write_resolution_error(
     match error {
         lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
-        )),
+        ).into()),
         lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
-            ))
+            ).into())
         }
         lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
@@ -134,17 +135,17 @@ fn write_resolution_error(
             {
                 ToolError::InvalidInput(format!(
                     "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
-                ))
+                ).into())
             } else {
                 ToolError::InvalidInput(format!(
                     "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
-                ))
+                ).into())
             }
         }
         lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile => {
-            ToolError::Io(format!("File {path} is not a regular file"))
+            ToolError::Io(format!("File {path} is not a regular file").into())
         }
-        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string().into()),
     }
 }
 
@@ -229,8 +230,8 @@ fn is_subagent_report_md(path: &std::path::Path) -> bool {
             .any(|w| lower.starts_with(w))
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["file_path", "content"],
@@ -238,7 +239,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "file_path": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)" },
             "content":   { "type": "string", "description": "The content to write to the file" }
         }
-    })
+    }))
 });
 
 #[async_trait]
@@ -248,11 +249,14 @@ impl Tool for FileWriteTool {
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("create or overwrite files")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("create or overwrite files".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -260,17 +264,21 @@ impl Tool for FileWriteTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -281,57 +289,54 @@ impl Tool for FileWriteTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // claude-code `FileWriteTool.ts:100`.
         "Write a file to the local filesystem.".to_string()
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // Model-gated, mirroring claude-code `v0i(e){if(Dh(e))return SHORT;
         // return LONG}` (binary offset ~196432410). Predicate shared with
         // TodoWrite via `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            WRITE_PROMPT_SHORT.to_string()
+            WRITE_PROMPT_SHORT.into()
         } else {
-            WRITE_PROMPT_LONG.to_string()
+            WRITE_PROMPT_LONG.into()
         }
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
-        input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
+        crate::input_string(input, "file_path").map(PathBuf::from)
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
-        let file_path = input
-            .get("file_path")
-            .and_then(Value::as_str)
+        let file_path = crate::input_string(&input, "file_path")
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
-        let content = input
-            .get("content")
-            .and_then(Value::as_str)
+        let content = crate::input_string(&input, "content")
             .ok_or_else(|| ToolError::InvalidInput("content is required".into()))?;
         // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
         // against the CURRENT session cwd (`ctx.cwd()`, switchable by
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
-            Err(message) => return Err(ToolError::InvalidInput(message)),
+            Err(message) => return Err(ToolError::InvalidInput(message.into())),
         };
 
         // A subagent must NOT write a REPORT/SUMMARY/FINDINGS/ANALYSIS `*.md`
@@ -433,7 +438,7 @@ impl Tool for FileWriteTool {
             let cmp_content = prior_decoded.as_deref().unwrap_or("");
             if let Err(e) = crate::check_read_before_write(
                 &self.ctx.read_file_state,
-                &canon,
+                &requested_path,
                 current_mtime_ms,
                 cmp_content,
                 crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
@@ -499,9 +504,9 @@ impl Tool for FileWriteTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: content.to_string(),
                 mtime_ms: new_mtime_ms,
@@ -513,6 +518,8 @@ impl Tool for FileWriteTool {
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         // Mirror Claude Code's automatic post-edit diagnostics path by
@@ -571,21 +578,22 @@ impl Tool for FileWriteTool {
         };
 
         Ok(ToolCallResult {
-            data: json!({
+            data: crate::generated_result(&json!({
                 "type": type_str,
                 "filePath": file_path,
                 "content": content,
                 "structuredPatch": structured_patch,
                 "originalFile": original_file,
                 "userModified": false,
-            }),
+            })),
             // Model-facing text is the byte-faithful Write message, surfaced
             // verbatim (NOT a JSON dump of `data`).
-            model_content: Some(content_message),
+            model_content: Some(content_message.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -614,9 +622,11 @@ mod tests {
     /// Simulate a prior full `Read` of `target` so the read-before-write
     /// staleness guard (Batch F) is satisfied when overwriting an EXISTING
     /// file: records the file's current raw-UTF-8 content + floored mtime under
-    /// the canonicalized key with `offset`/`limit` = `None`. Call AFTER writing
+    /// Native's normalized model-route key with `offset`/`limit` = `None`.
+    /// Canonical remains the source for disk access only. Call AFTER writing
     /// the file so the seeded mtime matches the on-disk mtime.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
         let content = crate::shared::decode_utf8_strict(&bytes)
@@ -627,7 +637,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -639,6 +649,40 @@ mod tests {
                 is_partial_view: false,
             },
         );
+    }
+
+    #[tokio::test]
+    async fn actual_read_then_write_uses_the_normalized_session_route_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "old text\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let state = ctx.read_file_state.clone();
+        let input_path = "nested/../source.txt";
+        let route = crate::normalize_model_file_path(input_path, &ctx.cwd());
+
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                crate::generated_result(&json!({ "file_path": input_path })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read succeeds through the active session cwd");
+        assert!(tool_api::read_file_state::get(&state, &route).is_some());
+
+        FileWriteTool::new(ctx)
+            .call(
+                crate::generated_result(
+                    &json!({ "file_path": input_path, "content": "new text\n" }),
+                ),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Write looks up the same Native lexical route that Read recorded");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new text\n");
     }
 
     #[test]
@@ -655,12 +699,21 @@ mod tests {
         std::fs::write(&target, "original").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        seed_full_read(&ctx, &target);
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                crate::generated_result(&json!({ "file_path": link.to_string_lossy() })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read the same lexical route before testing the write refusal");
         let tool = FileWriteTool::new(ctx);
 
         let error = tool
             .call(
-                json!({ "file_path": link.to_string_lossy(), "content": "changed" }),
+                crate::generated_result(
+                    &json!({ "file_path": link.to_string_lossy(), "content": "changed" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -670,6 +723,7 @@ mod tests {
             tool_api::tool_trait::ToolError::InvalidInput(message) => message,
             other => panic!("unexpected error: {other:?}"),
         };
+        let message = message.string_at("").unwrap();
         assert!(message.starts_with("Refusing to write "));
         assert!(
             message.ends_with("it is a symbolic link. Write to the link's target path instead.")
@@ -680,10 +734,13 @@ mod tests {
     #[test]
     fn write_resolution_messages_are_byte_exact() {
         assert_eq!(
-            write_resolution_error("/tmp/link.txt", lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink)
-                .to_string()
-                .strip_prefix("invalid input: ")
-                .unwrap_or_default(),
+            write_resolution_error(
+                "/tmp/link.txt",
+                lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink
+            )
+            .to_string()
+            .strip_prefix("invalid input: ")
+            .unwrap_or_default(),
             "Refusing to write /tmp/link.txt: it is a symbolic link. Write to the link's target path instead."
         );
         assert_eq!(
@@ -708,7 +765,7 @@ mod tests {
         );
         let tool = FileWriteTool::new(ctx);
         tool.call(
-            serde_json::json!({ "file_path": "/workspace/abc/new.txt", "content": "from guest" }),
+            crate::generated_result(&serde_json::json!({ "file_path": "/workspace/abc/new.txt", "content": "from guest" })),
             tool_api::test_support::fresh_ctx(),
             tool_api::test_support::fresh_tx(),
         )
@@ -729,8 +786,11 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(long, WRITE_PROMPT_LONG);
         assert!(long.starts_with("Writes a file to the local filesystem.\n\nUsage:"));
         assert!(long.contains("you MUST use the Read tool first"));
@@ -740,8 +800,11 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(short, WRITE_PROMPT_SHORT);
         assert!(
             short.starts_with("Writes a file to the local filesystem, overwriting if one exists.")
@@ -796,13 +859,15 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "hello" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "hello" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
     }
 
@@ -815,7 +880,9 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "hello" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "hello" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -825,15 +892,17 @@ mod tests {
         // the message); the model message is surfaced verbatim via
         // `model_content` and echoes the ORIGINAL input path.
         let input_path = target.to_str().unwrap();
-        assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["filePath"], input_path);
-        assert_eq!(result.data["content"], "hello");
-        assert_eq!(result.data["originalFile"], Value::Null);
-        assert_eq!(result.data["userModified"], false);
-        assert!(result.data.get("bytes_written").is_none());
-        assert!(result.data.get("gitDiff").is_none());
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["filePath"], input_path);
+        assert_eq!(crate::test_data(&result.data)["content"], "hello");
+        assert_eq!(crate::test_data(&result.data)["originalFile"], Value::Null);
+        assert_eq!(crate::test_data(&result.data)["userModified"], false);
+        assert!(crate::test_data(&result.data)
+            .get("bytes_written")
+            .is_none());
+        assert!(crate::test_data(&result.data).get("gitDiff").is_none());
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
@@ -857,7 +926,9 @@ mod tests {
         subagent_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "findings" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "findings" }),
+                ),
                 subagent_ctx,
                 fresh_tx(),
             )
@@ -865,8 +936,10 @@ mod tests {
             .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => assert_eq!(
-                m,
-                "Subagents should return findings as text, not write report files. Include this content in your final response instead."
+                m.string_at(""),
+                Some(
+                    "Subagents should return findings as text, not write report files. Include this content in your final response instead."
+                )
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -879,7 +952,9 @@ mod tests {
         let tool2 = FileWriteTool::new(ctx2);
         tool2
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "ok" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "ok" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -921,19 +996,21 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "hello\nworld\n" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "hello\nworld\n" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         // create → `structuredPatch: []` (empty hunk array, TS parity).
-        assert_eq!(result.data["structuredPatch"], json!([]));
+        assert_eq!(crate::test_data(&result.data)["structuredPatch"], json!([]));
         // `create` → originalFile is null (TS "null for new files").
-        assert_eq!(result.data["originalFile"], Value::Null);
+        assert_eq!(crate::test_data(&result.data)["originalFile"], Value::Null);
         // `data.content` is the FILE BYTES written, not the message.
-        assert_eq!(result.data["content"], "hello\nworld\n");
+        assert_eq!(crate::test_data(&result.data)["content"], "hello\nworld\n");
     }
 
     #[tokio::test]
@@ -947,21 +1024,26 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "alpha\nBETA\ngamma\n" }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap(), "content": "alpha\nBETA\ngamma\n" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "update");
+        assert_eq!(crate::test_data(&result.data)["type"], "update");
         // `originalFile` is the pre-write content; `content` is the new bytes.
-        assert_eq!(result.data["originalFile"], "alpha\nbeta\ngamma\n");
-        assert_eq!(result.data["content"], "alpha\nBETA\ngamma\n");
+        assert_eq!(
+            crate::test_data(&result.data)["originalFile"],
+            "alpha\nbeta\ngamma\n"
+        );
+        assert_eq!(
+            crate::test_data(&result.data)["content"],
+            "alpha\nBETA\ngamma\n"
+        );
         // The structuredPatch is the jsdiff hunk array capturing the changed
         // middle line (1:1: context + `-beta`/`+BETA` + context).
-        let sp = result.data["structuredPatch"]
-            .as_array()
-            .expect("hunk array");
+        let data = crate::test_data(&result.data);
+        let sp = data["structuredPatch"].as_array().expect("hunk array");
         assert_eq!(sp.len(), 1, "one hunk");
         assert_eq!(sp[0]["oldStart"], 1);
         assert_eq!(sp[0]["oldLines"], 3);
@@ -986,14 +1068,16 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "hi" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "hi" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["content"], "hi");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["content"], "hi");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
     }
 
@@ -1006,16 +1090,16 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "content": "deep content"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "deep content");
+        assert_eq!(crate::test_data(&result.data)["content"], "deep content");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "deep content");
     }
 
@@ -1029,13 +1113,15 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "nested" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "nested" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         assert!(target.exists());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "nested");
     }
@@ -1051,7 +1137,9 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1060,13 +1148,13 @@ mod tests {
         // Pre-existing non-empty file → `update`: byte-faithful message lives on
         // `model_content`; `data.content` is the new FILE BYTES.
         let input_path = target.to_str().unwrap();
-        assert_eq!(result.data["type"], "update");
-        assert_eq!(result.data["filePath"], input_path);
-        assert_eq!(result.data["content"], "new");
-        assert_eq!(result.data["originalFile"], "old");
-        assert_eq!(result.data["userModified"], false);
+        assert_eq!(crate::test_data(&result.data)["type"], "update");
+        assert_eq!(crate::test_data(&result.data)["filePath"], input_path);
+        assert_eq!(crate::test_data(&result.data)["content"], "new");
+        assert_eq!(crate::test_data(&result.data)["originalFile"], "old");
+        assert_eq!(crate::test_data(&result.data)["userModified"], false);
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             write_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
@@ -1086,20 +1174,22 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "filled" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "filled" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         let input_path = target.to_str().unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         // create → originalFile is null even for an existing-but-empty file
         // (TS `if (oldContent)` is falsy → create branch, `originalFile:null`).
-        assert_eq!(result.data["originalFile"], Value::Null);
-        assert_eq!(result.data["content"], "filled");
+        assert_eq!(crate::test_data(&result.data)["originalFile"], Value::Null);
+        assert_eq!(crate::test_data(&result.data)["content"], "filled");
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "filled");
@@ -1113,20 +1203,20 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "file_path": target.to_str().unwrap(),
                     "content": "deep content"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         let input_path = target.to_str().unwrap();
-        assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["content"], "deep content");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["content"], "deep content");
         assert_eq!(
-            result.model_content.as_deref().unwrap(),
+            crate::test_model_text(result.model_content.as_ref()).unwrap(),
             write_result_message(input_path, true)
         );
     }
@@ -1144,14 +1234,18 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap_err();
         match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m.string_at(""), Some(crate::FILE_NOT_READ_ERROR));
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // File untouched.
@@ -1173,13 +1267,15 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "brand new" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "brand new" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "brand new");
     }
 
@@ -1200,7 +1296,7 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "model wrote this" }),
+                crate::generated_result(&json!({ "file_path": target.to_str().unwrap(), "content": "model wrote this" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1210,7 +1306,12 @@ mod tests {
             // FT-07: stale-changed-content returns the oracle's
             // `validateInput` errorCode-3 literal (cc-238.js @226416137),
             // not the call-phase race sentence `WVo`.
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(
+                    m.string_at(""),
+                    Some(crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+                );
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // Write refused → file left as the external content.
@@ -1233,14 +1334,16 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "overwritten" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "overwritten" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Pre-existing non-empty file → update.
-        assert_eq!(result.data["type"], "update");
+        assert_eq!(crate::test_data(&result.data)["type"], "update");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "overwritten");
     }
 
@@ -1255,7 +1358,9 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = FileWriteTool::new(ctx);
         tool.call(
-            json!({ "file_path": target.to_str().unwrap(), "content": "v1" }),
+            crate::generated_result(
+                &json!({ "file_path": target.to_str().unwrap(), "content": "v1" }),
+            ),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1264,7 +1369,9 @@ mod tests {
         // No re-seed: the post-write `set` from the first write must satisfy
         // the guard for the second write.
         tool.call(
-            json!({ "file_path": target.to_str().unwrap(), "content": "v2" }),
+            crate::generated_result(
+                &json!({ "file_path": target.to_str().unwrap(), "content": "v2" }),
+            ),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1282,7 +1389,9 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let err = tool
             .call(
-                json!({ "file_path": target.to_str().unwrap(), "content": "x" }),
+                crate::generated_result(
+                    &json!({ "file_path": target.to_str().unwrap(), "content": "x" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1299,7 +1408,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        assert!(tool.is_destructive(&json!({})));
+        assert!(tool.is_destructive(&crate::generated_result(&json!({}))));
     }
 
     #[tokio::test]
@@ -1307,7 +1416,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        assert!(!tool.is_concurrency_safe(&json!({})));
+        assert!(!tool.is_concurrency_safe(&crate::generated_result(&json!({}))));
     }
 
     #[tokio::test]
@@ -1315,7 +1424,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        assert!(!tool.is_read_only(&json!({})));
+        assert!(!tool.is_read_only(&crate::generated_result(&json!({}))));
     }
 
     #[tokio::test]
@@ -1324,13 +1433,12 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
         let schema = tool.input_schema();
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(names.contains(&"file_path"));
-        assert!(names.contains(&"content"));
+        assert_eq!(schema.array_len("/required"), Some(2));
+        assert_eq!(schema.string_at("/required/0"), Some("file_path"));
+        assert_eq!(schema.string_at("/required/1"), Some("content"));
         // claude-code schema is {file_path, content} ONLY — no `mkdir`.
         assert!(
-            schema["properties"].get("mkdir").is_none(),
+            !schema.contains_property("mkdir") && schema.at_pointer("/properties/mkdir").is_none(),
             "schema must NOT expose `mkdir`"
         );
     }
@@ -1356,13 +1464,15 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": "relative.txt", "content": "hello" }),
+                crate::generated_result(
+                    &json!({ "file_path": "relative.txt", "content": "hello" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         assert_eq!(
             std::fs::read_to_string(wt.join("relative.txt")).unwrap(),
             "hello",
@@ -1386,13 +1496,15 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
-                json!({ "file_path": "relative.txt", "content": "hello" }),
+                crate::generated_result(
+                    &json!({ "file_path": "relative.txt", "content": "hello" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["type"], "create");
+        assert_eq!(crate::test_data(&result.data)["type"], "create");
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("relative.txt")).unwrap(),
             "hello"
@@ -1404,7 +1516,10 @@ mod tests {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
-        async fn submit(&self, _: Value) -> Result<Value, String> {
+        async fn submit(
+            &self,
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
             unreachable!()
         }
     }
@@ -1427,7 +1542,7 @@ mod tests {
             ctx
         };
         tool.call(
-            json!({"file_path":target,"content":"approved scope"}),
+            crate::generated_result(&json!({"file_path":target,"content":"approved scope"})),
             context(),
             fresh_tx(),
         )
@@ -1436,7 +1551,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "approved scope");
         assert!(tool
             .call(
-                json!({"file_path":sibling,"content":"not allowed"}),
+                crate::generated_result(&json!({"file_path":sibling,"content":"not allowed"})),
                 context(),
                 fresh_tx()
             )
@@ -1450,7 +1565,7 @@ mod tests {
             std::os::unix::fs::symlink(&sibling, &target).unwrap();
             assert!(tool
                 .call(
-                    json!({"file_path":target,"content":"no"}),
+                    crate::generated_result(&json!({"file_path":target,"content":"no"})),
                     context(),
                     fresh_tx()
                 )

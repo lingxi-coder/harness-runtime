@@ -7,6 +7,7 @@
 //! [`MergeStrategy::ConcatDedup`]; Task 6 adds `DeepMerge` + `Override`.
 
 use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
+use crate::types::utf16_json::{JsonValueView, Utf16JsonProjection, Utf16JsonProjectionError};
 
 /// Merge two settings layers — `next` overlays `prev` per field strategy.
 ///
@@ -35,6 +36,10 @@ fn merge_attribution(
 pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     SettingsJson {
         teammate_mode: next.teammate_mode.or(prev.teammate_mode),
+        prompt_cache_ttl: next.prompt_cache_ttl.or(prev.prompt_cache_ttl),
+        subagent_prompt_cache_ttl: next
+            .subagent_prompt_cache_ttl
+            .or(prev.subagent_prompt_cache_ttl),
         dollar_schema: next.dollar_schema.or(prev.dollar_schema),
         trusted_directories: concat_dedup(prev.trusted_directories, next.trusted_directories),
         additional_directories: concat_dedup(
@@ -46,14 +51,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         lingxi_md_excludes: concat_dedup(prev.lingxi_md_excludes, next.lingxi_md_excludes),
         sandbox: deep_merge_object(prev.sandbox, next.sandbox),
         hooks: deep_merge_object(prev.hooks, next.hooks),
-        // Deep-merge the opaque block. NOTE: claude-code concat-dedups the
-        // allow/deny/ask arrays across tiers; deep_merge_object takes `next`
-        // for a matching array key. This only affects a reader of the MERGED
-        // field — the permission loader reads each settings FILE per-source
-        // (`permission::permission_rules_from_settings_json`), so it is moot
-        // for rule loading. (Refine to per-array concat if the merged field is
-        // ever consumed directly.)
-        permissions: deep_merge_object(prev.permissions, next.permissions),
+        // Permission arrays accumulate across tiers in Claude Code's settings
+        // merge. `$.settings.read()` observes this merged field directly.
+        permissions: merge_permissions_object(prev.permissions, next.permissions),
         // Scalar fields — Override semantics: next wins when set, else prev.
         // OUTSTYLE.1: `outputStyle` is a string in claude-code and merges
         // scalar-override (settingsMergeCustomizer special-cases only arrays).
@@ -127,6 +127,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .or(prev.workflow_keyword_trigger_enabled),
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
         effort_level: next.effort_level.or(prev.effort_level),
+        fast_mode: next.fast_mode.or(prev.fast_mode),
+        fast_mode_per_session_opt_in: next
+            .fast_mode_per_session_opt_in
+            .or(prev.fast_mode_per_session_opt_in),
         // Cap fold (lowest wins) is done at the /effort consumer over raw
         // files; the merged view is still later-source-wins like other scalars.
         max_effort_level: next.max_effort_level.or(prev.max_effort_level),
@@ -142,6 +146,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         include_git_instructions: next
             .include_git_instructions
             .or(prev.include_git_instructions),
+        include_code_review_suggestion: next
+            .include_code_review_suggestion
+            .or(prev.include_code_review_suggestion),
         bash_edit_diff_enabled: next.bash_edit_diff_enabled.or(prev.bash_edit_diff_enabled),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
@@ -211,7 +218,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // 2.1.207 `otelHeadersHelper` (H-BIN-06) — plain string, scalar Override.
         otel_headers_helper: next.otel_headers_helper.or(prev.otel_headers_helper),
         enabled_plugins: deep_merge_object(prev.enabled_plugins, next.enabled_plugins),
-        plugin_configs: deep_merge_object(prev.plugin_configs, next.plugin_configs),
+        plugin_configs: deep_merge_source_object(prev.plugin_configs, next.plugin_configs),
         extra_known_marketplaces: deep_merge_object(
             prev.extra_known_marketplaces,
             next.extra_known_marketplaces,
@@ -228,9 +235,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
 }
 
 fn merge_model_settings(
-    prev: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
-    next: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
-) -> Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>> {
+    prev: Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>>,
+    next: Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>>,
+) -> Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>> {
     match (prev, next) {
         (None, other) | (other, None) => other,
         (Some(mut prev), Some(next)) => {
@@ -338,6 +345,9 @@ pub fn merge_raw_layer(
             },
             // Non-objects fall through `deep_merge_value`'s own mismatch arm to
             // `next`, matching `deep_merge_object` / `deep_merge_value_opt`.
+            MergeStrategy::DeepMerge if key == "permissions" => {
+                merge_permissions_value(v_prev, v_next.clone())
+            }
             MergeStrategy::DeepMerge => deep_merge_value(v_prev, v_next.clone()),
         };
         if merged != v_next {
@@ -346,6 +356,200 @@ pub fn merge_raw_layer(
         prev.insert(key, merged);
     }
     unioned
+}
+
+/// Fold one exact source settings layer into another using the same per-key
+/// strategy table as [`merge_raw_layer`]. Values and keys stay in Core's flat
+/// UTF-16 projection, including unpaired surrogates; this is the source view
+/// used by settings snapshots and editors.
+pub fn merge_raw_source_layer(
+    prev: &mut Utf16JsonProjection,
+    next: &Utf16JsonProjection,
+) -> Result<Vec<String>, Utf16JsonProjectionError> {
+    let previous_entries = prev
+        .object_entries()
+        .ok_or(Utf16JsonProjectionError::ExpectedObject)?;
+    let next_entries = next
+        .object_entries()
+        .ok_or(Utf16JsonProjectionError::ExpectedObject)?;
+    let mut fields = Vec::with_capacity(previous_entries.len() + next_entries.len());
+    for entry in previous_entries {
+        fields.push((
+            entry.code_units.to_vec(),
+            prev.subprojection_property_units(entry.code_units)?,
+        ));
+    }
+
+    let mut unioned = Vec::new();
+    for entry in next_entries {
+        if entry.value.is_null() {
+            continue;
+        }
+        let next_value = next.subprojection_property_units(entry.code_units)?;
+        let Some(index) = fields
+            .iter()
+            .position(|(key_units, _)| key_units.as_slice() == entry.code_units)
+        else {
+            fields.push((entry.code_units.to_vec(), next_value));
+            continue;
+        };
+
+        let previous_value = &fields[index].1;
+        let merged = match strategy_for(entry.display_key).unwrap_or(MergeStrategy::Override) {
+            MergeStrategy::Override => next_value.clone(),
+            MergeStrategy::ConcatDedup => concat_dedup_source(previous_value, &next_value)?,
+            MergeStrategy::DeepMerge if entry.display_key == "permissions" => {
+                merge_source_value(previous_value, &next_value, true)?
+            }
+            MergeStrategy::DeepMerge => merge_source_value(previous_value, &next_value, false)?,
+        };
+        if !source_values_equal(&merged, &next_value) {
+            unioned.push(entry.display_key.to_owned());
+        }
+        fields[index].1 = merged;
+    }
+
+    *prev = Utf16JsonProjection::object_units(fields)?;
+    Ok(unioned)
+}
+
+fn merge_source_value(
+    previous: &Utf16JsonProjection,
+    next: &Utf16JsonProjection,
+    permissions: bool,
+) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+    let (previous_entries, next_entries) = match (previous.object_entries(), next.object_entries())
+    {
+        (Some(previous_entries), Some(next_entries)) => (previous_entries, next_entries),
+        _ if permissions => return concat_dedup_source(previous, next),
+        _ => return Ok(next.clone()),
+    };
+
+    let mut fields = Vec::with_capacity(previous_entries.len() + next_entries.len());
+    for entry in previous_entries {
+        fields.push((
+            entry.code_units.to_vec(),
+            previous.subprojection_property_units(entry.code_units)?,
+        ));
+    }
+    for entry in next_entries {
+        let next_value = next.subprojection_property_units(entry.code_units)?;
+        if let Some(index) = fields
+            .iter()
+            .position(|(key_units, _)| key_units.as_slice() == entry.code_units)
+        {
+            let merged = merge_source_value(&fields[index].1, &next_value, permissions)?;
+            fields[index].1 = merged;
+        } else {
+            fields.push((entry.code_units.to_vec(), next_value));
+        }
+    }
+    Utf16JsonProjection::object_units(fields)
+}
+
+fn concat_dedup_source(
+    previous: &Utf16JsonProjection,
+    next: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+    let (Some(previous_length), Some(next_length)) = (
+        previous.at_pointer("").and_then(JsonValueView::array_len),
+        next.at_pointer("").and_then(JsonValueView::array_len),
+    ) else {
+        return Ok(next.clone());
+    };
+    let mut values = Vec::with_capacity(previous_length + next_length);
+    for (source, length) in [(previous, previous_length), (next, next_length)] {
+        for index in 0..length {
+            let value = source.subprojection(&format!("/{index}"))?;
+            if !values
+                .iter()
+                .any(|present| source_values_equal(present, &value))
+            {
+                values.push(value);
+            }
+        }
+    }
+    Utf16JsonProjection::array(values)
+}
+
+fn source_values_equal(left: &Utf16JsonProjection, right: &Utf16JsonProjection) -> bool {
+    let (Some(left_root), Some(right_root)) = (left.at_pointer(""), right.at_pointer("")) else {
+        return false;
+    };
+    let mut pending = vec![(left_root, right_root)];
+    while let Some((left, right)) = pending.pop() {
+        if left.is_null() || right.is_null() {
+            if left.is_null() && right.is_null() {
+                continue;
+            }
+            return false;
+        }
+        match (left.as_bool(), right.as_bool()) {
+            (Some(left), Some(right)) => {
+                if left != right {
+                    return false;
+                }
+                continue;
+            }
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+        match (left.as_number(), right.as_number()) {
+            (Some(left), Some(right)) => {
+                if left != right && !(left.is_nan() && right.is_nan()) {
+                    return false;
+                }
+                continue;
+            }
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+        match (left.code_units(), right.code_units()) {
+            (Some(left), Some(right)) => {
+                if left != right {
+                    return false;
+                }
+                continue;
+            }
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+        match (left.array_len(), right.array_len()) {
+            (Some(left_length), Some(right_length)) => {
+                if left_length != right_length {
+                    return false;
+                }
+                for index in 0..left_length {
+                    let (Some(left), Some(right)) = (left.get_index(index), right.get_index(index))
+                    else {
+                        return false;
+                    };
+                    pending.push((left, right));
+                }
+                continue;
+            }
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+        match (left.object_entries(), right.object_entries()) {
+            (Some(left_entries), Some(right_entries)) => {
+                if left_entries.len() != right_entries.len() {
+                    return false;
+                }
+                for left_entry in left_entries {
+                    let Some(right_entry) = right_entries
+                        .iter()
+                        .find(|entry| entry.code_units == left_entry.code_units)
+                    else {
+                        return false;
+                    };
+                    pending.push((left_entry.value, right_entry.value));
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Concatenate `prev` then append from `next`, dropping duplicates while
@@ -418,6 +622,154 @@ fn deep_merge_object(
     }
 }
 
+/// Deep-merge plugin configuration JSON without converting it through
+/// `serde_json::Value`. Existing keys retain their earlier position, new keys
+/// append in the later source order, and values/keys keep their exact source
+/// strings and JavaScript number representation. Non-object roots follow the
+/// same mismatch behavior as `deep_merge_value`: the later value wins.
+fn deep_merge_source_object(
+    prev: Option<Utf16JsonProjection>,
+    next: Option<Utf16JsonProjection>,
+) -> Option<Utf16JsonProjection> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(prev), Some(next)) => Some(deep_merge_source_value(prev, next)),
+    }
+}
+
+fn deep_merge_source_value(
+    prev: Utf16JsonProjection,
+    next: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    enum Task {
+        Merge(Option<Utf16JsonProjection>, Option<Utf16JsonProjection>),
+        BuildObject {
+            keys: Vec<Vec<u16>>,
+            child_count: usize,
+        },
+    }
+
+    let mut tasks = vec![Task::Merge(Some(prev), Some(next))];
+    let mut values = Vec::<Utf16JsonProjection>::new();
+
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Merge(None, Some(value)) | Task::Merge(Some(value), None) => {
+                values.push(value);
+            }
+            Task::Merge(None, None) => unreachable!("a merge task has at least one side"),
+            Task::Merge(Some(prev), Some(next)) => {
+                let (Some(prev_entries), Some(next_entries)) =
+                    (prev.object_entries(), next.object_entries())
+                else {
+                    values.push(next);
+                    continue;
+                };
+
+                let prev_keys = prev_entries
+                    .iter()
+                    .map(|entry| entry.code_units.to_vec())
+                    .collect::<Vec<_>>();
+                let prev_key_set = prev_keys
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>();
+                let next_indices = next_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (entry.code_units.to_vec(), index))
+                    .collect::<std::collections::HashMap<_, _>>();
+
+                let mut keys = Vec::with_capacity(prev_entries.len() + next_entries.len());
+                let mut children = Vec::with_capacity(prev_entries.len() + next_entries.len());
+                for key in prev_keys {
+                    let prev_child = prev
+                        .subprojection_property_units(&key)
+                        .expect("enumerated previous property exists");
+                    let next_child = next_indices.get(&key).map(|index| {
+                        next.subprojection_property_units(next_entries[*index].code_units)
+                            .expect("indexed later property exists")
+                    });
+                    keys.push(key);
+                    children.push((Some(prev_child), next_child));
+                }
+                for entry in &next_entries {
+                    if prev_key_set.contains(entry.code_units) {
+                        continue;
+                    }
+                    keys.push(entry.code_units.to_vec());
+                    children.push((
+                        None,
+                        Some(
+                            next.subprojection_property_units(entry.code_units)
+                                .expect("enumerated later property exists"),
+                        ),
+                    ));
+                }
+
+                let child_count = children.len();
+                tasks.push(Task::BuildObject { keys, child_count });
+                tasks.extend(
+                    children
+                        .into_iter()
+                        .rev()
+                        .map(|(prev, next)| Task::Merge(prev, next)),
+                );
+            }
+            Task::BuildObject { keys, child_count } => {
+                let children = values.split_off(values.len() - child_count);
+                let merged =
+                    Utf16JsonProjection::object_units(keys.into_iter().zip(children).collect())
+                        .expect("merged object keys remain unique");
+                values.push(merged);
+            }
+        }
+    }
+
+    values
+        .pop()
+        .expect("source deep merge produces one root value")
+}
+
+fn merge_permissions_object(
+    prev: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    next: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(prev), Some(next)) => {
+            let merged = merge_permissions_value(
+                serde_json::Value::Object(prev.into_iter().collect()),
+                serde_json::Value::Object(next.into_iter().collect()),
+            );
+            match merged {
+                serde_json::Value::Object(merged) => Some(merged.into_iter().collect()),
+                _ => unreachable!("two permission objects merge to an object"),
+            }
+        }
+    }
+}
+
+fn merge_permissions_value(prev: serde_json::Value, next: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match (prev, next) {
+        (Value::Object(mut prev), Value::Object(next)) => {
+            for (key, value) in next {
+                let merged = match prev.remove(&key) {
+                    Some(earlier) => merge_permissions_value(earlier, value),
+                    None => value,
+                };
+                prev.insert(key, merged);
+            }
+            Value::Object(prev)
+        }
+        (Value::Array(prev), Value::Array(next)) => {
+            Value::Array(concat_dedup(Some(prev), Some(next)).unwrap_or_default())
+        }
+        (_, next) => next,
+    }
+}
+
 /// Deep-merge two `Option<serde_json::Value>` fields.
 ///
 /// Both sides `None` → `None`. One side `None` → the other side. Both sides
@@ -462,6 +814,194 @@ mod tests {
     use super::*;
 
     #[test]
+    fn permission_arrays_accumulate_across_sources_in_typed_and_raw_views() {
+        let lower = serde_json::json!({
+            "permissions": {"allow":["Read", "Bash"], "deny":["WebFetch"],
+                "custom":{"rules":["lower"]}}
+        });
+        let upper = serde_json::json!({
+            "permissions": {"allow":["Bash", "Write"], "deny":["Read"],
+                "custom":{"rules":["upper"]}}
+        });
+        let expected = serde_json::json!({
+            "allow":["Read", "Bash", "Write"],
+            "deny":["WebFetch", "Read"],
+            "custom":{"rules":["lower", "upper"]},
+        });
+        let typed = merge(
+            serde_json::from_value(lower.clone()).unwrap(),
+            serde_json::from_value(upper.clone()).unwrap(),
+        );
+        assert_eq!(serde_json::to_value(typed.permissions).unwrap(), expected);
+        let mut raw = std::collections::BTreeMap::new();
+        let _ = merge_raw_layer(&mut raw, serde_json::from_value(lower).unwrap());
+        let _ = merge_raw_layer(&mut raw, serde_json::from_value(upper).unwrap());
+        assert_eq!(raw.get("permissions"), Some(&expected));
+    }
+
+    #[test]
+    fn raw_source_merge_keeps_exact_strings_and_shared_strategies() {
+        let mut previous = Utf16JsonProjection::parse(
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"type":"mcp_tool","input":{"path":"\ud800"}}]}]},"trustedDirectories":["a","shared"],"permissions":{"allow":["Read"],"deny":["WebFetch"],"custom":{"rules":["lower"]}},"unknown":{"lower":1}}"#,
+        )
+        .expect("source settings layer");
+        let next = Utf16JsonProjection::parse(
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]},"trustedDirectories":["shared","b"],"permissions":{"allow":["Bash","Read"],"deny":["Read"],"custom":{"rules":["upper"]}},"unknown":{"upper":2}}"#,
+        )
+        .expect("next source settings layer");
+
+        let unioned = merge_raw_source_layer(&mut previous, &next).expect("source merge");
+
+        assert_eq!(
+            previous.string_units("/hooks/PostToolUse/0/hooks/0/input/path"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            previous.string_at("/hooks/Stop/0/hooks/0/command"),
+            Some("x")
+        );
+        assert_eq!(
+            previous
+                .at_pointer("/trustedDirectories")
+                .and_then(|array| array.get_index(0))
+                .and_then(JsonValueView::as_str),
+            Some("a")
+        );
+        assert_eq!(
+            previous
+                .at_pointer("/trustedDirectories")
+                .and_then(|array| array.get_index(2))
+                .and_then(JsonValueView::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            previous
+                .at_pointer("/permissions/allow")
+                .and_then(|array| array.get_index(1))
+                .and_then(JsonValueView::as_str),
+            Some("Bash")
+        );
+        assert_eq!(
+            previous
+                .at_pointer("/permissions/custom/rules")
+                .and_then(|array| array.get_index(1))
+                .and_then(JsonValueView::as_str),
+            Some("upper")
+        );
+        assert_eq!(previous.number_at("/unknown/upper"), Some(2.0));
+        assert!(previous.at_pointer("/unknown/lower").is_none());
+        assert!(unioned.contains(&"hooks".to_owned()));
+        assert!(unioned.contains(&"trustedDirectories".to_owned()));
+        assert!(!unioned.contains(&"unknown".to_owned()));
+        assert!(previous
+            .to_json_string()
+            .expect("source output")
+            .contains(r#""path":"\ud800""#));
+    }
+
+    #[test]
+    fn plugin_configs_deep_merge_preserves_exact_strings_and_js_key_order() {
+        let lower: SettingsJson = serde_json::from_str(
+            r#"{"pluginConfigs":{"7":{"options":{"region":"us","keep":"\ud800"},"order":{"2":"two","10":"ten","x":"x"}},"z":{"old":true}}}"#,
+        )
+        .expect("parse lower plugin config source");
+        let upper: SettingsJson = serde_json::from_str(
+            r#"{"pluginConfigs":{"7":{"options":{"region":"eu","added":"\udfff"},"order":{"10":"TEN","1":"one"}},"2":{"from":"upper"}}}"#,
+        )
+        .expect("parse upper plugin config source");
+
+        let merged = merge(lower, upper);
+        let configs = merged.plugin_configs.expect("merged plugin configs");
+        assert_eq!(configs.string_units("/7/options/keep"), Some(vec![0xd800]));
+        assert_eq!(configs.string_units("/7/options/added"), Some(vec![0xdfff]));
+        assert_eq!(configs.string_at("/7/options/region"), Some("eu"));
+        assert!(configs.at_pointer("/z/old").unwrap().as_bool().unwrap());
+
+        let json = configs.to_json_string().expect("stringify merged source");
+        let order = json
+            .split_once("\"order\":{")
+            .expect("ordered nested object")
+            .1;
+        let one = order.find("\"1\"").unwrap();
+        let two = order.find("\"2\"").unwrap();
+        let ten = order.find("\"10\"").unwrap();
+        let x = order.find("\"x\"").unwrap();
+        assert!(
+            one < two && two < ten && ten < x,
+            "numeric keys must follow JavaScript order: {json}"
+        );
+        let root_two = json.find("\"2\"").unwrap();
+        let root_seven = json.find("\"7\"").unwrap();
+        let root_z = json.find("\"z\"").unwrap();
+        assert!(
+            root_two < root_seven && root_seven < root_z,
+            "root numeric keys precede insertion-order strings: {json}"
+        );
+    }
+
+    #[test]
+    fn plugin_configs_accept_non_object_native_shapes_and_later_shape_wins() {
+        let null: SettingsJson =
+            serde_json::from_str(r#"{"pluginConfigs":null}"#).expect("accept native null");
+        assert!(null
+            .plugin_configs
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+
+        let lower: SettingsJson =
+            serde_json::from_str(r#"{"pluginConfigs":"lower"}"#).expect("accept native value");
+        let upper: SettingsJson = serde_json::from_str(r#"{"pluginConfigs":[{"text":"\ud800"}]}"#)
+            .expect("accept later native value");
+        let merged = merge(lower, upper);
+        let configs = merged.plugin_configs.expect("later source retained");
+        assert_eq!(configs.array_len(""), Some(1));
+        assert_eq!(configs.string_units("/0/text"), Some(vec![0xd800]));
+    }
+
+    #[test]
+    fn raw_source_merge_matches_value_merge_for_json_representable_layers() {
+        let previous = serde_json::json!({
+            "hooks": {"PreToolUse": [{"matcher":"Bash"}]},
+            "permissions": {"allow":["Read"],"custom":{"rules":["lower"]}},
+            "trustedDirectories": ["a", "shared"],
+            "unknown": {"lower": true}
+        });
+        let next = serde_json::json!({
+            "hooks": {"PostToolUse": [{"matcher":"Write"}]},
+            "permissions": {"allow":["Bash", "Read"],"custom":{"rules":["upper"]}},
+            "trustedDirectories": ["shared", "b"],
+            "unknown": {"upper": true}
+        });
+        let mut raw = std::collections::BTreeMap::new();
+        let mut expected_unions = merge_raw_layer(
+            &mut raw,
+            serde_json::from_value(previous.clone()).expect("previous raw layer"),
+        );
+        expected_unions.extend(merge_raw_layer(
+            &mut raw,
+            serde_json::from_value(next.clone()).expect("next raw layer"),
+        ));
+
+        let mut source =
+            Utf16JsonProjection::from_serde_value(&previous).expect("previous source layer");
+        let next_source = Utf16JsonProjection::from_serde_value(&next).expect("next source layer");
+        let source_unions =
+            merge_raw_source_layer(&mut source, &next_source).expect("source settings merge");
+        let source_value: serde_json::Value =
+            serde_json::from_str(&source.to_json_string().expect("source JSON"))
+                .expect("bounded JSON-compatible source view");
+
+        assert_eq!(
+            source_value,
+            serde_json::Value::Object(raw.into_iter().collect())
+        );
+        assert_eq!(source_unions, expected_unions);
+    }
+
+    #[test]
     fn agent_push_notification_setting_is_scalar_override() {
         let merged = merge(
             SettingsJson {
@@ -474,6 +1014,32 @@ mod tests {
             },
         );
         assert_eq!(merged.agent_push_notif_enabled, Some(true));
+    }
+
+    #[test]
+    fn prompt_cache_ttl_settings_are_scalar_override() {
+        let merged = merge(
+            SettingsJson {
+                prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::FiveMinutes),
+                subagent_prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::OneHour),
+                ..Default::default()
+            },
+            SettingsJson {
+                prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::OneHour),
+                subagent_prompt_cache_ttl: Some(
+                    crate::settings::schema::PromptCacheTtl::FiveMinutes,
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            merged.prompt_cache_ttl,
+            Some(crate::settings::schema::PromptCacheTtl::OneHour)
+        );
+        assert_eq!(
+            merged.subagent_prompt_cache_ttl,
+            Some(crate::settings::schema::PromptCacheTtl::FiveMinutes)
+        );
     }
     use crate::settings::schema::SettingsJson;
 
@@ -1092,10 +1658,10 @@ mod tests {
 
         // The typed path: exactly what `Settings::load` does per layer.
         let typed_lower: SettingsJson =
-            serde_json::from_value(serde_json::to_value(&lower).unwrap())
+            serde_json::from_str(&serde_json::to_string(&lower).unwrap())
                 .expect("the fixture must parse as SettingsJson, or it is not testing `merge`");
         let typed_upper: SettingsJson =
-            serde_json::from_value(serde_json::to_value(&upper).unwrap())
+            serde_json::from_str(&serde_json::to_string(&upper).unwrap())
                 .expect("the fixture must parse as SettingsJson, or it is not testing `merge`");
         let typed_merged: std::collections::BTreeMap<String, serde_json::Value> =
             serde_json::from_value(serde_json::to_value(merge(typed_lower, typed_upper)).unwrap())
@@ -1212,6 +1778,8 @@ mod tests {
             // case that used to panic.
             (json!("auto"), json!("tmux")),
             (json!("china_mainland"), json!("international")),
+            (json!("low"), json!("medium")),
+            (json!("5m"), json!("1h")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip
@@ -1219,7 +1787,8 @@ mod tests {
         // A wrong-typed known field fails to parse; an unknown field parses
         // but vanishes from the re-serialization, so both are rejected.
         let round_trips = |field: &str, value: &Value| -> bool {
-            let Ok(parsed) = serde_json::from_value::<SettingsJson>(json!({ field: value })) else {
+            let source = json!({ field: value }).to_string();
+            let Ok(parsed) = serde_json::from_str::<SettingsJson>(&source) else {
                 return false;
             };
             serde_json::to_value(&parsed)
@@ -1259,9 +1828,11 @@ mod tests {
             };
 
             let typed_lower: SettingsJson =
-                serde_json::from_value(json!({ field: lower })).expect("probe must parse");
+                serde_json::from_str(&json!({ field: lower }).to_string())
+                    .expect("probe must parse");
             let typed_upper: SettingsJson =
-                serde_json::from_value(json!({ field: upper })).expect("probe must parse");
+                serde_json::from_str(&json!({ field: upper }).to_string())
+                    .expect("probe must parse");
             let merged = serde_json::to_value(merge(typed_lower, typed_upper))
                 .expect("a merged SettingsJson must serialize");
             let merged_field = merged.get(field);
@@ -1427,11 +1998,11 @@ mod tests {
         };
         let merged = merge(user, project).attribution.expect("attribution");
         assert_eq!(
-            merged.commit.as_deref(),
-            Some("user commit"),
+            merged.commit,
+            Some("user commit".into()),
             "the later layer named only `pr`, so `commit` must survive"
         );
-        assert_eq!(merged.pr.as_deref(), Some("project pr"));
+        assert_eq!(merged.pr, Some("project pr".into()));
     }
 
     /// Within a field the later layer still wins, and an explicit empty string
@@ -1448,16 +2019,49 @@ mod tests {
         };
         let project = SettingsJson {
             attribution: Some(Attribution {
-                commit: Some(String::new()),
+                commit: Some(String::new().into()),
                 pr: None,
             }),
             ..Default::default()
         };
         let merged = merge(user, project).attribution.expect("attribution");
         assert_eq!(
-            merged.commit.as_deref(),
-            Some(""),
+            merged.commit,
+            Some(String::new().into()),
             "an explicit empty must override, i.e. disable the trailer"
+        );
+    }
+
+    #[test]
+    fn attribution_merge_preserves_exact_surrogate_projection() {
+        use crate::settings::schema::Attribution;
+        let exact = Utf16JsonProjection::parse(r#""\ud800""#).expect("source string");
+        let user = SettingsJson {
+            attribution: Some(Attribution {
+                commit: Some(exact.clone()),
+                pr: None,
+            }),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            attribution: Some(Attribution {
+                commit: None,
+                pr: Some("project pr".into()),
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge(user, project).attribution.expect("attribution");
+        assert_eq!(merged.commit, Some(exact));
+        assert_eq!(
+            merged
+                .commit
+                .as_ref()
+                .expect("commit string")
+                .at_pointer("")
+                .expect("root value")
+                .code_units(),
+            Some([0xd800_u16].as_slice())
         );
     }
 }

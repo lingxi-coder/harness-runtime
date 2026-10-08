@@ -62,7 +62,9 @@ impl BuiltinCommandHandler for AgentsHandler {
         telemetry::emit_command_started(cmd_evt::AGENTS_STARTED);
         let s = agents_removed_message();
         telemetry::emit_command_completed(cmd_evt::AGENTS_COMPLETED, "");
-        CommandResult::Done { display: Some(s) }
+        CommandResult::Done {
+            display: Some((s).into()),
+        }
     }
     fn name(&self) -> &str {
         "agents"
@@ -80,7 +82,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "agents".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

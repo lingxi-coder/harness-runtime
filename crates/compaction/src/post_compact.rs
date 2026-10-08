@@ -11,7 +11,8 @@ use crate::thresholds::{
     POST_COMPACT_MAX_TOKENS_PER_SKILL, POST_COMPACT_SKILLS_TOKEN_BUDGET, POST_COMPACT_TOKEN_BUDGET,
 };
 use crate::warning_state::clear_compact_warning_suppression;
-use lingxi_core::types::{ContentBlock, ConversationMessage};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::ConversationMessage;
 
 /// Marker appended to skill content truncated to fit the per-skill budget.
 ///
@@ -50,108 +51,46 @@ const fn utf16_scalar_units(ch: char) -> u64 {
     }
 }
 
-#[must_use]
-fn utf16_scalar_prefix_boundary(content: &str, max_units: u64) -> usize {
-    let mut used = 0u64;
-    let mut boundary = 0usize;
-    for (idx, ch) in content.char_indices() {
-        let char_units = utf16_scalar_units(ch);
-        if used.saturating_add(char_units) > max_units {
-            break;
-        }
-        used = used.saturating_add(char_units);
-        boundary = idx + ch.len_utf8();
-    }
-    boundary
+fn root_string_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("UTF-16 units form a root JSON string")
 }
 
-#[must_use]
-fn utf16_units_vec(content: &str) -> Vec<u16> {
-    content.encode_utf16().collect()
+fn estimate_projection_tokens(content: &Utf16JsonProjection) -> u64 {
+    let length = content
+        .string_units("")
+        .expect("skill body is a root JSON string")
+        .len();
+    u64::try_from(length).unwrap_or(u64::MAX).saturating_add(2) / 4
 }
 
-#[must_use]
-fn estimated_tokens_for_exact_utf16(display_text: &str, exact_utf16: Option<&[u16]>) -> u64 {
-    exact_utf16.map_or_else(
-        || estimate_content_tokens(display_text),
-        |units| {
-            u64::try_from(units.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(2)
-                / 4
-        },
-    )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TruncatedText {
-    display_text: String,
-    exact_utf16: Option<Vec<u16>>,
-}
-
-/// Truncate `content` to fit within `max_tokens`, appending
-/// [`SKILL_TRUNCATION_MARKER`] when it overflows.
-///
-/// 1:1 with `o3p(e, t)` (`bin/claude.exe` offset 203003699):
-/// ```text
-/// function o3p(e,t){ if($f(e)<=t) return e; let n=t*4-Ael.length; return e.slice(0,n)+Ael }
-/// ```
-/// When `$f(content) <= max_tokens` the content is returned verbatim; otherwise
-/// it is sliced to `max_tokens*4 − marker.length` UTF-16 code units and the
-/// marker appended. The returned [`TruncatedText`] always carries a valid UTF-8
-/// `display_text`; when the exact JS `slice(0, keep)` result would end on the
-/// first half of a surrogate pair, `display_text` snaps down to the previous
-/// scalar value and `exact_utf16` preserves the true provider-visible UTF-16
-/// wire image.
-#[must_use]
-fn truncate_content_with_marker_exact(
-    content: &str,
+fn truncate_skill_projection(
+    content: &Utf16JsonProjection,
     max_tokens: u64,
-    marker: &str,
-) -> TruncatedText {
-    if estimate_content_tokens(content) <= max_tokens {
-        return TruncatedText {
-            display_text: content.to_string(),
-            exact_utf16: None,
-        };
+) -> Utf16JsonProjection {
+    let mut units = content
+        .string_units("")
+        .expect("skill body is a root JSON string");
+    if estimate_projection_tokens(content) <= max_tokens {
+        return content.clone();
     }
-    let marker_len = utf16_code_units(marker);
-    let keep = (max_tokens.saturating_mul(4)).saturating_sub(marker_len);
-    let boundary = utf16_scalar_prefix_boundary(content, keep);
-    let mut display_text = content[..boundary].to_string();
-    display_text.push_str(marker);
-
-    let mut exact_utf16 = None;
-    let mut exact_units = utf16_units_vec(content);
-    if let (Ok(total), Ok(keep)) = (
-        usize::try_from(utf16_code_units(content)),
-        usize::try_from(keep),
-    ) {
-        if keep <= total {
-            exact_units.truncate(keep);
-            exact_units.extend(marker.encode_utf16());
-            if exact_units != display_text.encode_utf16().collect::<Vec<_>>() {
-                exact_utf16 = Some(exact_units);
-            }
-        }
-    }
-
-    TruncatedText {
-        display_text,
-        exact_utf16,
-    }
+    let marker = SKILL_TRUNCATION_MARKER.encode_utf16().collect::<Vec<_>>();
+    let keep = max_tokens
+        .saturating_mul(4)
+        .saturating_sub(u64::try_from(marker.len()).unwrap_or(u64::MAX));
+    units.truncate(usize::try_from(keep).unwrap_or(usize::MAX));
+    units.extend(marker);
+    root_string_from_units(units)
 }
 
 /// Truncate skill content to fit within `max_tokens`, appending
 /// [`SKILL_TRUNCATION_MARKER`] when it overflows.
 #[must_use]
-pub fn truncate_skill_content(content: &str, max_tokens: u64) -> String {
-    truncate_content_with_marker_exact(content, max_tokens, SKILL_TRUNCATION_MARKER).display_text
-}
-
-#[must_use]
-fn truncate_skill_content_exact(content: &str, max_tokens: u64) -> TruncatedText {
-    truncate_content_with_marker_exact(content, max_tokens, SKILL_TRUNCATION_MARKER)
+pub fn truncate_skill_content(
+    content: &Utf16JsonProjection,
+    max_tokens: u64,
+) -> Utf16JsonProjection {
+    truncate_skill_projection(content, max_tokens)
 }
 
 /// A file eligible for post-compact restoration: the path, the content the
@@ -181,16 +120,13 @@ pub struct SkillRestoreCandidate {
     /// The registry key (`"{agentId}:{name}"`) this candidate came from — the
     /// target of the `n_n` write-back when the content is truncated or the
     /// budget overflows.
-    pub key: String,
+    pub key: Vec<u16>,
     /// Skill name.
-    pub name: String,
+    pub name: Utf16JsonProjection,
     /// Skill source path.
     pub path: std::path::PathBuf,
     /// Full skill content (truncated per [`POST_COMPACT_MAX_TOKENS_PER_SKILL`]).
-    pub content: String,
-    /// Exact JS UTF-16 wire image for `content`, when it differs from the
-    /// display-safe UTF-8 string.
-    pub content_exact_utf16: Option<Vec<u16>>,
+    pub content: Utf16JsonProjection,
     /// When the skill was last invoked; restoration sorts descending on this.
     pub invoked_at_ms: i64,
 }
@@ -205,9 +141,9 @@ pub struct SkillRestoreCandidate {
 #[derive(Debug, Clone)]
 pub enum AttachedSkillContent {
     /// Content that already rode in a prior `invoked_skills` attachment.
-    Attachment(String),
+    Attachment(Utf16JsonProjection),
     /// A message body's text (`DYi` of a user-meta message).
-    Body(String),
+    Body(Utf16JsonProjection),
 }
 
 /// `LQn` classification of a skill's content against already-attached context.
@@ -228,17 +164,17 @@ enum SkillDedup {
 /// a message-body match returns `Body` immediately, while an `invoked_skills`
 /// attachment match sets a flag; if no body match is found the flag decides
 /// between `Attachment` and `None`.
-fn lqn(already_attached: &[AttachedSkillContent], content: &str) -> SkillDedup {
+fn lqn(already_attached: &[AttachedSkillContent], content: &Utf16JsonProjection) -> SkillDedup {
     let mut attachment_match = false;
     for item in already_attached.iter().rev() {
         match item {
             AttachedSkillContent::Attachment(c) => {
-                if !attachment_match && c == content {
+                if !attachment_match && c.semantically_eq(content) {
                     attachment_match = true;
                 }
             }
             AttachedSkillContent::Body(c) => {
-                if c == content {
+                if c.semantically_eq(content) {
                     return SkillDedup::Body;
                 }
             }
@@ -261,99 +197,43 @@ fn lqn(already_attached: &[AttachedSkillContent], content: &str) -> SkillDedup {
 /// separator is a blank line too.
 pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. Any request or argument text embedded in the skill bodies below — for example under a \"## User Request\" or \"## Input\" heading — was captured when that skill was first invoked. It is NOT the user's current message and NOT a new request: do not act on it as if it were live. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
 
-/// Render restored skills into the model-visible `invoked_skills` attachment
-/// body, or `None` when there is nothing to restore.
-///
-/// 1:1 with the `case"invoked_skills"` renderer (`bin/claude.exe` v2.1.207 offset
-/// 226440880 / v2.1.208 offset 225821608, byte-verified via `od -c`):
-/// `e.skills.map((n)=>`### Skill: ${n.name}\nPath: ${n.path}\n\n${n.content}`).join(`\n\n---\n\n`)`
-/// wrapped as `${PREAMBLE}\n\n${joined}` and then inside `<system-reminder>`
-/// by v2.1.261 `nu` / `Na` — the per-skill blocks are separated by a
-/// `\n\n---\n\n` delimiter, each block puts a blank line before its content, and
-/// the preamble is joined to the blocks by a blank line. Emitted as a single
-/// `isMeta` user message (the caller wraps it in
-/// [`lingxi_core::types::ConversationMessage::user_meta`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedInvokedSkillsAttachment {
-    /// Display-safe attachment body.
-    pub display_text: String,
-    /// Exact JS UTF-16 code units to preserve on the provider wire.
-    pub exact_utf16: Option<Vec<u16>>,
-}
-
-impl RenderedInvokedSkillsAttachment {
-    /// Convert the rendered attachment into a normal text block or, when the
-    /// JS slice split a surrogate pair, the exact UTF-16 sidecar variant.
-    #[must_use]
-    pub fn into_content_block(self) -> ContentBlock {
-        match self.exact_utf16 {
-            Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
-                text: self.display_text,
-                utf16_code_units,
-            },
-            None => ContentBlock::Text {
-                text: self.display_text,
-            },
-        }
-    }
-}
-
-/// Render restored skills while retaining an exact UTF-16 sidecar when a JS
-/// truncation boundary cannot be represented by a Rust `String`.
+/// Render restored skills as one exact root-string projection for the model.
 #[must_use]
-pub fn render_invoked_skills_attachment_with_sidecar(
-    skills: &[RestoredSkill],
-) -> Option<RenderedInvokedSkillsAttachment> {
+pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<Utf16JsonProjection> {
     if skills.is_empty() {
         return None;
     }
-    let mut display_parts = Vec::with_capacity(skills.len());
     let mut exact_utf16 = Vec::new();
-    let mut has_exact = false;
     exact_utf16.extend("<system-reminder>\n".encode_utf16());
     exact_utf16.extend(INVOKED_SKILLS_ATTACHMENT_PREAMBLE.encode_utf16());
     exact_utf16.extend("\n\n".encode_utf16());
 
     for (index, skill) in skills.iter().enumerate() {
         if index > 0 {
-            display_parts.push("---".to_string());
             exact_utf16.extend("\n\n---\n\n".encode_utf16());
         }
-        let header = format!(
-            "### Skill: {}\nPath: {}\n\n",
-            skill.name,
-            skill.path.display()
+        exact_utf16.extend("### Skill: ".encode_utf16());
+        exact_utf16.extend(
+            skill
+                .name
+                .string_units("")
+                .expect("skill name is a root string"),
         );
-        exact_utf16.extend(header.encode_utf16());
-        display_parts.push(format!("{header}{}", skill.content));
-        if let Some(units) = &skill.content_exact_utf16 {
-            exact_utf16.extend(units.iter().copied());
-            has_exact = true;
-        } else {
-            exact_utf16.extend(skill.content.encode_utf16());
-        }
+        exact_utf16.extend("\nPath: ".encode_utf16());
+        exact_utf16.extend(skill.path.display().to_string().encode_utf16());
+        exact_utf16.extend("\n\n".encode_utf16());
+        exact_utf16.extend(
+            skill
+                .content
+                .string_units("")
+                .expect("skill body is a root string"),
+        );
     }
-
-    let display_text = format!(
-        "<system-reminder>\n{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{}\n</system-reminder>",
-        display_parts.join("\n\n")
-    );
     exact_utf16.extend("\n</system-reminder>".encode_utf16());
-
-    Some(RenderedInvokedSkillsAttachment {
-        display_text,
-        exact_utf16: has_exact.then_some(exact_utf16),
-    })
-}
-
-/// Render restored skills as display-safe UTF-8 text.
-///
-/// Production provider wiring should use
-/// [`render_invoked_skills_attachment_with_sidecar`] so a rare split-surrogate
-/// boundary remains byte-exact on the Claude-family JSON wire.
-#[must_use]
-pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<String> {
-    render_invoked_skills_attachment_with_sidecar(skills).map(|rendered| rendered.display_text)
+    Some(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&exact_utf16), exact_utf16)
+            .expect("rendered skill attachment is a valid root JSON string"),
+    )
 }
 
 /// A restored file attachment: the path plus content that stayed within both
@@ -370,14 +250,11 @@ pub struct RestoredFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoredSkill {
     /// Skill name.
-    pub name: String,
+    pub name: Utf16JsonProjection,
     /// Skill source path.
     pub path: std::path::PathBuf,
     /// The (possibly truncated) skill content included in the attachment.
-    pub content: String,
-    /// Exact JS UTF-16 code units for `content` when the display-safe string
-    /// cannot represent the provider-visible body byte-for-byte.
-    pub content_exact_utf16: Option<Vec<u16>>,
+    pub content: Utf16JsonProjection,
 }
 
 /// Select the recent files to restore after a compaction — the **selection**
@@ -501,7 +378,11 @@ pub fn restore_post_compact_skills(
     let mut out = Vec::new();
     for skill in sorted {
         // `if(!a.content)continue;` — skip cleared/empty registry rows.
-        if skill.content.is_empty() {
+        if skill
+            .content
+            .string_units("")
+            .is_some_and(|content| content.is_empty())
+        {
             continue;
         }
         // `let l=LQn(t,a.content);` — dedup against the boundary context.
@@ -514,42 +395,25 @@ pub fn restore_post_compact_skills(
         let is_body = dedup == SkillDedup::Body;
         // `u=sRg(a.content,K0g)` — per-skill truncation.
         let truncated =
-            truncate_skill_content_exact(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
-        // `d=cy(u)` — token estimate of the truncated content.
-        let truncated_exact_utf16 = if truncated.display_text == skill.content {
-            skill
-                .content_exact_utf16
-                .clone()
-                .or(truncated.exact_utf16.clone())
-        } else {
-            truncated.exact_utf16.clone()
-        };
-        let cost = estimated_tokens_for_exact_utf16(
-            &truncated.display_text,
-            truncated_exact_utf16.as_deref(),
-        );
+            truncate_skill_projection(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
+        let cost = estimate_projection_tokens(&truncated);
         // `if(n+d>Y0g){if(!c)n_n(s,"");continue}` — budget overflow: clear the
         // registry content (unless a body match) and DROP (do not truncate-to-fit).
         if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
             if !is_body {
-                crate::invoked_skills::write_back(&skill.key, "", None);
+                crate::invoked_skills::write_back(&skill.key, &root_string_from_units(Vec::new()));
             }
             continue;
         }
         // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
         running = running.saturating_add(cost);
-        if !is_body && truncated.display_text != skill.content {
-            crate::invoked_skills::write_back(
-                &skill.key,
-                &truncated.display_text,
-                truncated.exact_utf16.as_deref(),
-            );
+        if !is_body && !truncated.semantically_eq(&skill.content) {
+            crate::invoked_skills::write_back(&skill.key, &truncated);
         }
         out.push(RestoredSkill {
             name: skill.name,
             path: skill.path,
-            content: truncated.display_text,
-            content_exact_utf16: truncated_exact_utf16,
+            content: truncated,
         });
     }
     out
@@ -766,6 +630,14 @@ mod tests {
 
     use std::path::PathBuf;
 
+    fn source(text: &str) -> Utf16JsonProjection {
+        text.into()
+    }
+
+    fn text(value: &Utf16JsonProjection) -> &str {
+        value.string_at("").expect("root string")
+    }
+
     fn file(path: &str, content: &str, ts: i64) -> FileRestoreCandidate {
         FileRestoreCandidate {
             path: PathBuf::from(path),
@@ -779,11 +651,10 @@ mod tests {
             // Namespace the pure-test keys so their (no-op) `write_back` calls
             // can never collide with the real `":{name}"` keys the
             // `invoked_skills` registry tests register in the same test binary.
-            key: format!("pt:{name}"),
-            name: name.to_string(),
+            key: format!("pt:{name}").encode_utf16().collect(),
+            name: source(name),
             path: PathBuf::from(path),
-            content: content.to_string(),
-            content_exact_utf16: None,
+            content: source(content),
             invoked_at_ms: invoked,
         }
     }
@@ -804,58 +675,53 @@ mod tests {
 
     #[test]
     fn truncate_skill_content_keeps_short_content_verbatim() {
-        let short = "tiny skill body";
-        assert_eq!(truncate_skill_content(short, 5_000), short);
+        let short = source("tiny skill body");
+        assert!(truncate_skill_content(&short, 5_000).semantically_eq(&short));
     }
 
     #[test]
     fn truncate_skill_content_truncates_and_appends_marker() {
         // 40_000 chars ≈ 10_000 tokens > cap 5_000 → truncate.
-        let big = "x".repeat(40_000);
+        let big = source(&"x".repeat(40_000));
         let out = truncate_skill_content(&big, 5_000);
-        assert!(out.ends_with(SKILL_TRUNCATION_MARKER));
+        assert!(text(&out).ends_with(SKILL_TRUNCATION_MARKER));
         // kept = 5_000*4 - marker.length UTF-16 code units + marker.
         let expected_kept = 5_000 * 4
             - usize::try_from(utf16_code_units(SKILL_TRUNCATION_MARKER)).expect("marker fits");
-        assert_eq!(out.len(), expected_kept + SKILL_TRUNCATION_MARKER.len());
-    }
-
-    #[test]
-    fn truncate_content_with_marker_uses_utf16_units_for_cjk() {
-        let out = truncate_content_with_marker_exact("你好吗世界啊", 1, "[]");
-        assert_eq!(out.display_text, "你好[]");
-        assert!(out.exact_utf16.is_none());
-    }
-
-    #[test]
-    fn truncate_content_with_marker_matches_js_slice_when_prefix_is_scalar_aligned() {
-        let out = truncate_content_with_marker_exact("😀BCDE", 1, "[]");
-        assert_eq!(out.display_text, "😀[]");
-        assert!(out.exact_utf16.is_none());
-    }
-
-    #[test]
-    fn truncate_content_with_marker_carries_exact_utf16_when_js_slice_would_need_lone_surrogate() {
-        let keep = 2usize;
-        let js_prefix_units = "A😀BCD".encode_utf16().take(keep).collect::<Vec<_>>();
-        assert!(
-            std::char::decode_utf16(js_prefix_units.iter().copied())
-                .last()
-                .expect("split surrogate yields trailing unit")
-                .is_err(),
-            "JS slice(0, {keep}) would end with a lone surrogate that Rust String cannot represent"
-        );
-
-        let out = truncate_content_with_marker_exact("A😀BCD", 1, "[]");
-        assert_eq!(out.display_text, "A[]");
         assert_eq!(
-            out.exact_utf16,
-            Some(vec![0x0041, 0xD83D, 0x005B, 0x005D]),
-            "wire image must preserve the lone surrogate before the marker"
+            out.string_units("").unwrap().len(),
+            expected_kept + SKILL_TRUNCATION_MARKER.encode_utf16().count()
         );
-        assert!(
-            estimate_content_tokens(&out.display_text) <= 1,
-            "snap-down path must still satisfy the caller's token budget"
+    }
+
+    #[test]
+    fn truncate_skill_content_uses_utf16_units_for_cjk() {
+        let big = source(&"你".repeat(20_003));
+        let out = truncate_skill_content(&big, 5_000);
+        let units = out.string_units("").unwrap();
+        assert_eq!(units.len(), 20_000);
+        assert!(text(&out).ends_with(SKILL_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn truncate_skill_content_retains_a_split_surrogate_as_source_units() {
+        let marker_units = SKILL_TRUNCATION_MARKER.encode_utf16().count();
+        let keep = 5_000 * 4 - marker_units;
+        let mut units = vec![u16::from(b'x'); keep - 1];
+        units.extend([0xd83d, 0xde00]);
+        units.extend(std::iter::repeat_n(u16::from(b'y'), 200));
+        let content =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let out = truncate_skill_content(&content, 5_000);
+        let out_units = out.string_units("").unwrap();
+        assert_eq!(out_units[keep - 1], 0xd83d);
+        assert_eq!(
+            &out_units[keep..],
+            SKILL_TRUNCATION_MARKER
+                .encode_utf16()
+                .collect::<Vec<_>>()
+                .as_slice()
         );
     }
 
@@ -960,18 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn post_compact_file_read_budgets_match_token_limit_contract() {
-        assert_eq!(
-            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
-            usize::try_from(POST_COMPACT_MAX_TOKENS_PER_FILE).expect("token cap fits usize") * 4
-        );
-        assert_eq!(
-            crate::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
-            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ * 3 + 3
-        );
-    }
-
-    #[test]
     fn restore_files_composes_select_then_budget() {
         // The composed pure form must equal select-then-budget.
         let candidates = vec![file("/a", "one", 2), file("/b", "two", 1)];
@@ -989,11 +843,10 @@ mod tests {
         ];
         let restored = restore_post_compact_skills(candidates, &[]);
         // B invoked later → first; A capped + appended marker.
-        assert_eq!(restored[0].name, "B");
-        assert_eq!(restored[0].content, "short");
-        assert_eq!(restored[1].name, "A");
-        assert!(restored[1].content.ends_with(SKILL_TRUNCATION_MARKER));
-        assert!(restored[1].content_exact_utf16.is_none());
+        assert_eq!(text(&restored[0].name), "B");
+        assert_eq!(text(&restored[0].content), "short");
+        assert_eq!(text(&restored[1].name), "A");
+        assert!(text(&restored[1].content).ends_with(SKILL_TRUNCATION_MARKER));
     }
 
     #[test]
@@ -1029,7 +882,7 @@ mod tests {
         ];
         let restored = restore_post_compact_skills(candidates, &[]);
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].name, "live");
+        assert_eq!(text(&restored[0].name), "live");
     }
 
     #[test]
@@ -1040,10 +893,10 @@ mod tests {
             skill("dup", "/d", "already attached", 5),
             skill("fresh", "/f", "fresh body", 4),
         ];
-        let already = [AttachedSkillContent::Attachment("already attached".into())];
+        let already = [AttachedSkillContent::Attachment(source("already attached"))];
         let restored = restore_post_compact_skills(candidates, &already);
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].name, "fresh");
+        assert_eq!(text(&restored[0].name), "fresh");
     }
 
     #[test]
@@ -1052,14 +905,14 @@ mod tests {
         // attachment match which skips. (The registry write-back distinction is
         // asserted in `invoked_skills` where the global registry is available.)
         let candidates = vec![skill("s", "/s", "shared body", 5)];
-        let already = [AttachedSkillContent::Body("shared body".into())];
+        let already = [AttachedSkillContent::Body(source("shared body"))];
         let restored = restore_post_compact_skills(candidates, &already);
         assert_eq!(
             restored.len(),
             1,
             "body match restores; only attachment skips"
         );
-        assert_eq!(restored[0].content, "shared body");
+        assert_eq!(text(&restored[0].content), "shared body");
     }
 
     #[test]
@@ -1078,16 +931,14 @@ mod tests {
     fn render_invoked_skills_attachment_shape_is_byte_faithful() {
         let restored = vec![
             RestoredSkill {
-                name: "deploy".into(),
+                name: source("deploy"),
                 path: PathBuf::from("/skills/deploy"),
-                content: "Deploy guidelines".into(),
-                content_exact_utf16: None,
+                content: source("Deploy guidelines"),
             },
             RestoredSkill {
-                name: "build".into(),
+                name: source("build"),
                 path: PathBuf::from("/skills/build"),
-                content: "Build guidelines".into(),
-                content_exact_utf16: None,
+                content: source("Build guidelines"),
             },
         ];
         let body = render_invoked_skills_attachment(&restored).expect("non-empty");
@@ -1099,35 +950,31 @@ mod tests {
         let expected = format!(
             "<system-reminder>\n{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n### Skill: deploy\nPath: /skills/deploy\n\nDeploy guidelines\n\n---\n\n### Skill: build\nPath: /skills/build\n\nBuild guidelines\n</system-reminder>"
         );
-        assert_eq!(body, expected);
+        assert_eq!(body.string_at(""), Some(expected.as_str()));
         // Preamble internal separator is a blank line (`guidelines.\n\nIMPORTANT`).
-        assert!(body.contains("their guidelines.\n\nIMPORTANT: Do NOT"));
+        assert!(text(&body).contains("their guidelines.\n\nIMPORTANT: Do NOT"));
         // Empty → None (no attachment).
         assert!(render_invoked_skills_attachment(&[]).is_none());
     }
 
     #[test]
-    fn render_invoked_skills_attachment_exposes_text_js_utf16_sidecar() {
+    fn render_invoked_skills_attachment_preserves_exact_utf16() {
+        let content = Utf16JsonProjection::root_string(
+            "A�[]".to_string(),
+            vec![0x0041, 0xD83D, 0x005B, 0x005D],
+        )
+        .unwrap();
         let restored = vec![RestoredSkill {
-            name: "skill".into(),
+            name: source("skill"),
             path: PathBuf::from("/skills/skill"),
-            content: "A[]".into(),
-            content_exact_utf16: Some(vec![0x0041, 0xD83D, 0x005B, 0x005D]),
+            content,
         }];
-        let rendered = render_invoked_skills_attachment_with_sidecar(&restored).expect("non-empty");
-        let block = rendered.into_content_block();
-        match block {
-            ContentBlock::TextJsUtf16 {
-                text,
-                utf16_code_units,
-            } => {
-                assert!(text.contains("### Skill: skill"));
-                assert!(utf16_code_units
-                    .windows(4)
-                    .any(|w| w == [0x0041, 0xD83D, 0x005B, 0x005D]));
-            }
-            other => panic!("expected TextJsUtf16 block, got {other:?}"),
-        }
+        let rendered = render_invoked_skills_attachment(&restored).expect("non-empty");
+        let units = rendered.string_units("").unwrap();
+        assert!(text(&rendered).contains("### Skill: skill"));
+        assert!(units
+            .windows(4)
+            .any(|w| w == [0x0041, 0xD83D, 0x005B, 0x005D]));
     }
 
     #[test]
@@ -1169,31 +1016,39 @@ mod tests {
     /// compact must NOT.
     #[test]
     fn post_compact_resets_autonomous_loop_delivered_on_main_thread() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
         use tool_cron::{resolve_autonomous_loop_fire, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL};
+
+        fn starts_with_source(value: &Utf16JsonProjection, prefix: &str) -> bool {
+            value
+                .string_units("")
+                .is_some_and(|units| units.starts_with(&prefix.encode_utf16().collect::<Vec<_>>()))
+        }
+
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
         // 2.1.263: the resolver has no gate; sentinels always resolve.
         tool_cron::reset_autonomous_loop_delivered();
 
         let preamble_head = "# Autonomous loop check\n";
         // First fire delivers the full preamble; second drops it.
-        let first = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
-        assert!(first.starts_with(preamble_head));
-        let second = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
-        assert!(!second.starts_with(preamble_head));
+        let first = resolve_autonomous_loop_fire(&sentinel).unwrap();
+        assert!(starts_with_source(&first, preamble_head));
+        let second = resolve_autonomous_loop_fire(&sentinel).unwrap();
+        assert!(!starts_with_source(&second, preamble_head));
 
         // Subagent compact must NOT reset (state stays "delivered").
         run_post_compact_cleanup(Some("agent:child"));
-        let after_subagent =
-            resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let after_subagent = resolve_autonomous_loop_fire(&sentinel).unwrap();
         assert!(
-            !after_subagent.starts_with(preamble_head),
+            !starts_with_source(&after_subagent, preamble_head),
             "subagent compact must NOT reset delivery state"
         );
 
         // Main-thread compact (query_source None) resets → preamble re-emitted.
         run_post_compact_cleanup(None);
-        let after_main = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let after_main = resolve_autonomous_loop_fire(&sentinel).unwrap();
         assert!(
-            after_main.starts_with(preamble_head),
+            starts_with_source(&after_main, preamble_head),
             "main-thread compact must reset → preamble re-delivered"
         );
 

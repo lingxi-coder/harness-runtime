@@ -10,7 +10,9 @@ use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperationContext, AudioOperationId, AudioOwner,
 };
 use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
-use lingxi_core::types::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, AgentId, McpConnectionId, MessageId, SessionId, ToolUseId,
+};
 use lingxi_core::SessionState;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -34,8 +36,17 @@ pub struct ToolUseContext {
     /// request. Omitted for call sites that have no current assistant message
     /// (for example isolated unit tests and subagent helper invocations).
     pub assistant_message_id: Option<MessageId>,
+    /// Raw assistant row for the currently dispatched completed block. This
+    /// is independent of `messages` (the pre-query history snapshot) and is
+    /// refreshed from trusted host facts for every nested invocation.
+    pub assistant_message: Option<lingxi_core::types::ConversationMessage>,
+    /// Tool-use blocks from earlier sibling rows in the same query, excluding
+    /// the current assistant row. The host refreshes this on every call.
+    pub same_turn_tool_uses: Vec<lingxi_core::types::ContentBlock>,
     /// The agent that issued this call, if known.
     pub agent_id: Option<AgentId>,
+    /// Native per-context nested-memory triggers; independent of file cache.
+    pub nested_memory_triggers: Arc<crate::nested_memory_triggers::NestedMemoryTriggers>,
     /// The DISPLAY NAME of the teammate that issued this call, if known
     /// (claude-code `getAgentName()`). For an in-process teammate this is its
     /// human name (e.g. `"researcher"`), NOT the `agent:<uuid>` form of
@@ -57,10 +68,24 @@ pub struct ToolUseContext {
     /// immutable identity to keep their cost and budget accounting attached to
     /// the originating conversation.
     pub origin_session_id: Option<SessionId>,
+    /// Host-captured plugin caller/origin for nested `agent.spawn` events.
+    /// Mod-rewritten JSON never supplies or overwrites this identity.
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    /// Current Native query-function depth for a main-loop tool invocation.
+    /// None means this call was not produced by a tracked model query.
+    pub native_query_depth: Option<u32>,
     /// Trusted host-selected execution policy for this invocation. The nested
     /// dispatch path copies it from `SubagentInvocationContext`; ordinary
     /// callers use [`ToolExecutionPolicy::Ordinary`].
     pub tool_execution_policy: ToolExecutionPolicy,
+    /// Trusted effective permission mode for recursive Agent launches. Nested
+    /// dispatch derives this from its host override or the enforcing live gate.
+    pub trusted_effective_permission_mode: Option<String>,
+    /// Invocation-local verdict from the bound classifier-only permission
+    /// path. Tool bodies may annotate reports but cannot mint this result.
+    pub classifier_only_review: Option<lingxi_core::host::handback::ReportReview>,
+    /// Host snapshot inherited by ordinary and forked children.
+    pub instruction_context: Option<lingxi_core::host::instructions::InstructionContext>,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
     /// Mutable session state (M4-04). Tools that mutate the conversation
@@ -85,7 +110,7 @@ pub struct ToolUseContext {
     /// `None` for the non-fork path and for call sites the orchestrator has not
     /// yet wired (`AgentTool` then runs the fork child with `FORK_AGENT`'s empty
     /// system prompt — functional, not byte-identical).
-    pub fork_parent_system_prompt: Option<String>,
+    pub fork_parent_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Per-agent working directory OVERRIDE (claude-code's `agentWorktree` /
     /// `cwd`, threaded into the agent's `AsyncLocalStorage` cwd that every tool
     /// reads via `Mt()`). `Some` ONLY for a subagent isolated in a git worktree
@@ -184,11 +209,19 @@ impl ToolUseContext {
             messages: Vec::new(),
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: Arc::default(),
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            agent_spawn_provenance: Default::default(),
+            native_query_depth: None,
+            instruction_context: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -236,8 +269,8 @@ pub struct ToolUseOptions {
     pub mcp_clients: Vec<McpConnectionId>,
     /// Whether the agent is running in a non-interactive session.
     pub is_non_interactive_session: bool,
-    /// Optional system prompt override (replaces the default).
-    pub custom_system_prompt: Option<String>,
-    /// Optional system prompt addendum (appended to the default).
-    pub append_system_prompt: Option<String>,
+    /// Optional source-preserving system prompt override (replaces the default).
+    pub custom_system_prompt: Option<Utf16JsonProjection>,
+    /// Optional source-preserving system prompt addendum (appended to the default).
+    pub append_system_prompt: Option<Utf16JsonProjection>,
 }

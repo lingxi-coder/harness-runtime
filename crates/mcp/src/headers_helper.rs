@@ -31,10 +31,13 @@ pub async fn resolve_headers_helper(
     config: &McpServerConfig,
 ) -> Result<(McpTransportSpec, bool), McpError> {
     let cwd = std::env::current_dir().map_err(|error| {
-        McpError::Connection(format!(
-            "headersHelper for MCP server \"{}\" could not resolve cwd: {error}",
-            config.name
-        ))
+        McpError::Connection(
+            format!(
+                "headersHelper for MCP server \"{}\" could not resolve cwd: {error}",
+                config.name
+            )
+            .into(),
+        )
     })?;
     resolve_headers_helper_in(config, &cwd, None).await
 }
@@ -92,8 +95,7 @@ fn ensure_helper_source_trusted(scope: ConfigScope, cwd: &Path) -> Result<(), Mc
         Ok(())
     } else {
         Err(McpError::Connection(
-            "project/local MCP headersHelper is disabled until this workspace is trusted"
-                .to_string(),
+            "project/local MCP headersHelper is disabled until this workspace is trusted".into(),
         ))
     }
 }
@@ -121,19 +123,26 @@ async fn run_helper(
     }
 
     let mut child = process.spawn().map_err(|error| {
-        McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
-        ))
+        McpError::Connection(
+            format!("headersHelper for MCP server \"{server_name}\" failed to start: {error}")
+                .into(),
+        )
     })?;
     let mut stdout = child.stdout.take().ok_or_else(|| {
-        McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" failed to start: missing stdout"
-        ))
+        McpError::Connection(
+            format!(
+                "headersHelper for MCP server \"{server_name}\" failed to start: missing stdout"
+            )
+            .into(),
+        )
     })?;
     let mut stderr = child.stderr.take().ok_or_else(|| {
-        McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" failed to start: missing stderr"
-        ))
+        McpError::Connection(
+            format!(
+                "headersHelper for MCP server \"{server_name}\" failed to start: missing stderr"
+            )
+            .into(),
+        )
     })?;
 
     let read_stdout = async {
@@ -141,17 +150,23 @@ async fn run_helper(
         let mut tmp = [0u8; 8192];
         loop {
             let n = stdout.read(&mut tmp).await.map_err(|error| {
-                McpError::Connection(format!(
-                    "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
-                ))
+                McpError::Connection(
+                    format!(
+                        "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
+                    )
+                    .into(),
+                )
             })?;
             if n == 0 {
                 break;
             }
             if buf.len().saturating_add(n) > MAX_HELPER_STDOUT {
-                return Err(McpError::Connection(format!(
-                    "headersHelper for MCP server \"{server_name}\" returned more than 1 MiB"
-                )));
+                return Err(McpError::Connection(
+                    format!(
+                        "headersHelper for MCP server \"{server_name}\" returned more than 1 MiB"
+                    )
+                    .into(),
+                ));
             }
             buf.extend_from_slice(&tmp[..n]);
         }
@@ -188,9 +203,10 @@ async fn run_helper(
     let collect = async {
         let (stdout_bytes, stderr_bytes) = tokio::try_join!(read_stdout, read_stderr)?;
         let status = child.wait().await.map_err(|error| {
-            McpError::Connection(format!(
-                "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
-            ))
+            McpError::Connection(
+                format!("headersHelper for MCP server \"{server_name}\" failed to start: {error}")
+                    .into(),
+            )
         })?;
         Ok::<_, McpError>((status, stdout_bytes, stderr_bytes))
     };
@@ -204,25 +220,29 @@ async fn run_helper(
             }
             Err(_) => {
                 let _ = child.start_kill();
-                return Err(McpError::Connection(format!(
-                    "headersHelper for MCP server \"{server_name}\" timed out after 10s"
-                )));
+                return Err(McpError::Connection(
+                    format!("headersHelper for MCP server \"{server_name}\" timed out after 10s")
+                        .into(),
+                ));
             }
         };
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes);
         let detail = stderr.trim();
-        return Err(McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" exited {}{}",
-            status
-                .code()
-                .map_or_else(|| "without a status".to_string(), |code| code.to_string()),
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            }
-        )));
+        return Err(McpError::Connection(
+            format!(
+                "headersHelper for MCP server \"{server_name}\" exited {}{}",
+                status
+                    .code()
+                    .map_or_else(|| "without a status".to_string(), |code| code.to_string()),
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            )
+            .into(),
+        ));
     }
     parse_helper_output(&stdout_bytes, server_name)
 }
@@ -243,14 +263,18 @@ fn shell_command(command: &str) -> tokio::process::Command {
 
 fn parse_helper_output(bytes: &[u8], server_name: &str) -> Result<McpHeaders, McpError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
-        McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" returned invalid JSON: {error}"
-        ))
+        McpError::Connection(
+            format!(
+                "headersHelper for MCP server \"{server_name}\" returned invalid JSON: {error}"
+            )
+            .into(),
+        )
     })?;
     let serde_json::Value::Object(object) = value else {
-        return Err(McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" must return a JSON object"
-        )));
+        return Err(McpError::Connection(
+            format!("headersHelper for MCP server \"{server_name}\" must return a JSON object")
+                .into(),
+        ));
     };
     object
         .into_iter()
@@ -258,7 +282,7 @@ fn parse_helper_output(bytes: &[u8], server_name: &str) -> Result<McpHeaders, Mc
             serde_json::Value::String(value) => Ok((name, value)),
             _ => Err(McpError::Connection(format!(
                 "headersHelper for MCP server \"{server_name}\" returned a non-string value for \"{name}\""
-            ))),
+            ).into())),
         })
         .collect()
 }

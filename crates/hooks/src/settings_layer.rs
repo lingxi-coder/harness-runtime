@@ -3,20 +3,46 @@ use crate::events::HookEventType;
 use crate::loader::{
     build_condition, build_executor, event_type_name, parse_event_type, HookEntry, MatcherGroup,
 };
-use crate::matcher::comma_mode_for;
+use crate::matcher::{
+    comma_mode_for, is_simple_pattern_units, is_valid_hook_regexp_projection, trim_js_units,
+};
+use lingxi_core::types::utf16_json::{
+    JsonValueView, Utf16JsonProjection, Utf16JsonProjectionError,
+};
 use permission::PermissionRuleValue;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::time::Duration;
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct HookLayerDocument {
     #[serde(flatten)]
     pub events: BTreeMap<String, Vec<MatcherGroup>>,
+}
+
+// A derived internally flattened map is buffered through Serde's generic
+// `Content` representation before its field values are decoded. That loses
+// the original JSON token slice required by `RawValue`, so `HookEntry::input`
+// cannot use the raw JSON source adapter. Capture this root object as a
+// `RawValue` first, then decode the event map directly from its JSON text.
+// `MatcherGroup` and `HookEntry` are now deserialized by serde_json from the
+// original member slices, allowing arbitrary MCP input to enter its UTF-16
+// projection without a recursive `serde_json::Value` intermediary.
+impl<'de> Deserialize<'de> for HookLayerDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as DeError;
+        use serde_json::value::RawValue;
+
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let events = serde_json::from_str::<BTreeMap<String, Vec<MatcherGroup>>>(raw.get())
+            .map_err(D::Error::custom)?;
+        Ok(Self { events })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +60,7 @@ pub struct HookValidationIssue {
 #[derive(Debug)]
 pub enum HookLayerError {
     Json(serde_json::Error),
+    Projection(Utf16JsonProjectionError),
     Validation(Vec<HookValidationIssue>),
 }
 
@@ -41,7 +68,7 @@ impl HookLayerError {
     #[must_use]
     pub fn issues(&self) -> &[HookValidationIssue] {
         match self {
-            Self::Json(_) => &[],
+            Self::Json(_) | Self::Projection(_) => &[],
             Self::Validation(issues) => issues,
         }
     }
@@ -51,6 +78,7 @@ impl fmt::Display for HookLayerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Json(error) => write!(f, "hook layer JSON is invalid: {error}"),
+            Self::Projection(error) => write!(f, "hook layer projection failed: {error}"),
             Self::Validation(issues) => {
                 write!(f, "hook layer validation failed")?;
                 if let Some(first) = issues.first() {
@@ -70,6 +98,12 @@ impl From<serde_json::Error> for HookLayerError {
     }
 }
 
+impl From<Utf16JsonProjectionError> for HookLayerError {
+    fn from(error: Utf16JsonProjectionError) -> Self {
+        Self::Projection(error)
+    }
+}
+
 pub fn parse_hook_layer_strict(
     raw: &str,
     source: HookSource,
@@ -78,16 +112,11 @@ pub fn parse_hook_layer_strict(
     compile_hook_layer(document, source)
 }
 
-pub fn parse_hook_layer_value_strict(
-    value: &Value,
-    source: HookSource,
-) -> Result<ParsedHookLayer, HookLayerError> {
-    let document: HookLayerDocument = serde_json::from_value(value.clone())?;
-    compile_hook_layer(document, source)
-}
-
-pub fn serialize_hook_layer(document: &HookLayerDocument) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(document)
+pub fn serialize_hook_layer(
+    document: &HookLayerDocument,
+) -> Result<Utf16JsonProjection, HookLayerError> {
+    let json = serde_json::to_string(document)?;
+    Ok(Utf16JsonProjection::parse(&json)?)
 }
 
 fn compile_hook_layer(
@@ -110,8 +139,8 @@ fn compile_hook_layer(
                     name,
                     events: vec![event_type.clone()],
                     if_condition: build_condition(
-                        group.matcher.as_deref(),
-                        entry.if_pattern.as_deref(),
+                        group.matcher.as_ref(),
+                        entry.if_pattern.as_ref(),
                     ),
                     executor,
                     source,
@@ -151,7 +180,7 @@ fn validate_document(document: &HookLayerDocument) -> Vec<HookValidationIssue> {
 
         for (group_index, group) in groups.iter().enumerate() {
             let group_path = format!("hooks.{event_name}[{group_index}]");
-            if let Some(matcher) = group.matcher.as_deref() {
+            if let Some(matcher) = group.matcher.as_ref() {
                 if let Err(message) = validate_matcher(matcher, &event_type) {
                     issues.push(HookValidationIssue {
                         path: format!("{group_path}.matcher"),
@@ -189,7 +218,7 @@ fn validate_entry(
         return;
     };
 
-    if let Some(if_pattern) = entry.if_pattern.as_deref() {
+    if let Some(if_pattern) = entry.if_pattern.as_ref() {
         validate_if_pattern(if_pattern, &format!("{base}.if"), issues);
     }
 
@@ -224,10 +253,18 @@ fn validate_entry(
             }
         }
         "agent" => {
-            validate_required_string(entry.prompt.as_deref(), &format!("{base}.prompt"), issues);
+            validate_required_source_string(
+                entry.prompt.as_ref(),
+                &format!("{base}.prompt"),
+                issues,
+            );
         }
         "prompt" => {
-            validate_required_string(entry.prompt.as_deref(), &format!("{base}.prompt"), issues);
+            validate_required_source_string(
+                entry.prompt.as_ref(),
+                &format!("{base}.prompt"),
+                issues,
+            );
         }
         "mcp_tool" => {
             validate_required_string(entry.server.as_deref(), &format!("{base}.server"), issues);
@@ -256,19 +293,53 @@ fn validate_required_string(
     }
 }
 
-fn validate_if_pattern(value: &str, path: &str, issues: &mut Vec<HookValidationIssue>) {
-    if value.trim().is_empty() {
+fn validate_required_source_string(
+    value: Option<&Utf16JsonProjection>,
+    path: &str,
+    issues: &mut Vec<HookValidationIssue>,
+) {
+    let non_empty = value
+        .and_then(|value| value.string_units(""))
+        .is_some_and(|units| !trim_js_units(&units).is_empty());
+    if !non_empty {
         issues.push(HookValidationIssue {
             path: path.to_string(),
-            message: "`if` condition must not be empty".into(),
+            message: "field is required".into(),
+        });
+    }
+}
+
+fn validate_if_pattern(
+    value: &Utf16JsonProjection,
+    path: &str,
+    issues: &mut Vec<HookValidationIssue>,
+) {
+    let Some(units) = value.string_units("") else {
+        issues.push(HookValidationIssue {
+            path: path.to_string(),
+            message: "if condition must be a string".into(),
+        });
+        return;
+    };
+    if trim_js_units(&units).is_empty() {
+        issues.push(HookValidationIssue {
+            path: path.to_string(),
+            message: "if condition must not be empty".into(),
         });
         return;
     }
-    let parsed = PermissionRuleValue::from_rule_string(value);
-    if parsed.tool_name.trim().is_empty() {
+    let Some(parsed) = PermissionRuleValue::from_rule_projection(value) else {
         issues.push(HookValidationIssue {
             path: path.to_string(),
-            message: "`if` condition must start with a tool name".into(),
+            message: "if condition must start with a tool name".into(),
+        });
+        return;
+    };
+    let tool_name_units = parsed.tool_name.encode_utf16().collect::<Vec<_>>();
+    if trim_js_units(&tool_name_units).is_empty() {
+        issues.push(HookValidationIssue {
+            path: path.to_string(),
+            message: "if condition must start with a tool name".into(),
         });
     }
 }
@@ -314,91 +385,115 @@ fn validate_env_var_names(names: &[String], path: &str, issues: &mut Vec<HookVal
 }
 
 fn validate_mcp_input(
-    input: &HashMap<String, Value>,
+    input: &Utf16JsonProjection,
     path: &str,
     issues: &mut Vec<HookValidationIssue>,
 ) {
-    for (key, value) in input {
-        if key.trim().is_empty() {
+    let Some(root) = input.at_pointer("") else {
+        return;
+    };
+    let Some(entries) = root.object_entries() else {
+        issues.push(HookValidationIssue {
+            path: path.to_string(),
+            message: "input must be an object".into(),
+        });
+        return;
+    };
+
+    let mut pending = Vec::<(JsonValueView<'_>, String)>::new();
+    for entry in &entries {
+        if entry.display_key.trim().is_empty() {
             issues.push(HookValidationIssue {
                 path: path.to_string(),
                 message: "input keys must not be empty".into(),
             });
         }
-        validate_interpolation_value(value, &format!("{path}.{key}"), issues);
     }
-}
+    for entry in entries.into_iter().rev() {
+        pending.push((entry.value, format!("{path}.{}", entry.display_key)));
+    }
 
-fn validate_interpolation_value(value: &Value, path: &str, issues: &mut Vec<HookValidationIssue>) {
-    match value {
-        Value::String(text) => {
-            let bytes = text.as_bytes();
-            let mut index = 0;
-            while index < bytes.len() {
-                if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
-                    let start = index + 2;
-                    let Some(close_rel) = text[start..].find('}') else {
-                        issues.push(HookValidationIssue {
-                            path: path.to_string(),
-                            message: "unterminated ${path} placeholder".into(),
-                        });
-                        return;
-                    };
-                    let close = start + close_rel;
-                    if text[start..close].trim().is_empty() {
-                        issues.push(HookValidationIssue {
-                            path: path.to_string(),
-                            message: "${path} placeholders must not be empty".into(),
-                        });
-                    }
-                    index = close + 1;
-                    continue;
+    while let Some((value, value_path)) = pending.pop() {
+        if let Some(units) = value.code_units() {
+            validate_interpolation_units(units, &value_path, issues);
+            continue;
+        }
+        if let Some(length) = value.array_len() {
+            for index in (0..length).rev() {
+                if let Some(item) = value.get_index(index) {
+                    pending.push((item, format!("{value_path}[{index}]")));
                 }
-                index += 1;
+            }
+            continue;
+        }
+        if let Some(entries) = value.object_entries() {
+            for entry in entries.into_iter().rev() {
+                pending.push((entry.value, format!("{value_path}.{}", entry.display_key)));
             }
         }
-        Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                validate_interpolation_value(item, &format!("{path}[{index}]"), issues);
-            }
-        }
-        Value::Object(map) => {
-            for (key, item) in map {
-                validate_interpolation_value(item, &format!("{path}.{key}"), issues);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
-fn validate_matcher(matcher: &str, event_type: &HookEventType) -> Result<(), String> {
-    if matcher.is_empty() || matcher == "*" {
-        return Ok(());
+fn validate_interpolation_units(units: &[u16], path: &str, issues: &mut Vec<HookValidationIssue>) {
+    let mut index = 0;
+    while index < units.len() {
+        if units[index] == u16::from(b'$') && units.get(index + 1) == Some(&u16::from(b'{')) {
+            let start = index + 2;
+            let Some(close_relative) = units[start..]
+                .iter()
+                .position(|unit| *unit == u16::from(b'}'))
+            else {
+                issues.push(HookValidationIssue {
+                    path: path.to_string(),
+                    message: "unterminated ${path} placeholder".into(),
+                });
+                return;
+            };
+            let close = start + close_relative;
+            if utf16_text_is_whitespace(&units[start..close]) {
+                issues.push(HookValidationIssue {
+                    path: path.to_string(),
+                    message: "${path} placeholders must not be empty".into(),
+                });
+            }
+            index = close + 1;
+        } else {
+            index += 1;
+        }
     }
-    if is_simple_pattern(matcher, comma_mode_for(event_type)) {
-        return Ok(());
-    }
-    Regex::new(matcher)
-        .map(|_| ())
-        .map_err(|error| format!("matcher is not a valid regex: {error}"))
 }
 
-fn is_simple_pattern(value: &str, comma_mode: bool) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || byte == b'_'
-                || byte == b'|'
-                || (comma_mode && (byte == b',' || byte == b' ' || byte == b'-'))
-        })
+fn utf16_text_is_whitespace(units: &[u16]) -> bool {
+    char::decode_utf16(units.iter().copied())
+        .all(|decoded| decoded.map(char::is_whitespace).unwrap_or(false))
+}
+
+fn validate_matcher(
+    matcher: &Utf16JsonProjection,
+    event_type: &HookEventType,
+) -> Result<(), String> {
+    let Some(units) = matcher.string_units("") else {
+        return Err("matcher must be a string".into());
+    };
+    if units.is_empty() || units == [b'*' as u16] {
+        return Ok(());
+    }
+    if is_simple_pattern_units(&units, comma_mode_for(event_type)) {
+        return Ok(());
+    }
+    if is_valid_hook_regexp_projection(matcher) {
+        Ok(())
+    } else {
+        Err("matcher is not a valid JavaScript regular expression".into())
+    }
 }
 
 #[must_use]
-pub fn file_changed_matchers_from_hooks(hooks: &[HookDefinition]) -> Vec<String> {
+pub fn file_changed_matchers_from_hooks(hooks: &[HookDefinition]) -> Vec<Utf16JsonProjection> {
     hooks
         .iter()
         .filter(|hook| hook.events.contains(&HookEventType::FileChanged))
-        .filter_map(|hook| hook.matcher().map(ToString::to_string))
+        .filter_map(|hook| hook.matcher().cloned())
         .collect()
 }
 
@@ -412,9 +507,13 @@ mod tests {
     use super::*;
     use crate::definition::HookExecutor;
 
+    fn parse_fixture(raw: &str, source: HookSource) -> Result<ParsedHookLayer, HookLayerError> {
+        parse_hook_layer_strict(raw, source)
+    }
+
     #[test]
     fn strict_parse_round_trips_supported_fields() {
-        let raw = serde_json::json!({
+        let raw = r#"{
             "PreToolUse": [{
                 "matcher": "Bash, Write",
                 "hooks": [{
@@ -444,14 +543,16 @@ mod tests {
                     }
                 }]
             }]
-        });
+        }"#;
 
-        let parsed = parse_hook_layer_value_strict(
-            &raw,
+        let parsed = parse_fixture(
+            raw,
             HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
-        assert_eq!(serialize_hook_layer(&parsed.document).unwrap(), raw);
+        assert!(serialize_hook_layer(&parsed.document)
+            .unwrap()
+            .semantically_eq(&Utf16JsonProjection::parse(raw).unwrap()));
         assert_eq!(parsed.hooks.len(), 2);
         assert!(parsed.hooks.iter().any(|hook| hook.priority == 25));
         assert!(parsed
@@ -461,17 +562,55 @@ mod tests {
     }
 
     #[test]
+    fn strict_layer_serialization_preserves_unpaired_if_and_mcp_input_units() {
+        let raw = r#"{
+            "PreToolUse": [{
+                "matcher": "^\ud800$",
+                "hooks": [{
+                    "type": "command",
+                    "command": "./guard.sh",
+                    "if": "Edit(*\ud800.rs)"
+                }]
+            }],
+            "PostToolUse": [{
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "audit",
+                    "tool": "scan",
+                    "input": {"path": "\ud801"}
+                }]
+            }]
+        }"#;
+        let parsed = parse_fixture(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .hooks
+                .iter()
+                .find(|hook| hook.events.contains(&HookEventType::PreToolUse))
+                .and_then(HookDefinition::matcher)
+                .and_then(|matcher| matcher.string_units("")),
+            Some(vec![b'^' as u16, 0xd800, b'$' as u16])
+        );
+        let serialized = serialize_hook_layer(&parsed.document).unwrap();
+        assert!(serialized.semantically_eq(&Utf16JsonProjection::parse(raw).unwrap()));
+    }
+
+    #[test]
     fn strict_parse_rejects_invalid_event_matcher_and_url() {
-        let raw = serde_json::json!({
+        let raw = r#"{
             "Nope": [{ "hooks": [{ "type": "command", "command": "x" }] }],
             "SessionStart": [{
                 "matcher": "[",
                 "hooks": [{ "type": "http", "url": "not a url" }]
             }]
-        });
+        }"#;
 
-        let error = parse_hook_layer_value_strict(
-            &raw,
+        let error = parse_fixture(
+            raw,
             HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap_err();
@@ -487,7 +626,7 @@ mod tests {
 
     #[test]
     fn strict_parse_rejects_invalid_mcp_placeholders() {
-        let raw = serde_json::json!({
+        let raw = r#"{
             "PostToolUse": [{
                 "hooks": [{
                     "type": "mcp_tool",
@@ -499,10 +638,10 @@ mod tests {
                     }
                 }]
             }]
-        });
+        }"#;
 
-        let error = parse_hook_layer_value_strict(
-            &raw,
+        let error = parse_fixture(
+            raw,
             HookSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap_err();
@@ -517,8 +656,8 @@ mod tests {
 
     #[test]
     fn file_changed_matchers_filter_to_file_changed_hooks() {
-        let parsed = parse_hook_layer_value_strict(
-            &serde_json::json!({
+        let parsed = parse_fixture(
+            r#"{
                 "FileChanged": [{
                     "matcher": ".env|.envrc",
                     "hooks": [{ "type": "command", "command": "./watch.sh" }]
@@ -527,14 +666,34 @@ mod tests {
                     "matcher": "ignored",
                     "hooks": [{ "type": "command", "command": "./stop.sh" }]
                 }]
-            }),
+            }"#,
             HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
 
         assert_eq!(
-            file_changed_matchers_from_hooks(&parsed.hooks),
-            vec![".env|.envrc".to_string()]
+            file_changed_matchers_from_hooks(&parsed.hooks)
+                .iter()
+                .map(|matcher| matcher.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            vec![".env|.envrc"]
+        );
+    }
+
+    #[test]
+    fn raw_parse_retains_lone_surrogate_in_mcp_input() {
+        let parsed = parse_hook_layer_strict(
+            r#"{"PostToolUse":[{"hooks":[{"type":"mcp_tool","server":"audit","tool":"lint","input":{"path":"\ud800"}}]}]}"#,
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .expect("hook layer parses through RawValue");
+        let input = parsed.document.events["PostToolUse"][0].hooks[0]
+            .input
+            .as_ref()
+            .expect("input is retained");
+        assert_eq!(
+            input.string_units("/path").as_deref(),
+            Some([0xD800].as_slice())
         );
     }
 }

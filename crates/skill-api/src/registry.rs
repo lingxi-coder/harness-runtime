@@ -119,14 +119,14 @@ mod tests {
     fn mk_skill(name: &str, triggers: &[&str]) -> Skill {
         Skill {
             name: name.into(),
-            description: String::new(),
+            description: String::new().into(),
             frontmatter: SkillFrontmatter {
                 name: name.into(),
-                description: String::new(),
+                description: String::new().into(),
                 triggers: triggers.iter().map(|s| (*s).into()).collect(),
                 ..Default::default()
             },
-            content: String::new(),
+            content: String::new().into(),
             source: SkillSource::Bundled,
             loaded_from: LoadedFrom::Bundled,
             plugin_id: None,

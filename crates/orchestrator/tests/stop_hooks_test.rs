@@ -18,6 +18,7 @@ use hooks::{HookExecutorImpl, HookPromptRunner, PromptHookError, PromptHookReque
 use lingxi_core::host::{
     HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{HookId, HttpRequest, HttpResponse, SessionId};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -86,7 +87,7 @@ impl BuiltinHookHandler for StopBlockHandler {
             reason: Some("do X first".to_string()),
             // A transcript-only systemMessage that must NOT reach the model — the
             // continuation must come from `reason` (blockingError), never this.
-            system_message: Some("[stop-hook] please continue".to_string()),
+            system_message: Some("[stop-hook] please continue".into()),
             ..Default::default()
         });
         HookResult {
@@ -220,7 +221,7 @@ fn streaming_orch(
     hooks: Arc<HookExecutorImpl>,
     config: OrchestratorConfig,
 ) -> Arc<ConversationOrchestrator> {
-    Arc::new(ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         config,
         Arc::new(MockApiClient::new(Vec::new())),
         Arc::new(orchestrator::test_support::MockStreamingApiClient::with_turns(streams)),
@@ -254,6 +255,7 @@ fn end_turn(text: &str) -> llm_runtime::HistoryResponse {
         vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )
@@ -266,6 +268,7 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::Hist
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
@@ -284,19 +287,21 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::Hist
             ..llm_runtime::ExecutionUsage::default()
         },
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+            .expect("null is valid JSON"),
+        resumable: None,
     }
 }
 
 struct ScriptedPromptRunner {
     seen: StdMutex<Vec<PromptHookRequest>>,
-    scripted: StdMutex<VecDeque<Result<String, PromptHookError>>>,
+    scripted: StdMutex<VecDeque<Result<Utf16JsonProjection, PromptHookError>>>,
     on_call: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[async_trait]
 impl HookPromptRunner for ScriptedPromptRunner {
-    async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+    async fn run(&self, req: PromptHookRequest) -> Result<Utf16JsonProjection, PromptHookError> {
         self.seen.lock().unwrap().push(req);
         if let Some(on_call) = &self.on_call {
             on_call();
@@ -639,8 +644,8 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
-            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.into()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -680,9 +685,15 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
     );
     let seen = runner.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
-    assert!(seen[0].prompt.starts_with("Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: ship it\n\nARGUMENTS: "));
+    assert!(seen[0]
+        .prompt
+        .string_at("")
+        .is_some_and(|prompt| prompt.starts_with("Based on the conversation transcript above, has the following stopping condition been satisfied? Answer based on transcript evidence only.\n\nCondition: ship it\n\nARGUMENTS: ")));
     assert!(
-        seen[0].prompt.contains(r#""hook_event_name":"Stop""#),
+        seen[0]
+            .prompt
+            .string_at("")
+            .is_some_and(|prompt| prompt.contains(r#""hook_event_name":"Stop""#)),
         "goal Stop hook must evaluate the Stop payload"
     );
 }
@@ -699,8 +710,8 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
-            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.into()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -758,7 +769,7 @@ async fn goal_status_transcript_records_impossible_as_failed() {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([Ok(
             r#"{"ok": false, "impossible": true, "reason": "required service is unavailable"}"#
-                .to_string(),
+                .into(),
         )])),
         on_call: None,
     });
@@ -838,9 +849,9 @@ async fn stop_goal_shares_the_stop_hook_block_limit() {
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
-            Ok(r#"{"ok": false, "reason": "still working"}"#.to_string()),
-            Ok(r#"{"ok": false, "reason": "still working"}"#.to_string()),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": false, "reason": "still working"}"#.into()),
+            Ok(r#"{"ok": false, "reason": "still working"}"#.into()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -879,7 +890,7 @@ async fn stop_goal_timeout_pauses_without_counting_a_verdict() {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
             Err(PromptHookError::Timeout(Duration::from_secs(30))),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -912,7 +923,7 @@ async fn stop_goal_query_error_does_not_spin_or_count_a_verdict() {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
             Err(PromptHookError::Query("provider 500".into())),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -946,7 +957,7 @@ async fn stop_goal_explicit_cancel_escapes_before_second_goal_check() {
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([Ok(
-            r#"{"ok": false, "reason": "not yet"}"#.to_string(),
+            r#"{"ok": false, "reason": "not yet"}"#.into(),
         )])),
         on_call: Some(Arc::new(move || cancel_for_runner.cancel())),
     });
@@ -976,8 +987,8 @@ async fn stop_goal_hard_budget_escape_stops_before_second_goal_check() {
     let runner = Arc::new(ScriptedPromptRunner {
         seen: StdMutex::new(Vec::new()),
         scripted: StdMutex::new(VecDeque::from([
-            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
-            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.into()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.into()),
         ])),
         on_call: None,
     });
@@ -1297,8 +1308,11 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     ) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &tool_api::tool_trait::PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -1360,7 +1374,7 @@ async fn a_blocking_stop_hook_does_not_reopen_a_tool_requested_end() {
     .await;
     let mut cfg = OrchestratorConfig::default();
     cfg.max_turns = 2;
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         cfg,
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -1370,7 +1384,7 @@ async fn a_blocking_stop_hook_does_not_reopen_a_tool_requested_end() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     let result = orch.run_turn_streaming("go").await;
     assert!(

@@ -30,6 +30,7 @@
 //! so the ~4000 locked fixtures stay byte-identical.
 
 use crate::file::{parse_markdown_with_frontmatter, MemoryError, MemoryFrontmatter};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ConversationMessage, MessageId};
 use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::path::{Path, PathBuf};
@@ -293,7 +294,7 @@ impl SessionMemoryExtractor {
         session_id: &str,
         history: &[ConversationMessage],
         config_home: &Path,
-    ) -> Result<String, MemoryError> {
+    ) -> Result<Utf16JsonProjection, MemoryError> {
         self.extract_with_coverage(
             runner,
             cache_safe_params,
@@ -318,7 +319,7 @@ impl SessionMemoryExtractor {
         session_id: &str,
         covered_through: Option<MessageId>,
         config_home: &Path,
-    ) -> Result<String, MemoryError> {
+    ) -> Result<Utf16JsonProjection, MemoryError> {
         let content = Self::run_extraction(runner, cache_safe_params).await?;
         self.commit_extraction(&content, session_id, covered_through, config_home)?;
         Ok(content)
@@ -336,7 +337,7 @@ impl SessionMemoryExtractor {
     pub async fn run_extraction(
         runner: &ForkedAgentRunner,
         cache_safe_params: CacheSafeParams,
-    ) -> Result<String, MemoryError> {
+    ) -> Result<Utf16JsonProjection, MemoryError> {
         let request = ForkedAgentRequest {
             prompt_messages: vec![ConversationMessage::user(
                 MessageId::new(),
@@ -352,7 +353,9 @@ impl SessionMemoryExtractor {
             .run(request)
             .await
             .map_err(|e| MemoryError::SelectorUnavailable(e.to_string()))?;
-        Ok(normalize_session_memory_document(&result.final_text))
+        Ok(normalize_session_memory_document_source(
+            &result.final_text,
+        )?)
     }
 
     /// Persist a previously generated extraction and advance its coverage
@@ -364,7 +367,7 @@ impl SessionMemoryExtractor {
     /// Returns [`MemoryError::Io`] if the session-memory file cannot be written.
     pub fn commit_extraction(
         &mut self,
-        content: &str,
+        content: &Utf16JsonProjection,
         session_id: &str,
         covered_through: Option<MessageId>,
         config_home: &Path,
@@ -484,7 +487,12 @@ fn estimate_message_tokens(message: &ConversationMessage) -> u64 {
         | ConversationMessage::Assistant { content, .. } => {
             content.iter().map(estimate_block_tokens).sum()
         }
-        ConversationMessage::System { content, .. } => rough_token_count(utf16_len(content)),
+        ConversationMessage::System { content, .. } => rough_token_count(
+            content
+                .string_units("")
+                .expect("source content is a string")
+                .len(),
+        ),
     }
 }
 
@@ -492,24 +500,36 @@ fn estimate_block_tokens(block: &lingxi_core::types::ContentBlock) -> u64 {
     use lingxi_core::types::ContentBlock;
 
     match block {
-        ContentBlock::ProviderContent { value, .. } => rough_token_count(json_len(value)),
-        ContentBlock::Text { text } => rough_token_count(utf16_len(text)),
+        ContentBlock::ProviderContent { value, .. } => rough_token_count(source_json_len(value)),
+        ContentBlock::Text { text, .. } => rough_token_count(utf16_len(text)),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..
         } => rough_token_count(utf16_code_units.len()),
         ContentBlock::ToolUse { name, input, .. } => {
-            rough_token_count(utf16_len(name).saturating_add(json_len(input)))
+            rough_token_count(utf16_len(name).saturating_add(source_json_len(input)))
         }
         ContentBlock::ToolResult {
             content,
             content_blocks,
             ..
         } => content_blocks.as_ref().map_or_else(
-            || rough_token_count(utf16_len(content)),
+            || {
+                rough_token_count(
+                    content
+                        .string_units("")
+                        .expect("source content is a string")
+                        .len(),
+                )
+            },
             |blocks| {
-                blocks
-                    .iter()
-                    .map(|value| rough_token_count(json_len(value)))
+                (0..blocks
+                    .array_len("")
+                    .expect("tool result content is an array"))
+                    .map(|index| {
+                        rough_token_count(source_json_len(
+                            &blocks.subprojection(&format!("/{index}")).unwrap(),
+                        ))
+                    })
                     .sum()
             },
         ),
@@ -517,14 +537,20 @@ fn estimate_block_tokens(block: &lingxi_core::types::ContentBlock) -> u64 {
         ContentBlock::RedactedThinking { data } => rough_token_count(utf16_len(data)),
         ContentBlock::Image { .. } | ContentBlock::Document { .. } => 2_000,
         ContentBlock::ServerToolUse { name, input, .. } => {
-            rough_token_count(utf16_len(name).saturating_add(json_len(input)))
+            rough_token_count(utf16_len(name).saturating_add(source_json_len(input)))
         }
         ContentBlock::ConnectorText { connector_text, .. } => {
             rough_token_count(utf16_len(connector_text))
         }
-        ContentBlock::AdvisorToolResult { content, .. } => rough_token_count(json_len(content)),
+        ContentBlock::AdvisorToolResult { content, .. } => {
+            rough_token_count(source_json_len(content))
+        }
         ContentBlock::MediaAnalysis { analysis } => rough_token_count(json_len(analysis)),
     }
+}
+
+fn source_json_len(value: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> usize {
+    utf16_len(&value.to_json_string().expect("source JSON serializes"))
 }
 
 fn json_len<T: serde::Serialize>(value: &T) -> usize {
@@ -583,22 +609,21 @@ pub(crate) fn sanitize_session_id(session_id: &str) -> String {
 /// selector. The extractor is asked for frontmatter, but this fallback keeps
 /// malformed/legacy model output discoverable instead of silently producing an
 /// opaque UUID file with empty selector metadata.
-fn normalize_session_memory_document(raw: &str) -> String {
-    let (mut frontmatter, body) = parse_markdown_with_frontmatter(raw)
-        .unwrap_or_else(|_| (MemoryFrontmatter::default(), raw.to_string()));
+fn normalize_session_memory_document_source(
+    raw: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, MemoryError> {
+    let Some(raw_units) = raw.string_units("") else {
+        return Err(MemoryError::SelectorUnavailable(
+            "session-memory response was not a JSON string".into(),
+        ));
+    };
+    let (mut frontmatter, body_units) = parse_session_memory_source(&raw_units);
     if frontmatter.memory_type.is_empty() {
         frontmatter.memory_type = "session_memory".to_string();
     }
     if frontmatter.description.trim().is_empty() {
-        frontmatter.description = body
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.trim_start_matches('#').trim())
-            .map_or_else(
-                || "Durable notes extracted from a previous session".to_string(),
-                |line| line.chars().take(160).collect(),
-            );
+        frontmatter.description = first_nonempty_description(&body_units)
+            .unwrap_or_else(|| "Durable notes extracted from a previous session".to_string());
     }
     if frontmatter.when_to_use.is_none() {
         frontmatter.when_to_use =
@@ -608,7 +633,109 @@ fn normalize_session_memory_document(raw: &str) -> String {
         frontmatter.tags.push("session".to_string());
     }
     let yaml = serde_yaml::to_string(&frontmatter).unwrap_or_default();
-    format!("---\n{yaml}---\n{body}")
+    let mut units = format!("---\n{yaml}---\n")
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(body_units);
+    Ok(source_string(units))
+}
+
+fn parse_session_memory_source(units: &[u16]) -> (MemoryFrontmatter, Vec<u16>) {
+    const PREFIX: &[u16] = &[b'-' as u16, b'-' as u16, b'-' as u16];
+    const DELIMITER: &[u16] = &[
+        b'\n' as u16,
+        b'-' as u16,
+        b'-' as u16,
+        b'-' as u16,
+        b'\n' as u16,
+    ];
+    if !units.starts_with(PREFIX) {
+        return (MemoryFrontmatter::default(), units.to_vec());
+    }
+    let Some(delimiter_offset) = units[PREFIX.len()..]
+        .windows(DELIMITER.len())
+        .position(|window| window == DELIMITER)
+    else {
+        return (MemoryFrontmatter::default(), units.to_vec());
+    };
+    let yaml_start = PREFIX.len();
+    let yaml_end = yaml_start + delimiter_offset;
+    let Ok(yaml) = String::from_utf16(&units[yaml_start..yaml_end]) else {
+        return (MemoryFrontmatter::default(), units.to_vec());
+    };
+    let Ok(frontmatter) = serde_yaml::from_str::<MemoryFrontmatter>(&yaml) else {
+        return (MemoryFrontmatter::default(), units.to_vec());
+    };
+    let body_start = yaml_end + DELIMITER.len();
+    (frontmatter, trim_js_start_units(&units[body_start..]))
+}
+
+fn trim_js_start_units(units: &[u16]) -> Vec<u16> {
+    let mut start = 0;
+    while start < units.len() {
+        let Some(Ok(ch)) = char::decode_utf16(units[start..].iter().copied()).next() else {
+            break;
+        };
+        if !lingxi_core::host::effort::javascript_whitespace(ch) {
+            break;
+        }
+        start += ch.len_utf16();
+    }
+    units[start..].to_vec()
+}
+
+fn first_nonempty_description(units: &[u16]) -> Option<String> {
+    let mut offset = 0;
+    while offset <= units.len() {
+        let end = units[offset..]
+            .iter()
+            .position(|unit| *unit == b'\n' as u16)
+            .map_or(units.len(), |relative| offset + relative);
+        let mut line = trim_js_start_units(&units[offset..end]);
+        while line.last() == Some(&(b'\r' as u16)) {
+            line.pop();
+        }
+        let first_non_hash = line
+            .iter()
+            .position(|unit| *unit != b'#' as u16)
+            .unwrap_or(line.len());
+        line = trim_js_whitespace_units(&line[first_non_hash..]);
+        if !line.is_empty() {
+            return Some(String::from_utf16_lossy(&line[..line.len().min(160)]));
+        }
+        if end == units.len() {
+            break;
+        }
+        offset = end + 1;
+    }
+    None
+}
+
+fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display string is derived from exact UTF-16 units")
+}
+
+fn trim_js_whitespace_units(units: &[u16]) -> Vec<u16> {
+    let start_trimmed = trim_js_start_units(units);
+    let mut index = 0;
+    let mut end = 0;
+    while index < start_trimmed.len() {
+        let (width, is_whitespace) =
+            match char::decode_utf16(start_trimmed[index..].iter().copied()).next() {
+                Some(Ok(ch)) => (
+                    ch.len_utf16(),
+                    lingxi_core::host::effort::javascript_whitespace(ch),
+                ),
+                Some(Err(_)) => (1, false),
+                None => break,
+            };
+        if !is_whitespace {
+            end = index + width;
+        }
+        index += width;
+    }
+    start_trimmed[..end].to_vec()
 }
 
 /// Write `content` to `path`, creating parent directories as needed.
@@ -616,7 +743,7 @@ fn normalize_session_memory_document(raw: &str) -> String {
 /// # Errors
 ///
 /// Returns [`MemoryError::Io`] if directory creation or the write fails.
-fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
+fn write_session_memory(path: &Path, content: &Utf16JsonProjection) -> Result<(), MemoryError> {
     let parent = path
         .parent()
         .ok_or_else(|| MemoryError::Io("session-memory path has no parent".to_string()))?;
@@ -630,10 +757,14 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
         use std::os::unix::fs::PermissionsExt as _;
         options.file_mode = metadata.permissions().mode() & 0o777;
     }
+    let units = content.string_units("").ok_or_else(|| {
+        MemoryError::SelectorUnavailable("session-memory write was not a JSON string".into())
+    })?;
+    let bytes = String::from_utf16_lossy(&units);
     lingxi_core::host::rooted_fs::atomic_write(
         parent,
         Path::new(file_name),
-        content.as_bytes(),
+        bytes.as_bytes(),
         options,
     )
     .map_err(|error| MemoryError::Io(error.to_string()))
@@ -665,6 +796,7 @@ const SESSION_MEMORY_EXTRACTION_PROMPT: &str = "Distil durable, reusable notes f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
     use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use std::sync::Arc;
 
@@ -710,13 +842,15 @@ mod tests {
                 id: ToolUseId::new(),
                 provider_id: None,
                 name: format!("Tool{i}"),
-                input: serde_json::json!({}),
+                input: Source::from_serde_value(&serde_json::json!({}))
+                    .expect("empty object is valid JSON"),
             })
             .collect();
         ConversationMessage::Assistant {
             id: MessageId::new(),
             content,
             stop_reason: Some("tool_use".into()),
+            resumable: None,
         }
     }
 
@@ -731,6 +865,22 @@ mod tests {
         assert_eq!(c.minimum_message_tokens_to_init, 10_000);
         assert_eq!(c.minimum_tokens_between_update, 5_000);
         assert_eq!(c.tool_calls_between_updates, 3);
+    }
+
+    #[test]
+    fn system_prompt_threshold_counts_javascript_utf16_code_units() {
+        let history = [ConversationMessage::System {
+            id: MessageId::new(),
+            content: "😀".into(),
+            subtype: None,
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        }];
+
+        // The emoji is one Unicode scalar but two JS UTF-16 code units, so
+        // Math.round(length / 4) yields one token here.
+        assert_eq!(token_count_with_estimation(&history), 1);
     }
 
     #[test]
@@ -849,8 +999,10 @@ mod tests {
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "done".to_string(),
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".to_string()),
+                resumable: None,
             },
         ];
         assert!(token_count_with_estimation(&natural_turn) >= ex.tokens_at_last_extraction() + 5);
@@ -956,7 +1108,8 @@ mod tests {
             .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
 
         let cache_safe = CacheSafeParams {
-            system_prompt: Arc::from("SYS"),
+            system_prompt: Arc::new("SYS".into()),
+            system_prompt_input: None,
             user_context: std::collections::HashMap::new(),
             system_context: std::collections::HashMap::new(),
             user_context_message: None,
@@ -988,14 +1141,15 @@ mod tests {
             .await
             .expect("extract succeeds");
 
-        assert!(written.starts_with("---\n"));
-        let (frontmatter, body) = parse_markdown_with_frontmatter(&written).unwrap();
+        let written_text = written.string_at("").expect("memory output is a string");
+        assert!(written_text.starts_with("---\n"));
+        let (frontmatter, body) = parse_markdown_with_frontmatter(written_text).unwrap();
         assert_eq!(frontmatter.memory_type, "session_memory");
         assert_eq!(frontmatter.description, "DISTILLED NOTES");
         assert_eq!(body, "DISTILLED NOTES");
         // File landed under agents/session-memory/<id>.md.
         let path = session_memory_path(dir.path(), "sess-xyz");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written_text);
         // Watermark advanced to the last message so the next window starts fresh.
         assert_eq!(ex.last_extracted_message_id, Some(last_id));
         assert!(ex.is_initialized());
@@ -1016,14 +1170,40 @@ mod tests {
 
     #[test]
     fn normalize_session_memory_document_adds_selector_metadata_to_plain_output() {
-        let normalized =
-            normalize_session_memory_document("# Project convention\nUse cargo test.\n");
-        let (frontmatter, body) = parse_markdown_with_frontmatter(&normalized).unwrap();
+        let normalized = normalize_session_memory_document_source(&Utf16JsonProjection::from(
+            "# Project convention\nUse cargo test.\n",
+        ))
+        .unwrap();
+        let normalized = normalized.string_at("").expect("valid test result");
+        let (frontmatter, body) = parse_markdown_with_frontmatter(normalized).unwrap();
         assert_eq!(frontmatter.memory_type, "session_memory");
         assert_eq!(frontmatter.description, "Project convention");
         assert!(frontmatter.when_to_use.is_some());
         assert_eq!(frontmatter.tags, vec!["session"]);
         assert_eq!(body, "# Project convention\nUse cargo test.\n");
+    }
+
+    #[test]
+    fn normalization_keeps_unpaired_source_until_the_file_write_boundary() {
+        let source_units = "# Project "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("\nnotes\n".encode_utf16())
+            .collect::<Vec<_>>();
+        let source = source_string(source_units.clone());
+        let normalized = normalize_session_memory_document_source(&source).unwrap();
+        let normalized_units = normalized.string_units("").unwrap();
+        assert!(normalized_units
+            .windows(source_units.len())
+            .any(|window| window == source_units));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.md");
+        write_session_memory(&path, &normalized).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            String::from_utf16_lossy(&normalized_units)
+        );
     }
 
     #[tokio::test]
@@ -1053,7 +1233,8 @@ mod tests {
         let runner = ForkedAgentRunner::new()
             .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
         let cache_safe = CacheSafeParams {
-            system_prompt: Arc::from("SYS"),
+            system_prompt: Arc::new("SYS".into()),
+            system_prompt_input: None,
             user_context: std::collections::HashMap::new(),
             system_context: std::collections::HashMap::new(),
             user_context_message: None,
@@ -1101,7 +1282,8 @@ mod tests {
         let path = dir.path().join("blocked.md");
         std::fs::create_dir(&path).unwrap();
 
-        write_session_memory(&path, "notes").expect_err("directory replacement must fail");
+        write_session_memory(&path, &Utf16JsonProjection::from("notes"))
+            .expect_err("directory replacement must fail");
         assert!(path.is_dir());
     }
 
@@ -1115,7 +1297,7 @@ mod tests {
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
 
-        write_session_memory(&path, "new").unwrap();
+        write_session_memory(&path, &Utf16JsonProjection::from("new")).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);

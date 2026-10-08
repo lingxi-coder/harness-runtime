@@ -10,10 +10,16 @@
 
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::{InteractivePromptingGate, PermissionDecision, PermissionGate};
-use serde_json::json;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+    };
+}
 
 #[tokio::test]
 async fn check_typing_y_returns_allow() {
@@ -65,7 +71,8 @@ async fn check_typing_n_returns_deny() {
 
     match decision {
         PermissionDecision::Deny { reason } => {
-            assert!(reason.contains("user typed 'n'"), "got reason: {reason}");
+            let display = reason.string_at("").unwrap_or_default();
+            assert!(display.contains("user typed 'n'"), "got reason: {display}");
         }
         PermissionDecision::Allow => panic!("expected Deny, got Allow"),
     }
@@ -126,9 +133,10 @@ async fn check_after_3_invalid_inputs_returns_deny() {
     let decision = gate.check("Bash", &json!({})).await;
     match decision {
         PermissionDecision::Deny { reason } => {
+            let display = reason.string_at("").unwrap_or_default();
             assert!(
-                reason.contains("invalid permission input after 3 attempts"),
-                "got reason: {reason}"
+                display.contains("invalid permission input after 3 attempts"),
+                "got reason: {display}"
             );
         }
         PermissionDecision::Allow => panic!("expected Deny after retries, got Allow"),

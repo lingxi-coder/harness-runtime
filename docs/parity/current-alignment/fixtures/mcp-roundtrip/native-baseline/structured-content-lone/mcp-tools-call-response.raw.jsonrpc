@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"primary-\ud800\u03a9"},{"type":"text","text":"secondary-content-block"}],"structuredContent":{"ok":true,"label":"structured-\ud800\u03a9"}}}

@@ -25,6 +25,7 @@ use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleValue};
 use crate::update::PermissionUpdate;
 use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
 use lingxi_core::host::FsError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -345,16 +346,82 @@ fn behavior_key(behavior: PermissionBehavior) -> &'static str {
     }
 }
 
-/// Merge `rule`'s string form into `permissions.{behavior}` of `raw` settings
-/// JSON (the pure core of `addPermissionRulesToSettings`). Returns:
-/// - `Ok(Some(new_json))` — the rule was new; `new_json` is the pretty-printed
-///   updated settings (with a trailing newline) preserving all other keys.
-/// - `Ok(None)` — the rule (normalized) is already present; no write needed.
-/// - `Err(())` — `raw` is non-empty and not a JSON object (caller maps to
-///   [`PersistError::BrokenJson`] and must NOT overwrite).
-///
-/// Existing entries are preserved verbatim; only de-duplication normalizes via
-/// [`PermissionRuleValue::from_rule_string`]→[`PermissionRuleValue::to_rule_string`].
+/// Snapshot one object member without lowering its value through serde_json.
+fn source_object_field(
+    value: &Utf16JsonProjection,
+    key: &str,
+) -> Result<Option<Utf16JsonProjection>, ()> {
+    if value.object_entries().is_none() {
+        return Err(());
+    }
+    if !value.contains_property(key) {
+        return Ok(None);
+    }
+    let units = key.encode_utf16().collect::<Vec<_>>();
+    value
+        .subprojection_property_units(&units)
+        .map(Some)
+        .map_err(|_| ())
+}
+
+/// Rebuild an object while adding, replacing, or deleting one ordinary key.
+fn source_set_object_field(
+    object: &Utf16JsonProjection,
+    key: &str,
+    replacement: Option<Utf16JsonProjection>,
+) -> Result<Utf16JsonProjection, ()> {
+    let entries = object.object_entries().ok_or(())?;
+    let key_units = key.encode_utf16().collect::<Vec<_>>();
+    let mut found = false;
+    let extra = if replacement.is_some() { 1 } else { 0 };
+    let mut fields = Vec::with_capacity(entries.len() + extra);
+    for entry in entries {
+        if entry.code_units == key_units.as_slice() {
+            found = true;
+            if let Some(value) = &replacement {
+                fields.push((key_units.clone(), value.clone()));
+            }
+        } else {
+            fields.push((
+                entry.code_units.to_vec(),
+                object
+                    .subprojection_property_units(entry.code_units)
+                    .map_err(|_| ())?,
+            ));
+        }
+    }
+    if !found {
+        if let Some(value) = replacement {
+            fields.push((key_units, value));
+        }
+    }
+    Utf16JsonProjection::object_units(fields).map_err(|_| ())
+}
+
+fn source_array_items(value: &Utf16JsonProjection) -> Result<Vec<Utf16JsonProjection>, ()> {
+    let view = value.at_pointer("").ok_or(())?;
+    let length = view.array_len().ok_or(())?;
+    (0..length)
+        .map(|index| value.subprojection(&format!("/{index}")).map_err(|_| ()))
+        .collect()
+}
+
+fn canonical_rule_projection(value: &Utf16JsonProjection) -> Option<Vec<u16>> {
+    let rule = PermissionRuleValue::from_rule_projection(value)?;
+    rule.to_rule_projection().string_units("")
+}
+
+fn settings_json_source(raw: &str) -> Result<Utf16JsonProjection, ()> {
+    if raw.trim().is_empty() {
+        Utf16JsonProjection::object(Vec::new()).map_err(|_| ())
+    } else {
+        Utf16JsonProjection::parse(raw).map_err(|_| ())
+    }
+}
+
+/// Merge exact rule-string projections into `permissions.{behavior}` of the
+/// settings JSON. The settings file remains UTF-8 JSON, while embedded escaped
+/// UTF-16 units such as `\ud800` survive parse, canonicalization, and write.
 fn apply_rule_to_settings_json(raw: &str, rule: &PermissionRule) -> Result<Option<String>, ()> {
     mutate_rules_in_settings_json(raw, std::slice::from_ref(rule), true)
 }
@@ -373,55 +440,64 @@ fn mutate_rules_in_settings_json(
     if !add && raw.trim().is_empty() {
         return Ok(None);
     }
-    let mut root: Value = if raw.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(raw).map_err(|_| ())?
-    };
-    let obj = root.as_object_mut().ok_or(())?;
 
+    let root = settings_json_source(raw)?;
+    if root.object_entries().is_none() {
+        return Err(());
+    }
     let key = behavior_key(first.behavior);
-    let targets: Vec<String> = rules
-        .iter()
-        .map(|rule| rule.value.to_rule_string())
-        .collect();
+    let mut permissions = match source_object_field(&root, "permissions")? {
+        Some(value) => {
+            if value.object_entries().is_none() {
+                return Err(());
+            }
+            value
+        }
+        None if add => Utf16JsonProjection::object(Vec::new()).map_err(|_| ())?,
+        None => return Ok(None),
+    };
+    let current = source_object_field(&permissions, key)?;
+    let mut items = match current {
+        Some(array) => source_array_items(&array)?,
+        None if add => Vec::new(),
+        None => return Ok(None),
+    };
     let mut changed = false;
+    let targets = rules
+        .iter()
+        .map(|rule| rule.value.to_rule_projection())
+        .collect::<Vec<_>>();
     if add {
-        let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-        let perms_obj = perms.as_object_mut().ok_or(())?;
-        let arr = perms_obj.entry(key).or_insert_with(|| json!([]));
-        let arr_vec = arr.as_array_mut().ok_or(())?;
         for target in targets {
-            let exists = arr_vec.iter().filter_map(Value::as_str).any(|existing| {
-                PermissionRuleValue::from_rule_string(existing).to_rule_string() == target
+            let target_units = target.string_units("").ok_or(())?;
+            let exists = items.iter().any(|existing| {
+                canonical_rule_projection(existing).as_deref() == Some(target_units.as_slice())
             });
             if !exists {
-                arr_vec.push(json!(target));
+                items.push(target);
                 changed = true;
             }
         }
     } else {
-        let Some(perms) = obj.get_mut("permissions") else {
-            return Ok(None);
-        };
-        let perms_obj = perms.as_object_mut().ok_or(())?;
-        let Some(arr) = perms_obj.get_mut(key) else {
-            return Ok(None);
-        };
-        let arr_vec = arr.as_array_mut().ok_or(())?;
-        let before = arr_vec.len();
-        arr_vec.retain(|existing| {
-            existing.as_str().is_none_or(|value| {
-                let normalized = PermissionRuleValue::from_rule_string(value).to_rule_string();
-                !targets.iter().any(|target| target == &normalized)
-            })
+        let before = items.len();
+        items.retain(|existing| {
+            let Some(existing_units) = canonical_rule_projection(existing) else {
+                return true;
+            };
+            !targets
+                .iter()
+                .any(|target| target.string_units("").as_deref() == Some(existing_units.as_slice()))
         });
-        changed = arr_vec.len() != before;
+        changed = items.len() != before;
     }
     if !changed {
         return Ok(None);
     }
-    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+
+    let replacement_array = Utf16JsonProjection::array(items).map_err(|_| ())?;
+    permissions = source_set_object_field(&permissions, key, Some(replacement_array))?;
+    let updated_root = source_set_object_field(&root, "permissions", Some(permissions))?;
+    let serialized = updated_root.to_pretty_json_string().map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
 
@@ -482,51 +558,71 @@ fn replace_rules_in_settings_json(
     if rules.iter().any(|rule| rule.behavior != behavior) {
         return Err(());
     }
-    let mut root: Value = if raw.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(raw).map_err(|_| ())?
-    };
-    let obj = root.as_object_mut().ok_or(())?;
-    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-    let perms_obj = perms.as_object_mut().ok_or(())?;
-    let key = behavior_key(behavior);
-    let replacement: Vec<Value> = rules
-        .iter()
-        .map(|rule| json!(rule.value.to_rule_string()))
-        .collect();
-    if perms_obj.get(key).and_then(Value::as_array) == Some(&replacement) {
-        return Ok(None);
+    let root = settings_json_source(raw)?;
+    if root.object_entries().is_none() {
+        return Err(());
     }
-    if let Some(existing) = perms_obj.get(key) {
-        if !existing.is_array() {
-            return Err(());
+    let key = behavior_key(behavior);
+    let replacement: Vec<Utf16JsonProjection> = rules
+        .iter()
+        .map(|rule| rule.value.to_rule_projection())
+        .collect();
+    let mut permissions = match source_object_field(&root, "permissions")? {
+        Some(value) => {
+            if value.object_entries().is_none() {
+                return Err(());
+            }
+            value
+        }
+        None => Utf16JsonProjection::object(Vec::new()).map_err(|_| ())?,
+    };
+    if let Some(existing) = source_object_field(&permissions, key)? {
+        let existing_items = source_array_items(&existing)?;
+        let same = existing_items.len() == replacement.len()
+            && existing_items
+                .iter()
+                .zip(&replacement)
+                .all(|(left, right)| left.string_units("") == right.string_units(""));
+        if same {
+            return Ok(None);
         }
     }
-    perms_obj.insert(key.to_string(), Value::Array(replacement));
-    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    let replacement = Utf16JsonProjection::array(replacement).map_err(|_| ())?;
+    permissions = source_set_object_field(&permissions, key, Some(replacement))?;
+    let updated_root = source_set_object_field(&root, "permissions", Some(permissions))?;
+    let serialized = updated_root.to_pretty_json_string().map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
 
 fn set_default_mode_in_settings_json(raw: &str, mode: &str) -> Result<Option<String>, ()> {
-    let mut root: Value = if raw.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(raw).map_err(|_| ())?
-    };
-    let obj = root.as_object_mut().ok_or(())?;
-    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-    let perms_obj = perms.as_object_mut().ok_or(())?;
-    if perms_obj.get("defaultMode").and_then(Value::as_str) == Some(mode) {
-        return Ok(None);
+    let root = settings_json_source(raw)?;
+    if root.object_entries().is_none() {
+        return Err(());
     }
-    if let Some(existing) = perms_obj.get("defaultMode") {
-        if !existing.is_string() {
+    let mut permissions = match source_object_field(&root, "permissions")? {
+        Some(value) => {
+            if value.object_entries().is_none() {
+                return Err(());
+            }
+            value
+        }
+        None => Utf16JsonProjection::object(Vec::new()).map_err(|_| ())?,
+    };
+    if let Some(existing) = source_object_field(&permissions, "defaultMode")? {
+        let Some(units) = existing.string_units("") else {
             return Err(());
+        };
+        if units == mode.encode_utf16().collect::<Vec<_>>() {
+            return Ok(None);
         }
     }
-    perms_obj.insert("defaultMode".to_string(), json!(mode));
-    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    permissions = source_set_object_field(
+        &permissions,
+        "defaultMode",
+        Some(Utf16JsonProjection::from(mode)),
+    )?;
+    let updated_root = source_set_object_field(&root, "permissions", Some(permissions))?;
+    let serialized = updated_root.to_pretty_json_string().map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
 
@@ -729,54 +825,62 @@ fn mutate_directories_in_settings_json(
     if !add && raw.trim().is_empty() {
         return Ok(None);
     }
-    let mut root: Value = if raw.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(raw).map_err(|_| ())?
+    let root = settings_json_source(raw)?;
+    if root.object_entries().is_none() {
+        return Err(());
+    }
+    let mut permissions = match source_object_field(&root, "permissions")? {
+        Some(value) => {
+            if value.object_entries().is_none() {
+                return Err(());
+            }
+            value
+        }
+        None if add => Utf16JsonProjection::object(Vec::new()).map_err(|_| ())?,
+        None => return Ok(None),
     };
-    let obj = root.as_object_mut().ok_or(())?;
-
-    if add {
-        let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-        let perms_obj = perms.as_object_mut().ok_or(())?;
-        let arr = perms_obj
-            .entry("additionalDirectories")
-            .or_insert_with(|| json!([]));
-        let arr_vec = arr.as_array_mut().ok_or(())?;
+    let current = source_object_field(&permissions, "additionalDirectories")?;
+    let mut items = match current {
+        Some(value) => source_array_items(&value)?,
+        None if add => Vec::new(),
+        None => return Ok(None),
+    };
+    let directory_units = directories
+        .iter()
+        .map(|directory| directory.encode_utf16().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let changed = if add {
         let mut changed = false;
         for directory in directories {
-            if !arr_vec
+            let units = directory.encode_utf16().collect::<Vec<_>>();
+            if !items
                 .iter()
-                .filter_map(Value::as_str)
-                .any(|existing| existing == *directory)
+                .any(|existing| existing.string_units("").as_deref() == Some(units.as_slice()))
             {
-                arr_vec.push(json!(directory));
+                items.push(Utf16JsonProjection::from(*directory));
                 changed = true;
             }
         }
-        if !changed {
-            return Ok(None);
-        }
+        changed
     } else {
-        let Some(perms) = obj.get_mut("permissions") else {
-            return Ok(None);
-        };
-        let perms_obj = perms.as_object_mut().ok_or(())?;
-        let Some(arr) = perms_obj.get_mut("additionalDirectories") else {
-            return Ok(None);
-        };
-        let arr_vec = arr.as_array_mut().ok_or(())?;
-        let before = arr_vec.len();
-        arr_vec.retain(|entry| {
-            entry
-                .as_str()
-                .is_none_or(|value| !directories.contains(&value))
+        let before = items.len();
+        items.retain(|entry| {
+            entry.string_units("").is_none_or(|value| {
+                !directory_units
+                    .iter()
+                    .any(|units| units.as_slice() == value.as_slice())
+            })
         });
-        if arr_vec.len() == before {
-            return Ok(None); // nothing matched.
-        }
+        items.len() != before
+    };
+    if !changed {
+        return Ok(None);
     }
-    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    let replacement = Utf16JsonProjection::array(items).map_err(|_| ())?;
+    permissions =
+        source_set_object_field(&permissions, "additionalDirectories", Some(replacement))?;
+    let updated_root = source_set_object_field(&root, "permissions", Some(permissions))?;
+    let serialized = updated_root.to_pretty_json_string().map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
 
@@ -977,6 +1081,39 @@ mod tests {
         let out = apply_rule_to_settings_json("{}", &rule).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permissions"]["deny"], json!(["Read(./secrets/**)"]));
+    }
+
+    #[test]
+    fn source_rule_with_isolated_surrogate_persists_and_removes_exactly() {
+        let rule_string =
+            Utf16JsonProjection::parse(r#""Bash(\ud800)""#).expect("valid exact rule string JSON");
+        let value = PermissionRuleValue::from_rule_projection(&rule_string)
+            .expect("the tool name is representable");
+        assert_eq!(value.rule_content_units(), Some(vec![0xd800]));
+        let rule = PermissionRule {
+            value,
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
+        };
+
+        let written = apply_rule_to_settings_json("{}", &rule)
+            .unwrap()
+            .expect("new exact rule is written");
+        assert!(written.contains(r#""Bash(\ud800)""#));
+        let parsed = Utf16JsonProjection::parse(&written).expect("written JSON remains valid");
+        let stored_rule = parsed
+            .subprojection("/permissions/allow/0")
+            .expect("allow rule exists");
+        assert_eq!(
+            stored_rule.string_units(""),
+            rule.value.to_rule_projection().string_units("")
+        );
+
+        let removed = remove_rule_from_settings_json(&written, &rule)
+            .unwrap()
+            .expect("the same source rule is removed");
+        let parsed = Utf16JsonProjection::parse(&removed).expect("updated JSON remains valid");
+        assert_eq!(parsed.array_len("/permissions/allow"), Some(0));
     }
 
     // ── path resolution ──────────────────────────────────────────────────

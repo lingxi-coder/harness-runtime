@@ -7,7 +7,6 @@ use lingxi_core::host::{
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
 use lingxi_core::types::McpConnectionId as ConnId;
-use serde_json::Value;
 use std::sync::Arc;
 
 /// Minimal in-crate stub transport — only `connections` matters for
@@ -35,14 +34,14 @@ impl McpTransport for StubTransport {
         &self,
         _c: &McpRawConnection,
         _t: &str,
-        _i: Value,
+        _i: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         unreachable!()
     }
     async fn read_resource(
         &self,
         _c: &McpRawConnection,
-        _u: &str,
+        _u: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         unreachable!()
     }

@@ -40,9 +40,66 @@
 //! appended after the trailer in `extra` iteration order, so read→write
 //! round-trips of unported fields stay byte-faithful.
 
-use serde::ser::SerializeMap;
+use crate::jsonl::exact_json::PRIVATE_UTF16_KEY;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::{Map, Value};
+use serde_json::value::RawValue;
+#[cfg(test)]
+use serde_json::Value;
+
+fn deserialize_attachment_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Utf16JsonProjection::parse(raw.get())
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_message_projection<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_present_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Utf16JsonProjection::parse(raw.get())
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+fn null_json_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+}
+
+struct RawProjection<'a>(&'a Utf16JsonProjection);
+
+impl Serialize for RawProjection<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let source = self.0.to_json_string().map_err(serde::ser::Error::custom)?;
+        let raw = RawValue::from_string(source).map_err(serde::ser::Error::custom)?;
+        raw.serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+fn test_projection(value: Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).unwrap()
+}
 
 /// One line of the session JSONL file.
 ///
@@ -51,16 +108,15 @@ use serde_json::{Map, Value};
 /// (see the module docs) rather than this struct's declaration order — so the
 /// on-disk byte layout is 1:1, not just the field set. (This corrects an
 /// earlier note that claimed the order "does not yet" match; the hand-written
-/// `Serialize` closed that gap.) The `message` field is an opaque `Value`
+/// `Serialize` closed that gap.) The `message` field stays in the flat exact JSON carrier
 /// because its inner schema depends on `type` (Anthropic
 /// Messages API for `user`/`assistant`, claude-code internal shapes for
 /// `system`/`attachment`). All un-named outer fields land in `extra` via
 /// `#[serde(flatten)]` so read→write round-trips preserve every byte we read.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct JsonlMessage {
     /// `"user" | "assistant" | "system" | "attachment" | "summary" | ...`
     /// — see `claude-code/src/types/logs.ts:297` `Entry` union.
-    #[serde(rename = "type")]
     pub message_type: String,
 
     /// Stable identifier for this entry. UUID v4 lowercase.
@@ -68,11 +124,9 @@ pub struct JsonlMessage {
 
     /// Parent entry's `uuid`, or JSON `null` for the first turn.
     /// MUST serialize as `null` (NOT omitted) — `claude-code/src/types/logs.ts:222`.
-    #[serde(rename = "parentUuid")]
     pub parent_uuid: Option<String>,
 
     /// Session UUID. Matches the filename without `.jsonl`.
-    #[serde(rename = "sessionId")]
     pub session_id: String,
 
     /// ISO-8601 UTC timestamp with millisecond precision
@@ -86,31 +140,53 @@ pub struct JsonlMessage {
     /// ([`crate::jsonl::loader::build_conversation_chain`]) parses this via
     /// `chrono` and treats an unparsable / empty value as epoch (oldest), so a
     /// missing timestamp simply can't win the newest-leaf race.
-    #[serde(default)]
     pub timestamp: String,
 
     /// Canonical absolute cwd at the time this entry was written.
     /// TOLERANT (`#[serde(default)]`): present on `user`/`assistant`, may be
     /// absent on `attachment`/`system`.
-    #[serde(default)]
     pub cwd: String,
 
     /// Engine version string. claude-code: `MACRO.VERSION`; lingxi-core: `CARGO_PKG_VERSION`.
     /// TOLERANT (`#[serde(default)]`) for the same reason as `cwd`.
-    #[serde(default)]
     pub version: String,
 
     /// Inner message object — Anthropic Messages API shape for `user`/`assistant`,
-    /// other shapes for system entries. Preserved verbatim.
+    /// other shapes for system entries. Kept in the flat exact JSON carrier.
     ///
     /// TOLERANT: `attachment` and `system` chain-participant lines frequently
     /// lack a `message` field entirely (their payload lives in sibling outer
     /// fields captured by [`Self::extra`]). `#[serde(default)]` yields
-    /// `Value::Null` when absent so the line still parses and joins the chain,
+    /// a JSON null projection when absent so the line still parses and joins the chain,
     /// matching `claude-code`'s `isTranscriptMessage` (it gates on `type` only,
     /// never on the presence of `message`).
-    #[serde(default)]
-    pub message: Value,
+    pub message: Utf16JsonProjection,
+
+    /// Process-only flat attachment payload. The raw JSON member is captured
+    /// before typed `extra` values are deserialized, then emitted in Native's
+    /// attachment position without converting the payload to `Value`.
+    pub attachment_projection: Option<Utf16JsonProjection>,
+
+    /// Exact process-only capture of Native's raw tool result payload. The
+    /// outer JSONL field remains one ordinary JSON value; it is parsed before
+    /// the flattened typed-metadata map can recursively materialize it.
+    pub tool_use_result_projection: Option<Utf16JsonProjection>,
+
+    /// Process-only flat capture of arbitrary MCP metadata. It shares Native's
+    /// top-level `mcpMeta` JSON value shape and stays outside recursive `extra`.
+    pub mcp_meta_projection: Option<Utf16JsonProjection>,
+
+    /// Native outer user-row turn-companion marker, retaining absence versus false.
+    pub turn_companion: Option<Option<bool>>,
+
+    /// Native outer user-row note, retaining absence versus explicit null.
+    pub usage_limit_note: Option<Option<lingxi_core::types::messages::UsageLimitNote>>,
+
+    /// Exact Native origin object, such as session task notification provenance.
+    pub origin_projection: Option<Utf16JsonProjection>,
+
+    /// Exact Native turn-origin string tag.
+    pub turn_origin_projection: Option<Utf16JsonProjection>,
 
     // The Anthropic `request-id` response header (`req_…`) is persisted as the
     // top-level `requestId` field on REAL assistant lines (the SDK's
@@ -121,41 +197,31 @@ pub struct JsonlMessage {
     /// `false` for the main agent loop; `true` for sub-agent transcripts.
     /// Optional in the schema but emitted by claude-code's writer; we default
     /// to `false` on write and accept missing on read.
-    #[serde(rename = "isSidechain", default)]
     pub is_sidechain: bool,
 
     /// `process.env.USER_TYPE || "external"` — lingxi-core lock: `"external"`.
-    #[serde(rename = "userType", skip_serializing_if = "Option::is_none")]
     pub user_type: Option<String>,
 
     /// Git branch at write time, when available.
     /// `getBranch()` once per chain (`sessionStorage.ts:1012-1019`); on a
     /// non-repo / git failure the writer leaves it `None` → omitted.
-    #[serde(rename = "gitBranch", skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
 
     /// CLI entrypoint string — `getEntrypoint()` (`sessionStorage.ts:1058`),
     /// e.g. `"cli"`. Stamped on EVERY line by claude-code's writer. Optional on
     /// read (legacy rows omit it); `skip_serializing_if = "Option::is_none"`
     /// so an unset value is omitted, matching TS `undefined`.
-    #[serde(
-        rename = "entrypoint",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
     pub entrypoint: Option<String>,
 
     /// Per-session plan slug — `getPlanSlugCache().get(sessionId)`
     /// (`sessionStorage.ts:1023, 1063`). `undefined` when the session has no
     /// plan slug; omitted on write when `None`.
-    #[serde(rename = "slug", default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
 
     /// Stable per-prompt id — `getPromptId()` (`sessionStorage.ts:1045-1046`),
     /// set ONLY on `user` lines (TS: `type === 'user' ? getPromptId() : undefined`).
     /// `None` (omitted) on every non-`user` line and on `user` lines when no
     /// prompt id is available.
-    #[serde(rename = "promptId", default, skip_serializing_if = "Option::is_none")]
     pub prompt_id: Option<String>,
 
     /// Compact-boundary back-link — `logicalParentUuid`
@@ -163,24 +229,171 @@ pub struct JsonlMessage {
     /// `parentUuid: null` and stashes the real parent here
     /// (`isCompactBoundary ? parentUuid : undefined`); on every other line it is
     /// `undefined`. Omitted on write when `None`.
-    #[serde(
-        rename = "logicalParentUuid",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
     pub logical_parent_uuid: Option<String>,
 
     /// All other outer fields (`agentId`, `agentName`, `agentColor`,
     /// `teamName`, `isMeta`, `toolUseResult`, ...) preserved verbatim across
     /// read->write so round-trips are byte-equivalent.
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub extra: Utf16JsonProjection,
+}
+
+impl JsonlMessage {
+    /// Parse a complete raw JSONL row into its typed scalar fields and flat
+    /// exact payload projections. No member is materialized as Value.
+    pub fn from_projection(row: &Utf16JsonProjection) -> Result<Self, String> {
+        let string_field = |key: &str| -> Result<String, String> {
+            row.get_property(key)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("JSONL field {key} must be a string"))
+        };
+        let optional_string = |key: &str| -> Result<Option<String>, String> {
+            match row.get_property(key) {
+                None => Ok(None),
+                Some(value) if value.is_null() => Ok(None),
+                Some(value) => value
+                    .as_str()
+                    .map(|value| Some(value.to_owned()))
+                    .ok_or_else(|| format!("JSONL field {key} must be a string or null")),
+            }
+        };
+        let nullable_bool = |key: &str| -> Result<Option<Option<bool>>, String> {
+            match row.get_property(key) {
+                None => Ok(None),
+                Some(value) if value.is_null() => Ok(Some(None)),
+                Some(value) => value
+                    .as_bool()
+                    .map(|value| Some(Some(value)))
+                    .ok_or_else(|| format!("JSONL field {key} must be a boolean or null")),
+            }
+        };
+        let optional_projection = |key: &str| -> Result<Option<Utf16JsonProjection>, String> {
+            if row.get_property(key).is_none() {
+                return Ok(None);
+            }
+            row.subprojection_property_units(&key.encode_utf16().collect::<Vec<_>>())
+                .map(Some)
+                .map_err(|error| format!("invalid JSONL field {key}: {error}"))
+        };
+        let nullable_string =
+            |key: &str| -> Result<Option<String>, String> { optional_string(key) };
+        let message = optional_projection("message")?.unwrap_or_else(null_json_projection);
+        let turn_companion = nullable_bool("turnCompanion")?;
+        let usage_limit_note = match row.get_property("usageLimitNote") {
+            None => None,
+            Some(value) if value.is_null() => Some(None),
+            Some(value) => {
+                let text = value.as_str().ok_or_else(|| {
+                    "JSONL field usageLimitNote must be a string or null".to_owned()
+                })?;
+                let parsed = match text {
+                    "wrap_up" => lingxi_core::types::messages::UsageLimitNote::WrapUp,
+                    "release" => lingxi_core::types::messages::UsageLimitNote::Release,
+                    "near_limit" => lingxi_core::types::messages::UsageLimitNote::NearLimit,
+                    _ => return Err("unknown JSONL usageLimitNote".into()),
+                };
+                Some(Some(parsed))
+            }
+        };
+
+        let mut extra_fields = Vec::new();
+        let known = [
+            "type",
+            "uuid",
+            "parentUuid",
+            "sessionId",
+            "timestamp",
+            "cwd",
+            "version",
+            "message",
+            "attachment",
+            "toolUseResult",
+            "mcpMeta",
+            "isSidechain",
+            "userType",
+            "gitBranch",
+            "entrypoint",
+            "slug",
+            "promptId",
+            "logicalParentUuid",
+            "turnCompanion",
+            "usageLimitNote",
+            "origin",
+            "turnOrigin",
+        ];
+        let known_units = known
+            .iter()
+            .map(|key| key.encode_utf16().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for entry in row
+            .object_entries()
+            .ok_or_else(|| "JSONL row must be an object".to_owned())?
+        {
+            if known_units.iter().any(|key| key == entry.code_units)
+                || entry.code_units == PRIVATE_UTF16_KEY.encode_utf16().collect::<Vec<_>>()
+            {
+                continue;
+            }
+            let value = row
+                .subprojection_property_units(entry.code_units)
+                .map_err(|error| format!("invalid JSONL extra field: {error}"))?;
+            extra_fields.push((entry.code_units.to_vec(), value));
+        }
+
+        let is_sidechain = match row.get_property("isSidechain") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "JSONL field isSidechain must be a boolean".to_owned())?,
+        };
+        Ok(Self {
+            message_type: string_field("type")?,
+            uuid: string_field("uuid")?,
+            parent_uuid: nullable_string("parentUuid")?,
+            session_id: string_field("sessionId")?,
+            timestamp: optional_string("timestamp")?.unwrap_or_default(),
+            cwd: optional_string("cwd")?.unwrap_or_default(),
+            version: optional_string("version")?.unwrap_or_default(),
+            message,
+            attachment_projection: optional_projection("attachment")?,
+            tool_use_result_projection: optional_projection("toolUseResult")?,
+            mcp_meta_projection: optional_projection("mcpMeta")?,
+            turn_companion,
+            usage_limit_note,
+            origin_projection: optional_projection("origin")?,
+            turn_origin_projection: optional_projection("turnOrigin")?,
+            is_sidechain,
+            user_type: optional_string("userType")?,
+            git_branch: optional_string("gitBranch")?,
+            entrypoint: optional_string("entrypoint")?,
+            slug: optional_string("slug")?,
+            prompt_id: optional_string("promptId")?,
+            logical_parent_uuid: optional_string("logicalParentUuid")?,
+            extra: Utf16JsonProjection::object_units(extra_fields)
+                .map_err(|error| format!("invalid JSONL extra object: {error}"))?,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonlMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+        Self::from_projection(&projection).map_err(serde::de::Error::custom)
+    }
 }
 
 /// `extra` keys this serializer pulls into their claude-ordered positions.
 /// Anything NOT in this set is appended verbatim after the common trailer
 /// (forward-compat for unported claude fields like `agentId`/`toolUseResult`).
 const RECOGNIZED_EXTRA: &[&str] = &[
+    "attachment",
+    "toolUseResult",
+    "mcpMeta",
+    "origin",
     "isMeta",
     "requestId",
     "error",
@@ -254,6 +467,7 @@ const USER_HEAD_EXTRA: &[&str] = &[
     "isVisibleInTranscriptOnly",
     "isCompactSummary",
     "turnCompanion",
+    "usageLimitNote",
 ];
 
 /// `extra` keys emitted BETWEEN `timestamp` and the common trailer, in this
@@ -293,7 +507,6 @@ const USER_HEAD_EXTRA: &[&str] = &[
 /// still round-trips (via the unrecognized-key tail), just not in claude's
 /// head slot.
 const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
-    "toolUseResult",
     "toolDenialKind",
     "mcpMeta",
     "toolEndsTurn",
@@ -308,9 +521,36 @@ const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
 /// head emitted them.
 const BOUNDARY_HEAD_EXTRA: &[&str] = &["subtype", "content", "level", "compactMetadata"];
 
+const MODEL_FALLBACK_HEAD: &[&str] = &[
+    "subtype",
+    "content",
+    "level",
+    "trigger",
+    "originalModel",
+    "fallbackModel",
+    "isMeta",
+];
+
+const REFUSAL_FALLBACK_HEAD: &[&str] = &[
+    "subtype",
+    "direction",
+    "scope",
+    "content",
+    "level",
+    "trigger",
+    "originalModel",
+    "fallbackModel",
+    "requestId",
+    "apiRefusalCategory",
+    "apiRefusalExplanation",
+    "retractedMessageUuids",
+    "refusedUserMessageUuid",
+    "isMeta",
+];
+
 // Hand-written `Serialize` so the outer JSONL keys land in claude-code's EXACT
-// per-kind order (see module docs). `Deserialize` stays derived — the reader is
-// order-independent. VALUES are byte-identical to the derived impl; only key
+// per-kind order (see module docs). The source-aware `Deserialize` is order-
+// independent. Values are byte-identical to the typed schema; only key
 // POSITION changes. Skip predicates mirror the struct's `skip_serializing_if`
 // so presence parity is preserved.
 impl Serialize for JsonlMessage {
@@ -318,251 +558,265 @@ impl Serialize for JsonlMessage {
     where
         S: Serializer,
     {
-        // serde_json's map serializer preserves `serialize_entry` insertion
-        // order, so emitting entries in sequence yields claude's on-disk order.
-        let mut map = serializer.serialize_map(None)?;
-
+        let mut fields = Vec::<(Vec<u16>, Utf16JsonProjection)>::new();
         let is_user = self.message_type == "user";
         let is_assistant = self.message_type == "assistant";
         let is_system = self.message_type == "system";
-        // Attachment line: claude emits the `attachment` PAYLOAD before the
-        // `type` discriminator and writes NO inner `message`.
         let is_attachment = self.message_type == "attachment";
-        let is_api_error = self.extra.contains_key("isApiErrorMessage");
-        let is_scheduled_fire = is_system
-            && self.extra.get("subtype").and_then(Value::as_str) == Some("scheduled_task_fire");
-        // Compact-boundary system line: claude flattens the system envelope
-        // (`subtype`/`content`/`level`/`compactMetadata` are top-level
-        // siblings, no inner `message`). Only THIS system subtype gets the
-        // flattened head; other system lines keep the generic arm below.
-        let is_compact_boundary = is_system
-            && self.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
+        let is_api_error = self.extra.contains_property("isApiErrorMessage");
+        let subtype = self.extra.string_at("/subtype");
+        let is_scheduled_fire = is_system && subtype == Some("scheduled_task_fire");
+        let is_model_fallback = is_system && subtype == Some("model_fallback");
+        let is_refusal_fallback = is_system && subtype == Some("model_refusal_fallback");
+        let is_compact_boundary = is_system && subtype == Some("compact_boundary");
 
-        // (a) parentUuid — ALWAYS first, emitted even when null.
-        map.serialize_entry("parentUuid", &self.parent_uuid)?;
-        // (b) logicalParentUuid — system places it right after parentUuid. The
-        //     port sets it on compact-boundary lines (which carry
-        //     `parentUuid: null` + the real parent here, the claude chain
-        //     reset); omitted when None to match the TS `undefined` skip.
+        push_projection(
+            &mut fields,
+            "parentUuid",
+            option_string_projection(self.parent_uuid.as_deref()),
+        );
         if self.logical_parent_uuid.is_some() {
-            map.serialize_entry("logicalParentUuid", &self.logical_parent_uuid)?;
+            push_projection(
+                &mut fields,
+                "logicalParentUuid",
+                option_string_projection(self.logical_parent_uuid.as_deref()),
+            );
         }
-        // (c) isSidechain — always.
-        map.serialize_entry("isSidechain", &self.is_sidechain)?;
+        push_projection(
+            &mut fields,
+            "isSidechain",
+            bool_projection(self.is_sidechain),
+        );
 
         if is_user {
-            // (d) user head: promptId?, type, message, isMeta?,
-            //     isVisibleInTranscriptOnly?, isCompactSummary?, uuid,
-            //     timestamp. The two compact-summary flags sit between
-            //     `message` and `uuid` on claude's persisted summary lines
-            //     (real 2.1.207 transcripts).
-            if let Some(pid) = &self.prompt_id {
-                map.serialize_entry("promptId", pid)?;
+            if let Some(prompt_id) = &self.prompt_id {
+                push_projection(&mut fields, "promptId", string_projection(prompt_id));
             }
-            map.serialize_entry("type", &self.message_type)?;
-            map.serialize_entry("message", &self.message)?;
-            if let Some(v) = self.extra.get("isMeta") {
-                map.serialize_entry("isMeta", v)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            push_projection(&mut fields, "message", self.message.clone());
+            push_extra_projection(&mut fields, &self.extra, "isMeta");
+            if let Some(present) = self.turn_companion {
+                push_projection(
+                    &mut fields,
+                    "turnCompanion",
+                    present.map(bool_projection).unwrap_or_else(null_projection),
+                );
             }
-            if let Some(v) = self.extra.get("turnCompanion") {
-                map.serialize_entry("turnCompanion", v)?;
+            if let Some(present) = self.usage_limit_note {
+                let note = match present {
+                    None => null_projection(),
+                    Some(lingxi_core::types::messages::UsageLimitNote::WrapUp) => {
+                        string_projection("wrap_up")
+                    }
+                    Some(lingxi_core::types::messages::UsageLimitNote::Release) => {
+                        string_projection("release")
+                    }
+                    Some(lingxi_core::types::messages::UsageLimitNote::NearLimit) => {
+                        string_projection("near_limit")
+                    }
+                };
+                push_projection(&mut fields, "usageLimitNote", note);
             }
-            if let Some(v) = self.extra.get("isVisibleInTranscriptOnly") {
-                map.serialize_entry("isVisibleInTranscriptOnly", v)?;
-            }
-            if let Some(v) = self.extra.get("isCompactSummary") {
-                map.serialize_entry("isCompactSummary", v)?;
-            }
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
+            push_extra_projection(&mut fields, &self.extra, "isVisibleInTranscriptOnly");
+            push_extra_projection(&mut fields, &self.extra, "isCompactSummary");
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
         } else if is_assistant && is_api_error {
-            // (e1) assistant api-error head: type, uuid, timestamp, message,
-            //      requestId?, error?, errorDetails?, truncatedAfterOutput?,
-            //      isApiErrorMessage, apiErrorStatus?.
-            // `truncatedAfterOutput` sits after `errorDetails` and before
-            // `isApiErrorMessage` (cc 2.1.263 `Ggr`).
-            map.serialize_entry("type", &self.message_type)?;
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
-            map.serialize_entry("message", &self.message)?;
-            if let Some(v) = self.extra.get("requestId") {
-                map.serialize_entry("requestId", v)?;
-            }
-            if let Some(v) = self.extra.get("error") {
-                map.serialize_entry("error", v)?;
-            }
-            if let Some(v) = self.extra.get("errorDetails") {
-                map.serialize_entry("errorDetails", v)?;
-            }
-            if let Some(v) = self.extra.get("truncatedAfterOutput") {
-                map.serialize_entry("truncatedAfterOutput", v)?;
-            }
-            // isApiErrorMessage is guaranteed present (gated `is_api_error`).
-            if let Some(v) = self.extra.get("isApiErrorMessage") {
-                map.serialize_entry("isApiErrorMessage", v)?;
-            }
-            if let Some(v) = self.extra.get("apiErrorStatus") {
-                map.serialize_entry("apiErrorStatus", v)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_projection(&mut fields, "message", self.message.clone());
+            for key in [
+                "requestId",
+                "error",
+                "errorDetails",
+                "truncatedAfterOutput",
+                "isApiErrorMessage",
+                "apiErrorStatus",
+            ] {
+                push_extra_projection(&mut fields, &self.extra, key);
             }
         } else if is_assistant {
-            // (e2) assistant normal head: message, requestId?, type, uuid,
-            //      timestamp, effort?. `effort` (2.1.212) is the last field of
-            //      the in-memory assistant message object `d` (after
-            //      `advisorModel`), spread into the transcript record before the
-            //      `userType`/`cwd`/`version`/`gitBranch` trailer — the level
-            //      string from `Y4n(effort).level`, emitted only when present
-            //      (claude's `...effort!==void 0&&{effort}` guard).
-            map.serialize_entry("message", &self.message)?;
-            if let Some(v) = self.extra.get("requestId") {
-                map.serialize_entry("requestId", v)?;
-            }
-            map.serialize_entry("type", &self.message_type)?;
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
-            if let Some(v) = self.extra.get("effort") {
-                map.serialize_entry("effort", v)?;
-            }
+            push_projection(&mut fields, "message", self.message.clone());
+            push_extra_projection(&mut fields, &self.extra, "requestId");
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_extra_projection(&mut fields, &self.extra, "effort");
+            push_extra_projection(&mut fields, &self.extra, "supersedesUuids");
         } else if is_attachment {
-            // (d2) attachment head: attachment, type, uuid, timestamp — the
-            //      payload leads, BEFORE `type` (real 2.1.220 transcripts:
-            //      every one of the 26 048 mined attachment lines orders them
-            //      `parentUuid, isSidechain, attachment, type, uuid,
-            //      timestamp, …trailer`). Attachment lines carry NO inner
-            //      `message`, so `self.message` (Null) is skipped like the
-            //      compact-boundary arm.
-            if let Some(v) = self.extra.get("attachment") {
-                map.serialize_entry("attachment", v)?;
+            if let Some(projection) = &self.attachment_projection {
+                push_projection(&mut fields, "attachment", projection.clone());
             }
-            map.serialize_entry("type", &self.message_type)?;
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+        } else if is_refusal_fallback {
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            for key in REFUSAL_FALLBACK_HEAD {
+                push_extra_projection(&mut fields, &self.extra, key);
+            }
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+        } else if is_model_fallback {
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            for key in MODEL_FALLBACK_HEAD {
+                push_extra_projection(&mut fields, &self.extra, key);
+            }
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
         } else if is_scheduled_fire {
-            map.serialize_entry("type", &self.message_type)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
             for key in ["subtype", "content", "isMeta"] {
-                if let Some(value) = self.extra.get(key) {
-                    map.serialize_entry(key, value)?;
-                }
+                push_extra_projection(&mut fields, &self.extra, key);
             }
-            map.serialize_entry("timestamp", &self.timestamp)?;
-            map.serialize_entry("uuid", &self.uuid)?;
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
             for key in &SCHEDULED_FIRE_HEAD[3..] {
-                if let Some(value) = self.extra.get(*key) {
-                    map.serialize_entry(*key, value)?;
-                }
+                push_extra_projection(&mut fields, &self.extra, key);
             }
         } else if is_compact_boundary {
-            // (f1) compact-boundary system head — claude's flattened envelope
-            //      (real 2.1.207 transcripts): type, subtype, content,
-            //      [isMeta?,] level, compactMetadata, uuid, timestamp. NO
-            //      inner `message` — claude never writes one on boundary
-            //      lines, so `self.message` (Null) is intentionally skipped.
-            //      (`isMeta` only appears on pre-2.1.199 boundary lines; kept
-            //      near its historical slot for tolerant round-trips.)
-            map.serialize_entry("type", &self.message_type)?;
-            if let Some(v) = self.extra.get("subtype") {
-                map.serialize_entry("subtype", v)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            for key in ["subtype", "content", "isMeta", "level", "compactMetadata"] {
+                push_extra_projection(&mut fields, &self.extra, key);
             }
-            if let Some(v) = self.extra.get("content") {
-                map.serialize_entry("content", v)?;
-            }
-            if let Some(v) = self.extra.get("isMeta") {
-                map.serialize_entry("isMeta", v)?;
-            }
-            if let Some(v) = self.extra.get("level") {
-                map.serialize_entry("level", v)?;
-            }
-            if let Some(v) = self.extra.get("compactMetadata") {
-                map.serialize_entry("compactMetadata", v)?;
-            }
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
         } else {
-            // (f) system + any other kind: type, message, isMeta?, uuid,
-            //     timestamp. The port emits an inner `message`; claude's
-            //     flattened system envelope (subtype/content as top-level
-            //     siblings) is ported ONLY for the compact-boundary subtype
-            //     (arm f1); other system subtypes tail-append their `extra`
-            //     keys as before.
-            map.serialize_entry("type", &self.message_type)?;
-            map.serialize_entry("message", &self.message)?;
-            if let Some(v) = self.extra.get("isMeta") {
-                map.serialize_entry("isMeta", v)?;
-            }
-            map.serialize_entry("uuid", &self.uuid)?;
-            map.serialize_entry("timestamp", &self.timestamp)?;
+            push_projection(&mut fields, "type", string_projection(&self.message_type));
+            push_projection(&mut fields, "message", self.message.clone());
+            push_extra_projection(&mut fields, &self.extra, "isMeta");
+            push_projection(&mut fields, "uuid", string_projection(&self.uuid));
+            push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
         }
 
-        // (g2) Tool-result head — claude emits these BETWEEN `timestamp` and the
-        //      common trailer, in the fixed order of [`TOOL_RESULT_HEAD_EXTRA`]
-        //      rather than in `extra` insertion order, so a caller that sets
-        //      them in any order writes the same bytes. Each is skipped when
-        //      absent; a line carrying none of them is byte-unchanged.
+        if let Some(projection) = &self.tool_use_result_projection {
+            push_projection(&mut fields, "toolUseResult", projection.clone());
+        }
         for key in TOOL_RESULT_HEAD_EXTRA {
-            if let Some(v) = self.extra.get(*key) {
-                map.serialize_entry(*key, v)?;
+            if *key == "mcpMeta" {
+                if let Some(projection) = &self.mcp_meta_projection {
+                    push_projection(&mut fields, "mcpMeta", projection.clone());
+                }
+            } else {
+                push_extra_projection(&mut fields, &self.extra, key);
+            }
+        }
+        if let Some(origin) = &self.origin_projection {
+            push_projection(&mut fields, "origin", origin.clone());
+        }
+
+        if let Some(value) = extra_projection(&self.extra, SESSION_KIND_KEY) {
+            push_projection(&mut fields, SESSION_KIND_KEY, value);
+        }
+        if let Some(value) = &self.user_type {
+            push_projection(&mut fields, "userType", string_projection(value));
+        }
+        if let Some(value) = &self.entrypoint {
+            push_projection(&mut fields, "entrypoint", string_projection(value));
+        }
+        push_projection(&mut fields, "cwd", string_projection(&self.cwd));
+        push_projection(
+            &mut fields,
+            "sessionId",
+            string_projection(&self.session_id),
+        );
+        push_projection(&mut fields, "version", string_projection(&self.version));
+        if let Some(value) = &self.git_branch {
+            push_projection(&mut fields, "gitBranch", string_projection(value));
+        }
+        if let Some(value) = &self.slug {
+            push_projection(&mut fields, "slug", string_projection(value));
+        }
+
+        if let Some(entries) = self.extra.object_entries() {
+            for entry in entries {
+                let value = self
+                    .extra
+                    .subprojection_property_units(entry.code_units)
+                    .map_err(serde::ser::Error::custom)?;
+                let Ok(key) = String::from_utf16(entry.code_units) else {
+                    fields.push((entry.code_units.to_vec(), value));
+                    continue;
+                };
+                if key == crate::jsonl::exact_json::PRIVATE_UTF16_KEY
+                    || RECOGNIZED_EXTRA.contains(&key.as_str())
+                    || (is_user
+                        && (USER_HEAD_EXTRA.contains(&key.as_str()) || key == "usageLimitNote"))
+                    || (is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&key.as_str()))
+                    || (is_model_fallback && MODEL_FALLBACK_HEAD.contains(&key.as_str()))
+                    || (is_refusal_fallback && REFUSAL_FALLBACK_HEAD.contains(&key.as_str()))
+                    || (is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&key.as_str()))
+                    || (is_attachment && key == "attachment")
+                    || TOOL_RESULT_HEAD_EXTRA.contains(&key.as_str())
+                    || key == "origin"
+                    || (is_assistant && !is_api_error && key == "supersedesUuids")
+                {
+                    continue;
+                }
+                fields.push((entry.code_units.to_vec(), value));
             }
         }
 
-        // (h) Common trailer — same emit/skip predicates as the derived impl,
-        //     only the POSITION moves (it now follows the per-kind envelope).
-        //
-        //     `sessionKind` leads it: the oracle's chain-entry literal
-        //     (@296794533) is `…, agentId, ...g, sessionKind:a3e(), userType,
-        //     entrypoint, cwd, …`. Carried in `extra` (not a named field)
-        //     because that is the channel the `/resume` daemon filter in
-        //     `loader.rs` already reads it back through.
-        if let Some(v) = self.extra.get(SESSION_KIND_KEY) {
-            map.serialize_entry(SESSION_KIND_KEY, v)?;
+        if let Some(projection) = &self.attachment_projection {
+            if !is_attachment {
+                push_projection(&mut fields, "attachment", projection.clone());
+            }
         }
-        if let Some(v) = &self.user_type {
-            map.serialize_entry("userType", v)?;
-        }
-        if let Some(v) = &self.entrypoint {
-            map.serialize_entry("entrypoint", v)?;
-        }
-        map.serialize_entry("cwd", &self.cwd)?;
-        map.serialize_entry("sessionId", &self.session_id)?;
-        map.serialize_entry("version", &self.version)?;
-        if let Some(v) = &self.git_branch {
-            map.serialize_entry("gitBranch", v)?;
-        }
-        if let Some(v) = &self.slug {
-            map.serialize_entry("slug", v)?;
+        if let Some(projection) = &self.turn_origin_projection {
+            push_projection(&mut fields, "turnOrigin", projection.clone());
         }
 
-        // (i) Tail — any UNRECOGNIZED extra key (unported claude field), in
-        //     `extra` iteration order, so round-trips of those survive. Keys a
-        //     per-kind head already emitted are skipped ONLY for that kind.
-        for (k, v) in &self.extra {
-            if RECOGNIZED_EXTRA.contains(&k.as_str()) {
-                continue;
-            }
-            if is_user && USER_HEAD_EXTRA.contains(&k.as_str()) {
-                continue;
-            }
-            if is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&k.as_str()) {
-                continue;
-            }
-            if is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&k.as_str()) {
-                continue;
-            }
-            if is_attachment && k == "attachment" {
-                continue;
-            }
-            // Already emitted by the tool-result head above.
-            if TOOL_RESULT_HEAD_EXTRA.contains(&k.as_str()) {
-                continue;
-            }
-            map.serialize_entry(k, v)?;
-        }
-
-        map.end()
+        let row = Utf16JsonProjection::object_units(fields).map_err(serde::ser::Error::custom)?;
+        RawProjection(&row).serialize(serializer)
     }
+}
+
+fn push_projection(
+    fields: &mut Vec<(Vec<u16>, Utf16JsonProjection)>,
+    key: &str,
+    value: Utf16JsonProjection,
+) {
+    fields.push((key.encode_utf16().collect(), value));
+}
+
+fn push_extra_projection(
+    fields: &mut Vec<(Vec<u16>, Utf16JsonProjection)>,
+    extra: &Utf16JsonProjection,
+    key: &str,
+) {
+    if let Some(value) = extra_projection(extra, key) {
+        push_projection(fields, key, value);
+    }
+}
+
+fn extra_projection(extra: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    extra
+        .subprojection_property_units(&key.encode_utf16().collect::<Vec<_>>())
+        .ok()
+}
+
+fn string_projection(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+        .expect("Rust strings are valid JSON strings")
+}
+
+fn bool_projection(value: bool) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(if value { "true" } else { "false" })
+        .expect("boolean literal is valid JSON")
+}
+
+fn null_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+}
+
+fn option_string_projection(value: Option<&str>) -> Utf16JsonProjection {
+    value.map(string_projection).unwrap_or_else(null_projection)
 }
 
 #[cfg(test)]
 mod attachment_envelope_tests {
-    use super::JsonlMessage;
+    use super::{JsonlMessage, Utf16JsonProjection};
 
     /// Real 2.1.220 `attachment` lines put the `attachment` payload BEFORE the
     /// `type` discriminator — outer key order
@@ -573,11 +827,6 @@ mod attachment_envelope_tests {
     /// `session_id` / `sessionKind` / `slug` siblings).
     #[test]
     fn attachment_line_emits_payload_before_type() {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "attachment".to_string(),
-            serde_json::json!({"type": "hook_success", "hookName": "Stop"}),
-        );
         let msg = JsonlMessage {
             message_type: "attachment".to_string(),
             uuid: "84c51927-5550-4d0c-bdff-16c5699c7d4c".to_string(),
@@ -586,7 +835,7 @@ mod attachment_envelope_tests {
             timestamp: "2026-07-27T18:34:21.476Z".to_string(),
             cwd: "/private/tmp".to_string(),
             version: "0.12.0".to_string(),
-            message: serde_json::Value::Null,
+            message: Utf16JsonProjection::parse("null").unwrap(),
             is_sidechain: false,
             user_type: Some("external".to_string()),
             git_branch: Some("HEAD".to_string()),
@@ -594,7 +843,17 @@ mod attachment_envelope_tests {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra,
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
+            attachment_projection: Some(
+                Utf16JsonProjection::parse(r#"{"type":"hook_success","hookName":"Stop"}"#).unwrap(),
+            ),
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         };
         assert_eq!(
             serde_json::to_string(&msg).unwrap(),
@@ -606,8 +865,6 @@ mod attachment_envelope_tests {
     /// `"message":null` must not leak onto it.
     #[test]
     fn attachment_line_has_no_inner_message_key() {
-        let mut extra = serde_json::Map::new();
-        extra.insert("attachment".to_string(), serde_json::json!({"type": "x"}));
         let msg = JsonlMessage {
             message_type: "attachment".to_string(),
             uuid: "u".to_string(),
@@ -616,7 +873,7 @@ mod attachment_envelope_tests {
             timestamp: "t".to_string(),
             cwd: "/c".to_string(),
             version: "v".to_string(),
-            message: serde_json::Value::Null,
+            message: Utf16JsonProjection::parse("null").unwrap(),
             is_sidechain: false,
             user_type: None,
             git_branch: None,
@@ -624,7 +881,15 @@ mod attachment_envelope_tests {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra,
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
+            attachment_projection: Some(Utf16JsonProjection::parse(r#"{"type":"x"}"#).unwrap()),
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(!s.contains("\"message\""), "no inner message key: {s}");
@@ -643,11 +908,13 @@ mod attachment_envelope_tests {
     /// It must NOT fall out of the unrecognized-key tail after `gitBranch`.
     #[test]
     fn session_kind_leads_the_common_trailer() {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            super::SESSION_KIND_KEY.to_string(),
-            serde_json::json!("daemon-worker"),
-        );
+        let mut extra = Utf16JsonProjection::parse("{}").unwrap();
+        extra
+            .set_field(
+                super::SESSION_KIND_KEY,
+                Utf16JsonProjection::parse(r#""daemon-worker""#).unwrap(),
+            )
+            .unwrap();
         let msg = JsonlMessage {
             message_type: "user".to_string(),
             uuid: "u".to_string(),
@@ -656,7 +923,7 @@ mod attachment_envelope_tests {
             timestamp: "t".to_string(),
             cwd: "/c".to_string(),
             version: "v".to_string(),
-            message: serde_json::json!({"role": "user", "content": "hi"}),
+            message: super::test_projection(serde_json::json!({"role": "user", "content": "hi"})),
             is_sidechain: false,
             user_type: Some("external".to_string()),
             git_branch: Some("main".to_string()),
@@ -665,6 +932,14 @@ mod attachment_envelope_tests {
             prompt_id: None,
             logical_parent_uuid: None,
             extra,
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(
@@ -689,7 +964,7 @@ mod attachment_envelope_tests {
             timestamp: "t".to_string(),
             cwd: "/c".to_string(),
             version: "v".to_string(),
-            message: serde_json::json!({"role": "user"}),
+            message: super::test_projection(serde_json::json!({"role": "user"})),
             is_sidechain: false,
             user_type: Some("external".to_string()),
             git_branch: None,
@@ -697,7 +972,16 @@ mod attachment_envelope_tests {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: serde_json::Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         };
         assert!(!serde_json::to_string(&msg).unwrap().contains("sessionKind"));
     }
@@ -714,15 +998,15 @@ mod attachment_envelope_tests {
 //   gitBranch[, slug]
 #[cfg(test)]
 mod tool_result_head_tests {
-    use super::JsonlMessage;
-    use serde_json::{json, Map};
+    use super::{JsonlMessage, Utf16JsonProjection};
+    use serde_json::json;
 
     fn base() -> JsonlMessage {
         JsonlMessage {
             parent_uuid: Some("p".into()),
             is_sidechain: false,
             message_type: "user".into(),
-            message: json!({"role":"user","content":[]}),
+            message: super::test_projection(json!({"role":"user","content":[]})),
             uuid: "u".into(),
             timestamp: "T".into(),
             user_type: Some("external".into()),
@@ -734,19 +1018,41 @@ mod tool_result_head_tests {
             slug: None,
             logical_parent_uuid: None,
             prompt_id: None,
-            extra: Map::new(),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         }
     }
 
     #[test]
     fn denial_head_keys_precede_the_common_trailer() {
         let mut m = base();
+        m.tool_use_result_projection = Some(
+            Utf16JsonProjection::root_string(
+                "Error: denied".into(),
+                "Error: denied".encode_utf16().collect(),
+            )
+            .unwrap(),
+        );
         m.extra
-            .insert("toolUseResult".into(), json!("Error: denied"));
+            .set_field(
+                "toolDenialKind",
+                Utf16JsonProjection::parse(r#""permission-rule""#).unwrap(),
+            )
+            .unwrap();
         m.extra
-            .insert("toolDenialKind".into(), json!("permission-rule"));
-        m.extra
-            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
+            .set_field(
+                "sourceToolAssistantUUID",
+                Utf16JsonProjection::parse(r#""a-uuid""#).unwrap(),
+            )
+            .unwrap();
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
             r#"{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[]},"uuid":"u","timestamp":"T","toolUseResult":"Error: denied","toolDenialKind":"permission-rule","sourceToolAssistantUUID":"a-uuid","userType":"external","entrypoint":"cli","cwd":"/w","sessionId":"s","version":"0.12.0"}"#
@@ -760,9 +1066,19 @@ mod tool_result_head_tests {
     fn head_key_order_is_fixed_regardless_of_insertion_order() {
         let mut m = base();
         m.extra
-            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
-        m.extra.insert("toolDenialKind".into(), json!("cancelled"));
-        m.extra.insert("toolUseResult".into(), json!("x"));
+            .set_field(
+                "sourceToolAssistantUUID",
+                Utf16JsonProjection::parse(r#""a-uuid""#).unwrap(),
+            )
+            .unwrap();
+        m.extra
+            .set_field(
+                "toolDenialKind",
+                Utf16JsonProjection::parse(r#""cancelled""#).unwrap(),
+            )
+            .unwrap();
+        m.tool_use_result_projection =
+            Some(Utf16JsonProjection::root_string("x".into(), vec![b'x' as u16]).unwrap());
         let s = serde_json::to_string(&m).unwrap();
         let i_res = s.find("toolUseResult").unwrap();
         let i_kind = s.find("toolDenialKind").unwrap();
@@ -789,13 +1105,25 @@ mod tool_result_head_tests {
     fn mcp_meta_and_ends_turn_ride_between_denial_kind_and_source() {
         let mut m = base();
         m.extra
-            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
-        m.extra.insert("toolEndsTurn".into(), json!(true));
+            .set_field(
+                "sourceToolAssistantUUID",
+                Utf16JsonProjection::parse(r#""a-uuid""#).unwrap(),
+            )
+            .unwrap();
         m.extra
-            .insert("mcpMeta".into(), json!({"_meta":{"claude/endTurn":true}}));
+            .set_field("toolEndsTurn", Utf16JsonProjection::parse("true").unwrap())
+            .unwrap();
+        m.mcp_meta_projection = Some(super::test_projection(
+            json!({"_meta":{"claude/endTurn":true}}),
+        ));
         m.extra
-            .insert("toolDenialKind".into(), json!("permission-rule"));
-        m.extra.insert("toolUseResult".into(), json!("x"));
+            .set_field(
+                "toolDenialKind",
+                Utf16JsonProjection::parse(r#""permission-rule""#).unwrap(),
+            )
+            .unwrap();
+        m.tool_use_result_projection =
+            Some(Utf16JsonProjection::root_string("x".into(), vec![b'x' as u16]).unwrap());
         let s = serde_json::to_string(&m).unwrap();
         let i_res = s.find("toolUseResult").unwrap();
         let i_kind = s.find("toolDenialKind").unwrap();
@@ -817,8 +1145,17 @@ mod tool_result_head_tests {
     fn permission_mode_follows_source_uuid_before_the_common_trailer() {
         let mut m = base();
         m.extra
-            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
-        m.extra.insert("permissionMode".into(), json!("plan"));
+            .set_field(
+                "sourceToolAssistantUUID",
+                Utf16JsonProjection::parse(r#""a-uuid""#).unwrap(),
+            )
+            .unwrap();
+        m.extra
+            .set_field(
+                "permissionMode",
+                Utf16JsonProjection::parse(r#""plan""#).unwrap(),
+            )
+            .unwrap();
         let s = serde_json::to_string(&m).unwrap();
         assert!(
             s.find("sourceToolAssistantUUID").unwrap() < s.find("permissionMode").unwrap()
@@ -837,10 +1174,59 @@ mod tool_result_head_tests {
 }
 
 #[cfg(test)]
+mod supersedes_head_tests {
+    use super::{JsonlMessage, Utf16JsonProjection};
+    use serde_json::json;
+
+    #[test]
+    fn server_stitch_supersedes_ids_precede_the_common_trailer() {
+        let extra =
+            Utf16JsonProjection::parse(r#"{"supersedesUuids":["old-row-1","old-row-2"]}"#).unwrap();
+        let message = JsonlMessage {
+            message_type: "assistant".into(),
+            uuid: "new-row".into(),
+            parent_uuid: Some("parent".into()),
+            session_id: "session".into(),
+            timestamp: "2026-10-03T12:00:00.000Z".into(),
+            cwd: "/workspace".into(),
+            version: "0.12.0".into(),
+            message: super::test_projection(
+                json!({"id":"provider-message","role":"assistant","content":[]}),
+            ),
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: None,
+            entrypoint: Some("cli".into()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"parentUuid":"parent","isSidechain":false,"message":{"id":"provider-message","role":"assistant","content":[]},"type":"assistant","uuid":"new-row","timestamp":"2026-10-03T12:00:00.000Z","supersedesUuids":["old-row-1","old-row-2"],"userType":"external","entrypoint":"cli","cwd":"/workspace","sessionId":"session","version":"0.12.0"}"#
+        );
+    }
+}
+
+#[cfg(test)]
 #[test]
 fn scheduled_fire_matches_2_1_270_oracle_bytes() {
     for expected in include_str!("../../tests/fixtures/loop-2.1.270/scheduled_fire.jsonl").lines() {
-        let row: JsonlMessage = serde_json::from_str(expected).unwrap();
+        let row = crate::jsonl::reader::route_lines(expected)
+            .messages_in_order
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(serde_json::to_string(&row).unwrap(), expected);
     }
 }
@@ -849,6 +1235,10 @@ fn scheduled_fire_matches_2_1_270_oracle_bytes() {
 #[test]
 fn loop_turn_companion_matches_2_1_270_oracle_bytes() {
     let expected = include_str!("../../tests/fixtures/loop-2.1.270/turn_companion.jsonl").trim();
-    let row: JsonlMessage = serde_json::from_str(expected).unwrap();
+    let row = crate::jsonl::reader::route_lines(expected)
+        .messages_in_order
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(serde_json::to_string(&row).unwrap(), expected);
 }

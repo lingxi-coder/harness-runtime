@@ -3,14 +3,15 @@
 //! Claude Code's current public surface exposes `--permission-mode auto` and the
 //! `auto-mode` inspection command. This module keeps the same local boundary:
 //! the permission crate owns classifier semantics, while hosts only consume the
-//! resulting allow/deny/pass verdict. The implementation is deterministic and
-//! offline: it applies the shipped auto-mode policy categories to the tool call
-//! shape instead of starting an LLM request from the permission layer.
+//! resulting allow/deny/pass verdict. Local tool-shape helpers are deterministic;
+//! the session-owned binding executes the model classifier. Classifier-only
+//! reports require that binding and cannot use a local helper as approval.
 
 pub use crate::result::ClassifierKind;
 
 use crate::result::PermissionDecisionReason;
 use crate::{read_only_command, shell_command};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,10 +23,24 @@ pub trait LoopPermissionClassifier: Send + Sync {
     async fn classify(
         &self,
         tool_name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         host_context: &[crate::host_context::HostContextRecord],
-        deny_rules: &[String],
+        deny_rules: &[Utf16JsonProjection],
     ) -> AutoModeClassifierVerdict;
+
+    /// Review a classifier-only report using the dispatching child's actual
+    /// transcript and the tool's native action, preserving failure metadata.
+    ///
+    /// `None` means this binding did not run the classifier. A saved allow,
+    /// offline table, or completed-work handoff verdict cannot stand in for it.
+    async fn classify_report(
+        &self,
+        request: &lingxi_core::host::permission_gate::ClassifierOnlyReviewRequest,
+        deny_rules: &[Utf16JsonProjection],
+    ) -> Option<lingxi_core::host::handback::ReportReview> {
+        let _ = (request, deny_rules);
+        None
+    }
 
     /// Review a finished subagent's work before its parent acts on it — `EZe`,
     /// the classifier's second consumer.
@@ -40,7 +55,7 @@ pub trait LoopPermissionClassifier: Send + Sync {
     async fn classify_handoff(
         &self,
         transcript: Option<&std::path::Path>,
-        final_text: &str,
+        final_text: &Utf16JsonProjection,
     ) -> AutoModeClassifierVerdict {
         let _ = (transcript, final_text);
         AutoModeClassifierVerdict::Pass {
@@ -149,7 +164,10 @@ pub fn reason_allows_classifier(reason: &PermissionDecisionReason) -> bool {
 
 /// Classify one tool call for auto mode.
 #[must_use]
-pub fn classify_tool_call(tool_name: &str, input: &Value) -> AutoModeClassifierVerdict {
+pub fn classify_tool_call(
+    tool_name: &str,
+    input: &Utf16JsonProjection,
+) -> AutoModeClassifierVerdict {
     match tool_name {
         "Bash" | "Shell" | "PowerShell" => classify_shell(input),
         "Read" | "Glob" | "Grep" | "LSP" | "LS" => allow("Read-Only Operations"),
@@ -205,7 +223,7 @@ pub fn classify_tool_call(tool_name: &str, input: &Value) -> AutoModeClassifierV
 #[must_use]
 pub fn classify_tool_call_with_host_context(
     tool_name: &str,
-    input: &Value,
+    input: &Utf16JsonProjection,
     host_context: &[crate::host_context::HostContextRecord],
 ) -> HostContextClassification {
     let verdict = classify_tool_call(tool_name, input);
@@ -278,7 +296,7 @@ pub fn critique_rules(value: &Value) -> Vec<String> {
     findings
 }
 
-fn classify_shell(input: &Value) -> AutoModeClassifierVerdict {
+fn classify_shell(input: &Utf16JsonProjection) -> AutoModeClassifierVerdict {
     let Some(command) = shell_command::command_from_input(input).map(str::trim) else {
         return AutoModeClassifierVerdict::Pass {
             reason: "Shell command is missing".to_string(),
@@ -316,12 +334,12 @@ fn classify_shell(input: &Value) -> AutoModeClassifierVerdict {
     }
 }
 
-fn classify_file_mutation(input: &Value) -> AutoModeClassifierVerdict {
+fn classify_file_mutation(input: &Utf16JsonProjection) -> AutoModeClassifierVerdict {
     let path = input
-        .get("file_path")
-        .or_else(|| input.get("path"))
-        .or_else(|| input.get("notebook_path"))
-        .and_then(Value::as_str)
+        .get_property("file_path")
+        .or_else(|| input.get_property("path"))
+        .or_else(|| input.get_property("notebook_path"))
+        .and_then(crate::source_input::exact_string)
         .unwrap_or_default();
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     if lower.is_empty() {
@@ -352,8 +370,11 @@ fn classify_file_mutation(input: &Value) -> AutoModeClassifierVerdict {
     }
 }
 
-fn classify_web(tool_name: &str, input: &Value) -> AutoModeClassifierVerdict {
-    let haystack = input.to_string().to_ascii_lowercase();
+fn classify_web(tool_name: &str, input: &Utf16JsonProjection) -> AutoModeClassifierVerdict {
+    let haystack = input
+        .to_json_string()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if contains_any(
         &haystack,
         &["webhook.site", "oastify.com", "ngrok.io", "requestbin"],
@@ -551,7 +572,11 @@ fn starts_with_any(haystack: &str, prefixes: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    macro_rules! json {
+        ($($tokens:tt)+) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+        };
+    }
 
     #[test]
     fn classifier_permissions_enabled() {
@@ -562,7 +587,10 @@ mod tests {
 
     fn host_ctx(live: bool) -> crate::host_context::HostContextRecord {
         crate::host_context::HostContextRecord {
-            value: "the user said go ahead".to_string(),
+            value: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#""the user said go ahead""#,
+            )
+            .unwrap(),
             tool_use_id: "toolu_1".to_string(),
             host_principal: false,
             live,
@@ -610,6 +638,22 @@ mod tests {
 
     /// No host context at all is the default-install path: eligible = 0 and the
     /// verdict is identical to the plain classifier.
+    #[test]
+    fn source_input_with_unpaired_surrogate_fails_closed_for_shell_and_file_rules() {
+        let shell = Utf16JsonProjection::parse(r#"{"command":"git push \ud800"}"#).unwrap();
+        assert!(matches!(
+            classify_tool_call("Bash", &shell),
+            AutoModeClassifierVerdict::Pass { .. }
+        ));
+
+        let file = Utf16JsonProjection::parse(r#"{"file_path":"src/\ud800.rs"}"#).unwrap();
+        assert!(matches!(
+            classify_tool_call("Edit", &file),
+            AutoModeClassifierVerdict::Pass { .. }
+        ));
+        assert!(file.string_units("/file_path").unwrap().contains(&0xd800));
+    }
+
     #[test]
     fn no_host_context_is_the_identity_path() {
         let input = json!({ "command": "ls" });

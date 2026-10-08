@@ -20,6 +20,7 @@
 //! (`tools/file/src/write.rs`, `edit.rs`), so the gate and the tool can never
 //! disagree about which mount a path belongs to.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Answers "does this model-supplied path have a host twin?" without teaching
@@ -87,8 +88,8 @@ impl ModelPathTranslator for FileSystemPathTranslator {
 pub(crate) fn rewrite_tool_input(
     translator: &dyn ModelPathTranslator,
     tool_name: &str,
-    input: &serde_json::Value,
-) -> Option<serde_json::Value> {
+    input: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
     let write = match crate::filesystem::file_tool_kind(tool_name) {
         crate::filesystem::FileToolKind::Editor => true,
         crate::filesystem::FileToolKind::Reader => false,
@@ -98,7 +99,11 @@ pub(crate) fn rewrite_tool_input(
         crate::filesystem::FileToolKind::NonFile => return None,
     };
     let field = crate::filesystem::input_path_field_for_tool(tool_name);
-    let raw = input.get(field)?.as_str()?;
+    // Translation is an explicit OS-path boundary. Only pass the source string
+    // when its UTF-16 units have an exact Rust path representation; an
+    // unpaired surrogate remains intact in the original projection and cannot
+    // be rewritten through a lossy replacement path.
+    let raw = input.string_at(&format!("/{field}"))?;
     if !std::path::Path::new(raw).is_absolute() {
         // A relative path needs no rewrite: `expand_path` joins it onto
         // `roots.cwd`, which is already the workspace host root.
@@ -106,6 +111,86 @@ pub(crate) fn rewrite_tool_input(
     }
     let host = translator.to_host(raw, write)?;
     let mut out = input.clone();
-    out[field] = serde_json::Value::String(host);
+    out.set_field(
+        field,
+        Utf16JsonProjection::root_string(host.clone(), host.encode_utf16().collect()).ok()?,
+    )
+    .ok()?;
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct GuestMount;
+
+    impl ModelPathTranslator for GuestMount {
+        fn translate(&self, model_path: &str, _write: bool) -> ModelPathOutcome {
+            if model_path == "/workspace/project/file.txt" {
+                ModelPathOutcome::Host("/var/mobile/project/file.txt".into())
+            } else if model_path.starts_with("/workspace/") {
+                ModelPathOutcome::Fenced
+            } else {
+                ModelPathOutcome::NotGuest
+            }
+        }
+    }
+
+    #[test]
+    fn rewriting_a_declared_path_preserves_unrelated_source_fields() {
+        let input = Utf16JsonProjection::parse(
+            r#"{"file_path":"/workspace/project/file.txt","content":"before\ud800after"}"#,
+        )
+        .unwrap();
+        let rewritten = rewrite_tool_input(&GuestMount, "Edit", &input).unwrap();
+        assert_eq!(
+            rewritten.string_at("/file_path"),
+            Some("/var/mobile/project/file.txt")
+        );
+        assert_eq!(
+            rewritten.string_units("/content"),
+            Some(vec![
+                b'b' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b'o' as u16,
+                b'r' as u16,
+                b'e' as u16,
+                0xd800,
+                b'a' as u16,
+                b'f' as u16,
+                b't' as u16,
+                b'e' as u16,
+                b'r' as u16,
+            ]),
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_source_path_is_not_rewritten_or_narrowed() {
+        let input = Utf16JsonProjection::parse(r#"{"file_path":"/workspace/\ud800.txt"}"#).unwrap();
+        assert!(rewrite_tool_input(&GuestMount, "Edit", &input).is_none());
+        assert_eq!(
+            input.string_units("/file_path"),
+            Some(vec![
+                b'/' as u16,
+                b'w' as u16,
+                b'o' as u16,
+                b'r' as u16,
+                b'k' as u16,
+                b's' as u16,
+                b'p' as u16,
+                b'a' as u16,
+                b'c' as u16,
+                b'e' as u16,
+                b'/' as u16,
+                0xd800,
+                b'.' as u16,
+                b't' as u16,
+                b'x' as u16,
+                b't' as u16,
+            ]),
+        );
+    }
 }

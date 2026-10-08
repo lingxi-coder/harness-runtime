@@ -527,6 +527,41 @@ pub fn is_palette_hidden(name: &str) -> bool {
         || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
 }
 
+/// Native 2.1.288 `src_186881176.js` `rRt` (offset 1,281,435) reads
+/// `command.immediate === true`; an `immediate` callback therefore appears as
+/// `false` in the event input.
+/// These interactive terminal command objects carry the literal boolean
+/// `true` in the executable; other same-named command variants can differ.
+#[must_use]
+pub fn command_describe_immediate(name: &str) -> bool {
+    matches!(
+        name,
+        "model"
+            | "mcp"
+            | "permissions"
+            | "tasks"
+            | "workflows"
+            | "hooks"
+            | "skills"
+            | "status"
+            | "brief"
+            | "color"
+            | "focus"
+            | "version"
+            | "autocompact"
+            | "skill-doctor"
+            | "usage"
+            | "goal"
+            | "fast"
+            | "btw"
+            | "rename"
+            | "plugin"
+            | "stop"
+            | "exit"
+            | "effort"
+    )
+}
+
 /// `(command_name, DISABLE_*_COMMAND env var)` pairs whose command object in
 /// claude-code v2.1.183 carries an `isEnabled:()=>!je.DISABLE_X_COMMAND`
 /// truthiness gate (`je` is `process.env`). When the env var is set to any
@@ -601,7 +636,9 @@ pub fn core_description(name: &str) -> &'static str {
         // "Set up and customise auto mode — environment context, …" has 0 hits
         // in 2.1.238.
         "auto-mode-setup" => "Teach auto mode about your environment, plus optional rule tweaks",
-        "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+        "clear" => {
+            "Start a new session with empty context; previous session stays on disk (resumable with /resume)"
+        }
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",
         "doctor" => "Diagnose and verify your LingXi installation and settings",
@@ -617,7 +654,9 @@ pub fn core_description(name: &str) -> &'static str {
         // Byte-exact from the 2.1.270 command object `QNt`.
         "output-style" => "List output styles or switch to one",
         "permissions" => "Manage allow and deny tool permission rules",
-        "status" => "Show LingXi status including version, model, account, API connectivity, and tool statuses",
+        "status" => {
+            "Show LingXi status including version, model, account, API connectivity, and tool statuses"
+        }
         // claude-code v2.1.183 live `usage` command object
         // (`name:"usage",aliases:["cost","stats"],...`).
         "usage" => "Show session cost, plan usage, and what's contributing to your limits",
@@ -686,7 +725,9 @@ pub fn core_description(name: &str) -> &'static str {
         "rename" => "Rename the current conversation",
         "resume" => "Resume a previous conversation",
         "rewind" => "Restore the code and/or conversation to a previous point",
-        "security-review" => "Complete a security review of the pending changes on the current branch",
+        "security-review" => {
+            "Complete a security review of the pending changes on the current branch"
+        }
         "session" => "Show remote session URL and QR code",
         "skills" => "List available skills",
         "statusline" => "Set up LingXi's status line UI",
@@ -1323,5 +1364,43 @@ mod tests {
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
         assert!(!disabled.contains("btw"));
         assert!(!gaps.contains("btw"));
+    }
+
+    #[test]
+    fn command_describe_immediate_distinguishes_literal_and_callback_fields() {
+        let native_true = [
+            "autocompact",
+            "brief",
+            "btw",
+            "color",
+            "effort",
+            "exit",
+            "fast",
+            "focus",
+            "goal",
+            "hooks",
+            "mcp",
+            "model",
+            "permissions",
+            "plugin",
+            "rename",
+            "skill-doctor",
+            "skills",
+            "status",
+            "stop",
+            "tasks",
+            "usage",
+            "version",
+            "workflows",
+        ];
+        for name in native_true {
+            assert!(command_describe_immediate(name), "{name}");
+        }
+
+        // Native properties which are callbacks (or absent) are not the
+        // literal boolean true checked by command.describe.
+        for name in ["add-dir", "config", "help", "diff", "theme"] {
+            assert!(!command_describe_immediate(name), "{name}");
+        }
     }
 }

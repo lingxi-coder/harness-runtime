@@ -288,7 +288,7 @@ mod tests {
         PermissionRule {
             value: PermissionRuleValue {
                 tool_name: tool.to_string(),
-                rule_content: content.map(str::to_string),
+                rule_content: content.map(Into::into),
             },
             behavior,
             source,

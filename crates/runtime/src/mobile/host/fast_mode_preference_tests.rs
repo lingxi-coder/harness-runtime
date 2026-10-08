@@ -2,10 +2,20 @@ mod fast_mode_preference_tests {
     use super::super::fast_mode_preference;
     use super::*;
 
+    fn permit_org_fast_mode(home: &std::path::Path) {
+        std::fs::create_dir_all(home).unwrap();
+        std::fs::write(
+            home.join(branding::LEGACY_GLOBAL_CONFIG_FILE),
+            r#"{"penguinModeOrgEnabled":true}"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn fast_mode_choice_survives_engine_restart_and_new_session() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = test_config(tmp.path());
+        permit_org_fast_mode(&cfg.lingxi_home);
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
             handle
@@ -45,6 +55,7 @@ mod fast_mode_preference_tests {
     fn failed_fast_mode_preference_save_rolls_back_the_live_choice() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = test_config(tmp.path());
+        permit_org_fast_mode(&cfg.lingxi_home);
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
             handle
@@ -62,6 +73,29 @@ mod fast_mode_preference_tests {
                 handle.inner().orchestrator.clone();
             assert!(orchestrator.fast_mode().await);
             assert_eq!(fast_mode_preference::load(&cfg.lingxi_home), None);
+        });
+    }
+
+    #[test]
+    fn refused_fast_enable_never_persists_a_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(tmp.path());
+        let (handle, _) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let refusal = handle
+                .submit(ClientCommand::SetFastMode { enabled: true })
+                .await
+                .unwrap_err();
+            assert!(refusal.to_string().contains("Fast mode unavailable:"));
+            assert_eq!(fast_mode_preference::load(&cfg.lingxi_home), None);
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner().orchestrator.clone();
+            assert!(!orchestrator.fast_mode().await);
+            handle
+                .submit(ClientCommand::SetFastMode { enabled: false })
+                .await
+                .unwrap();
+            assert_eq!(fast_mode_preference::load(&cfg.lingxi_home), Some(false));
         });
     }
 

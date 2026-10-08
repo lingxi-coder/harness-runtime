@@ -17,8 +17,9 @@ pub use codec::{CodecError, LineCodec, LspCodec};
 pub use connection::{Connection, ConnectionBuilder, ConnectionError, ConnectionMode, Mode};
 pub use inbound::{BoxedHandler, Dispatcher, InboundHandler};
 pub use messages::{
-    Id, Message, Notification, Request, Response, ResponseError, INTERNAL_ERROR, INVALID_PARAMS,
-    INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, PARSE_ERROR,
+    Id, JsonPayload, JsonRpcString, Message, Notification, Request, Response, ResponseError,
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND,
+    PARSE_ERROR,
 };
 pub use router::{OutboundMessage, Router, RouterError, StartedCall, DEFAULT_TIMEOUT};
 

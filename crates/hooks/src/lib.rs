@@ -37,6 +37,9 @@ pub mod loader;
 pub mod matcher;
 /// Name-addressed MCP hook invocation seam.
 pub mod mcp_invoker;
+pub mod mod_api_context;
+pub mod mod_ui_fault;
+pub mod mods;
 pub mod prompt_executor;
 pub mod registry;
 pub mod response;
@@ -69,13 +72,16 @@ pub use executor::{
 };
 pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use hook_payload::{
-    parse_response, validation_hint, HookBackgroundTask, HookEventEnvelope, HookEventNamePost,
-    HookEventNamePostModelSwitch, HookEventNamePre, HookEventNamePreModelSwitch,
-    HookResponseParseError, HookSessionCron, PostModelSwitchPayload, PostToolUsePayload,
-    PreModelSwitchPayload, PreToolUsePayload,
+    parse_response, parse_response_projection, validation_hint, HookBackgroundTask,
+    HookEventEnvelope, HookEventNamePost, HookEventNamePostModelSwitch, HookEventNamePre,
+    HookEventNamePreModelSwitch, HookResponseParseError, HookSessionCron, PostModelSwitchPayload,
+    PostToolUsePayload, PreModelSwitchPayload, PreToolUsePayload,
 };
 pub use loader::{
-    parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated, HookPolicyGate,
+    parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated,
+    parse_hooks_from_settings_projection, parse_hooks_from_settings_projection_gated,
+    parse_hooks_from_tree_projection, parse_hooks_from_tree_projection_gated, HookPolicyGate,
+    HookSettingsProjectionError,
 };
 pub use matcher::{get_legacy_tool_names, matches_pattern, normalize_legacy_tool_name};
 pub use mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
@@ -83,16 +89,15 @@ pub use prompt_executor::{
     HookPromptRunner, PromptHookError, PromptHookRequest, PromptHookTranscript,
     HOOK_PROMPT_TIMEOUT_MS,
 };
-pub use registry::{HookContext, HookRegistry, HookSourceReplaceResult};
+pub use registry::{HookContext, HookModelSelection, HookRegistry, HookSourceReplaceResult};
 pub use response::{
     truncate_utf16, AggregateHookResult, ClassifierHostContext, ElicitationHookResponse,
-    HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite, PermissionRequestResult,
-    CLASSIFIER_CONTEXT_CAP_UTF16,
+    ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite,
+    PermissionRequestResult, CLASSIFIER_CONTEXT_CAP_UTF16,
 };
 pub use settings_layer::{
     event_name_for_hook, file_changed_matchers_from_hooks, parse_hook_layer_strict,
-    parse_hook_layer_value_strict, serialize_hook_layer, HookLayerDocument, HookLayerError,
-    HookValidationIssue, ParsedHookLayer,
+    serialize_hook_layer, HookLayerDocument, HookLayerError, HookValidationIssue, ParsedHookLayer,
 };
 pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};

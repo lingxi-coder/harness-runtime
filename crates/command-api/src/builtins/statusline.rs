@@ -14,9 +14,12 @@
 //! conversation turn picks up the injected content as if the user had typed it.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{
+    source_concat, trim_source_text, BuiltinCommandHandler, CommandResult, PromptPart,
+};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// The TS `AGENT_TOOL_NAME` constant (`src/tools/AgentTool/constants.ts`).
 const AGENT_TOOL_NAME: &str = "Agent";
@@ -43,16 +46,24 @@ impl StatuslineHandler {
 impl BuiltinCommandHandler for StatuslineHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         // TS: `const prompt = args.trim() || '<default>'`
-        let trimmed = args.raw_args.trim();
-        let prompt = if trimmed.is_empty() {
-            DEFAULT_PROMPT
+        let trimmed = trim_source_text(&args.raw_args);
+        let prompt = if trimmed
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
+            Utf16JsonProjection::from(DEFAULT_PROMPT)
         } else {
             trimmed
         };
         // TS: `Create an ${AGENT_TOOL_NAME} with subagent_type "statusline-setup" and the prompt "${prompt}"`
-        let content = format!(
-            "Create an {AGENT_TOOL_NAME} with subagent_type \"statusline-setup\" and the prompt \"{prompt}\""
+        let prefix = format!(
+            "Create an {AGENT_TOOL_NAME} with subagent_type \"statusline-setup\" and the prompt \""
         );
+        let content = source_concat([
+            PromptPart::Text(&prefix),
+            PromptPart::Source(&prompt),
+            PromptPart::Text("\""),
+        ]);
         CommandResult::InjectMessage { content }
     }
 
@@ -68,11 +79,12 @@ impl BuiltinCommandHandler for StatuslineHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "statusline".to_string(),
-            raw_args: raw.to_string(),
+            name: "statusline".into(),
+            raw_args: raw.into(),
             positional_args: vec![],
         }
     }

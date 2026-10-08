@@ -23,7 +23,6 @@ use lingxi_core::host::{
 use lingxi_core::types::McpConnectionId;
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -117,7 +116,7 @@ impl McpTransport for WindowsMcpTransport {
                     .stderr(std::process::Stdio::piped());
                 let child = cmd
                     .spawn()
-                    .map_err(|e| McpError::Connection(e.to_string()))?;
+                    .map_err(|e| McpError::Connection(e.to_string().into()))?;
                 self.insert(id, WindowsMcpConnection::Stdio { child });
             }
             McpTransportSpec::Sse { .. }
@@ -132,8 +131,19 @@ impl McpTransport for WindowsMcpTransport {
     async fn connect_and_initialize(
         &self,
         spec: &McpTransportSpec,
-        options: McpConnectOptions,
+        mut options: McpConnectOptions,
     ) -> Result<McpConnectResult, McpError> {
+        if options.expected_era.is_none() {
+            match mcp::protocol_negotiation::resolve_for_spec(spec, options.deadline_ms) {
+                mcp::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
+                    options.expected_era = Some(McpProtocolEra::Modern);
+                    options.probe_timeout_ms = Some(probe_timeout_ms);
+                }
+                mcp::protocol_negotiation::NegotiationMode::Legacy => {
+                    options.expected_era = Some(McpProtocolEra::Legacy)
+                }
+            }
+        }
         // Keep remote transports on the shared modern-negotiation path. This
         // is what POSIX does and is important for IDE servers that advertise
         // the modern result envelope or skills extension.
@@ -202,6 +212,13 @@ impl McpTransport for WindowsMcpTransport {
         })
     }
 
+    fn server_metadata(
+        &self,
+        id: McpConnectionId,
+    ) -> Option<lingxi_core::host::McpServerMetadataDto> {
+        self.remote.server_metadata(id)
+    }
+
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.initialize(conn).await;
@@ -213,8 +230,10 @@ impl McpTransport for WindowsMcpTransport {
             prompts: false,
             logging: false,
             directory_read: false,
-            extensions: HashMap::new(),
-            experimental: HashMap::new(),
+            extensions: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty source JSON object"),
+            experimental: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty source JSON object"),
         })
     }
 
@@ -258,7 +277,7 @@ impl McpTransport for WindowsMcpTransport {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.call_tool(conn, tool, input).await;
@@ -271,7 +290,7 @@ impl McpTransport for WindowsMcpTransport {
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.read_resource(conn, uri).await;
@@ -284,7 +303,7 @@ impl McpTransport for WindowsMcpTransport {
     async fn read_resource_rich(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         output_dir: &std::path::Path,
     ) -> Result<Vec<McpResourceContentsRich>, McpError> {
         if self.is_remote_connection(conn.connection_id) {

@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used)] // std mutex poisoning is fatal for us anyway
 
 use lingxi_core::types::AgentId;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,11 +28,17 @@ pub struct TeammateMessage {
     #[serde(default)]
     pub from_name: String,
     /// Message content.
-    pub content: String,
-    /// Optional concise summary rendered as the envelope's `summary=`
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub content: Utf16JsonProjection,
+    /// Optional exact-source summary rendered as the envelope's `summary=`
     /// attribute. Ordinary string `SendMessage` calls require and preserve it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub summary: Option<Utf16JsonProjection>,
     /// Caller-assigned message ID for idempotency.
     pub message_id: String,
     /// Wall-clock send time.

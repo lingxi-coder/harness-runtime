@@ -4,7 +4,7 @@ use crate::upstream::codec_fixtures::{
 };
 // Cross-provider replay and exact tool-result projection regressions.
 use llm_runtime::{CacheControl, ContentBlock, Message, ProviderResponse};
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[test]
 fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
@@ -33,7 +33,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
     let chat = OpenAiChatCodec::new("https://example.test/v1")
         .encode_request(&request)
         .unwrap();
-    let sent = chat.body_json.to_string();
+    let sent = chat.body_json.as_json_source();
     assert!(sent.contains("answer"));
     assert!(!sent.contains("opaque"));
     assert!(!sent.contains("encrypted_content"));
@@ -43,12 +43,16 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
     );
 
     let resumed = responses.encode_request(&request).unwrap();
-    assert_eq!(resumed.body_json["input"][0]["encrypted_content"], "opaque");
+    assert_eq!(
+        super::json_payload_value(&resumed.body_json)["input"][0]["encrypted_content"],
+        "opaque"
+    );
 
     request.messages[0].content.push(ContentBlock::TextJsUtf16 {
         text: "B�".into(),
         utf16_code_units: vec![66, 0xd83d],
         cache_control: None,
+        citations: None,
     });
     let original = request.clone();
     let anthropic = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
@@ -71,11 +75,11 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
             ContentBlock::ServerToolUse {
                 id: "search-1".into(),
                 name: "web_search".into(),
-                input: json!({"query":"something"}),
+                input: super::json_payload(json!({"query":"something"})),
             },
             ContentBlock::ProviderContent {
                 protocol: "anthropic_messages".into(),
-                value: json!({"type":"text", "text":"cited answer", "citations":[{"type":"web_search_result_location"}]}),
+                value: super::json_payload(json!({"type":"text", "text":"cited answer", "citations":[{"type":"web_search_result_location"}]})),
             },
         ],
     });
@@ -83,7 +87,7 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
     let projected = OpenAiChatCodec::new("https://example.test/v1")
         .encode_request(&request)
         .unwrap();
-    let sent = projected.body_json.to_string();
+    let sent = projected.body_json.as_json_source();
     assert!(sent.contains("cited answer"));
     assert!(!sent.contains("server_tool_use"));
     assert!(!sent.contains("citations"));
@@ -93,10 +97,10 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
 fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_call_id: "call-1".into(),
-        output: Value::Array(lingxi_core::types::js_utf16::tool_result_sidecar(vec![
+        output: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&[
             65, 0xd83d, 10,
-        ])),
-        is_error: false,
+        ]),
+        is_error: Some(false),
         cache_control,
         cache_reference: None,
     }
@@ -121,7 +125,9 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
                 content: vec![
                     ContentBlock::ProviderContent {
                         protocol: "open_ai_responses".into(),
-                        value: json!({"type":"reasoning", "encrypted_content":"foreign"}),
+                        value: super::json_payload(
+                            json!({"type":"reasoning", "encrypted_content":"foreign"}),
+                        ),
                     },
                     ContentBlock::Reasoning {
                         text: "foreign summary".into(),
@@ -134,13 +140,16 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
                 content: vec![
                     ContentBlock::ProviderContent {
                         protocol: "open_ai_responses".into(),
-                        value: json!({"type":"reasoning", "encrypted_content":"foreign"}),
+                        value: super::json_payload(
+                            json!({"type":"reasoning", "encrypted_content":"foreign"}),
+                        ),
                     },
                     exact_tool_result(control),
                     ContentBlock::TextJsUtf16 {
                         text: "B�".into(),
                         utf16_code_units: vec![66, 0xd83d],
                         cache_control: None,
+                        citations: None,
                     },
                 ],
             });
@@ -152,7 +161,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
             assert!(!sent.contains("lingxi_tool_result_string_utf16"));
             assert!(!sent.contains("foreign"));
             assert_eq!(
-                encoded.body_json["messages"][0]["content"]
+                super::json_payload_value(&encoded.body_json)["messages"][0]["content"]
                     .as_array()
                     .unwrap()
                     .len(),
@@ -173,9 +182,12 @@ fn tool_result_sidecars_become_display_text_on_chat_wire() {
     let encoded = OpenAiChatCodec::new("https://example.test/v1")
         .encode_request(&request)
         .unwrap();
-    assert_eq!(encoded.body_json["messages"][0]["content"], "A�\n");
+    assert_eq!(
+        super::json_payload_value(&encoded.body_json)["messages"][0]["content"],
+        "A�\n"
+    );
     assert!(!encoded
         .body_json
-        .to_string()
+        .as_json_source()
         .contains("lingxi_tool_result_string_utf16"));
 }

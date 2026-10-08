@@ -1,0 +1,182 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "30f926cf75a7f6217ad5450207a90b44ee89391fc97543c5988516ec37fe6204",
+  "fixture_sha256": "4cf0b4bd5f37e8979473c4537f845c303a3b3588d39fea873e1fbf3498cb8e71",
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000002940",
+    "model": "claude-sonnet-4-5",
+    "prompt": "Reply with the fixed cancellation probe result.",
+    "signal": "SIGINT",
+    "max_retries": 0
+  },
+  "network_boundary": "127.0.0.1 loopback only; isolated HOME/config; dummy key; stub withheld its response until after SIGINT",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 28853,
+      "request_sha256": "206d0464ef3b04cba92f7952115403a1980d889a11a3acfb1eb47ff48986537c",
+      "stream": false
+    }
+  ],
+  "stub_response_sent": false,
+  "sigint_sent_after_request": true,
+  "native_exit_code": 0,
+  "timed_out_after_sigint": false,
+  "cleanup_signal": null,
+  "stdout_result": {
+    "type": "result",
+    "is_error": true,
+    "terminal_reason": "aborted_streaming",
+    "subtype": "error_during_execution",
+    "stop_reason": null,
+    "num_turns": 2,
+    "session_id": "00000000-0000-4000-8000-000000002940",
+    "errors": [
+      "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"
+    ]
+  },
+  "session": {
+    "bytes": 33090,
+    "sha256": "399959401723af91611d8c3f0b411d8f652b22021b0cefdcba624db1db05083f",
+    "fixed_prompt_user_rows": 1,
+    "interrupt_user_rows": 1,
+    "assistant_rows": 0
+  },
+  "session_capture_ignored_path": "run-output/sigint-kxx557bd/session.raw.jsonl",
+  "session_fixed_row_texts": [
+    {
+      "index": 2,
+      "role": "prompt",
+      "text_units": [
+        [
+          82,
+          101,
+          112,
+          108,
+          121,
+          32,
+          119,
+          105,
+          116,
+          104,
+          32,
+          116,
+          104,
+          101,
+          32,
+          102,
+          105,
+          120,
+          101,
+          100,
+          32,
+          99,
+          97,
+          110,
+          99,
+          101,
+          108,
+          108,
+          97,
+          116,
+          105,
+          111,
+          110,
+          32,
+          112,
+          114,
+          111,
+          98,
+          101,
+          32,
+          114,
+          101,
+          115,
+          117,
+          108,
+          116,
+          46
+        ]
+      ]
+    },
+    {
+      "index": 10,
+      "role": "interrupt",
+      "text_units": [
+        [
+          91,
+          82,
+          101,
+          113,
+          117,
+          101,
+          115,
+          116,
+          32,
+          105,
+          110,
+          116,
+          101,
+          114,
+          114,
+          117,
+          112,
+          116,
+          101,
+          100,
+          32,
+          98,
+          121,
+          32,
+          117,
+          115,
+          101,
+          114,
+          93
+        ]
+      ]
+    }
+  ],
+  "artifacts": {
+    "stdout.raw.json": {
+      "bytes": 1241,
+      "sha256": "a631b749d0a064d2a60d9c3c9590f7bb1e8b89579c39c174c2793ad155e160b0"
+    },
+    "stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "prompt-content.raw.json": {
+      "bytes": 49,
+      "sha256": "63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b"
+    },
+    "interrupt-content.raw.json": {
+      "bytes": 56,
+      "sha256": "ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228"
+    }
+  },
+  "dynamic_fields": [
+    "Native-generated message UUIDs",
+    "timestamps",
+    "cwd/metadata",
+    "stdout result UUID"
+  ],
+  "comparison_constraints": [
+    "one accepted loopback Messages POST; no stub response; SIGINT sent only after POST",
+    "result envelope type/is_error/terminal_reason/subtype and turn count",
+    "fixed prompt and exact interruption text as UTF-16 units in user-row order",
+    "session IDs/UUIDs and timestamps are format/lifecycle constraints, not byte-normalized passes"
+  ],
+  "checks": {
+    "one_accepted_dummy_key_request": true,
+    "sigint_was_sent": true,
+    "native_exited_without_forced_cleanup": true,
+    "json_result_is_aborted_streaming_error": true,
+    "session_keeps_prompt_then_interrupt": true
+  },
+  "scope": "One public Native 2.1.293 CLI process, fixed session ID and prompt, one in-flight loopback Anthropic Messages request, then SIGINT. This observes the CLI interruption/output/persistence boundary only; it does not prove Harness turn cancellation-token parity, tool side-effect rollback, retry behavior without the explicit zero-retry setting, or Native module unload."
+}

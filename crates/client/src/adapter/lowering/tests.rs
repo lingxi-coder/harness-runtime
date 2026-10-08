@@ -175,14 +175,20 @@ mod regressions {
         let with = HookInfo {
             name: "guard".to_string(),
             event: "PreToolUse".to_string(),
-            matcher: Some("Bash.*".to_string()),
+            matcher: Some("Bash.*".into()),
             timeout_ms: 5_000,
             ..HookInfo::default()
         };
         let dto = lower_hook_info(&with);
         assert_eq!(dto.name, "guard");
         assert_eq!(dto.event, "PreToolUse");
-        assert_eq!(dto.matcher.as_deref(), Some("Bash.*"));
+        assert_eq!(
+            dto.matcher
+                .as_ref()
+                .map(|matcher| matcher.display())
+                .as_deref(),
+            Some("Bash.*")
+        );
         assert_eq!(dto.timeout_ms, 5_000);
         assert_eq!(dto.blocking, Some(false));
         assert_eq!(dto.is_async, Some(true));
@@ -192,6 +198,44 @@ mod regressions {
             ..with
         };
         assert_eq!(lower_hook_info(&without).matcher, None);
+    }
+
+    #[test]
+    fn hook_source_text_survives_full_client_event_envelope() {
+        use crate::protocol::events::ClientEvent;
+
+        let matcher_units = vec![b'B' as u16, 0xd800, b'.' as u16, b'*' as u16];
+        let condition_units = vec![b'c' as u16, 0xdfff, b'!' as u16];
+        let source = |units: &[u16]| {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(units),
+                units.to_vec(),
+            )
+            .unwrap()
+        };
+        let info = HookInfo {
+            name: "source-hook".into(),
+            event: "PreToolUse".into(),
+            matcher: Some(source(&matcher_units)),
+            if_condition: Some(source(&condition_units)),
+            ..HookInfo::default()
+        };
+        let event = ClientEvent::Hooks {
+            hooks: vec![lower_hook_info(&info)],
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""matcher":"B\ud800.*""#));
+        assert!(encoded.contains(r#""if_condition":"c\udfff!""#));
+        let decoded: ClientEvent = serde_json::from_str(&encoded).unwrap();
+        let ClientEvent::Hooks { hooks } = decoded else {
+            panic!("expected hooks event");
+        };
+        assert_eq!(hooks[0].matcher.as_ref().unwrap().code_units, matcher_units);
+        assert_eq!(
+            hooks[0].if_condition.as_ref().unwrap().code_units,
+            condition_units
+        );
     }
 
     #[test]
@@ -299,8 +343,9 @@ mod regressions {
             task_id: "b3f9zk2xq".to_string(),
             task_type: "local_bash".to_string(),
             status: "killed".to_string(),
-            description: "build".to_string(),
+            description: "build".into(),
             command: None,
+            agent_facts: None,
             ..Default::default()
         };
         let dto = lower_task_record(&rec);
@@ -308,7 +353,7 @@ mod regressions {
         assert_eq!(dto.task_type, "local_bash");
         // "killed" wire status → Cancelled DTO variant.
         assert_eq!(dto.status, TaskStatusDto::Cancelled);
-        assert_eq!(dto.description, "build");
+        assert_eq!(dto.description.display(), "build");
     }
 
     /// F005: `TaskRecord.stage` (the `/fusion` task's live progress-stage
@@ -321,12 +366,13 @@ mod regressions {
             awaiting_plan_approval: true,
             status: "running".into(),
             description: "Review API".into(),
+            agent_facts: None,
             ..Default::default()
         };
         let pending = lower_task_record(&record);
         assert!(pending.awaiting_plan_approval);
         assert_eq!(pending.status, TaskStatusDto::Running);
-        assert_eq!(pending.description, "Review API");
+        assert_eq!(pending.description.display(), "Review API");
         for _decision in ["approved", "rejected"] {
             record.awaiting_plan_approval = false;
             assert!(!lower_task_record(&record).awaiting_plan_approval);
@@ -347,8 +393,9 @@ mod regressions {
             task_id: "fu3f9zk2x".to_string(),
             task_type: "local_fusion".to_string(),
             status: "running".to_string(),
-            description: "deliberate".to_string(),
+            description: "deliberate".into(),
             stage: Some("Running panels 2/3".to_string()),
+            agent_facts: None,
             ..Default::default()
         };
         let dto = lower_task_record(&with_stage);
@@ -358,7 +405,8 @@ mod regressions {
             task_id: "b3f9zk2xq".to_string(),
             task_type: "local_bash".to_string(),
             status: "running".to_string(),
-            description: "build".to_string(),
+            description: "build".into(),
+            agent_facts: None,
             ..Default::default()
         };
         assert_eq!(
@@ -366,6 +414,26 @@ mod regressions {
             None,
             "non-fusion task rows carry no stage"
         );
+    }
+
+    #[test]
+    fn task_record_source_description_keeps_lone_surrogate_units() {
+        let description =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""t\ud800""#).unwrap();
+        let record = TaskRecord {
+            task_id: "b3f9zk2xq".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            description,
+            agent_facts: None,
+            ..Default::default()
+        };
+        let row = lower_task_record(&record);
+        assert_eq!(row.description.code_units, [b't' as u16, 0xd800]);
+        let encoded = serde_json::to_string(&row).unwrap();
+        assert!(encoded.contains(r#""description":"t\ud800""#));
+        let decoded: TaskRowDto = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.description.code_units, [b't' as u16, 0xd800]);
     }
 
     #[test]
@@ -414,6 +482,7 @@ mod regressions {
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "resume me".to_string(),
+                    citations: None,
                 }],
                 is_meta: false,
                 is_compact_summary: false,
@@ -424,6 +493,7 @@ mod regressions {
                 content: vec![
                     ContentBlock::Text {
                         text: "on it".to_string(),
+                        citations: None,
                     },
                     ContentBlock::ToolUse {
                         id: tu.clone(),
@@ -445,7 +515,7 @@ mod regressions {
         assert_eq!(
             dtos[0].blocks,
             vec![MessageBlockDto::Text {
-                text: "resume me".to_string()
+                text: "resume me".into()
             }]
         );
 
@@ -457,7 +527,7 @@ mod regressions {
             dtos[1].blocks,
             vec![
                 MessageBlockDto::Text {
-                    text: "on it".to_string()
+                    text: "on it".into()
                 },
                 MessageBlockDto::ToolUse {
                     id: tu.to_string(),
@@ -488,6 +558,7 @@ mod regressions {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: legacy_prompt.to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -498,7 +569,7 @@ mod regressions {
         assert_eq!(
             transcript[0].blocks,
             vec![MessageBlockDto::Text {
-                text: "/cron 每天早上汇报武汉天气".to_string(),
+                text: "/cron 每天早上汇报武汉天气".into(),
             }],
         );
     }
@@ -535,7 +606,7 @@ mod regressions {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: tu.clone(),
                     content: "edited".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -603,7 +674,7 @@ mod regressions {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
                 content: content.to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -708,7 +779,7 @@ mod regressions {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
                 content: content.to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -764,7 +835,7 @@ mod regressions {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "orphaned".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -800,7 +871,10 @@ mod regressions {
             is_visible_in_transcript_only: false,
         };
         let history = vec![
-            meta(vec![ContentBlock::Text { text: tick.clone() }]),
+            meta(vec![ContentBlock::Text {
+                text: tick.clone(),
+                citations: None,
+            }]),
             ConversationMessage::user(MessageId::new(), tick.clone()),
             ConversationMessage::Assistant {
                 id: MessageId::new(),
@@ -815,11 +889,12 @@ mod regressions {
             meta(vec![
                 ContentBlock::Text {
                     text: "Internal result context".to_string(),
+                    citations: None,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: tool_id,
                     content: "/tmp".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 },
@@ -829,7 +904,7 @@ mod regressions {
         assert_eq!(transcript.len(), 3);
         assert_eq!(
             transcript[0].blocks,
-            vec![MessageBlockDto::Text { text: tick }]
+            vec![MessageBlockDto::Text { text: tick.into() }]
         );
         assert_eq!(transcript[2].blocks.len(), 1);
         assert!(
@@ -877,9 +952,10 @@ mod regressions {
         use lingxi_core::types::MessageId;
         let msg = ConversationMessage::System {
             id: MessageId::new(),
-            content: "you are a helpful assistant".to_string(),
+            content: "you are a helpful assistant".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         let dto = lower_conversation_message(&msg);
@@ -887,8 +963,60 @@ mod regressions {
         assert_eq!(
             dto.blocks,
             vec![MessageBlockDto::Text {
-                text: "you are a helpful assistant".to_string()
+                text: "you are a helpful assistant".into()
             }]
+        );
+    }
+
+    #[test]
+    fn lower_system_message_preserves_unpaired_utf16_through_client_json() {
+        use lingxi_core::types::{MessageId, utf16_json::Utf16JsonProjection};
+
+        let message = ConversationMessage::System {
+            id: MessageId::new(),
+            content: Utf16JsonProjection::parse(r#""before\ud800after""#).unwrap(),
+            subtype: None,
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let dto = lower_conversation_message(&message);
+        let MessageBlockDto::Text { text } = &dto.blocks[0] else {
+            panic!("expected system text block");
+        };
+        let mut expected_units = "before".encode_utf16().collect::<Vec<_>>();
+        expected_units.push(0xd800);
+        expected_units.extend("after".encode_utf16());
+        assert_eq!(text.code_units, expected_units);
+
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains(r#""text":"before\ud800after""#), "{json}");
+        let decoded: MessageDto = serde_json::from_str(&json).unwrap();
+        let MessageBlockDto::Text { text } = &decoded.blocks[0] else {
+            panic!("expected system text block");
+        };
+        assert_eq!(text.code_units, expected_units);
+    }
+
+    #[test]
+    fn lower_content_block_displays_opaque_anthropic_text_as_one_text_dto() {
+        use crate::adapter::turn::lower_content_block;
+
+        let block = lingxi_core::types::ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: serde_json::json!({
+                "type":"text",
+                "text":"visible answer",
+                "citations":[{"type":"url","url":"https://example.test"}],
+                "future_annotation":{"preserve":true}
+            }),
+        };
+
+        assert_eq!(
+            lower_content_block(&block),
+            Some(MessageBlockDto::Text {
+                text: "visible answer".into(),
+            })
         );
     }
 
@@ -902,6 +1030,7 @@ mod regressions {
             content: vec![
                 ContentBlock::Text {
                     text: "look".to_string(),
+                    citations: None,
                 },
                 ContentBlock::Image {
                     source: ImageSource::Url {
@@ -917,7 +1046,7 @@ mod regressions {
         assert_eq!(
             dto.blocks,
             vec![MessageBlockDto::Text {
-                text: "look".to_string()
+                text: "look".into()
             }]
         );
         assert_eq!(
@@ -936,7 +1065,7 @@ fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
     let message = ConversationMessage::System {
         id: lingxi_core::types::MessageId::new(),
         content: serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}).to_string(),
-        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, refusal_fallback: None,
+        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, model_fallback: None, refusal_fallback: None,
     };
     let dto = lower_conversation_message(&message);
     assert!(dto.blocks.is_empty());

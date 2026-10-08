@@ -1,8 +1,23 @@
 //! Round-trip parity for `JsonlMessage` — every byte we read we re-emit.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};
 use session::jsonl::schema::JsonlMessage;
+
+fn projection(value: Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).unwrap()
+}
+
+fn read_row(line: &str) -> JsonlMessage {
+    let loaded = session::jsonl::reader::route_lines(line);
+    assert_eq!(loaded.malformed_line_count, 0);
+    loaded
+        .messages_in_order
+        .into_iter()
+        .next()
+        .expect("message row")
+}
 
 #[test]
 fn user_message_round_trip_is_byte_equivalent() {
@@ -10,7 +25,7 @@ fn user_message_round_trip_is_byte_equivalent() {
     // type, message, [isMeta,] uuid, timestamp, then trailer userType, [entrypoint,]
     // cwd, sessionId, version, [gitBranch,] [slug].
     let original = r#"{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"hello"},"uuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-05-25T14:30:00.000Z","userType":"external","cwd":"/Users/foo/proj","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
-    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let parsed = read_row(original);
     let reemitted = serde_json::to_string(&parsed).expect("serialize");
     assert_eq!(reemitted, original);
 }
@@ -21,7 +36,7 @@ fn assistant_message_with_tool_use_round_trips() {
     // isSidechain, message, [requestId,] type, uuid, timestamp, then trailer
     // (no userType here — absent in input). This input has no requestId.
     let original = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"message":{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"claude-3-5-sonnet-latest","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":5}},"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","cwd":"/Users/foo/proj","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
-    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let parsed = read_row(original);
     let reemitted = serde_json::to_string(&parsed).expect("serialize");
     assert_eq!(reemitted, original);
 }
@@ -44,7 +59,7 @@ fn assistant_effort_field_sits_after_timestamp_before_trailer() {
         timestamp: "2026-05-25T14:30:01.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"assistant","content":"hi"}),
+        message: projection(json!({"role":"assistant","content":"hi"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -52,14 +67,22 @@ fn assistant_effort_field_sits_after_timestamp_before_trailer() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"message":{"role":"assistant","content":"hi"},"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","effort":"high","userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
     assert_eq!(s, expected);
 
     // Round-trips: reading the emitted line and re-emitting is byte-stable.
-    let parsed: JsonlMessage = serde_json::from_str(&s).expect("parse");
+    let parsed = read_row(&s);
     assert_eq!(serde_json::to_string(&parsed).expect("re-ser"), expected);
 }
 
@@ -71,17 +94,14 @@ fn unknown_outer_fields_preserved_in_extra() {
     // order, so byte position shifts — assert by VALUE on a parse→re-parse
     // round-trip rather than raw-byte equality.
     let original = r#"{"type":"user","uuid":"33333333-4444-5555-6666-777777777777","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-05-25T14:30:02.000Z","cwd":"/x","version":"0.6.0","message":{"role":"user","content":"hi"},"isSidechain":false,"agentId":"agent-42","promptId":"prompt-7","slug":"plan-abc"}"#;
-    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let parsed = read_row(original);
     // agentId — unknown field, lands in extra.
-    assert_eq!(
-        parsed.extra.get("agentId"),
-        Some(&Value::String("agent-42".into()))
-    );
+    assert_eq!(parsed.extra.string_at("/agentId"), Some("agent-42"));
     // promptId / slug — promoted to named fields (NOT in extra anymore).
     assert_eq!(parsed.prompt_id.as_deref(), Some("prompt-7"));
     assert_eq!(parsed.slug.as_deref(), Some("plan-abc"));
-    assert!(!parsed.extra.contains_key("promptId"));
-    assert!(!parsed.extra.contains_key("slug"));
+    assert!(!parsed.extra.contains_property("promptId"));
+    assert!(!parsed.extra.contains_property("slug"));
 
     // Value-level round-trip: re-serialize, re-parse as a free `Value`, and
     // confirm every key/value survives (order-independent).
@@ -101,7 +121,7 @@ fn parent_uuid_null_serializes_as_null_not_missing() {
         timestamp: "2026-05-25T14:30:00.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":"hi"}),
+        message: projection(json!({"role":"user","content":"hi"})),
         is_sidechain: false,
         user_type: None,
         git_branch: None,
@@ -109,7 +129,15 @@ fn parent_uuid_null_serializes_as_null_not_missing() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: Map::default(),
+        extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     assert!(
@@ -140,7 +168,7 @@ fn assistant_api_error_outer_key_order_matches_claude() {
         timestamp: "2026-05-25T14:30:01.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"assistant","content":"API Error"}),
+        message: projection(json!({"role":"assistant","content":"API Error"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -148,7 +176,15 @@ fn assistant_api_error_outer_key_order_matches_claude() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","message":{"role":"assistant","content":"API Error"},"error":"Overloaded","isApiErrorMessage":true,"apiErrorStatus":529,"userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
@@ -172,7 +208,7 @@ fn assistant_api_error_truncated_after_output_sits_before_is_api_error_message()
         timestamp: "2026-05-25T14:30:01.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"assistant","content":"API Error"}),
+        message: projection(json!({"role":"assistant","content":"API Error"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -180,7 +216,15 @@ fn assistant_api_error_truncated_after_output_sits_before_is_api_error_message()
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","message":{"role":"assistant","content":"API Error"},"error":"server_error","truncatedAfterOutput":true,"isApiErrorMessage":true,"userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
@@ -201,7 +245,7 @@ fn user_meta_outer_key_order_places_ismeta_before_uuid() {
         timestamp: "2026-05-25T14:30:00.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":"meta"}),
+        message: projection(json!({"role":"user","content":"meta"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -209,7 +253,15 @@ fn user_meta_outer_key_order_places_ismeta_before_uuid() {
         slug: None,
         prompt_id: Some("prompt-1".into()),
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":null,"isSidechain":false,"promptId":"prompt-1","type":"user","message":{"role":"user","content":"meta"},"isMeta":true,"uuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-05-25T14:30:00.000Z","userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
@@ -230,7 +282,7 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
         timestamp: "2026-05-25T14:30:00.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":"hi"}),
+        message: projection(json!({"role":"user","content":"hi"})),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
@@ -238,7 +290,15 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     assert!(
@@ -256,7 +316,7 @@ fn compact_boundary_line_round_trip_is_byte_equivalent() {
     // content, level, compactMetadata), NO inner `message`, then uuid,
     // timestamp, trailer.
     let original = r#"{"parentUuid":null,"logicalParentUuid":"3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8","isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","compactMetadata":{"trigger":"manual","preTokens":587092,"preservedSegment":{"headUuid":"a4a2d767-b61c-4358-b7c4-99603c36557d","anchorUuid":"05dff8f7-6c3f-45ee-83f8-7f728e8f7b5d","tailUuid":"3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"},"preservedMessages":{"anchorUuid":"05dff8f7-6c3f-45ee-83f8-7f728e8f7b5d","uuids":["a4a2d767-b61c-4358-b7c4-99603c36557d","3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"],"allUuids":["a4a2d767-b61c-4358-b7c4-99603c36557d","3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"]}},"uuid":"1b537b0d-d441-490d-9b2a-6021ca6db237","timestamp":"2026-07-11T14:20:51.951Z","userType":"external","entrypoint":"cli","cwd":"/tmp/proj","sessionId":"0330afb2-f6ba-4fd7-bbe0-878cb4c550c5","version":"2.1.207","gitBranch":"main"}"#;
-    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let parsed = read_row(original);
     // Chain reset semantics survive the parse.
     assert_eq!(parsed.parent_uuid, None);
     assert_eq!(
@@ -273,7 +333,7 @@ fn compact_summary_user_line_round_trip_is_byte_equivalent() {
     // isVisibleInTranscriptOnly + isCompactSummary flags ride between
     // `message` and `uuid`.
     let original = r#"{"parentUuid":"1b537b0d-d441-490d-9b2a-6021ca6db237","isSidechain":false,"promptId":"f3b2f9f0-9a67-4b7e-9f52-8f2f9d3f6a11","type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation."},"isVisibleInTranscriptOnly":true,"isCompactSummary":true,"uuid":"9a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-07-11T14:20:52.000Z","userType":"external","entrypoint":"cli","cwd":"/tmp/proj","sessionId":"0330afb2-f6ba-4fd7-bbe0-878cb4c550c5","version":"2.1.207","gitBranch":"main"}"#;
-    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let parsed = read_row(original);
     let reemitted = serde_json::to_string(&parsed).expect("serialize");
     assert_eq!(reemitted, original);
 }
@@ -293,7 +353,7 @@ fn non_boundary_system_line_keeps_generic_envelope() {
         timestamp: "2026-05-25T14:30:00.000Z".into(),
         cwd: "/x".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"system","content":"note"}),
+        message: projection(json!({"role":"system","content":"note"})),
         is_sidechain: false,
         user_type: None,
         git_branch: None,
@@ -301,7 +361,15 @@ fn non_boundary_system_line_keeps_generic_envelope() {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra,
+        extra: projection(Value::Object(extra)),
+
+        attachment_projection: None,
+        tool_use_result_projection: None,
+        mcp_meta_projection: None,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin_projection: None,
+        turn_origin_projection: None,
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":null,"isSidechain":false,"type":"system","message":{"role":"system","content":"note"},"uuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-05-25T14:30:00.000Z","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0","subtype":"other_subtype"}"#;

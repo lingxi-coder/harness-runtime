@@ -8,6 +8,7 @@
 //! §0.4); the diff fields (`old_string`/`new_string`/`file_path`) mirror the
 //! TUI `UserToolResult` at `tui/src/state.rs:73-89`.
 
+use crate::protocol::text::ClientTextDto;
 use serde::{Deserialize, Serialize};
 
 /// A complete conversation message — a role plus an ordered list of content
@@ -75,7 +76,7 @@ pub enum MessageBlockDto {
     /// Plain assistant text.
     Text {
         /// The text body.
-        text: String,
+        text: ClientTextDto,
     },
     /// Extended-thinking reasoning trace (mirrors `lingxi_core::types::ContentBlock::Thinking`).
     Thinking {

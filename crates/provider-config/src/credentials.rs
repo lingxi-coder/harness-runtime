@@ -8,9 +8,9 @@
 //! - any other id → keychain[id] → env[recorded var] → `Err(Authentication)`
 //!   (matching `EnvCredentialProvider`; spec §6.1/§6.6).
 //!
-//! Secrets are returned as `Credential::ApiKey`; `ModelRuntime::load_secret`
-//! extracts `ApiKey | BearerToken` uniformly and the profile's `AuthStrategy`
-//! picks the header (so Copilot's `CopilotBearer` rides this path).
+//! OAuth delegates retain their account/scope credential material. The host
+//! passes selected credentials to the SDK authenticator; the profile strategy
+//! determines its wire headers.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -149,9 +149,79 @@ impl MultiCredentialProvider {
             message: String::new(),
         })
     }
+    async fn status_api_key(&self) -> Result<Option<Credential>, LlmError> {
+        if let Some(key) = self
+            .credentials
+            .get_provider_key_ephemeral("anthropic-api-key")
+            .await
+        {
+            return Ok(Some(Credential::ApiKey(key.expose_secret().clone())));
+        }
+        if let Some(key) = self
+            .anthropic_api_key
+            .as_ref()
+            .filter(|key| !key.is_empty())
+        {
+            return Ok(Some(Credential::ApiKey(key.clone())));
+        }
+        // Native mb shadows the store with a configured helper, including
+        // a cold cache. NQn reads it without executing or checking the TTL.
+        if self.anthropic_api_key_helper.is_some() {
+            return Ok(self
+                .anthropic_api_key_helper_cache
+                .snapshot()
+                .map(Credential::ApiKey));
+        }
+        self.credentials
+            .get_anthropic_api_key()
+            .await
+            .map(|key| key.map(|key| Credential::ApiKey(key.expose_secret().clone())))
+            .map_err(|_| LlmError::Authentication {
+                message: String::new(),
+            })
+    }
 }
 
 impl CredentialProvider for MultiCredentialProvider {
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<llm_runtime::AnthropicAuthSnapshot, LlmError>> {
+        Box::pin(async move {
+            if scope.provider_id != llm_runtime::ProviderId::AnthropicFirstParty {
+                return Ok(llm_runtime::AnthropicAuthSnapshot::default());
+            }
+            let oauth_scope = scope.clone().with_credential_id("anthropic-oauth");
+            let oauth = if let Some(delegate) = self.oauth_delegates.get("anthropic-oauth") {
+                delegate
+                    .anthropic_auth_snapshot(&oauth_scope)
+                    .await
+                    .ok()
+                    .and_then(|snapshot| snapshot.oauth)
+            } else {
+                None
+            };
+            // Native Xb suppresses key lookup failure without discarding OAuth.
+            let api_key = self.status_api_key().await.unwrap_or(None);
+            Ok(llm_runtime::AnthropicAuthSnapshot { oauth, api_key })
+        })
+    }
+    fn refresh<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+        rejected: &'a Credential,
+    ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
+        Box::pin(async move {
+            let delegate = scope
+                .credential_id
+                .as_deref()
+                .and_then(|id| self.oauth_delegates.get(id));
+            match delegate {
+                Some(delegate) => delegate.refresh(scope, rejected).await,
+                None => Ok(None),
+            }
+        })
+    }
     fn load<'a>(
         &'a self,
         scope: &'a CredentialScope,
@@ -183,6 +253,187 @@ mod tests {
         ModelProfile, ModelRuntime, ProviderId,
     };
     use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct RefreshDelegate;
+    impl CredentialProvider for RefreshDelegate {
+        fn anthropic_auth_snapshot<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<llm_runtime::AnthropicAuthSnapshot, LlmError>> {
+            Box::pin(async move {
+                Ok(llm_runtime::AnthropicAuthSnapshot::from_credential(
+                    scope.clone(),
+                    Credential::AnthropicOAuth {
+                        access_token: "old".into(),
+                        scopes: vec!["user:profile".into()],
+                    },
+                ))
+            })
+        }
+
+        fn load<'a>(
+            &'a self,
+            _: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            Box::pin(async {
+                Ok(Credential::AnthropicOAuth {
+                    access_token: "old".into(),
+                    scopes: vec!["user:profile".into()],
+                })
+            })
+        }
+        fn refresh<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+            rejected: &'a Credential,
+        ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
+            Box::pin(async move {
+                assert_eq!(scope.credential_id.as_deref(), Some("anthropic-oauth"));
+                assert!(
+                    matches!(rejected, Credential::AnthropicOAuth { access_token, .. } if access_token=="old")
+                );
+                Ok(Some(Credential::AnthropicOAuth {
+                    access_token: "new".into(),
+                    scopes: vec!["user:profile".into()],
+                }))
+            })
+        }
+    }
+    #[tokio::test]
+    async fn status_oauth_remains_independent_of_the_model_api_key() {
+        let provider = MultiCredentialProvider::new(
+            manager(),
+            vec![],
+            Some("model-key".into()),
+            None,
+            BTreeMap::from([(
+                "anthropic-oauth".into(),
+                Arc::new(RefreshDelegate) as Arc<dyn CredentialProvider>,
+            )]),
+        );
+        let model_scope = CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic")
+            .with_credential_id("anthropic-api-key");
+        assert_eq!(
+            provider.load(&model_scope).await.unwrap(),
+            Credential::ApiKey("model-key".into())
+        );
+        let snapshot = provider
+            .anthropic_auth_snapshot(&model_scope)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.api_key,
+            Some(Credential::ApiKey("model-key".into()))
+        );
+        let (oauth_scope, credential) = snapshot.oauth.unwrap();
+        assert_eq!(
+            oauth_scope.credential_id.as_deref(),
+            Some("anthropic-oauth")
+        );
+        assert_eq!(oauth_scope.profile_name, model_scope.profile_name);
+        assert!(
+            matches!(credential, Credential::AnthropicOAuth {ref access_token, ..} if access_token == "old")
+        );
+        assert!(provider
+            .refresh(&oauth_scope, &credential)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!format!("{credential:?}").contains("old"));
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_reaches_only_the_selected_oauth_delegate() {
+        let provider = MultiCredentialProvider::new(
+            manager(),
+            vec![],
+            None,
+            None,
+            BTreeMap::from([(
+                "anthropic-oauth".into(),
+                Arc::new(RefreshDelegate) as Arc<dyn CredentialProvider>,
+            )]),
+        );
+        let scope = CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic")
+            .with_credential_id("anthropic-oauth");
+        let old = provider.load(&scope).await.unwrap();
+        assert!(
+            matches!(provider.refresh(&scope, &old).await.unwrap(), Some(Credential::AnthropicOAuth { access_token, .. }) if access_token=="new")
+        );
+        let other =
+            CredentialScope::new(ProviderId::OpenAI, "other").with_credential_id("unregistered");
+        assert_eq!(provider.refresh(&other, &old).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn native_fast_key_snapshots_preserve_helper_shadowing_without_execution() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../llm-runtime/tests/fixtures/fast_auth_sources_2_1_287.json"
+        ))
+        .unwrap();
+        let marker = std::env::temp_dir().join(format!(
+            "harness-fast-helper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let marker_quoted = marker.to_string_lossy().replace('\'', "'\\''");
+        for row in fixture["key_sources"].as_array().unwrap() {
+            let input = &row["input"];
+            let credentials = manager();
+            if let Some(key) = input["stored"].as_str() {
+                credentials.store_anthropic_api_key(key).await.unwrap();
+            }
+            let provider = MultiCredentialProvider::new(
+                credentials,
+                vec![],
+                input["static_key"].as_str().map(str::to_owned),
+                input["helper"]
+                    .as_bool()
+                    .unwrap()
+                    .then(|| format!("touch '{marker_quoted}'; printf unexpected")),
+                BTreeMap::new(),
+            );
+            if let Some(key) = input["cached"].as_str() {
+                provider.anthropic_api_key_helper_cache.store(key.into());
+                assert!(provider
+                    .anthropic_api_key_helper_cache
+                    .get_fresh(0)
+                    .is_none());
+            }
+            let current_scope = scope(
+                ProviderId::AnthropicFirstParty,
+                "anthropic",
+                "anthropic-oauth",
+            );
+            let actual = provider
+                .anthropic_auth_snapshot(&current_scope)
+                .await
+                .unwrap()
+                .api_key;
+            let actual = actual.map(|credential| match credential {
+                Credential::ApiKey(key) => key,
+                other => panic!("unexpected alternate credential: {other:?}"),
+            });
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                row["expected"],
+                "{row}"
+            );
+            assert!(!marker.exists(), "Fast snapshots must not execute helpers");
+            assert_eq!(
+                provider
+                    .anthropic_auth_snapshot(&scope(ProviderId::OpenAI, "other", "other"))
+                    .await
+                    .unwrap()
+                    .api_key,
+                None
+            );
+        }
+    }
 
     /// Shared in-memory `CredentialManager` harness (re-used by availability.rs too).
     #[derive(Default)]

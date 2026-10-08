@@ -104,12 +104,15 @@
 //! `aborted_tools`, `stop_hook_prevented`, `hook_stopped`, `tool_deferred`,
 //! `max_turns`, `background_requested`, `completed`) -> `null` (no clear).
 
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{
+    source_concat, trim_source_text, BuiltinCommandHandler, CommandResult, PromptPart,
+};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 #[cfg(test)]
 use lingxi_core::host::ActiveGoalSnapshot;
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::SystemTime;
@@ -136,8 +139,7 @@ const NO_GOAL_SET_USAGE: &str = "No goal set. Usage: `/goal <condition>`";
 /// `kEt`'s trust-gate failure message, verbatim from the locked output-string
 /// list. The value comes from the composition root's effective workspace
 /// trust decision through [`OrchestratorHandle::workspace_trusted`].
-const TRUST_GATE_MESSAGE: &str =
-    "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again.";
+const TRUST_GATE_MESSAGE: &str = "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again.";
 
 /// `kEt`'s hooks-restricted failure message, verbatim from the locked
 /// output-string list. The value comes from merged managed/user/project hook
@@ -166,14 +168,14 @@ fn too_long_message(got: usize) -> String {
 
 /// `nrr(n)` — the fixed model-facing directive injected once a goal is
 /// accepted. Verbatim from the locked output-string list.
-fn directive_for(condition: &str) -> String {
-    format!(
-        "A session-scoped Stop hook is now active with condition: \"{condition}\". Briefly \
-acknowledge the goal, then immediately start (or continue) working toward it — treat the \
-condition itself as your directive and do not pause to ask the user what to do. The hook will \
-block stopping until the condition holds. It auto-clears once the condition is met — do not \
-tell the user to run `/goal clear` after success; that's only for clearing a goal early."
-    )
+fn directive_for(condition: &Utf16JsonProjection) -> Utf16JsonProjection {
+    source_concat([
+        PromptPart::Text("A session-scoped Stop hook is now active with condition: \""),
+        PromptPart::Source(condition),
+        PromptPart::Text(
+            "\". Briefly acknowledge the goal, then immediately start (or continue) working toward it — treat the condition itself as your directive and do not pause to ask the user what to do. The hook will block stopping until the condition holds. It auto-clears once the condition is met — do not tell the user to run `/goal clear` after success; that's only for clearing a goal early.",
+        ),
+    ])
 }
 
 /// `/goal` handler — set, show, or clear a session-scoped stop-gating goal.
@@ -210,14 +212,20 @@ impl GoalHandler {
                     1 => "1 turn".to_string(),
                     count => format!("{count} turns"),
                 };
-                let last_check = match g.last_reason.as_deref().filter(|reason| !reason.is_empty())
+                let last_check = match g
+                    .last_reason
+                    .as_ref()
+                    .and_then(|reason| reason.string_at(""))
                 {
-                    Some(reason) => {
+                    Some(reason) if !reason.is_empty() => {
                         format!("\nLast check: {}", first_line(trim_js_whitespace(reason)))
                     }
-                    None => String::new(),
+                    _ => String::new(),
                 };
-                format!("Goal active: {} ({evaluations}){last_check}", g.condition)
+                format!(
+                    "Goal active: {} ({evaluations}){last_check}",
+                    g.condition.string_at("").unwrap_or_default()
+                )
             }
         }
     }
@@ -228,8 +236,9 @@ impl GoalHandler {
         match self.handle.clear_active_goal().await {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
-                telemetry::emit_command_completed(TELEMETRY_STOP_HOOK_REMOVED, &g.condition);
-                format!("Goal cleared: {}", g.condition)
+                let condition = g.condition.string_at("").unwrap_or_default();
+                telemetry::emit_command_completed(TELEMETRY_STOP_HOOK_REMOVED, condition);
+                format!("Goal cleared: {condition}")
             }
         }
     }
@@ -238,21 +247,21 @@ impl GoalHandler {
     /// directive (binary: `` {type:"query",value:`Goal set: ${n}`,
     /// prompt:nrr(n)} `` — see the module doc's `CommandResult` mapping note
     /// for why only the `prompt` half is representable here).
-    async fn set(&self, condition: &str) -> CommandResult {
+    async fn set(&self, condition: &Utf16JsonProjection) -> CommandResult {
         // 2.1.270 `ust`: hooks restrictions take precedence over trust.
         if self.handle.hooks_restricted().await {
             return CommandResult::Done {
-                display: Some(HOOKS_RESTRICTED_MESSAGE.to_string()),
+                display: Some((HOOKS_RESTRICTED_MESSAGE.to_string()).into()),
             };
         }
         if !self.handle.workspace_trusted().await {
             return CommandResult::Done {
-                display: Some(TRUST_GATE_MESSAGE.to_string()),
+                display: Some((TRUST_GATE_MESSAGE.to_string()).into()),
             };
         }
         self.handle.set_active_goal(condition).await;
         CommandResult::InjectMessage {
-            content: directive_for(condition),
+            content: directive_for(condition).into(),
         }
     }
 }
@@ -260,33 +269,39 @@ impl GoalHandler {
 #[async_trait]
 impl BuiltinCommandHandler for GoalHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let trimmed = trim_js_whitespace(&args.raw_args);
+        let trimmed = trim_source_text(&args.raw_args);
 
         // 1) empty → status.
-        if trimmed.is_empty() {
+        if trimmed
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
             return CommandResult::Done {
-                display: Some(self.status().await),
+                display: Some((self.status().await).into()),
             };
         }
 
         // 2) case-insensitive clear token → clear.
-        if CLEAR_TOKENS.contains(&trimmed.to_lowercase().as_str()) {
+        let is_clear = trimmed
+            .string_at("")
+            .is_some_and(|value| CLEAR_TOKENS.contains(&value.to_lowercase().as_str()));
+        if is_clear {
             return CommandResult::Done {
-                display: Some(self.clear().await),
+                display: Some((self.clear().await).into()),
             };
         }
 
         // 2.1.270 `e.length`: JavaScript counts UTF-16 code units.
-        let n = trimmed.encode_utf16().count();
+        let n = trimmed.string_units("").map_or(0, |units| units.len());
         if n > MAX_CONDITION_CHARS {
             telemetry::emit_command_failed(TELEMETRY_GOAL_SET_EVENT, TELEMETRY_TOO_LONG_PROPERTY);
             return CommandResult::Done {
-                display: Some(too_long_message(n)),
+                display: Some((too_long_message(n)).into()),
             };
         }
 
         // 4) else → gate + set.
-        self.set(trimmed).await
+        self.set(&trimmed).await
     }
 
     fn name(&self) -> &str {
@@ -320,6 +335,7 @@ fn first_line(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     #[test]
@@ -330,13 +346,14 @@ mod tests {
             .as_str()
             .unwrap()
             .replace("{condition}", "ship it");
-        assert_eq!(directive_for("ship it").as_bytes(), expected.as_bytes());
+        let actual = directive_for(&"ship it".into());
+        assert_eq!(actual.string_at(""), Some(expected.as_str()));
     }
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "goal".to_string(),
-            raw_args: raw.to_string(),
+            name: "goal".into(),
+            raw_args: raw.into(),
             positional_args: vec![],
         }
     }
@@ -437,9 +454,9 @@ mod tests {
             ("\u{feff}evidence\u{feff}", "\nLast check: evidence"),
         ] {
             handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
-                condition: "ship".to_string(),
+                condition: "ship".into(),
                 set_at: SystemTime::now(),
-                last_reason: Some(reason.to_string()),
+                last_reason: Some(reason.into()),
                 iterations: 1,
                 tokens_at_start: 0,
             }));
@@ -558,9 +575,9 @@ mod tests {
     async fn status_pluralizes_turns_and_separates_last_check() {
         let (handle, h) = mock_handler();
         handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
-            condition: "ship".to_string(),
+            condition: "ship".into(),
             set_at: SystemTime::now(),
-            last_reason: Some("tests pending".to_string()),
+            last_reason: Some("tests pending".into()),
             iterations: 1,
             tokens_at_start: 100,
         }));
@@ -568,9 +585,9 @@ mod tests {
         assert_eq!(one, "Goal active: ship (1 turn)\nLast check: tests pending");
 
         handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
-            condition: "ship".to_string(),
+            condition: "ship".into(),
             set_at: SystemTime::now(),
-            last_reason: Some("review pending".to_string()),
+            last_reason: Some("review pending".into()),
             iterations: 2,
             tokens_at_start: 100,
         }));
@@ -582,9 +599,9 @@ mod tests {
 
         // `Hr(t)` keeps only the first line of a multi-line evaluator reason.
         handle.set_active_goal_snapshot(Some(ActiveGoalSnapshot {
-            condition: "ship".to_string(),
+            condition: "ship".into(),
             set_at: SystemTime::now(),
-            last_reason: Some("  first line\nsecond line\nthird  ".to_string()),
+            last_reason: Some("  first line\nsecond line\nthird  ".into()),
             iterations: 3,
             tokens_at_start: 100,
         }));

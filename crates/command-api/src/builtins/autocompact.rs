@@ -206,9 +206,10 @@ fn format_tokens_compact(n: u64) -> String {
 impl BuiltinCommandHandler for AutocompactHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         let window = Self::env_window();
-        let arg = args.raw_args.trim();
+        let arg = crate::model::trim_source_text(&args.raw_args);
+        let has_argument = !arg.string_units("").unwrap_or_default().is_empty();
 
-        let display = if arg.is_empty() {
+        let display = if !has_argument {
             // No argument → status block (`M$m`).
             Self::status_block(Self::resolved_source(window))
         } else if window.is_some() {
@@ -223,7 +224,7 @@ impl BuiltinCommandHandler for AutocompactHandler {
         };
 
         CommandResult::Done {
-            display: Some(display),
+            display: Some((display).into()),
         }
     }
 
@@ -246,9 +247,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "autocompact".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "autocompact".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

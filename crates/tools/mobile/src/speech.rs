@@ -1,6 +1,7 @@
 //! `speech` exposes live recognition and completed speech playback.
 
 use lingxi_core::host::audio::{AudioOperation, AudioOperationKind, AudioOperationSuccess};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
@@ -13,6 +14,8 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
+
+use crate::device_support::{generated_projection, generated_schema_repair};
 
 use crate::audio_support::{execute_operation, operation_context, operation_supported};
 
@@ -49,9 +52,10 @@ fn input_schema_for_action_rule(action: Value) -> Value {
     })
 }
 
-fn optional_string(input: &Value, key: &str) -> Result<Option<String>, String> {
-    match input.get(key) {
-        None | Some(Value::Null) => Ok(None),
+fn optional_string(input: &Utf16JsonProjection, key: &str) -> Result<Option<String>, String> {
+    match input.get_property(key) {
+        None => Ok(None),
+        Some(value) if value.is_null() => Ok(None),
         Some(value) => value
             .as_str()
             .filter(|text| !text.trim().is_empty())
@@ -60,12 +64,13 @@ fn optional_string(input: &Value, key: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn optional_rate(input: &Value) -> Result<Option<f32>, String> {
-    match input.get("rate") {
-        None | Some(Value::Null) => Ok(None),
+fn optional_rate(input: &Utf16JsonProjection) -> Result<Option<f32>, String> {
+    match input.get_property("rate") {
+        None => Ok(None),
+        Some(value) if value.is_null() => Ok(None),
         Some(value) => {
             let rate = value
-                .as_f64()
+                .as_number()
                 .ok_or_else(|| "`rate` must be a number between 0.5 and 2".to_string())?;
             if !rate.is_finite() || !(0.5..=2.0).contains(&rate) {
                 return Err("`rate` must be a number between 0.5 and 2".into());
@@ -75,10 +80,10 @@ fn optional_rate(input: &Value) -> Result<Option<f32>, String> {
     }
 }
 
-fn speak_text(input: &Value) -> Result<String, String> {
+fn speak_text(input: &Utf16JsonProjection) -> Result<String, String> {
     let text = input
-        .get("text")
-        .and_then(Value::as_str)
+        .get_property("text")
+        .and_then(|value| value.as_str())
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| "`speak` requires a non-empty `text`".to_string())?;
     if text.chars().count() > MAX_SPEAK_TEXT_CHARS {
@@ -102,8 +107,8 @@ fn speech_timeout(text: &str) -> Duration {
 #[derive(Clone)]
 pub struct SpeechTool {
     ctx: BuiltinToolContext,
-    schema: Value,
-    validation_schema: Value,
+    schema: Utf16JsonProjection,
+    validation_schema: Utf16JsonProjection,
 }
 
 impl SpeechTool {
@@ -113,8 +118,8 @@ impl SpeechTool {
         let (supports_listen, supports_speak) = supported_actions(&ctx);
         Self {
             ctx,
-            schema: input_schema(supports_listen, supports_speak),
-            validation_schema: runtime_validation_schema(),
+            schema: generated_projection(&input_schema(supports_listen, supports_speak)),
+            validation_schema: generated_projection(&runtime_validation_schema()),
         }
     }
 
@@ -142,17 +147,20 @@ impl Tool for SpeechTool {
         TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &self.schema
     }
 
-    fn input_validation_schema(&self) -> &Value {
+    fn input_validation_schema(&self) -> &Utf16JsonProjection {
         &self.validation_schema
     }
 
-    fn input_schema_snapshot(&self) -> Option<Value> {
+    fn input_schema_snapshot(&self) -> Option<Utf16JsonProjection> {
         let (supports_listen, supports_speak) = self.supported_actions();
-        Some(input_schema(supports_listen, supports_speak))
+        Some(generated_projection(&input_schema(
+            supports_listen,
+            supports_speak,
+        )))
     }
 
     fn input_schema_revision(&self) -> Option<String> {
@@ -165,6 +173,10 @@ impl Tool for SpeechTool {
         })
     }
 
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_schema_repair()
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         let (supports_listen, supports_speak) = self.supported_actions();
         supports_listen || supports_speak
@@ -174,15 +186,19 @@ impl Tool for SpeechTool {
         4096
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "speech tool — native OS permission gates live audio operations".into(),
@@ -193,33 +209,39 @@ impl Tool for SpeechTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        match input.get("action").and_then(Value::as_str) {
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("speak") => "Speaking the requested text".into(),
             _ => "Listening to live microphone speech".into(),
         }
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Listen to live speech from the microphone, or play synthesized speech.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let (supports_listen, supports_speak) = self.supported_actions();
-        match input.get("action").and_then(Value::as_str) {
+        match input
+            .get_property("action")
+            .and_then(|value| value.as_str())
+        {
             Some("transcribe") if supports_listen => optional_string(input, "language")
                 .map(|_| ())
-                .map_err(ValidationError),
+                .map_err(|message| ValidationError(message.into())),
             Some("speak") if supports_speak => speak_text(input)
                 .map(|_| ())
                 .and_then(|_| optional_string(input, "voice").map(|_| ()))
                 .and_then(|_| optional_string(input, "language").map(|_| ()))
                 .and_then(|_| optional_rate(input).map(|_| ()))
-                .map_err(ValidationError),
+                .map_err(|message| ValidationError(message.into())),
             Some("transcribe" | "speak") => Err(ValidationError(
                 "the requested speech action is not supported on this device".into(),
             )),
@@ -231,7 +253,7 @@ impl Tool for SpeechTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         use_context: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -239,17 +261,20 @@ impl Tool for SpeechTool {
             ToolError::Internal("device audio service is not available on this platform".into())
         })?;
         let action = input
-            .get("action")
-            .and_then(Value::as_str)
+            .get_property("action")
+            .and_then(|value| value.as_str())
             .unwrap_or("transcribe");
         let (supports_listen, supports_speak) = self.supported_actions();
         let data = match action {
             "speak" if supports_speak => {
-                let text = speak_text(&input).map_err(ToolError::InvalidInput)?;
-                let voice = optional_string(&input, "voice").map_err(ToolError::InvalidInput)?;
-                let language =
-                    optional_string(&input, "language").map_err(ToolError::InvalidInput)?;
-                let rate = optional_rate(&input).map_err(ToolError::InvalidInput)?;
+                let text = speak_text(&input)
+                    .map_err(|message| ToolError::InvalidInput(message.into()))?;
+                let voice = optional_string(&input, "voice")
+                    .map_err(|message| ToolError::InvalidInput(message.into()))?;
+                let language = optional_string(&input, "language")
+                    .map_err(|message| ToolError::InvalidInput(message.into()))?;
+                let rate = optional_rate(&input)
+                    .map_err(|message| ToolError::InvalidInput(message.into()))?;
                 let context =
                     operation_context(service, &use_context, speech_timeout(&text)).await?;
                 match execute_operation(
@@ -271,13 +296,13 @@ impl Tool for SpeechTool {
                     _ => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid speak result".into(),
-                        ))
+                        ));
                     }
                 }
             }
             "transcribe" if supports_listen => {
-                let language =
-                    optional_string(&input, "language").map_err(ToolError::InvalidInput)?;
+                let language = optional_string(&input, "language")
+                    .map_err(|message| ToolError::InvalidInput(message.into()))?;
                 let context =
                     operation_context(service, &use_context, Duration::from_secs(60)).await?;
                 match execute_operation(
@@ -296,24 +321,25 @@ impl Tool for SpeechTool {
                     _ => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid listen result".into(),
-                        ))
+                        ));
                     }
                 }
             }
             _ => {
                 return Err(ToolError::InvalidInput(
                     "the requested speech action is not supported on this device".into(),
-                ))
+                ));
             }
         };
 
         Ok(ToolCallResult {
-            data,
+            data: generated_projection(&data),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -326,12 +352,14 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_support::test_json_view;
     use async_trait::async_trait;
     use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioOperationContext, AudioOperationId,
         AudioOperationReadiness, AudioReadinessState, AudioService,
     };
     use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
@@ -444,14 +472,14 @@ mod tests {
         let tool = SpeechTool::new(context);
         let result = tool
             .call(
-                json!({ "action": "transcribe", "language": "zh-CN" }),
+                generated_projection(&json!({ "action": "transcribe", "language": "zh-CN" })),
                 use_context(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("live listen succeeds");
-        assert_eq!(result.data["text"], "live words");
-        assert_eq!(result.data["language"], "en-US");
+        assert_eq!(result.data.string_at("/text"), Some("live words"));
+        assert_eq!(result.data.string_at("/language"), Some("en-US"));
         assert!(
             matches!(audio.operations.lock().unwrap().as_slice(), [AudioOperation::Listen { language: Some(language) }] if language == "zh-CN")
         );
@@ -464,20 +492,23 @@ mod tests {
         let tool = SpeechTool::new(context);
         let result = tool
             .call(
-                json!({
+                generated_projection(&json!({
                     "action": "speak",
                     "text": "hello",
                     "voice": "speaker-1",
                     "language": "en-US",
                     "rate": 1.25,
-                }),
+                })),
                 use_context(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .expect("playback completes");
-        assert_eq!(result.data["spoken"], true);
-        assert_eq!(result.data["duration_ms"], 85);
+        assert_eq!(
+            result.data.at_pointer("/spoken").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(result.data.number_at("/duration_ms"), Some(85.0));
         assert!(matches!(
             audio.operations.lock().unwrap().as_slice(),
             [AudioOperation::Speak { text, voice: Some(voice), language: Some(language), rate: Some(rate) }]
@@ -493,7 +524,7 @@ mod tests {
         let text = "a".repeat(2_000);
 
         tool.call(
-            json!({ "action": "speak", "text": text }),
+            generated_projection(&json!({ "action": "speak", "text": text })),
             use_context(),
             tool_api::test_support::fresh_tx(),
         )
@@ -521,13 +552,17 @@ mod tests {
         });
 
         assert_eq!(
-            tool.input_schema()["properties"]["text"]["maxLength"],
+            test_json_view(tool.input_schema())["properties"]["text"]["maxLength"],
             MAX_SPEAK_TEXT_CHARS
         );
-        assert!(tool.validate_input(&input, &use_context()).await.is_err());
+        let input_source = generated_projection(&input);
+        assert!(tool
+            .validate_input(&input_source, &use_context())
+            .await
+            .is_err());
         assert!(matches!(
-            tool.call(input, use_context(), tool_api::test_support::fresh_tx()).await,
-            Err(ToolError::InvalidInput(message)) if message.contains("at most")
+            tool.call(input_source, use_context(), tool_api::test_support::fresh_tx()).await,
+            Err(ToolError::InvalidInput(message)) if message.string_at("").is_some_and(|s| s.contains("at most"))
         ));
         assert!(audio.operations.lock().unwrap().is_empty());
     }
@@ -537,15 +572,21 @@ mod tests {
         let (context, _) = fake_context(vec![AudioOperationKind::Speak], AudioReadinessState::Busy);
         let tool = SpeechTool::new(context);
         assert_eq!(
-            tool.input_schema()["properties"]["action"]["enum"],
+            test_json_view(tool.input_schema())["properties"]["action"]["enum"],
             json!(["speak"])
         );
         assert!(tool
-            .validate_input(&json!({ "action": "transcribe" }), &use_context())
+            .validate_input(
+                &generated_projection(&json!({ "action": "transcribe" })),
+                &use_context()
+            )
             .await
             .is_err());
         assert!(tool
-            .validate_input(&json!({ "action": "speak", "text": "hi" }), &use_context())
+            .validate_input(
+                &generated_projection(&json!({ "action": "speak", "text": "hi" })),
+                &use_context()
+            )
             .await
             .is_ok());
     }
@@ -562,18 +603,21 @@ mod tests {
         assert!(tool.is_enabled(&static_context));
         assert_eq!(tool.input_schema_revision().as_deref(), Some("3:10"));
         assert_eq!(
-            tool.input_schema_snapshot().unwrap()["properties"]["action"]["enum"],
+            test_json_view(&tool.input_schema_snapshot().unwrap())["properties"]["action"]["enum"],
             json!(["speak"])
         );
         assert!(tool
-            .validate_input(&json!({ "action": "speak", "text": "hi" }), &use_context())
+            .validate_input(
+                &generated_projection(&json!({ "action": "speak", "text": "hi" })),
+                &use_context()
+            )
             .await
             .is_ok());
 
         audio.supported.lock().unwrap().clear();
         assert!(!tool.is_enabled(&static_context));
         assert_eq!(
-            tool.input_schema_snapshot().unwrap()["properties"]["action"]["enum"],
+            test_json_view(&tool.input_schema_snapshot().unwrap())["properties"]["action"]["enum"],
             json!([])
         );
     }
@@ -583,36 +627,47 @@ mod tests {
         let (context, audio) = fake_context(Vec::new(), AudioReadinessState::Unavailable);
         let tool = SpeechTool::new(context);
         let input = json!({ "action": "speak", "text": "hello after handshake" });
+        let input_source = generated_projection(&input);
 
         assert_eq!(
-            tool.input_schema_snapshot().unwrap()["properties"]["action"]["enum"],
+            test_json_view(&tool.input_schema_snapshot().unwrap())["properties"]["action"]["enum"],
             json!([]),
             "the pre-handshake capability schema must stay truthful"
         );
         assert!(
-            tool.input_validation_schema()["properties"]["action"]
-                .get("enum")
+            tool.input_validation_schema()
+                .at_pointer("/properties/action/enum")
                 .is_none(),
             "runtime shape schema must not cache the pre-handshake empty enum"
         );
-        assert!(tool.validate_input(&input, &use_context()).await.is_err());
+        assert!(tool
+            .validate_input(&input_source, &use_context())
+            .await
+            .is_err());
 
         *audio.supported.lock().unwrap() = vec![AudioOperationKind::Speak];
         audio.support_revision.store(10, Ordering::SeqCst);
         assert_eq!(
-            tool.input_schema_snapshot().unwrap()["properties"]["action"]["enum"],
+            test_json_view(&tool.input_schema_snapshot().unwrap())["properties"]["action"]["enum"],
             json!(["speak"]),
             "the advertised schema updates to the post-handshake capability"
         );
-        tool.validate_input(&input, &use_context())
+        tool.validate_input(&input_source, &use_context())
             .await
             .expect("the live validator accepts speech once the service advertises it");
         let result = tool
-            .call(input, use_context(), tool_api::test_support::fresh_tx())
+            .call(
+                input_source,
+                use_context(),
+                tool_api::test_support::fresh_tx(),
+            )
             .await
             .expect("post-handshake speech is callable");
 
-        assert_eq!(result.data["spoken"], true);
+        assert_eq!(
+            result.data.at_pointer("/spoken").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert!(matches!(
             audio.operations.lock().unwrap().as_slice(),
             [AudioOperation::Speak { text, .. }] if text == "hello after handshake"
@@ -625,10 +680,14 @@ mod tests {
             fake_context(vec![AudioOperationKind::Speak], AudioReadinessState::Ready);
         let tool = SpeechTool::new(context);
         let input = json!({ "action": "speak", "text": "hello", "rate": 3.0 });
-        assert!(tool.validate_input(&input, &use_context()).await.is_err());
+        let input_source = generated_projection(&input);
+        assert!(tool
+            .validate_input(&input_source, &use_context())
+            .await
+            .is_err());
         assert!(matches!(
-            tool.call(input, use_context(), tool_api::test_support::fresh_tx()).await,
-            Err(ToolError::InvalidInput(message)) if message.contains("rate")
+            tool.call(input_source, use_context(), tool_api::test_support::fresh_tx()).await,
+            Err(ToolError::InvalidInput(message)) if message.string_at("").is_some_and(|s| s.contains("rate"))
         ));
         assert!(audio.operations.lock().unwrap().is_empty());
     }

@@ -23,7 +23,9 @@
 //! clear/keep transform and therefore assumes its caller already passed the
 //! time gate.
 
-use lingxi_core::types::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection as Source, ContentBlock, ConversationMessage,
+};
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
@@ -99,28 +101,40 @@ fn rough_token_count_estimation(content: &str) -> u64 {
 
 /// 2.1.261 `BXo`: previews already point at persisted results and must survive
 /// subsequent keep-recent passes. Structured content is never a placeholder.
-fn already_compacted(content: &str, content_blocks: Option<&[serde_json::Value]>) -> bool {
+fn already_compacted(content: &Source, content_blocks: Option<&Source>) -> bool {
     content_blocks.is_none()
-        && (content == TIME_BASED_MC_CLEARED_MESSAGE || content.starts_with("<persisted-output>"))
+        && content.string_units("").is_some_and(|units| {
+            units
+                == TIME_BASED_MC_CLEARED_MESSAGE
+                    .encode_utf16()
+                    .collect::<Vec<_>>()
+                || units.starts_with(&"<persisted-output>".encode_utf16().collect::<Vec<_>>())
+        })
 }
 
-/// 2.1.261 `FXo`: count the actual wire array, ignoring unrecognized blocks.
-fn tool_result_tokens(content: &str, content_blocks: Option<&[serde_json::Value]>) -> u64 {
+/// Count exact UTF-16 text units in the model-visible tool result.
+fn tool_result_tokens(content: &Source, content_blocks: Option<&Source>) -> u64 {
+    let count = |units: usize| u64::try_from(units.saturating_add(2) / 4).unwrap_or(u64::MAX);
     content_blocks.map_or_else(
-        || rough_token_count_estimation(content),
+        || {
+            count(
+                content
+                    .string_units("")
+                    .expect("tool result text is a string")
+                    .len(),
+            )
+        },
         |blocks| {
-            blocks
-                .iter()
-                .map(
-                    |block| match block.get("type").and_then(serde_json::Value::as_str) {
-                        Some("text") => block
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .map_or(0, rough_token_count_estimation),
-                        Some("image" | "document") => 2_000,
-                        _ => 0,
-                    },
-                )
+            (0..blocks
+                .array_len("")
+                .expect("tool result content is an array"))
+                .map(|index| match blocks.string_at(&format!("/{index}/type")) {
+                    Some("text") => blocks
+                        .string_units(&format!("/{index}/text"))
+                        .map_or(0, |text| count(text.len())),
+                    Some("image" | "document") => 2_000,
+                    _ => 0,
+                })
                 .sum()
         },
     )
@@ -221,7 +235,7 @@ pub fn collect_compactable_tool_ids(
 pub fn keep_recent_persist_candidates(
     messages: &[ConversationMessage],
     keep_recent: usize,
-) -> Vec<(lingxi_core::types::ToolUseId, String)> {
+) -> Vec<(lingxi_core::types::ToolUseId, Source)> {
     let estimate = estimate_keep_recent(messages, keep_recent);
     let mut out = Vec::new();
     for message in messages {
@@ -241,7 +255,11 @@ pub fn keep_recent_persist_candidates(
             if !estimate.candidate_ids.contains(tool_use_id) {
                 continue;
             }
-            if content.is_empty() || has_media_blocks(content_blocks.as_deref()) {
+            if content
+                .string_units("")
+                .is_some_and(|units| units.is_empty())
+                || has_media_blocks(content_blocks.as_ref())
+            {
                 continue;
             }
             out.push((tool_use_id.clone(), content.clone()));
@@ -252,7 +270,7 @@ pub fn keep_recent_persist_candidates(
 
 /// `content_blocks` of a `ToolResult` block, if it is one.
 #[must_use]
-fn media_blocks_of(block: &ContentBlock) -> Option<Vec<serde_json::Value>> {
+fn media_blocks_of(block: &ContentBlock) -> Option<Source> {
     match block {
         ContentBlock::ToolResult { content_blocks, .. } => content_blocks.clone(),
         _ => None,
@@ -263,14 +281,17 @@ fn media_blocks_of(block: &ContentBlock) -> Option<Vec<serde_json::Value>> {
 /// the PLAIN placeholder for those even when a persisted reference exists —
 /// the file would hold a JSON blob the model cannot usefully `Read`.
 #[must_use]
-fn has_media_blocks(blocks: Option<&[serde_json::Value]>) -> bool {
+fn has_media_blocks(blocks: Option<&Source>) -> bool {
     blocks.is_some_and(|blocks| {
-        blocks.iter().any(|b| {
-            matches!(
-                b.get("type").and_then(serde_json::Value::as_str),
-                Some("image" | "document")
-            )
-        })
+        (0..blocks
+            .array_len("")
+            .expect("tool result content is an array"))
+            .any(|index| {
+                matches!(
+                    blocks.string_at(&format!("/{index}/type")),
+                    Some("image" | "document")
+                )
+            })
     })
 }
 
@@ -333,13 +354,13 @@ pub fn estimate_keep_recent(
                         // An already-cleared placeholder contributes nothing
                         // (TS `!Wxd` / `!LH_`).
                         if clear_set.contains(tool_use_id)
-                            && !already_compacted(content, content_blocks.as_deref())
+                            && !already_compacted(content, content_blocks.as_ref())
                         {
                             cleared_count += 1;
                             candidate_ids.insert(tool_use_id.clone());
                             tokens_saved = tokens_saved.saturating_add(tool_result_tokens(
                                 content,
-                                content_blocks.as_deref(),
+                                content_blocks.as_ref(),
                             ));
                         }
                     }
@@ -453,6 +474,10 @@ impl Microcompactor {
                     is_meta,
                     is_compact_summary,
                     is_visible_in_transcript_only,
+                    turn_companion,
+                    usage_limit_note,
+                    origin,
+                    turn_origin,
                 } = m
                 {
                     let new_content: Vec<ContentBlock> = content
@@ -470,7 +495,7 @@ impl Microcompactor {
                                     // takes the plain placeholder, even when a
                                     // reference exists for it.
                                     let replacement =
-                                        if has_media_blocks(media_blocks_of(&b).as_deref()) {
+                                        if has_media_blocks(media_blocks_of(&b).as_ref()) {
                                             TIME_BASED_MC_CLEARED_MESSAGE.to_string()
                                         } else {
                                             persisted.get(tool_use_id).cloned().unwrap_or_else(
@@ -479,7 +504,7 @@ impl Microcompactor {
                                         };
                                     return ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
-                                        content: replacement,
+                                        content: replacement.into(),
                                         is_error: *is_error,
                                         // Preserve the provider id through content clearing.
                                         provider_tool_use_id: provider_tool_use_id.clone(),
@@ -496,6 +521,10 @@ impl Microcompactor {
                         is_meta,
                         is_compact_summary,
                         is_visible_in_transcript_only,
+                        turn_companion,
+                        usage_limit_note,
+                        origin,
+                        turn_origin,
                     }
                 } else {
                     m
@@ -532,10 +561,11 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id,
                 name: name.into(),
-                input: json!({}),
+                input: Source::from_serde_value(&json!({})).expect("empty object is valid JSON"),
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -545,20 +575,27 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,
                 content: content.into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
-    fn result_content(msg: &ConversationMessage) -> &str {
+    fn result_content(msg: &ConversationMessage) -> String {
         match msg {
             ConversationMessage::User { content, .. } => match &content[0] {
-                ContentBlock::ToolResult { content, .. } => content.as_str(),
+                ContentBlock::ToolResult { content, .. } => content
+                    .string_at("")
+                    .expect("tool result content is a string")
+                    .to_owned(),
                 _ => panic!("expected tool_result"),
             },
             _ => panic!("expected user message"),
@@ -606,12 +643,15 @@ mod tests {
         let mut nested = user_tool_result(old.clone(), "display text must not be counted");
         if let ConversationMessage::User { content, .. } = &mut nested {
             if let ContentBlock::ToolResult { content_blocks, .. } = &mut content[0] {
-                *content_blocks = Some(vec![
-                    json!({"type":"text", "text":"你好😀"}),
-                    json!({"type":"image", "source":{}}),
-                    json!({"type":"document", "source":{}}),
-                    json!({"type":"unknown", "text":"x".repeat(80_000)}),
-                ]);
+                *content_blocks = Some(
+                    Source::from_serde_value(&json!([
+                        json!({"type":"text", "text":"你好😀"}),
+                        json!({"type":"image", "source":{}}),
+                        json!({"type":"document", "source":{}}),
+                        json!({"type":"unknown", "text":"x".repeat(80_000)}),
+                    ]))
+                    .expect("test content blocks are valid JSON"),
+                );
             }
         }
         let messages = vec![
@@ -949,9 +989,12 @@ mod tests {
                     tool_use_id,
                     content,
                     ..
-                } if tool_use_id.as_str() == "t0" || tool_use_id.as_str() == "t1" => {
-                    Some(content.clone())
-                }
+                } if tool_use_id.as_str() == "t0" || tool_use_id.as_str() == "t1" => Some(
+                    content
+                        .string_at("")
+                        .expect("tool result content is a string")
+                        .to_owned(),
+                ),
                 _ => None,
             })
             .collect();
@@ -972,11 +1015,12 @@ mod tests {
         // `lCt`'s guard: the file would hold a JSON blob the model cannot
         // usefully Read, so those always take the plain placeholder even when
         // a reference exists for them.
-        let blocks = vec![serde_json::json!({"type": "image"})];
+        let blocks = Source::from_serde_value(&json!([{"type": "image"}]))
+            .expect("test blocks are valid JSON");
         assert!(has_media_blocks(Some(&blocks)));
-        assert!(!has_media_blocks(Some(&[
-            serde_json::json!({"type": "text"})
-        ])));
+        let text_blocks = Source::from_serde_value(&json!([{"type": "text"}]))
+            .expect("test blocks are valid JSON");
+        assert!(!has_media_blocks(Some(&text_blocks)));
         assert!(!has_media_blocks(None));
 
         let mut msgs = Vec::new();

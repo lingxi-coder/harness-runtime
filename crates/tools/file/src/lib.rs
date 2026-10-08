@@ -86,6 +86,114 @@ pub use notebook_edit::NotebookEditTool;
 pub use read::FileReadTool;
 pub use write::FileWriteTool;
 
+pub(crate) use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+/// Read a string-valued builtin argument without materializing a serde value.
+/// File-system and matcher APIs require UTF-8, so an exact source string that
+/// cannot be represented as Rust UTF-8 is rejected at this boundary.
+pub(crate) fn input_string<'a>(input: &'a Utf16JsonProjection, field: &str) -> Option<&'a str> {
+    let value = input.get_property(field)?;
+    String::from_utf16(value.code_units()?).ok()?;
+    value.as_str()
+}
+
+pub(crate) fn input_bool(input: &Utf16JsonProjection, field: &str) -> Option<bool> {
+    input.get_property(field)?.as_bool()
+}
+
+pub(crate) fn input_u64(input: &Utf16JsonProjection, field: &str) -> Option<u64> {
+    unsigned_integer_at(input, &format!("/{field}"))
+}
+
+pub(crate) fn unsigned_integer_at(input: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
+    let number = input.number_at(pointer)?;
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number >= u64::MAX as f64 {
+        return None;
+    }
+    Some(number as u64)
+}
+
+pub(crate) fn input_usize(input: &Utf16JsonProjection, field: &str) -> Option<usize> {
+    let value = input.get_property(field)?;
+    if let Some(number) = value.as_number() {
+        return (number >= 0.0 && number.is_finite()).then_some(number as usize);
+    }
+    let text = value.as_str()?;
+    if String::from_utf16(value.code_units()?).is_err() {
+        return None;
+    }
+    let number = text.trim().parse::<f64>().ok()?;
+    (number >= 0.0 && number.is_finite()).then_some(number as usize)
+}
+
+pub(crate) fn generated_result(value: &serde_json::Value) -> Utf16JsonProjection {
+    tool_api::tool_trait::generated_builtin_result(value)
+}
+
+/// All file tools advertise schemas generated from local builtin definitions;
+/// Native input repair therefore uses that exact advertised schema.
+pub(crate) fn input_repair_metadata() -> tool_api::tool_trait::ToolInputRepairMetadata {
+    use tool_api::tool_trait::{
+        ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+    };
+
+    ToolInputRepairMetadata::Known {
+        schema: ToolInputRepairSchema::Advertised,
+        schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+        exempt_top_level_keys: None,
+    }
+}
+
+/// Materialize locally generated result data only for legacy-shaped unit-test
+/// assertions. Production paths inspect [`Utf16JsonProjection`] directly.
+#[cfg(test)]
+pub(crate) fn test_data(value: &Utf16JsonProjection) -> serde_json::Value {
+    serde_json::from_str(
+        &value
+            .to_json_string()
+            .expect("generated test result is valid JSON"),
+    )
+    .expect("generated test result is representable as serde_json::Value")
+}
+
+/// Read model text from a typed result in unit tests without changing its
+/// Source-backed production representation.
+#[cfg(test)]
+pub(crate) fn test_model_text(value: Option<&Utf16JsonProjection>) -> Option<&str> {
+    value.and_then(|text| text.string_at(""))
+}
+
+/// Resolve a model file path against the active session cwd and normalize it
+/// lexically, matching Native `VE`/`Ke`. The result is the read-state key and
+/// observed route; canonical paths remain separate for permission and I/O.
+#[must_use]
+pub(crate) fn normalize_model_file_path(
+    file_path: &str,
+    cwd: &std::path::Path,
+) -> std::path::PathBuf {
+    let path = tool_api::util::path_validation::resolve_against_cwd(
+        std::path::PathBuf::from(file_path),
+        cwd,
+    );
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
 /// Read-before-write staleness error: emitted when Edit / Write / NotebookEdit
 /// detect that the target file changed on disk since the last `Read` (its
 /// floor-truncated mtime advanced past the recorded read timestamp, and the
@@ -108,8 +216,7 @@ pub use write::FileWriteTool;
 /// call phase), so the guard emits the validate-phase literal — the bytes the
 /// model actually gets upstream. (Before FT-07 the port emitted `WVo` here,
 /// i.e. the oracle's RARE branch, for every stale case.)
-pub const FILE_UNEXPECTEDLY_MODIFIED_ERROR: &str =
-    "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
+pub const FILE_UNEXPECTEDLY_MODIFIED_ERROR: &str = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
 
 /// Read-before-write "never read" error: emitted when Edit / Write /
 /// NotebookEdit are asked to modify an EXISTING file that has no recorded
@@ -130,8 +237,7 @@ pub const FILE_NOT_READ_ERROR: &str =
 /// LingXi has a unified `call` path, so the guard below reports the
 /// validate-phase [`FILE_UNEXPECTEDLY_MODIFIED_ERROR`] instead; this constant
 /// stays byte-locked here as the oracle's other branch (FT-07).
-pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
-    "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit.";
+pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str = "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit.";
 
 /// Read-state staleness guard shared by Edit / Write / NotebookEdit (Batch F).
 ///
@@ -168,8 +274,8 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 ///
 /// Arguments:
 /// - `map`: the shared `read_file_state` registry (`ctx.read_file_state`).
-/// - `canon`: the canonicalized absolute path used as the registry key (the
-///   same key the `Read` tool wrote under).
+/// - `read_state_key`: Native's normalized absolute model path, produced by
+///   the same current session-cwd route normalizer as `Read`.
 /// - `current_mtime_ms`: the file's *current* floor-truncated mtime (ms).
 /// - `current_full_content`: the file's *current* content, decoded the SAME
 ///   way `Read` stores it (so the content-equality fallback compares like with
@@ -264,16 +370,19 @@ pub fn read_requirement_waived(model: Option<&str>, canon: &std::path::Path) -> 
     lingxi_core::host::read_auto_allow::read_auto_allowed(&canon.to_string_lossy())
 }
 
+/// Check the entry under Native's normalized model-path key. Callers retain
+/// canonical paths separately for I/O and permission, and pass current mtime
+/// and content separately as staleness metadata.
 pub fn check_read_before_write(
     map: &tool_api::read_file_state::ReadFileStateMap,
-    canon: &std::path::Path,
+    read_state_key: &std::path::Path,
     current_mtime_ms: i64,
     current_full_content: &str,
     waived: bool,
 ) -> Result<(), tool_api::tool_trait::ToolError> {
     use tool_api::tool_trait::ToolError;
 
-    let entry = match tool_api::read_file_state::get(map, canon) {
+    let entry = match tool_api::read_file_state::get(map, read_state_key) {
         Some(e) => e,
         // No recorded read at all → refuse. (claude-code `FOg`: `if(!r) throw
         // PWn`.) A ranged / offset read still HAS an entry, so it is NOT
@@ -397,6 +506,24 @@ pub fn register_all_with_live_cwd(
 mod staleness_guard_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn model_path_normalization_uses_session_cwd_and_clamps_above_root() {
+        let cwd = PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+            .join("workspace")
+            .join("current");
+        assert_eq!(
+            normalize_model_file_path("nested/../source.txt", &cwd),
+            cwd.join("source.txt")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            normalize_model_file_path("/../tmp/source.txt", &cwd),
+            PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+                .join("tmp")
+                .join("source.txt")
+        );
+    }
     use tool_api::read_file_state::{new_read_file_state_map, set, ReadFileEntry};
     use tool_api::tool_trait::ToolError;
 
@@ -462,7 +589,10 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "new content", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
+                assert_eq!(
+                    m.string_at("").as_deref(),
+                    Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+                );
             }
             other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
@@ -494,7 +624,10 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "body\n", false);
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
+                assert_eq!(
+                    m.string_at("").as_deref(),
+                    Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR)
+                );
             }
             other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
@@ -521,7 +654,9 @@ mod staleness_guard_tests {
     /// `"invalid input: "`, so we match on the `InvalidInput` payload).
     fn assert_err_msg(r: Result<(), ToolError>, expected: &str) {
         match r.unwrap_err() {
-            ToolError::InvalidInput(m) => assert_eq!(m, expected),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m.string_at("").as_deref(), Some(expected))
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
     }
@@ -829,7 +964,8 @@ mod staleness_guard_tests {
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
                 assert_eq!(
-                    m, FILE_UNEXPECTEDLY_MODIFIED_ERROR,
+                    m.string_at("").as_deref(),
+                    Some(FILE_UNEXPECTEDLY_MODIFIED_ERROR),
                     "a waived model must still be told the file changed"
                 );
             }

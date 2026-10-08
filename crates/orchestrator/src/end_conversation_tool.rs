@@ -11,16 +11,20 @@
 //! the tool call and decides whether to end (2nd consecutive call) or return the
 //! re-read reminder (1st call).
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
-use serde_json::{json, Value};
-use tool_api::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
-    ToolStaticContext, ToolUseContext,
+use serde_json::json;
+use tool_api::tool_trait::{
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    PromptOptions, ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+    ToolStaticContext,
 };
+use tool_api::{Tool, ToolCallResult, ToolError, ToolProgressSender, ToolUseContext};
 
 use crate::prompt::end_conversation as ec;
 
@@ -35,7 +39,7 @@ pub type EndConversationSlot = Arc<AtomicBool>;
 /// — the composition root computes it; DEFAULT `false` keeps the tool
 /// unregistered/inert so the prompt + tool set stay byte-identical.
 pub struct EndConversationTool {
-    schema: Value,
+    schema: Utf16JsonProjection,
     enabled: bool,
     /// Raised by [`Self::call`] when the conversation is actually ended (the
     /// 2nd consecutive call). The turn loop consumes it.
@@ -48,7 +52,7 @@ impl EndConversationTool {
     #[must_use]
     pub fn new(enabled: bool, end_requested: EndConversationSlot) -> Self {
         Self {
-            schema: ec::input_schema(),
+            schema: generated_builtin_schema(&ec::input_schema()),
             enabled,
             end_requested,
         }
@@ -94,8 +98,16 @@ impl Tool for EndConversationTool {
         ec::END_CONVERSATION_TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: Some(HashSet::new()),
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -108,12 +120,12 @@ impl Tool for EndConversationTool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         // claude-code `isReadOnly(){return!0}`.
         true
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         // claude-code `isConcurrencySafe(){return!1}`.
         false
     }
@@ -124,13 +136,13 @@ impl Tool for EndConversationTool {
 
     async fn check_permissions(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         // claude-code `checkPermissions(){return{behavior:"allow",updatedInput}}`.
         permission::PermissionResult::Allow {
             reason: permission::PermissionDecisionReason::Other {
-                reason: "end conversation".to_string(),
+                reason: "end conversation".into(),
             },
             updated_input: Some(input.clone()),
             update_destination: None,
@@ -138,19 +150,26 @@ impl Tool for EndConversationTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // claude-code `description(){return G2r}` — the full text.
         ec::render_prompt(ec::END_CONVERSATION_TOOL_NAME)
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         // claude-code `prompt(){return G2r}` — same full text as description().
-        ec::render_prompt(ec::END_CONVERSATION_TOOL_NAME)
+        ec::render_prompt(ec::END_CONVERSATION_TOOL_NAME).into()
     }
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -159,17 +178,15 @@ impl Tool for EndConversationTool {
             // FORK branch (206 checks `t.agentId` FIRST): a background fork can
             // end neither the main conversation nor itself. Return the fork
             // reflection prompt with ended:false and NEVER raise the slot.
-            return Ok(ToolCallResult {
-                data: json!({
-                    "ended": false,
-                    "message": ec::END_CONVERSATION_FORK_REFLECTION_PROMPT,
-                }),
-                model_content: Some(ec::END_CONVERSATION_FORK_REFLECTION_PROMPT.to_string()),
-                new_messages: Vec::new(),
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-            });
+            let data = generated_builtin_result(&json!({
+                "ended": false,
+                "message": ec::END_CONVERSATION_FORK_REFLECTION_PROMPT,
+            }));
+            let mut result = ToolCallResult::from_data(data);
+            result.model_content = Some(source_text_projection(
+                ec::END_CONVERSATION_FORK_REFLECTION_PROMPT,
+            ));
+            return Ok(result);
         }
         if prior_assistant_turn_called_end_conversation(&ctx.messages) {
             // SECOND consecutive call → actually end. Raise the slot so the turn
@@ -178,29 +195,23 @@ impl Tool for EndConversationTool {
             // (MWn), NOT the finalMessage — matching 206's
             // `{data:{ended:true, message: MWn}}` + `finalMessage: k4i`.
             self.end_requested.store(true, Ordering::SeqCst);
-            Ok(ToolCallResult {
-                data: json!({
+            Ok(ToolCallResult::from_data(generated_builtin_result(
+                &json!({
                     "ended": true,
                     "message": ec::END_CONVERSATION_TOOL_RESULT,
                 }),
-                model_content: None,
-                new_messages: Vec::new(),
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-            })
+            )))
         } else {
             // FIRST call → do NOT end; return the re-read reminder (guidance
             // appended) so the model must confirm by calling again.
             let reminder = ec::render_reread_reminder(tool, &ec::render_prompt(tool));
-            Ok(ToolCallResult {
-                data: json!({ "ended": false, "message": reminder }),
-                model_content: Some(reminder),
-                new_messages: Vec::new(),
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-            })
+            let data = generated_builtin_result(&json!({
+                "ended": false,
+                "message": reminder,
+            }));
+            let mut result = ToolCallResult::from_data(data);
+            result.model_content = Some(source_text_projection(&reminder));
+            Ok(result)
         }
     }
 }
@@ -209,6 +220,10 @@ impl Tool for EndConversationTool {
 mod tests {
     use super::*;
     use lingxi_core::types::MessageId;
+
+    fn source_json(input: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(input).expect("valid source fixture")
+    }
 
     fn tool() -> EndConversationTool {
         EndConversationTool::new(true, Arc::new(AtomicBool::new(false)))
@@ -224,6 +239,7 @@ mod tests {
                 provider_id: None,
             }],
             stop_reason: None,
+            resumable: None,
         }
     }
 
@@ -239,10 +255,16 @@ mod tests {
         assert_eq!(t.name(), "EndConversation");
         assert!(!t.is_enabled(&ToolStaticContext::default()));
         assert!(t.should_defer());
-        assert!(t.is_read_only(&json!({})));
-        assert!(!t.is_concurrency_safe(&json!({})));
+        let input = source_json("{}");
+        assert!(t.is_read_only(&input));
+        assert!(!t.is_concurrency_safe(&input));
         assert_eq!(t.max_result_size_chars(), 10_000);
-        assert_eq!(t.input_schema()["additionalProperties"], false);
+        assert_eq!(
+            t.input_schema()
+                .get_property("additionalProperties")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 
     #[tokio::test]
@@ -250,7 +272,7 @@ mod tests {
         let t = tool();
         let d = t
             .description(
-                &json!({}),
+                &source_json("{}"),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -259,7 +281,40 @@ mod tests {
         assert!(t.is_enabled(&ToolStaticContext::default()));
         assert!(d.starts_with("End the current conversation. Use only for sustained user abuse"));
         assert!(d.ends_with("and then use the EndConversation tool to do so."));
-        assert_eq!(d, t.prompt(&PromptOptions::default()).await);
+        let prompt = t.prompt(&PromptOptions::default()).await;
+        assert_eq!(
+            d.as_str(),
+            prompt.string_at("").expect("prompt is a root string")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_allow_echoes_exact_updated_input() {
+        let t = tool();
+        let input = source_json(r#"{"value":"left\ud800right"}"#);
+        let result = t.check_permissions(&input, &ctx_with(Vec::new())).await;
+        let permission::PermissionResult::Allow {
+            updated_input: Some(updated),
+            ..
+        } = result
+        else {
+            panic!("EndConversation always allows and echoes updated input")
+        };
+        assert_eq!(
+            updated.string_units("/value"),
+            Some(vec![
+                b'l' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b't' as u16,
+                0xd800,
+                b'r' as u16,
+                b'i' as u16,
+                b'g' as u16,
+                b'h' as u16,
+                b't' as u16,
+            ])
+        );
     }
 
     #[tokio::test]
@@ -268,13 +323,23 @@ mod tests {
         let t = tool();
         let (tx, _rx) = tool_api::progress::progress_channel();
         let r = t
-            .call(json!({}), ctx_with(vec![asst_calling_endconv()]), tx)
+            .call(
+                source_json("{}"),
+                ctx_with(vec![asst_calling_endconv()]),
+                tx,
+            )
             .await
             .expect("ok");
-        assert_eq!(r.data["ended"], false);
+        assert_eq!(
+            r.data
+                .get_property("ended")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
         assert!(r
             .model_content
-            .as_deref()
+            .as_ref()
+            .and_then(|content| content.string_at(""))
             .unwrap()
             .starts_with("Re-read the EndConversation tool guidance below."));
         assert!(
@@ -293,11 +358,24 @@ mod tests {
             ConversationMessage::user(MessageId::new(), "reminder ack".into()),
             asst_calling_endconv(), // current turn
         ];
-        let r = t.call(json!({}), ctx_with(msgs), tx).await.expect("ok");
-        assert_eq!(r.data["ended"], true);
+        let r = t
+            .call(source_json("{}"), ctx_with(msgs), tx)
+            .await
+            .expect("ok");
+        assert_eq!(
+            r.data
+                .get_property("ended")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         // Tool RESULT (MWn), returned to the model — NOT the user-facing
         // finalMessage (k4i, emitted separately by the turn loop).
-        assert_eq!(r.data["message"], "Claude has ended this chat.");
+        assert_eq!(
+            r.data
+                .get_property("message")
+                .and_then(|value| value.as_str()),
+            Some("Claude has ended this chat.")
+        );
         assert!(
             t.end_requested.load(Ordering::SeqCst),
             "slot raised on 2nd call"
@@ -316,13 +394,18 @@ mod tests {
             asst_calling_endconv(),
         ]);
         ctx.agent_id = Some(lingxi_core::types::AgentId::new());
-        let r = t.call(json!({}), ctx, tx).await.expect("ok");
+        let r = t.call(source_json("{}"), ctx, tx).await.expect("ok");
         assert_eq!(
-            r.data["ended"], false,
+            r.data
+                .get_property("ended")
+                .and_then(|value| value.as_bool()),
+            Some(false),
             "a fork can never end the conversation"
         );
-        assert!(r.data["message"]
-            .as_str()
+        assert!(r
+            .data
+            .get_property("message")
+            .and_then(|value| value.as_str())
             .unwrap()
             .starts_with("You are running as a background fork"));
         assert!(

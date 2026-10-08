@@ -216,8 +216,22 @@ fn consume_fusion_flag(
 /// Returns [`FUSION_SLASH_USAGE`] or a more specific mutex / parse error.
 pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, String> {
     let mut acc = FusionFlagAccum::default();
-    let tokens = &args.positional_args;
-    let raw = args.raw_args.as_str();
+    // Fusion's request schema is a typed-scalar API. Decode the raw argument
+    // text strictly at that boundary; arbitrary UTF-16 prompts remain exact
+    // in the command dispatcher, while Fusion rejects code units that cannot
+    // be represented as scalar Rust text.
+    let raw = args.raw_args_utf8().ok_or_else(|| {
+        format!("Fusion arguments must be valid Unicode text.\n{FUSION_SLASH_USAGE}")
+    })?;
+    let tokens = (0..args.positional_args.len())
+        .map(|index| {
+            args.positional_arg_utf8(index)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("Fusion arguments must be valid Unicode text.\n{FUSION_SLASH_USAGE}")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // `tokens` is shell-quote output: unquoted `*`/`?` globs are dropped,
     // `#` truncates the remainder as a comment, `( ) | & ; < >` are operators.
     // That is fine for recognising leading `--flag` words (always plain
@@ -228,7 +242,7 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let mut cursor = 0usize;
     let mut i = 0;
     while i < tokens.len() {
-        match consume_fusion_flag(tokens, raw, i, cursor, &mut acc)? {
+        match consume_fusion_flag(&tokens, raw, i, cursor, &mut acc)? {
             FlagStep::Consumed {
                 next_i,
                 next_cursor,
@@ -495,7 +509,7 @@ mod tests {
     use crate::parse_slash_command;
 
     fn parse(line: &str) -> Result<FusionSlashArgs, String> {
-        let parsed = parse_slash_command(line).expect("slash");
+        let parsed = parse_slash_command(&line.into()).expect("slash");
         parse_fusion_slash(&parsed)
     }
 

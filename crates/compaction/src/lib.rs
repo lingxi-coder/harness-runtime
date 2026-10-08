@@ -65,11 +65,10 @@ pub use partial::{
 };
 pub use post_compact::{
     budget_post_compact_files, estimate_content_tokens, is_main_thread_compact,
-    render_invoked_skills_attachment, render_invoked_skills_attachment_with_sidecar,
-    restore_post_compact_files, restore_post_compact_skills, run_post_compact_cleanup,
-    select_post_compact_files, truncate_skill_content, AttachedSkillContent, FileRestoreCandidate,
-    PostCompactBuilder, PostCompactMessages, RenderedInvokedSkillsAttachment, RestoredFile,
-    RestoredSkill, SkillRestoreCandidate, INVOKED_SKILLS_ATTACHMENT_PREAMBLE,
+    render_invoked_skills_attachment, restore_post_compact_files, restore_post_compact_skills,
+    run_post_compact_cleanup, select_post_compact_files, truncate_skill_content,
+    AttachedSkillContent, FileRestoreCandidate, PostCompactBuilder, PostCompactMessages,
+    RestoredFile, RestoredSkill, SkillRestoreCandidate, INVOKED_SKILLS_ATTACHMENT_PREAMBLE,
     SKILL_TRUNCATION_MARKER,
 };
 pub use prompt::{

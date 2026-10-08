@@ -69,8 +69,9 @@ pub use token_usage_replay::{
     ReplayTurnStatus,
 };
 pub use tracker::{
-    CostAttemptReceipt, CostAttemptSettlement, CostModelResponse, CostResponseObservation,
-    CostResponseReceipt, CostResponseSettlement, CostSessionScope, CostState, CostTracker,
-    ModelUsage, PreparedCostSession, RetainedCostResponse,
+    CostAttemptReceipt, CostAttemptSettlement, CostModelResponse, CostResponseMeasurement,
+    CostResponseObservation, CostResponsePricing, CostResponseReceipt, CostResponseSettlement,
+    CostSessionScope, CostState, CostTracker, ModelUsage, PreparedCostSession,
+    RetainedCostResponse,
 };
 pub use usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};

@@ -1,11 +1,11 @@
 use super::*;
-use crate::test_support::{
-    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
-    message_delta_stop, message_start, message_stop, mock_message_response, noop_hook_executor,
-    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider,
-};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider, content_block_start_text, content_block_start_tool_use,
+    content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
+    mock_message_response, noop_hook_executor, text_delta,
+};
 use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use std::sync::Arc;
@@ -72,8 +72,11 @@ impl Tool for ModelSwitchTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "model-switch".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -149,8 +152,11 @@ impl Tool for PlainTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "plain".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -192,6 +198,7 @@ async fn batched_skill_model_override_switches_session_model() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -234,6 +241,7 @@ async fn batched_no_modifier_leaves_session_model_untouched() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -277,7 +285,7 @@ async fn streaming_skill_model_override_switches_session_and_next_call() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -287,7 +295,7 @@ async fn streaming_skill_model_override_switches_session_and_next_call() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     orch.run_turn_streaming("switch please")
         .await
@@ -327,7 +335,7 @@ async fn streaming_no_modifier_leaves_session_model_untouched() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -337,7 +345,7 @@ async fn streaming_no_modifier_leaves_session_model_untouched() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     orch.run_turn_streaming("no switch")
         .await
         .expect("streaming turn");
@@ -370,7 +378,7 @@ async fn streaming_threads_model_profile_to_stream_call() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -380,7 +388,7 @@ async fn streaming_threads_model_profile_to_stream_call() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     // Set model_profile on the session directly (mirrors what switch_model does).
     {
         let mut s = orch.session.lock().await;

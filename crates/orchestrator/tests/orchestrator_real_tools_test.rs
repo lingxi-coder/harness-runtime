@@ -82,8 +82,11 @@ impl Tool for SimpleReadTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "Read a UTF-8 file".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -97,7 +100,7 @@ impl Tool for SimpleReadTool {
             .ok_or_else(|| ToolError::InvalidInput("file_path required".into()))?;
         let content = tokio::fs::read_to_string(path)
             .await
-            .map_err(|e| ToolError::Io(format!("read {path}: {e}")))?;
+            .map_err(|e| ToolError::Io(format!("read {path}: {e}").into()))?;
         Ok(ToolCallResult {
             data: json!({ "content": content }),
             model_content: None,
@@ -130,7 +133,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "I read it".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );

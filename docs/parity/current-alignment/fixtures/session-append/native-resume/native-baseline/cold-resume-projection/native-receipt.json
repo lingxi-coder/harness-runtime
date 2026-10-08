@@ -1,0 +1,228 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "8fa66e806d8f639fa498d22b835eae71c26521d50f19e2af52ff2905b9a172ba",
+  "fixture_sha256": {
+    "cases.json": "5be0206f41fe741bb0446075cd0063fea883b777254fc3a2763dd3ae3adb23e9",
+    "plugin/hooks/register.js": "4f1e420d510c926859b2a8b5bfa088a2319c7aa4a4c4e88220458c8731f7fa9c",
+    "plugin/hooks/hooks.json": "b931956e2be9f76c91e4364655b2ab31493908b4920a088282a6c19aa7e8a6dc",
+    "plugin/.claude-plugin/plugin.json": "d5571517b507bc6731e4bd1744e8f42886a7fb93ee9fa46d54651c65fc8f6226"
+  },
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000000016",
+    "model": "claude-sonnet-4-5",
+    "first_prompt": "Create the fixed assistant session-append row.",
+    "resume_prompt": "Continue this fixed session and report the result.",
+    "assistant_rewrite_prefix": "accepted Mod text ",
+    "assistant_rewrite_units": [
+      55296,
+      937,
+      56320
+    ]
+  },
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "phase_results": [
+    {
+      "phase": "initial",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_bytes": 1624,
+      "stdout_sha256": "fc660c7ccab78037068f8b5416f50ff2e17cf530d8cc7668e614de59d88ebedb",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "post_count": 1
+    },
+    {
+      "phase": "resume",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_bytes": 1614,
+      "stdout_sha256": "20501da230a5de6dc628142634b4ba9fc6dd7d5225006e2cf105d6149f97d5fe",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "post_count": 1
+    }
+  ],
+  "requests": [
+    {
+      "method": "POST",
+      "phase": "initial",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 28892,
+      "request_sha256": "a85e90db894e019657a9985d21988f9c925e7f7eda1930f83e50413fed01d476"
+    },
+    {
+      "method": "POST",
+      "phase": "resume",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 29214,
+      "request_sha256": "0538351807287c1d86a4652c8daa39952c76683dcd1ce918ad368b15232d9d8b"
+    }
+  ],
+  "evidence": {
+    "initial.stdout.raw": {
+      "bytes": 1624,
+      "sha256": "fc660c7ccab78037068f8b5416f50ff2e17cf530d8cc7668e614de59d88ebedb"
+    },
+    "resume.stdout.raw": {
+      "bytes": 1614,
+      "sha256": "20501da230a5de6dc628142634b4ba9fc6dd7d5225006e2cf105d6149f97d5fe"
+    },
+    "rewritten-assistant-session-row.raw.jsonl": {
+      "bytes": 1090,
+      "sha256": "218960e89ebff5bd3730370bbc806dc2b97cfa562165bdbf2751b92442eb14df"
+    },
+    "resume-assistant-text.raw.json": {
+      "bytes": 28,
+      "sha256": "394303b75af550b592a2496abc0758bb6b314c109ca54f7307dca631f85a00c6"
+    },
+    "append-meta.raw.txt": {
+      "bytes": 458,
+      "sha256": "860cc6ce2f6c9a48edb48380c568b01b7e5a383a1d6e53d86ccd82e588ed04b4"
+    },
+    "session-messages-meta.raw.txt": {
+      "bytes": 418,
+      "sha256": "2e8a693e5a08ad5b41c86f8f01e28290854a68a22be6fec908c805511837e835"
+    }
+  },
+  "session_row_utf16_units": [
+    97,
+    99,
+    99,
+    101,
+    112,
+    116,
+    101,
+    100,
+    32,
+    77,
+    111,
+    100,
+    32,
+    116,
+    101,
+    120,
+    116,
+    32,
+    55296,
+    937,
+    56320
+  ],
+  "resumed_request_utf16_units": [
+    97,
+    99,
+    99,
+    101,
+    112,
+    116,
+    101,
+    100,
+    32,
+    77,
+    111,
+    100,
+    32,
+    116,
+    101,
+    120,
+    116,
+    32,
+    65533,
+    937,
+    65533
+  ],
+  "resumed_request_projection": "well_formed_replacement_units",
+  "cold_resume_session_messages": {
+    "path": "session-messages-meta.raw.txt",
+    "sha256": "2e8a693e5a08ad5b41c86f8f01e28290854a68a22be6fec908c805511837e835",
+    "answer_units": [
+      78,
+      97,
+      116,
+      105,
+      118,
+      101,
+      32,
+      114,
+      101,
+      115,
+      117,
+      109,
+      101,
+      32,
+      99,
+      111,
+      109,
+      112,
+      108,
+      101,
+      116,
+      101
+    ],
+    "summary_units": [
+      [
+        97,
+        99,
+        99,
+        101,
+        112,
+        116,
+        101,
+        100,
+        32,
+        77,
+        111,
+        100,
+        32,
+        116,
+        101,
+        120,
+        116,
+        32,
+        65533,
+        937,
+        65533
+      ]
+    ],
+    "summary_projection": "well_formed_replacement_units",
+    "api_units": [
+      [
+        97,
+        99,
+        99,
+        101,
+        112,
+        116,
+        101,
+        100,
+        32,
+        77,
+        111,
+        100,
+        32,
+        116,
+        101,
+        120,
+        116,
+        32,
+        65533,
+        937,
+        65533
+      ]
+    ],
+    "api_projection": "well_formed_replacement_units"
+  },
+  "checks": {
+    "native_session_row_keeps_source_units": true,
+    "cold_resume_request_contains_rewritten_assistant": true,
+    "cold_resume_uses_known_projection": true,
+    "cold_resume_summary_view_uses_known_projection": true,
+    "cold_resume_api_view_uses_known_projection": true
+  },
+  "scope": "Native 2.1.293 public CLI: first process persists the fixed session.append rewrite; second process uses --resume; a turn.complete public hook reads $.session.messages() and $.session.messages({as:\"api\"}). The persisted row keeps lone UTF-16 units, while the resumed model request and both public message views project them to U+FFFD. Request bodies are represented only by hashes because they contain Native system prompt/context."
+}

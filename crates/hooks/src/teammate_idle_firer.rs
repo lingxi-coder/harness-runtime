@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use crate::response::ExactHookText;
 use async_trait::async_trait;
 
 /// The byte-faithful wire payload for a `TeammateIdle` fire, sourced from the
@@ -65,12 +66,12 @@ pub struct TeammateIdleOutcome {
     pub prevent_continuation: bool,
     /// Hook-provided `stopReason`, or the oracle default when continuation was
     /// prevented.
-    pub reason: Option<String>,
+    pub reason: Option<ExactHookText>,
     /// Model-facing blocking feedback. Each entry becomes one meta user
     /// message and therefore drives another turn instead of allowing idle.
-    pub blocking_feedback: Vec<String>,
+    pub blocking_feedback: Vec<ExactHookText>,
     /// Model-facing `additionalContext` values, in hook execution order.
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<ExactHookText>,
 }
 
 impl TeammateIdleOutcome {

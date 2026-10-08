@@ -304,8 +304,9 @@ mod tests {
                 .nth(1)
                 .and_then(|value| value.split([',', '}']).next())
                 .unwrap_or("1");
-            let response_body =
-                format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"capabilities\":{{}}}}}}");
+            let response_body = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"mobile-route-test\",\"version\":\"test\"}}}}}}"
+            );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(), response_body
@@ -515,6 +516,7 @@ mod tests {
                     expected_era: Some(lingxi_core::host::McpProtocolEra::Legacy),
                     deadline_ms: 10_000,
                     probe_timeout_ms: None,
+                    elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
                 },
             )
             .await
@@ -698,6 +700,7 @@ mod tests {
                     expected_era: Some(lingxi_core::host::McpProtocolEra::Legacy),
                     deadline_ms: 5_000,
                     probe_timeout_ms: None,
+                    elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
                 },
             )
             .await

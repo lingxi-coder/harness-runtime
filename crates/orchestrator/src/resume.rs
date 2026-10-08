@@ -32,8 +32,10 @@ use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, Orches
 use crate::test_support::{HookExecutor, PermissionGate};
 use lingxi_core::host::{FileSystem, OutputStream};
 use lingxi_core::session::{ActiveGoalState, GoalOrigin};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use lingxi_core::SessionState;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use session::jsonl::{
     load_session_across_worktrees, load_session_entries_across_worktrees, JsonlMessage,
@@ -56,6 +58,191 @@ pub enum ResumeError {
     /// Deferred-tool replay failed after the transcript loaded.
     #[error("deferred replay: {0}")]
     DeferredReplay(String),
+}
+
+#[cfg(test)]
+mod mod_session_turn_resume_tests {
+    use super::*;
+
+    fn hook_attachment_row(session: Uuid, uuid: Uuid, attachment: Value) -> JsonlMessage {
+        serde_json::from_value(serde_json::json!({
+            "type":"attachment",
+            "uuid":uuid.to_string(),
+            "parentUuid":null,
+            "sessionId":session.to_string(),
+            "attachment":attachment
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn restored_mod_chain_context_uses_plugin_origin_and_skips_record_only_hooks() {
+        let session = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let ignored_id = Uuid::new_v4();
+        let rows = vec![
+            hook_attachment_row(
+                session,
+                plugin_id,
+                serde_json::json!({
+                    "type":"hook_additional_context",
+                    "hookName":"prompt.submit",
+                    "hookEvent":"UserPromptSubmit",
+                    "content":["plugin context"]
+                }),
+            ),
+            hook_attachment_row(
+                session,
+                ignored_id,
+                serde_json::json!({
+                    "type":"hook_error_during_execution",
+                    "hookName":"PostToolUse",
+                    "hookEvent":"PostToolUse",
+                    "message":"record only"
+                }),
+            ),
+        ];
+        let descriptors = mod_attachment_descriptors_from_messages(&rows);
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors.get(&MessageId::from_uuid(plugin_id)),
+            Some(&(
+                "hook_additional_context".into(),
+                serde_json::json!({"kind":"plugin","event":"prompt.submit"})
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_hook_attachment_keeps_origin_and_can_be_omitted_from_model_copy() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        let session_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let rows = vec![hook_attachment_row(
+            session_id,
+            attachment_id,
+            serde_json::json!({
+                "type":"hook_additional_context",
+                "hookName":"SessionStart",
+                "hookEvent":"SessionStart",
+                "content":["RESTORED SECRET"]
+            }),
+        )];
+        let state = state_from_messages(session_id, &rows);
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].id(), MessageId::from_uuid(attachment_id));
+        let descriptors = mod_attachment_descriptors_from_messages(&rows);
+        assert_eq!(
+            descriptors.get(&MessageId::from_uuid(attachment_id)),
+            Some(&(
+                "hook_additional_context".into(),
+                serde_json::json!({"kind":"hook","event":"SessionStart"})
+            ))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omit-restored.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) =>
+                e.origin.kind === 'hook' && e.origin.event === 'SessionStart'
+                  ? { text: null } : next(e));
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        *orch.session.lock().await = state;
+        orch.restore_resume_prompt_metadata(&rows).await;
+        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
+        let prepared = orch
+            .prepare_turn_step(
+                crate::conversation::ModelCallPath::Batched,
+                None,
+                true,
+                is_regular_user_prompt,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(prepared
+            .snapshot
+            .iter()
+            .all(|message| !message.text_content().contains("RESTORED SECRET")));
+        assert!(orch
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|message| message.text_content().contains("RESTORED SECRET")));
+    }
+
+    fn user_row(session: &str, content: Value, flags: &[(&str, bool)]) -> JsonlMessage {
+        let mut row = serde_json::json!({
+            "type": "user",
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": session,
+            "message": { "role": "user", "content": content },
+        });
+        for (name, value) in flags {
+            row[*name] = Value::Bool(*value);
+        }
+        serde_json::from_value(row).unwrap()
+    }
+
+    #[test]
+    fn full_jsonl_resume_counts_real_prompts_without_virtual_or_summary_rows() {
+        let id = uuid::Uuid::new_v4();
+        let session = id.to_string();
+        let text = |value: &str| serde_json::json!([{ "type": "text", "text": value }]);
+        let rows = vec![
+            user_row(&session, text("first"), &[]),
+            user_row(&session, text("virtual"), &[("isVirtual", true)]),
+            user_row(
+                &session,
+                serde_json::json!([{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok", "is_error": false }]),
+                &[],
+            ),
+            user_row(
+                &session,
+                text("summary"),
+                &[
+                    ("isCompactSummary", true),
+                    ("isVisibleInTranscriptOnly", true),
+                ],
+            ),
+            user_row(&session, text("second"), &[]),
+        ];
+        let mut state = state_from_messages(id, &rows);
+        assert_eq!(state.real_user_turns(), 2);
+        assert_eq!(state.virtual_user_messages.len(), 1);
+        let summary = state.history[3].clone();
+        let second = state.history[4].clone();
+        state.replace_model_context_history(vec![summary, second]);
+        assert_eq!(state.real_user_turns(), 2);
+    }
 }
 
 /// Result of [`replay_session_state`]: the rebuilt session, the UUID of the
@@ -86,7 +273,8 @@ pub struct ReplayedSession {
     /// `client::adapter::lowering::lower_transcript_with_tool_results` so a
     /// replayed subagent card still knows which call created it, and a replayed
     /// plan card still has its document and its approval.
-    pub client_state_tool_results: std::collections::HashMap<String, Value>,
+    pub client_state_tool_results:
+        std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection>,
 }
 
 impl ReplayedSession {
@@ -105,8 +293,7 @@ impl ReplayedSession {
         let model_recovered = self.messages.iter().any(|m| {
             carries_human_turn_settings(m)
                 && m.message
-                    .get("model")
-                    .and_then(serde_json::Value::as_str)
+                    .string_at("/model")
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
@@ -136,6 +323,8 @@ impl ReplayedSession {
                 .iter()
                 .copied()
                 .collect(),
+            virtual_user_message_ids: self.state.virtual_user_messages.iter().copied().collect(),
+            compacted_user_turns: self.state.compacted_user_turns,
             model_context_excluded_message_ids: self
                 .state
                 .model_context_excluded_messages
@@ -148,6 +337,9 @@ impl ReplayedSession {
             )
             .into_iter()
             .collect(),
+            model_reminder_attachments: model_reminder_attachments_from_messages(&self.messages)
+                .into_iter()
+                .collect(),
             cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
             compacted: tracking.compacted,
             turn_counter: tracking.turn_counter,
@@ -156,6 +348,7 @@ impl ReplayedSession {
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             deferred_tools: self.runtime_metadata.deferred_tools.clone(),
             prompt_snapshot: self.runtime_metadata.prompt_snapshot.clone(),
+            context_rendering_hint: self.runtime_metadata.context_rendering_hint,
         }
     }
 }
@@ -181,6 +374,8 @@ pub struct ResumeRuntimeMetadata {
     pub deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
     /// Last valid static prompt snapshot recovered from the transcript.
     pub prompt_snapshot: Option<lingxi_core::host::PromptSnapshot>,
+    /// Hint from the latest raw prompt_snapshot, with no older-row fallback.
+    pub context_rendering_hint: Option<lingxi_core::host::instructions::InstructionRendering>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -217,6 +412,8 @@ pub async fn replay_session_state(
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
     runtime_metadata.prompt_snapshot = prompt_snapshot_from_messages(&transcript_entries);
+    runtime_metadata.context_rendering_hint =
+        context_rendering_hint_from_messages(&transcript_entries);
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -270,21 +467,22 @@ pub fn runtime_metadata_from_messages(messages: &[JsonlMessage]) -> ResumeRuntim
 #[must_use]
 pub fn post_compact_skill_attachments_from_messages(
     messages: &[JsonlMessage],
-) -> std::collections::HashMap<MessageId, Vec<String>> {
+) -> std::collections::HashMap<MessageId, Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>
+{
     messages
         .iter()
         .filter_map(|message| {
             let uuid = Uuid::parse_str(&message.uuid).ok()?;
-            let contents = message
-                .extra
-                .get("invokedSkillContents")?
-                .as_array()?
-                .iter()
-                .map(serde_json::Value::as_str)
-                .collect::<Option<Vec<_>>>()?
-                .into_iter()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
+            let count = message.extra.array_len("/invokedSkillContents")?;
+            let mut contents = Vec::with_capacity(count);
+            for index in 0..count {
+                let content = message
+                    .extra
+                    .subprojection(&format!("/invokedSkillContents/{index}"))
+                    .ok()?;
+                content.string_units("")?;
+                contents.push(content);
+            }
             (!contents.is_empty()).then_some((MessageId::from_uuid(uuid), contents))
         })
         .collect()
@@ -301,17 +499,76 @@ pub fn prompt_snapshot_from_messages(
         if message.message_type != "attachment" {
             return None;
         }
-        let attachment = message.extra.get("attachment")?;
-        if attachment.get("type").and_then(Value::as_str) != Some("prompt_snapshot") {
+        let attachment = message.attachment_projection.as_ref()?;
+        if attachment.string_at("/type") != Some("prompt_snapshot") {
             return None;
         }
-        let snapshot =
-            serde_json::from_value::<lingxi_core::host::PromptSnapshot>(attachment.clone()).ok()?;
+        let prompt = attachment.at_pointer("/systemPrompt")?;
+        let prompt_len = prompt.array_len()?;
+        let mut system_prompt = Vec::with_capacity(prompt_len);
+        let mut system_prompt_utf16 = Vec::with_capacity(prompt_len);
+        for index in 0..prompt_len {
+            let member = prompt.get_index(index)?;
+            let display = member.as_str()?.to_owned();
+            let units = member.code_units()?.to_vec();
+            system_prompt.push(display);
+            system_prompt_utf16.push(String::from_utf16(&units).is_err().then_some(units));
+        }
+        let tools =
+            projection_value::<Vec<lingxi_core::host::PromptToolDescription>>(attachment, "/tools")
+                .unwrap_or_default();
+        let context_rendering = projection_value::<
+            lingxi_core::host::instructions::InstructionRendering,
+        >(attachment, "/contextRendering");
+        let snapshot = lingxi_core::host::PromptSnapshot {
+            system_prompt,
+            system_prompt_utf16,
+            tools,
+            context_rendering,
+        };
         (!snapshot.system_prompt.is_empty()
-            && snapshot.system_prompt.iter().all(|part| !part.is_empty())
             && snapshot.tools.iter().all(|tool| !tool.name.is_empty()))
         .then_some(snapshot)
     })
+}
+
+pub fn context_rendering_hint_from_messages(
+    messages: &[JsonlMessage],
+) -> Option<lingxi_core::host::instructions::InstructionRendering> {
+    let attachments = messages
+        .iter()
+        .filter(|message| message.message_type == "attachment")
+        .filter_map(|message| message.attachment_projection.clone())
+        .collect::<Vec<_>>();
+    lingxi_core::host::instruction_announcements::latest_snapshot_context_rendering(&attachments)
+}
+
+fn projection_value<T: DeserializeOwned>(
+    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pointer: &str,
+) -> Option<T> {
+    let value = projection.subprojection(pointer).ok()?;
+    serde_json::from_str(&value.to_json_string().ok()?).ok()
+}
+
+fn projection_u64(
+    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pointer: &str,
+) -> Option<u64> {
+    let value = projection
+        .subprojection(pointer)
+        .ok()?
+        .to_json_string()
+        .ok()?;
+    serde_json::from_str(&value).ok()
+}
+
+fn attachment_projection(
+    message: &JsonlMessage,
+) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    (message.message_type == "attachment")
+        .then_some(message.attachment_projection.as_ref())
+        .flatten()
 }
 
 /// An in-progress run of consecutive per-block "assistant" JSONL rows that
@@ -328,6 +585,7 @@ struct PendingAssistant {
     message_id: Uuid,
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
+    resumable: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     model_context_excluded: bool,
 }
 
@@ -360,6 +618,7 @@ fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssi
             id: message_id,
             content: pending.content,
             stop_reason: pending.stop_reason,
+            resumable: pending.resumable,
         });
     }
 }
@@ -391,24 +650,34 @@ fn build_state_from_jsonl(
         match m.message_type.as_str() {
             "user" => {
                 flush_pending_assistant(&mut state, pending_assistant.take());
-                let mut content_blocks = extract_content_blocks(&m.message, true);
+                let mut content_blocks = extract_content_blocks(&m.message, true, false);
                 if restore_main_handback_content(m, &mut content_blocks).is_err() {
                     tracing::warn!(uuid = %m.uuid, "skipping invalid native Peer handback row");
                     continue;
                 }
-                restore_exact_history_strings(m, &mut content_blocks);
+                restore_exact_history_strings(m, &mut content_blocks, false);
                 // Restore the `isMeta` outer-envelope flag (claude-code persists
                 // it as a top-level field; we read it back from `extra`) so a
                 // resumed Stop-hook-feedback message stays meta/hidden.
                 let is_meta = m
                     .extra
-                    .get("isMeta")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isMeta")
+                    .and_then(JsonValueView::as_bool)
                     .unwrap_or(false);
+                if m.extra
+                    .at_pointer("/isVirtual")
+                    .and_then(JsonValueView::as_bool)
+                    == Some(true)
+                {
+                    state
+                        .virtual_user_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
+                }
                 let replay_text = content_blocks
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. }
+                        | ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -419,8 +688,8 @@ fn build_state_from_jsonl(
                     ultracode_state.non_meta_turns_since_reminder;
                 let is_visible_in_transcript_only = m
                     .extra
-                    .get("isVisibleInTranscriptOnly")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isVisibleInTranscriptOnly")
+                    .and_then(JsonValueView::as_bool)
                     .unwrap_or(false);
                 if is_visible_in_transcript_only {
                     state
@@ -429,8 +698,8 @@ fn build_state_from_jsonl(
                 }
                 let is_compact_summary = m
                     .extra
-                    .get("isCompactSummary")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isCompactSummary")
+                    .and_then(JsonValueView::as_bool)
                     .unwrap_or(false);
                 if is_compact_summary {
                     state
@@ -439,8 +708,8 @@ fn build_state_from_jsonl(
                 }
                 let is_model_context_excluded = m
                     .extra
-                    .get("isModelContextExcluded")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isModelContextExcluded")
+                    .and_then(JsonValueView::as_bool)
                     .unwrap_or(false);
                 if is_model_context_excluded {
                     state
@@ -453,12 +722,16 @@ fn build_state_from_jsonl(
                     is_meta,
                     is_compact_summary,
                     is_visible_in_transcript_only,
+                    turn_companion: m.turn_companion,
+                    usage_limit_note: m.usage_limit_note.clone(),
+                    origin: m.origin_projection.clone(),
+                    turn_origin: m.turn_origin_projection.clone(),
                 });
                 last_uuid = Some(msg_uuid);
             }
             "assistant" => {
-                let mut content_blocks = extract_content_blocks(&m.message, false);
-                restore_exact_history_strings(m, &mut content_blocks);
+                let mut content_blocks = extract_content_blocks(&m.message, false, true);
+                restore_exact_history_strings(m, &mut content_blocks, true);
                 // Recover the session's active model: each assistant line records
                 // the model that produced it, so the LAST one is the model the
                 // session was on at save time. Restoring it (over the
@@ -474,8 +747,7 @@ fn build_state_from_jsonl(
                 // on the first turn.
                 if let Some(model) = m
                     .message
-                    .get("model")
-                    .and_then(serde_json::Value::as_str)
+                    .string_at("/model")
                     .filter(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
                     .filter(|_| carries_human_turn_settings(m))
                 {
@@ -485,12 +757,12 @@ fn build_state_from_jsonl(
                 // the model. Presence is significant: JSON null intentionally
                 // clears a profile, while legacy rows omit the field and retain
                 // the most recently reconstructed value.
-                if let Some(profile) = m
-                    .extra
-                    .get("modelProfile")
-                    .filter(|_| carries_human_turn_settings(m))
-                {
-                    state.model_profile = profile.as_str().map(str::to_owned);
+                if m.extra.contains_property("modelProfile") && carries_human_turn_settings(m) {
+                    state.model_profile = m
+                        .extra
+                        .at_pointer("/modelProfile")
+                        .and_then(JsonValueView::as_str)
+                        .map(str::to_owned);
                 }
                 // Per-block persistence (write-side) splits one assistant turn
                 // into several single-block rows sharing one inner `message.id`
@@ -499,20 +771,22 @@ fn build_state_from_jsonl(
                 // `flush_pending_assistant`).
                 let inner_key = m
                     .message
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
+                    .string_at("/id")
                     .map(str::to_string)
                     .unwrap_or_else(|| m.uuid.clone());
                 match &mut pending_assistant {
                     Some(pending) if pending.inner_key == inner_key => {
                         pending.content.extend(content_blocks);
-                        if let Some(reason) = m.message.get("stop_reason").and_then(Value::as_str) {
+                        if let Some(reason) = m.message.string_at("/stop_reason") {
                             pending.stop_reason = Some(reason.to_string());
+                        }
+                        if let Ok(value) = m.message.subprojection("/resumable") {
+                            pending.resumable = Some(value);
                         }
                         pending.model_context_excluded |= m
                             .extra
-                            .get("isModelContextExcluded")
-                            .and_then(serde_json::Value::as_bool)
+                            .at_pointer("/isModelContextExcluded")
+                            .and_then(JsonValueView::as_bool)
                             .unwrap_or(false);
                     }
                     _ => {
@@ -521,26 +795,23 @@ fn build_state_from_jsonl(
                         pending_assistant = Some(PendingAssistant {
                             hook_grouping: (
                                 m.extra
-                                    .get("isVirtual")
-                                    .and_then(serde_json::Value::as_bool)
+                                    .at_pointer("/isVirtual")
+                                    .and_then(JsonValueView::as_bool)
                                     .unwrap_or(false),
                                 m.extra
-                                    .get("resumedFromIncompleteThinking")
-                                    .and_then(serde_json::Value::as_bool)
+                                    .at_pointer("/resumedFromIncompleteThinking")
+                                    .and_then(JsonValueView::as_bool)
                                     .unwrap_or(false),
                             ),
                             inner_key,
                             message_id,
                             content: content_blocks,
-                            stop_reason: m
-                                .message
-                                .get("stop_reason")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned),
+                            stop_reason: m.message.string_at("/stop_reason").map(str::to_owned),
+                            resumable: m.message.subprojection("/resumable").ok(),
                             model_context_excluded: m
                                 .extra
-                                .get("isModelContextExcluded")
-                                .and_then(serde_json::Value::as_bool)
+                                .at_pointer("/isModelContextExcluded")
+                                .and_then(JsonValueView::as_bool)
                                 .unwrap_or(false),
                         });
                     }
@@ -568,17 +839,17 @@ fn build_state_from_jsonl(
                 if is_compact_boundary(m) {
                     let content = m
                         .extra
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or(compaction::BOUNDARY_CONTENT)
-                        .to_string();
+                        .subprojection("/content")
+                        .ok()
+                        .filter(|source| source.string_units("").is_some())
+                        .unwrap_or_else(|| compaction::BOUNDARY_CONTENT.into());
                     let compact_metadata = m
                         .extra
-                        .get("compactMetadata")
-                        .cloned()
+                        .subprojection("/compactMetadata")
+                        .ok()
                         .and_then(|value| {
-                            serde_json::from_value::<lingxi_core::types::CompactBoundaryMetadata>(
-                                value,
+                            serde_json::from_str::<lingxi_core::types::CompactBoundaryMetadata>(
+                                &value.to_json_string().ok()?,
                             )
                             .ok()
                         })
@@ -591,6 +862,7 @@ fn build_state_from_jsonl(
                         content,
                         subtype: Some("compact_boundary".to_string()),
                         compact_metadata,
+                        model_fallback: None,
                         refusal_fallback: None,
                     });
                 }
@@ -605,17 +877,65 @@ fn build_state_from_jsonl(
                         id: MessageId::from_uuid(msg_uuid),
                         content: m
                             .extra
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                            .subprojection("/content")
+                            .unwrap_or_else(|_| "".into()),
                         subtype: Some("scheduled_task_fire".to_string()),
                         compact_metadata: None,
+                        model_fallback: None,
                         refusal_fallback: None,
                     });
                     state
                         .model_context_excluded_messages
                         .insert(MessageId::from_uuid(msg_uuid));
+                }
+                if m.message_type == "system"
+                    && m.extra.string_at("/subtype") == Some("model_refusal_fallback")
+                {
+                    if let Ok(mut metadata) =
+                        serde_json::from_str::<lingxi_core::types::RefusalFallbackMetadata>(
+                            &m.extra
+                                .to_json_string()
+                                .expect("transcript fields are JSON"),
+                        )
+                    {
+                        metadata.notice_timestamp = Some(m.timestamp.clone());
+                        state.history.push(ConversationMessage::System {
+                            id: MessageId::from_uuid(msg_uuid),
+                            content: m
+                                .extra
+                                .subprojection("/content")
+                                .unwrap_or_else(|_| "".into()),
+                            subtype: Some("model_refusal_fallback".into()),
+                            compact_metadata: None,
+                            model_fallback: None,
+                            refusal_fallback: Some(metadata),
+                        });
+                    }
+                }
+                if m.message_type == "system"
+                    && m.extra.string_at("/subtype") == Some("model_fallback")
+                {
+                    if let (Some(trigger), Some(original_model), Some(fallback_model)) = (
+                        m.extra.string_at("/trigger"),
+                        m.extra.string_at("/originalModel"),
+                        m.extra.string_at("/fallbackModel"),
+                    ) {
+                        state.history.push(ConversationMessage::System {
+                            id: MessageId::from_uuid(msg_uuid),
+                            content: m
+                                .extra
+                                .subprojection("/content")
+                                .unwrap_or_else(|_| "".into()),
+                            subtype: Some("model_fallback".into()),
+                            compact_metadata: None,
+                            refusal_fallback: None,
+                            model_fallback: Some(lingxi_core::types::ModelFallbackMetadata {
+                                trigger: trigger.into(),
+                                original_model: original_model.into(),
+                                fallback_model: fallback_model.into(),
+                            }),
+                        });
+                    }
                 }
                 if let Some(active_goal) = goal_state_from_message(m) {
                     state.active_goal = active_goal;
@@ -660,8 +980,7 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
         if message.message_type == "assistant" {
             let key = message
                 .message
-                .get("id")
-                .and_then(Value::as_str)
+                .string_at("/id")
                 .unwrap_or(&message.uuid)
                 .to_string();
             let id = match &pending {
@@ -669,7 +988,7 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
                 _ => MessageId::from_uuid(Uuid::parse_str(&key).unwrap_or(uuid)),
             };
             pending = Some((key.clone(), id));
-            let thinking_count = extract_content_blocks(&message.message)
+            let thinking_count = extract_content_blocks(&message.message, false, false)
                 .iter()
                 .filter(|block| {
                     matches!(
@@ -690,22 +1009,18 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
             continue;
         }
         pending = None;
-        let Some(attachment) = message
-            .extra
-            .get("attachment")
-            .filter(|_| message.message_type == "attachment")
-        else {
+        let Some(attachment) = attachment_projection(message) else {
             continue;
         };
-        if attachment.get("type").and_then(Value::as_str) != Some("thinking_stripped") {
+        if attachment.string_at("/type") != Some("thinking_stripped") {
             continue;
         }
         state.thinking_signature_stripped = true;
-        let partial = if attachment.get("scope").and_then(Value::as_str) == Some("partial") {
-            attachment.get("from").and_then(|from| {
+        let partial = if attachment.string_at("/scope") == Some("partial") {
+            attachment.at_pointer("/from").and_then(|from| {
                 Some((
-                    from.get("messageId")?.as_str()?,
-                    usize::try_from(from.get("thinkingIndex")?.as_u64()?).ok()?,
+                    from.get_property("messageId")?.as_str()?,
+                    projection_value::<usize>(attachment, "/from/thinkingIndex")?,
                 ))
             })
         } else {
@@ -747,18 +1062,63 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
     }
 }
 
+/// Retain original raw attachment payloads independently of API projection.
+/// Visible history and its compact boundary decide which payloads are active;
+/// unknown attachment kinds are never recovered by parsing rendered prose.
+pub(crate) fn model_reminder_attachments_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<MessageId, lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            if message.message_type != "attachment" {
+                return None;
+            }
+            let attachment = attachment_projection(message)?;
+            let id = Uuid::parse_str(&message.uuid).ok()?;
+            Some((MessageId::from_uuid(id), attachment.clone()))
+        })
+        .collect()
+}
+
 fn hook_attachment_message_for_api(
     message: &JsonlMessage,
     message_uuid: Uuid,
 ) -> Option<ConversationMessage> {
-    if message.message_type != "attachment" {
-        return None;
-    }
-    let attachment = message.extra.get("attachment")?;
-    match attachment.get("type").and_then(Value::as_str)? {
+    let attachment = attachment_projection(message)?;
+    match attachment.string_at("/type")? {
+        "file" | "compact_file_reference" => ConversationOrchestrator::file_attachment_projection(
+            MessageId::from_uuid(message_uuid),
+            attachment,
+        ),
+        "nested_memory" => ConversationOrchestrator::nested_memory_attachment_projection(
+            MessageId::from_uuid(message_uuid),
+            attachment,
+        ),
+        "instructions" | "session_context" | "context_sections" | "date" => Some(
+            crate::conversation::context_announcements_impl::context_attachment_projection(
+                MessageId::from_uuid(message_uuid),
+                attachment,
+            ),
+        ),
+        "mcp_instructions_delta" => {
+            let content = crate::prompt::mcp_instructions::render_source(attachment)?;
+            Some(ConversationMessage::user_meta_js_utf16(
+                MessageId::from_uuid(message_uuid),
+                content.string_at("")?.to_owned(),
+                content.string_units("")?,
+            ))
+        }
+        "total_tokens_reminder" => Some(ConversationMessage::user_meta(
+            MessageId::from_uuid(message_uuid),
+            format!(
+                "<system-reminder>\n{}\n</system-reminder>",
+                attachment.string_at("/text")?
+            ),
+        )),
         "hook_stopped_continuation" => {
-            let hook_name = attachment.get("hookName")?.as_str()?;
-            let reason = attachment.get("message")?.as_str()?;
+            let hook_name = attachment.string_at("/hookName")?;
+            let reason = attachment.string_at("/message")?;
             Some(ConversationMessage::user_meta(
                 MessageId::from_uuid(message_uuid),
                 format!(
@@ -767,30 +1127,44 @@ fn hook_attachment_message_for_api(
             ))
         }
         "hook_additional_context" => {
-            let hook_name = attachment.get("hookName")?.as_str()?;
-            let content = attachment.get("content")?.as_array()?;
-            if content.is_empty() {
+            let hook_name = attachment.string_at("/hookName")?;
+            let content = attachment.at_pointer("/content")?;
+            let content_len = content.array_len()?;
+            if content_len == 0 {
                 return None;
             }
             // Claude 2.1.263 JDo/Eht rejects the entire malformed attachment;
             // filtering individual values would replay a different hook body.
-            let body = content
-                .iter()
-                .map(Value::as_str)
-                .collect::<Option<Vec<_>>>()?
-                .join("\n");
-            Some(ConversationMessage::user_meta(
+            let mut display = String::from("<system-reminder>\n");
+            let mut units = display.encode_utf16().collect::<Vec<_>>();
+            display.push_str(hook_name);
+            units.extend(attachment.string_units("/hookName")?);
+            let separator = " hook additional context: ";
+            display.push_str(separator);
+            units.extend(separator.encode_utf16());
+            for index in 0..content_len {
+                let member = content.get_index(index)?;
+                let text = member.as_str()?;
+                if index > 0 {
+                    display.push('\n');
+                    units.push(u16::from(b'\n'));
+                }
+                display.push_str(text);
+                units.extend_from_slice(member.code_units()?);
+            }
+            let suffix = "\n</system-reminder>";
+            display.push_str(suffix);
+            units.extend(suffix.encode_utf16());
+            Some(ConversationMessage::user_meta_js_utf16(
                 MessageId::from_uuid(message_uuid),
-                format!(
-                    "<system-reminder>\n{hook_name} hook additional context: {body}\n</system-reminder>"
-                ),
+                display,
+                units,
             ))
         }
         "hook_blocking_error" => {
-            let hook_name = attachment.get("hookName")?.as_str()?;
-            let blocking = attachment.get("blockingError")?;
-            let command = blocking.get("command")?.as_str()?;
-            let error = blocking.get("blockingError")?.as_str()?;
+            let hook_name = attachment.string_at("/hookName")?;
+            let command = attachment.string_at("/blockingError/command")?;
+            let error = attachment.string_at("/blockingError/blockingError")?;
             Some(ConversationMessage::user_meta(
                 MessageId::from_uuid(message_uuid),
                 format!(
@@ -802,15 +1176,55 @@ fn hook_attachment_message_for_api(
     }
 }
 
+/// Restore the provenance of model-visible hook attachments from their JSONL
+/// rows. The replay renderer gives the derived history message the attachment
+/// row's UUID, so the same key identifies its original text on later requests.
+fn mod_attachment_descriptors_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<MessageId, (String, Value)> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let uuid = Uuid::parse_str(&message.uuid).ok()?;
+            hook_attachment_message_for_api(message, uuid)?;
+            let attachment = attachment_projection(message)?;
+            let kind = attachment.string_at("/type")?;
+            let hook_name = attachment.string_at("/hookName");
+            let origin = if kind == "hook_additional_context"
+                && matches!(hook_name, Some("prompt.submit" | "tool.call"))
+            {
+                let event = hook_name?;
+                serde_json::json!({"kind":"plugin","event":event})
+            } else {
+                let event = attachment.string_at("/hookEvent")?;
+                serde_json::json!({"kind":"hook","event":event})
+            };
+            Some((MessageId::from_uuid(uuid), (kind.to_owned(), origin)))
+        })
+        .collect()
+}
+
 fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
-    message
-        .message
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|blocks| blocks.iter())
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+    let mut ids = Vec::new();
+    if let Some(content) = message.message.at_pointer("/content") {
+        if let Some(length) = content.array_len() {
+            for index in 0..length {
+                let Some(block) = content.get_index(index) else {
+                    continue;
+                };
+                if block.get_property("type").and_then(JsonValueView::as_str) == Some("tool_result")
+                {
+                    if let Some(id) = block
+                        .get_property("tool_use_id")
+                        .and_then(JsonValueView::as_str)
+                    {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+    ids.into_iter()
 }
 
 /// The tools whose STRUCTURED result a client rebuilds UI state from, and which
@@ -858,28 +1272,31 @@ pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Skill", "ExitPlanMode"];
 #[must_use]
 pub fn client_state_tool_results_from_messages(
     messages: &[JsonlMessage],
-) -> std::collections::HashMap<String, Value> {
+) -> std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection> {
     let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let mut results = std::collections::HashMap::new();
     for message in messages {
-        for block in message
-            .message
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                continue;
-            }
-            if let (Some(id), Some(name)) = (
-                block.get("id").and_then(Value::as_str),
-                block.get("name").and_then(Value::as_str),
-            ) {
-                names.insert(id, name);
+        if let Some(content) = message.message.at_pointer("/content") {
+            if let Some(length) = content.array_len() {
+                for index in 0..length {
+                    let Some(block) = content.get_index(index) else {
+                        continue;
+                    };
+                    if block.get_property("type").and_then(JsonValueView::as_str)
+                        != Some("tool_use")
+                    {
+                        continue;
+                    }
+                    if let (Some(id), Some(name)) = (
+                        block.get_property("id").and_then(JsonValueView::as_str),
+                        block.get_property("name").and_then(JsonValueView::as_str),
+                    ) {
+                        names.insert(id, name);
+                    }
+                }
             }
         }
-        let Some(result) = message.extra.get("toolUseResult") else {
+        let Some(result) = message.tool_use_result_projection.as_ref() else {
             continue;
         };
         let mut ids = tool_result_ids(message);
@@ -910,13 +1327,13 @@ pub fn deferred_tool_replays_from_messages(
         if message.message_type != "attachment" {
             continue;
         }
-        let Some(attachment) = message.extra.get("attachment") else {
+        let Some(attachment) = attachment_projection(message) else {
             continue;
         };
-        if attachment.get("type").and_then(Value::as_str) != Some("hook_deferred_tool") {
+        if attachment.string_at("/type") != Some("hook_deferred_tool") {
             continue;
         }
-        let Some(tool_use_id) = attachment.get("toolUseID").and_then(Value::as_str) else {
+        let Some(tool_use_id) = attachment.string_at("/toolUseID") else {
             continue;
         };
         if resolved.contains(tool_use_id) {
@@ -933,24 +1350,18 @@ pub fn deferred_tool_replays_from_messages(
         if !seen.insert(tool_use_id) {
             continue;
         }
-        let Some(tool_name) = attachment.get("toolName").and_then(Value::as_str) else {
+        let Some(tool_name) = attachment.string_at("/toolName") else {
             continue;
         };
-        let Some(tool_input) = attachment.get("toolInput") else {
+        let Some(tool_input) = attachment.subprojection("/toolInput").ok() else {
             continue;
         };
         deferred.push(lingxi_core::host::DeferredToolReplay {
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
-            tool_input: tool_input.clone(),
-            permission_mode: attachment
-                .get("permissionMode")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            traceparent: attachment
-                .get("traceparent")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            tool_input,
+            permission_mode: attachment.string_at("/permissionMode").map(str::to_string),
+            traceparent: attachment.string_at("/traceparent").map(str::to_string),
         });
     }
     deferred.reverse();
@@ -1013,7 +1424,7 @@ async fn replay_deferred_tool_after_resume(
     // Applied per tool, before the next one is dispatched: a context modifier
     // is about the model's context, not about message shape, and the following
     // replay has to see it.
-    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await?;
+    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await;
     Ok(DeferredReplayOutcome {
         tool_use_id,
         tool_results,
@@ -1056,36 +1467,29 @@ pub async fn replay_deferred_tools_after_resume(
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     {
         let mut session = orch.session.lock().await;
         session.history.push(tool_results_msg.clone());
-        for (message, source_id) in &injected_messages {
-            session.history.push(message.clone());
-            session
-                .injected_message_sources
-                .insert(message.id(), source_id.clone());
-        }
     }
     orch.persist_message_to_jsonl(&tool_results_msg).await;
     for tool_use_id in &tool_use_ids {
         orch.flush_hook_attachments(tool_use_id).await;
     }
-    for (message, _source_id) in &injected_messages {
-        if message.is_meta() {
-            continue;
-        }
-        orch.persist_message_to_jsonl(message).await;
-    }
+    crate::turn_loop::append_tool_injected_messages(orch, injected_messages, None).await;
     Ok(())
 }
 
 fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalState>> {
     if message.message_type == "attachment" {
-        let attachment = message.extra.get("attachment")?;
-        if attachment.get("type").and_then(serde_json::Value::as_str) == Some("goal_status") {
+        let attachment = attachment_projection(message)?;
+        if attachment.string_at("/type") == Some("goal_status") {
             let status: lingxi_core::host::GoalStatusAttachment =
-                serde_json::from_value(attachment.clone()).ok()?;
+                serde_json::from_str(&attachment.to_json_string().ok()?).ok()?;
             // 2.1.266 shape: a SENTINEL announces set (`met:false`) or clear
             // (`met:true`); a non-sentinel record is an evaluation, terminal
             // when it is `met` (achieved) or `failed` (impossible), and
@@ -1113,20 +1517,17 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
     if message.message_type != "system" {
         return None;
     }
-    if message
-        .extra
-        .get("subtype")
-        .and_then(serde_json::Value::as_str)
-        == Some("thread_goal_updated")
-    {
-        let goal_state = message.extra.get("goalState")?;
-        return serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone())
+    if message.extra.string_at("/subtype") == Some("thread_goal_updated") {
+        let goal_state = message.extra.subprojection("/goalState").ok()?;
+        return serde_json::from_str::<Option<ActiveGoalState>>(&goal_state.to_json_string().ok()?)
             .ok()
             .map(restored);
     }
-    let compact_metadata = message.extra.get("compactMetadata")?;
-    let goal_state = compact_metadata.get("activeGoal")?;
-    serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone())
+    let goal_state = message
+        .extra
+        .subprojection("/compactMetadata/activeGoal")
+        .ok()?;
+    serde_json::from_str::<Option<ActiveGoalState>>(&goal_state.to_json_string().ok()?)
         .ok()
         .map(restored)
 }
@@ -1159,27 +1560,19 @@ fn carries_human_turn_settings(message: &JsonlMessage) -> bool {
     message.message_type == "assistant"
         && !message
             .extra
-            .get("perTurnSettings")
-            .and_then(serde_json::Value::as_bool)
+            .at_pointer("/perTurnSettings")
+            .and_then(JsonValueView::as_bool)
             .unwrap_or(false)
 }
 
 fn is_scheduled_task_fire(message: &JsonlMessage) -> bool {
     message.message_type == "system"
-        && message
-            .extra
-            .get("subtype")
-            .and_then(serde_json::Value::as_str)
-            == Some("scheduled_task_fire")
+        && message.extra.string_at("/subtype") == Some("scheduled_task_fire")
 }
 
 fn is_compact_boundary(message: &JsonlMessage) -> bool {
     message.message_type == "system"
-        && message
-            .extra
-            .get("subtype")
-            .and_then(serde_json::Value::as_str)
-            == Some("compact_boundary")
+        && message.extra.string_at("/subtype") == Some("compact_boundary")
 }
 
 /// Claude `getCurrentUsage` / `getTokenUsage`: scan the effective chain in
@@ -1195,34 +1588,51 @@ fn current_usage_from_messages(
         }
         if message.is_sidechain
             || message.message_type != "assistant"
-            || message.message.get("model").and_then(Value::as_str) == Some("<synthetic>")
+            || message.message.string_at("/model") == Some("<synthetic>")
         {
             continue;
         }
-        let first_text = message
-            .message
-            .get("content")
-            .and_then(Value::as_array)
-            .and_then(|blocks| blocks.first())
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-            .and_then(|block| block.get("text"))
-            .and_then(Value::as_str);
-        if matches!(first_text, Some(
-            "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
-            | "No response requested."
-            | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
-            | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
-        )) { continue; }
-        if let Some(usage) = message.message.get("usage").filter(|v| v.is_object()) {
-            let mut usage = usage.clone();
+        let first_text = (message.message.string_at("/content/0/type") == Some("text"))
+            .then(|| message.message.string_at("/content/0/text"))
+            .flatten();
+        if matches!(
+            first_text,
+            Some(
+                "[Request interrupted by user]"
+                    | "[Request interrupted by user for tool use]"
+                    | "No response requested."
+                    | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+                    | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+            )
+        ) {
+            continue;
+        }
+        if let Ok(mut usage) = message.message.subprojection("/usage") {
+            if usage
+                .at_pointer("")
+                .and_then(JsonValueView::object_entries)
+                .is_none()
+            {
+                continue;
+            }
             // Claude uses `?? 0`, including providers that explicitly send null.
             for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
-                if usage.get(field).is_none_or(Value::is_null) {
-                    usage[field] = Value::from(0);
+                if usage
+                    .at_pointer(&format!("/{field}"))
+                    .is_none_or(JsonValueView::is_null)
+                {
+                    usage
+                        .set_field(
+                            field,
+                            Utf16JsonProjection::parse("0").expect("zero is JSON"),
+                        )
+                        .expect("usage is an object");
                 }
             }
-            if let Ok(usage) = serde_json::from_value(usage) {
-                return Some(usage);
+            if let Ok(usage_json) = usage.to_json_string() {
+                if let Ok(usage) = serde_json::from_str(&usage_json) {
+                    return Some(usage);
+                }
             }
         }
     }
@@ -1238,28 +1648,23 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         (carries_human_turn_settings(m)
             && !m
                 .extra
-                .get("isApiErrorMessage")
-                .and_then(serde_json::Value::as_bool)
+                .at_pointer("/isApiErrorMessage")
+                .and_then(JsonValueView::as_bool)
                 .unwrap_or(false))
-        .then(|| {
-            m.extra
-                .get("reasoningSelection")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-        })
+        .then(|| projection_value(&m.extra, "/reasoningSelection"))
         .flatten()
     });
     let effort = messages.iter().rev().find_map(|m| {
         if !carries_human_turn_settings(m)
             || m.extra
-                .get("isApiErrorMessage")
-                .and_then(serde_json::Value::as_bool)
+                .at_pointer("/isApiErrorMessage")
+                .and_then(JsonValueView::as_bool)
                 .unwrap_or(false)
         {
             return None;
         }
         m.extra
-            .get("effort")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/effort")
             .filter(|value| matches!(*value, "low" | "medium" | "high" | "xhigh" | "max"))
             .map(str::to_owned)
     });
@@ -1273,17 +1678,15 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     let mut cumulative_dropped_tokens = 0;
     let mut tracking = compaction::AutoCompactTrackingState::default();
     if let Some(&last_boundary) = boundary_indices.last() {
-        let compact_metadata = messages[last_boundary].extra.get("compactMetadata");
-        cumulative_dropped_tokens = compact_metadata
-            .and_then(|metadata| metadata.get("cumulativeDroppedTokens"))
-            .and_then(serde_json::Value::as_u64)
-            .or_else(|| {
-                let metadata = compact_metadata?;
-                let pre = metadata.get("preTokens")?.as_u64()?;
-                let post = metadata.get("postTokens")?.as_u64()?;
-                Some(pre.saturating_sub(post))
-            })
-            .unwrap_or(0);
+        let compact_metadata = &messages[last_boundary].extra;
+        cumulative_dropped_tokens =
+            projection_u64(compact_metadata, "/compactMetadata/cumulativeDroppedTokens")
+                .or_else(|| {
+                    let pre = projection_u64(compact_metadata, "/compactMetadata/preTokens")?;
+                    let post = projection_u64(compact_metadata, "/compactMetadata/postTokens")?;
+                    Some(pre.saturating_sub(post))
+                })
+                .unwrap_or(0);
 
         tracking.compacted = true;
         tracking.turn_counter = u32::try_from(
@@ -1330,6 +1733,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         compaction_tracking: tracking,
         deferred_tools: Vec::new(),
         prompt_snapshot: prompt_snapshot_from_messages(messages),
+        context_rendering_hint: context_rendering_hint_from_messages(messages),
     }
 }
 
@@ -1344,14 +1748,20 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
         if message.message_type != "assistant" {
             continue;
         }
-        let Some(content) = message.message.get("content").and_then(Value::as_array) else {
+        let Some(content) = message.message.at_pointer("/content") else {
             continue;
         };
-        for block in content {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        let Some(length) = content.array_len() else {
+            continue;
+        };
+        for index in 0..length {
+            let Some(block) = content.get_index(index) else {
+                continue;
+            };
+            if block.get_property("type").and_then(JsonValueView::as_str) != Some("tool_use") {
                 continue;
             }
-            if let Some(id) = block.get("id").and_then(Value::as_str) {
+            if let Some(id) = block.get_property("id").and_then(JsonValueView::as_str) {
                 if !seen_tool_uses.insert(id.to_string()) {
                     duplicate_tool_uses.insert(id.to_string());
                 }
@@ -1365,10 +1775,9 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
     for message in messages.iter().rev() {
         if message.message_type == "attachment" {
             match message
-                .extra
-                .get("attachment")
-                .and_then(|attachment| attachment.get("type"))
-                .and_then(Value::as_str)
+                .attachment_projection
+                .as_ref()
+                .and_then(|attachment| attachment.string_at("/type"))
             {
                 Some("plan_mode" | "plan_mode_reentry") => return !newer_non_plan_mode,
                 Some("plan_mode_exit") => return false,
@@ -1378,17 +1787,23 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
         }
 
         if message.message_type == "assistant" {
-            let Some(content) = message.message.get("content").and_then(Value::as_array) else {
+            let Some(content) = message.message.at_pointer("/content") else {
                 continue;
             };
-            for block in content.iter().rev() {
-                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                    continue;
-                }
-                let Some(id) = block.get("id").and_then(Value::as_str) else {
+            let Some(length) = content.array_len() else {
+                continue;
+            };
+            for index in (0..length).rev() {
+                let Some(block) = content.get_index(index) else {
                     continue;
                 };
-                let Some(name) = block.get("name").and_then(Value::as_str) else {
+                if block.get_property("type").and_then(JsonValueView::as_str) != Some("tool_use") {
+                    continue;
+                }
+                let Some(id) = block.get_property("id").and_then(JsonValueView::as_str) else {
+                    continue;
+                };
+                let Some(name) = block.get_property("name").and_then(JsonValueView::as_str) else {
                     continue;
                 };
                 if name == "ExitPlanMode"
@@ -1411,61 +1826,65 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
         if message.message_type != "user" {
             continue;
         }
-        if let Some(content) = message.message.get("content").and_then(Value::as_array) {
-            let mut had_tool_result = false;
-            for block in content {
-                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+        if let Some(content) = message.message.at_pointer("/content") {
+            if let Some(length) = content.array_len() {
+                let mut had_tool_result = false;
+                for index in 0..length {
+                    let Some(block) = content.get_index(index) else {
+                        continue;
+                    };
+                    if block.get_property("type").and_then(JsonValueView::as_str)
+                        != Some("tool_result")
+                    {
+                        continue;
+                    }
+                    had_tool_result = true;
+                    let Some(id) = block
+                        .get_property("tool_use_id")
+                        .and_then(JsonValueView::as_str)
+                    else {
+                        continue;
+                    };
+                    if block
+                        .get_property("is_error")
+                        .and_then(JsonValueView::as_bool)
+                        .unwrap_or(false)
+                    {
+                        failed_tool_results.insert(id.to_string());
+                    } else {
+                        successful_tool_results.insert(id.to_string());
+                    }
+                }
+                if had_tool_result {
                     continue;
                 }
-                had_tool_result = true;
-                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                    continue;
-                };
-                if block
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    failed_tool_results.insert(id.to_string());
-                } else {
-                    successful_tool_results.insert(id.to_string());
-                }
-            }
-            if had_tool_result {
-                continue;
             }
         }
 
-        let text = message
-            .message
-            .get("content")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                message
-                    .message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .and_then(|content| {
-                        content.iter().find_map(|block| {
-                            (block.get("type").and_then(Value::as_str) == Some("text"))
-                                .then(|| block.get("text").and_then(Value::as_str))
-                                .flatten()
-                        })
-                    })
-            });
+        let content = message.message.at_pointer("/content");
+        let text = content.and_then(JsonValueView::as_str).or_else(|| {
+            let content = content?;
+            let length = content.array_len()?;
+            (0..length).find_map(|index| {
+                let block = content.get_index(index)?;
+                (block.get_property("type").and_then(JsonValueView::as_str) == Some("text"))
+                    .then(|| block.get_property("text").and_then(JsonValueView::as_str))
+                    .flatten()
+            })
+        });
         if text.is_some_and(|text| {
             text.trim_start()
                 .starts_with("<command-name>/plan</command-name>")
         }) {
             return !newer_non_plan_mode;
         }
-        match message.extra.get("permissionMode").and_then(Value::as_str) {
+        match message.extra.string_at("/permissionMode") {
             Some("plan") => return !newer_non_plan_mode,
             Some(_)
                 if !message
                     .extra
-                    .get("isMeta")
-                    .and_then(Value::as_bool)
+                    .at_pointer("/isMeta")
+                    .and_then(JsonValueView::as_bool)
                     .unwrap_or(false) =>
             {
                 newer_non_plan_mode = true;
@@ -1476,42 +1895,300 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
     false
 }
 
+/// A native Peer report is meta input with one framed text block. The reader
+/// reconstructs exact units from JSON string escapes; validating that frame
+/// against its Peer body prevents a retained carrier from changing authority
+/// or supplying different model text during cold resume.
+fn restore_main_handback_content(
+    message: &JsonlMessage,
+    content: &mut [ContentBlock],
+) -> Result<(), ()> {
+    let Ok(origin) = message.extra.subprojection("/origin") else {
+        return Ok(());
+    };
+    if origin.string_at("/kind") != Some("peer")
+        || origin
+            .at_pointer("/handback")
+            .and_then(JsonValueView::as_bool)
+            != Some(true)
+    {
+        return Ok(());
+    }
+    let from = origin.string_at("/from").ok_or(())?;
+    let body = origin.string_at("/body").ok_or(())?;
+    let body_units = origin.string_units("/body").ok_or(())?;
+    if message.message_type != "user"
+        || message.message.string_at("/role") != Some("user")
+        || message
+            .extra
+            .at_pointer("/isMeta")
+            .and_then(JsonValueView::as_bool)
+            != Some(true)
+        || !origin
+            .string_at("/senderTaskId")
+            .is_some_and(|id| !id.is_empty())
+        || (origin.contains_property("name") && origin.string_units("/name").is_none())
+        || (origin.contains_property("flagged")
+            && origin
+                .at_pointer("/flagged")
+                .and_then(JsonValueView::as_bool)
+                != Some(true))
+        || message
+            .extra
+            .at_pointer("/isVisibleInTranscriptOnly")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
+        || message
+            .extra
+            .at_pointer("/isModelContextExcluded")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
+    {
+        return Err(());
+    }
+    if message.message.array_len("/content") != Some(1)
+        || message.message.string_at("/content/0/type") != Some("text")
+    {
+        return Err(());
+    }
+    let [ContentBlock::Text { text, .. }] = content else {
+        return Err(());
+    };
+    let model_units = message.message.string_units("/content/0/text").ok_or(())?;
+    if String::from_utf16_lossy(&body_units) != body
+        || String::from_utf16_lossy(&model_units) != *text
+    {
+        return Err(());
+    }
+    // origin.body has already passed native wXe neutralization. Insert it
+    // between the native escaped sender and closing line without applying the
+    // neutralizer again.
+    let wrapper = lingxi_core::host::handback_wire::render_agent_message_utf16(from, &[]);
+    let body_start = wrapper
+        .len()
+        .checked_sub("\n</agent-message>".len())
+        .ok_or(())?;
+    let mut expected = wrapper[..body_start].to_vec();
+    expected.extend(body_units);
+    expected.extend_from_slice(&wrapper[body_start..]);
+    if expected != model_units {
+        return Err(());
+    }
+    if session::jsonl::exact_json::message_utf16_overrides(message)
+        .contains_key("/message/content/0/text")
+    {
+        content[0] = ContentBlock::TextJsUtf16 {
+            text: text.clone(),
+            utf16_code_units: model_units,
+            citations: None,
+        };
+    }
+    Ok(())
+}
+
+/// Native cold resume's assistant-text projection replaces lone UTF-16
+/// surrogates while retaining valid pairs and all well-formed text.
+fn native_cold_resume_units(units: &[u16]) -> Vec<u16> {
+    match String::from_utf16(units) {
+        Ok(_) => units.to_vec(),
+        Err(_) => String::from_utf16_lossy(units).encode_utf16().collect(),
+    }
+}
+
 /// Best-effort extraction of `content` from a JSONL `message` payload.
 ///
 /// claude-code stores `message.content` as either:
 /// - a string (for simple text-only turns), or
 /// - an array of content blocks.
 ///
-/// We accept both: a string becomes a single `ContentBlock::Text`; an array
-/// is deserialized after removing malformed text blocks. If neither shape
+/// We accept both: a string becomes one text block; an array is deserialized
+/// after removing malformed text blocks and normalizing non-text user
+/// tool-result payloads. Only callers rebuilding assistant model text request
+/// the measured Native replacement projection. If neither shape
 /// matches, the result is an empty `Vec` — the message is still appended
 /// so the chain is preserved, but the inner content is empty.
-fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
-    let Some(content) = message.get("content") else {
+fn extract_content_blocks(
+    message: &Utf16JsonProjection,
+    normalize_tool_results: bool,
+    project_assistant_text: bool,
+) -> Vec<ContentBlock> {
+    let Some(content) = message.at_pointer("/content") else {
         return Vec::new();
     };
-    if let Some(s) = content.as_str() {
-        return vec![ContentBlock::Text {
-            text: s.to_string(),
-        }];
+    if let Some(text) = content.as_str() {
+        let units = content.code_units().unwrap_or_default();
+        return if !project_assistant_text && String::from_utf16(units).is_err() {
+            vec![ContentBlock::TextJsUtf16 {
+                text: text.to_owned(),
+                utf16_code_units: units.to_vec(),
+                citations: None,
+            }]
+        } else {
+            vec![ContentBlock::Text {
+                text: text.to_owned(),
+                citations: None,
+            }]
+        };
     }
-    if let Some(content) = content.as_array() {
+    if let Some(length) = content.array_len() {
         // Claude 2.1.263 nNo drops malformed text blocks on resume before
         // normalizing history. One damaged text block must not erase its
         // otherwise valid siblings (including tool calls and tool results).
-        let content = content
-            .iter()
-            .filter(|block| {
-                block.get("type").and_then(Value::as_str) != Some("text")
-                    || block.get("text").is_some_and(Value::is_string)
-            })
-            .cloned()
-            .collect();
-        if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(Value::Array(content)) {
-            return blocks;
+        let mut blocks = Vec::with_capacity(length);
+        for index in 0..length {
+            let Some(block_view) = content.get_index(index) else {
+                continue;
+            };
+            let block_type = block_view
+                .get_property("type")
+                .and_then(JsonValueView::as_str);
+            if block_type == Some("text")
+                && block_view
+                    .get_property("text")
+                    .and_then(JsonValueView::as_str)
+                    .is_none()
+            {
+                continue;
+            }
+            let pointer = format!("/content/{index}");
+            let Ok(mut block) = message.subprojection(&pointer) else {
+                continue;
+            };
+            if normalize_tool_results && block_type == Some("tool_result") {
+                if let Ok(result_content) = block.subprojection("/content") {
+                    let content_view = result_content.at_pointer("").expect("root view");
+                    if !content_view.is_null()
+                        && content_view.as_str().is_none()
+                        && content_view.array_len().is_none()
+                    {
+                        block
+                            .set_field(
+                                "content",
+                                crate::tool_result_text::normalized_tool_result_projection(
+                                    &result_content,
+                                ),
+                            )
+                            .expect("tool result is an object");
+                    }
+                }
+            }
+            let Ok(source) = block.to_json_string() else {
+                continue;
+            };
+            if let Ok(block) = serde_json::from_str::<ContentBlock>(&source) {
+                blocks.push(block);
+            }
         }
+        return blocks;
     }
     Vec::new()
+}
+
+/// Reapply exact JSONL text for cold-resumed user content, while projecting
+/// only assistant text through Native's observed replacement boundary. Other
+/// fields (tool inputs, metadata, resumable state) keep their Source carrier.
+fn restore_exact_history_strings(
+    message: &JsonlMessage,
+    content: &mut [ContentBlock],
+    project_assistant_text: bool,
+) {
+    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
+    if overrides.is_empty() {
+        return;
+    }
+    let raw = message.message.at_pointer("/content");
+    let raw_is_string = raw.and_then(JsonValueView::as_str).is_some();
+    let paths: Vec<_> = if raw_is_string {
+        vec!["/message/content".to_owned()]
+    } else if let Some(length) = raw.and_then(JsonValueView::array_len) {
+        (0..length)
+            .filter(|index| {
+                message.message.string_at(&format!("/content/{index}/type")) != Some("text")
+                    || message
+                        .message
+                        .string_units(&format!("/content/{index}/text"))
+                        .is_some()
+            })
+            .map(|index| format!("/message/content/{index}"))
+            .collect()
+    } else {
+        return;
+    };
+    for (block, path) in content.iter_mut().zip(paths) {
+        match block {
+            ContentBlock::Text { text, citations } => {
+                let pointer = if raw_is_string {
+                    path
+                } else {
+                    format!("{path}/text")
+                };
+                let Some(units) = overrides.get(&pointer).filter(|units| {
+                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
+                }) else {
+                    continue;
+                };
+                if project_assistant_text {
+                    let projected = native_cold_resume_units(units);
+                    *text = String::from_utf16(&projected)
+                        .expect("cold resume projection is valid UTF-16");
+                } else {
+                    *block = ContentBlock::TextJsUtf16 {
+                        text: text.clone(),
+                        utf16_code_units: units.clone(),
+                        citations: citations.clone(),
+                    };
+                }
+            }
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+            } if project_assistant_text => {
+                let pointer = if raw_is_string {
+                    path
+                } else {
+                    format!("{path}/text")
+                };
+                if let Some(units) = overrides.get(&pointer).filter(|units| {
+                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
+                }) {
+                    let projected = native_cold_resume_units(units);
+                    *block = ContentBlock::Text {
+                        text: String::from_utf16(&projected)
+                            .expect("cold resume projection is valid UTF-16"),
+                        citations: citations.clone(),
+                    };
+                } else if String::from_utf16(utf16_code_units).is_err() {
+                    let projected = native_cold_resume_units(utf16_code_units);
+                    *block = ContentBlock::Text {
+                        text: String::from_utf16(&projected)
+                            .expect("cold resume projection is valid UTF-16"),
+                        citations: citations.clone(),
+                    };
+                }
+            }
+            ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } => {
+                let pointer = format!("{path}/content");
+                if let Some(units) = overrides.get(&pointer).filter(|units| {
+                    String::from_utf16(units).is_err()
+                        && String::from_utf16_lossy(units) == *content.string_at("").unwrap_or("")
+                }) {
+                    let sidecar = serde_json::Value::Array(
+                        lingxi_core::types::js_utf16::tool_result_sidecar(units.clone()),
+                    );
+                    *content_blocks = Some(
+                        Utf16JsonProjection::from_serde_value(&sidecar)
+                            .expect("generated UTF-16 tool-result sidecar is valid JSON"),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ConversationOrchestrator {
@@ -1530,6 +2207,14 @@ impl ConversationOrchestrator {
         self.compaction_runtime
             .last_response_output_tokens
             .store(usage.output_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.compaction_runtime.total_tokens_reminder_usage.store(
+            usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens)
+                .saturating_add(usage.cache_creation_input_tokens)
+                .saturating_add(usage.output_tokens),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Restore transcript-derived compaction state on an already-built runtime.
@@ -1545,6 +2230,7 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(
@@ -1558,6 +2244,12 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(messages);
+        *self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(messages);
     }
 
     /// Restore only metadata that may live off the resumable model chain.
@@ -1568,6 +2260,8 @@ impl ConversationOrchestrator {
     /// full runtime projection on that raw stream would let preserved
     /// pre-compaction assistant rows overwrite the normalized current usage.
     pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        *self.prompt_runtime.context_rendering_hint.lock().await =
+            context_rendering_hint_from_messages(messages);
         if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
             *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
         }
@@ -1577,6 +2271,28 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(messages);
+        *self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(messages);
+        self.restore_mod_attachment_provenance_from_messages(messages)
+            .await;
+    }
+
+    async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
+        let history_ids = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        let mut descriptors = mod_attachment_descriptors_from_messages(messages);
+        descriptors.retain(|id, _| history_ids.contains(id));
+        *self.prompt_runtime.mod_persisted_attachments.lock().await = descriptors;
     }
 
     /// Construct an orchestrator pre-populated with a replayed session.
@@ -1640,6 +2356,39 @@ impl ConversationOrchestrator {
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
+        {
+            let mut state = orch.session.lock().await;
+            let recorded_model = replayed.messages.iter().any(|message| {
+                carries_human_turn_settings(message)
+                    && message.message.string_at("/model").is_some_and(|model| {
+                        !model.is_empty() && !(model.starts_with('<') && model.ends_with('>'))
+                    })
+            });
+            if recorded_model {
+                // The assistant row selects the cold-resume model. A server
+                // notice may supply only the provider-profile companion, and
+                // only when its target matches that independently selected
+                // model. A notice written just before a crash cannot select a
+                // fallback route before any fallback assistant response.
+                if let Some(profile) =
+                    crate::query_model::server_session_serving_profile(&state.history, &state.model)
+                {
+                    state.model_profile = profile;
+                }
+            }
+            let restored = crate::query_model::restore_refusal_selection(
+                &orch,
+                recorded_model.then_some(state.model.as_str()),
+                &state.history,
+                false,
+            );
+            if !restored {
+                state.model = orch.config.model.clone();
+                state.model_profile = None;
+            }
+        }
+        orch.main_reports
+            .reset_for_builder(orch.session.lock().await.session_id);
         orch.restore_response_usage(replayed.runtime_metadata.current_usage);
         orch.sync_thinking_signature_strip_flag_to_api().await;
         orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
@@ -1659,11 +2408,21 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(&replayed.messages);
+        *orch
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(&replayed.messages);
         orch.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *orch.prompt_runtime.prompt_snapshot.lock().await =
             replayed.runtime_metadata.prompt_snapshot.clone();
+        *orch.prompt_runtime.context_rendering_hint.lock().await =
+            replayed.runtime_metadata.context_rendering_hint;
+        orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
+            .await;
         if let Some(writer) = jsonl_writer {
             orch.transcript.jsonl_writer = Some(writer);
         }
@@ -1755,74 +2514,17 @@ mod mod_session_turn_resume_tests {
             )
             .await
             .unwrap();
-        assert!(
-            prepared
-                .snapshot
-                .iter()
-                .all(|message| !message.text_content().contains("RESTORED SECRET"))
-        );
-        assert!(
-            orch.session
-                .lock()
-                .await
-                .history
-                .iter()
-                .any(|message| message.text_content().contains("RESTORED SECRET"))
-        );
-    }}
-
-fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentBlock]) {
-    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
-    if overrides.is_empty() {
-        return;
-    }
-    let raw = message.message.get("content");
-    let paths: Vec<_> = match raw {
-        Some(Value::String(_)) => vec!["/message/content".to_owned()],
-        Some(Value::Array(blocks)) => blocks
+        assert!(prepared
+            .snapshot
             .iter()
-            .enumerate()
-            .filter(|(_, block)| {
-                block["type"] != "text" || block.get("text").is_some_and(Value::is_string)
-            })
-            .map(|(index, _)| format!("/message/content/{index}"))
-            .collect(),
-        _ => return,
-    };
-    for (block, path) in content.iter_mut().zip(paths) {
-        match block {
-            ContentBlock::Text { text, citations } => {
-                let pointer = if raw.is_some_and(Value::is_string) {
-                    path
-                } else {
-                    format!("{path}/text")
-                };
-                if let Some(units) = overrides.get(&pointer).filter(|units| {
-                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
-                }) {
-                    *block = ContentBlock::TextJsUtf16 {
-                        text: text.clone(),
-                        utf16_code_units: units.clone(),
-                        citations: citations.clone(),
-                    };
-                }
-            }
-            ContentBlock::ToolResult {
-                content,
-                content_blocks,
-                ..
-            } => {
-                if let Some(units) = overrides.get(&format!("{path}/content")).filter(|units| {
-                    String::from_utf16(units).is_err()
-                        && String::from_utf16_lossy(units) == *content
-                }) {
-                    *content_blocks = Some(lingxi_core::types::js_utf16::tool_result_sidecar(
-                        units.clone(),
-                    ));
-                }
-            }
-            _ => {}
-        }
+            .all(|message| !message.text_content().contains("RESTORED SECRET")));
+        assert!(orch
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|message| message.text_content().contains("RESTORED SECRET")));
     }
 }
 
@@ -1842,11 +2544,15 @@ mod exact_history_string_tests {
     }
 
     #[test]
-    fn cold_history_restores_exact_text_and_tool_strings_after_filtering_damaged_blocks() {
+    fn cold_resume_projects_assistant_text_and_keeps_unverified_user_source() {
         let messages = vec![
             row(
                 "user",
-                r#"[{"type":"text","text":"\ud800"},{"type":"text","text":1},{"type":"text","text":"\ud801"},{"type":"tool_result","tool_use_id":"call","content":"\ud802","is_error":false}]"#,
+                r#"[{"type":"text","text":"\ud800Ω\udc00"},{"type":"text","text":1},{"type":"text","text":"\ud801"},{"type":"tool_result","tool_use_id":"call","content":"\ud802","is_error":false}]"#,
+            ),
+            row(
+                "assistant",
+                r#"[{"type":"text","text":"accepted Mod text \ud800Ω\udc00"}]"#,
             ),
             row("assistant", r#""\ud803""#),
         ];
@@ -1855,11 +2561,14 @@ mod exact_history_string_tests {
             panic!()
         };
         assert_eq!(content.len(), 3);
-        for (index, units) in [vec![0xd800], vec![0xd801]].iter().enumerate() {
-            assert!(
-                matches!(&content[index], ContentBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==units)
-            );
-        }
+        assert!(
+            matches!(&content[0], ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+            if utf16_code_units == &vec![0xd800, 0x03a9, 0xdc00])
+        );
+        assert!(
+            matches!(&content[1], ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+            if utf16_code_units == &vec![0xd801])
+        );
         let ContentBlock::ToolResult {
             content_blocks: Some(blocks),
             ..
@@ -1873,7 +2582,65 @@ mod exact_history_string_tests {
         );
         assert!(
             matches!(&state.history[1], ConversationMessage::Assistant {content,..}
-            if matches!(content.as_slice(), [ContentBlock::TextJsUtf16 {utf16_code_units,..}] if utf16_code_units==&vec![0xd803]))
+            if matches!(content.as_slice(), [ContentBlock::Text { text, .. }] if text == "accepted Mod text �Ω�"))
+        );
+        assert!(
+            matches!(&state.history[2], ConversationMessage::Assistant {content,..}
+            if matches!(content.as_slice(), [ContentBlock::Text { text, .. }] if text == "�"))
+        );
+        let source = session::jsonl::exact_json::message_utf16_overrides(&messages[0]);
+        assert_eq!(
+            source.get("/message/content/0/text"),
+            Some(&vec![0xd800, 0x03a9, 0xdc00])
+        );
+        assert_eq!(
+            source.get("/message/content/3/content"),
+            Some(&vec![0xd802])
+        );
+        assert_eq!(
+            session::jsonl::exact_json::message_utf16_overrides(&messages[1])
+                .get("/message/content/0/text"),
+            Some(&vec![0xd800, 0x03a9, 0xdc00])
+        );
+        assert_eq!(
+            session::jsonl::exact_json::message_utf16_overrides(&messages[2])
+                .get("/message/content"),
+            Some(&vec![0xd803])
         );
     }
 }
+
+#[cfg(test)]
+mod assistant_resumable_source_tests {
+    use super::*;
+
+    #[test]
+    fn assistant_resumable_survives_flat_jsonl_read_and_resume() {
+        let source = r#"{"text":"\ud800"}"#;
+        let row_source = format!(
+            r#"{{"type":"assistant","uuid":"11111111-1111-4111-8111-111111111111","parentUuid":null,"sessionId":"22222222-2222-4222-8222-222222222222","message":{{"id":"33333333-3333-4333-8333-333333333333","role":"assistant","content":[],"stop_reason":"max_tokens","resumable":{source}}}}}"#
+        );
+        let row = JsonlMessage::from_projection(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&row_source)
+                .expect("valid JSONL row source"),
+        )
+        .expect("flat JSONL row decodes");
+        let serialized = serde_json::to_string(&row).expect("flat JSONL row serializes");
+        assert!(serialized.contains(r#""resumable":{"text":"\ud800"}"#));
+
+        let session_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let state = state_from_messages(session_id, &[row]);
+        let Some(ConversationMessage::Assistant {
+            resumable: Some(actual),
+            ..
+        }) = state.history.last()
+        else {
+            panic!("assistant resumable source was restored")
+        };
+        assert_eq!(actual.string_units("/text"), Some(vec![0xd800]));
+    }
+}
+
+#[cfg(test)]
+#[path = "nested_memory_resume_287_tests.rs"]
+mod nested_memory_resume_287_tests;

@@ -59,8 +59,11 @@ impl Tool for Probe {
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,

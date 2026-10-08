@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
-use client::protocol::listings::SessionAgentSummaryDto;
+use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
 use lingxi_core::types::{ConversationMessage, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -198,17 +198,19 @@ fn activity(message: &ConversationMessage) -> Option<String> {
         ConversationMessage::Assistant { content, .. }
         | ConversationMessage::User { content, .. } => Some(content.as_slice()),
         ConversationMessage::System { content, .. } => {
-            return (!content.is_empty()).then(|| content.chars().take(160).collect());
+            let text = content.string_at("")?;
+            return (!text.is_empty()).then(|| text.chars().take(160).collect());
         }
     }?;
     blocks.iter().find_map(|block| match block {
-        lingxi_core::types::ContentBlock::Text { text } if !text.is_empty() => {
+        lingxi_core::types::ContentBlock::Text { text, .. } if !text.is_empty() => {
             Some(text.chars().take(160).collect())
         }
         lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-        lingxi_core::types::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
-            Some(content.chars().take(160).collect())
-        }
+        lingxi_core::types::ContentBlock::ToolResult { content, .. } => content
+            .string_at("")
+            .filter(|text| !text.is_empty())
+            .map(|text| text.chars().take(160).collect()),
         _ => None,
     })
 }
@@ -518,6 +520,18 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                 )
                 .await;
             }
+            SubagentObservation::MessageRow {
+                agent_id,
+                message,
+                message_index,
+            } => {
+                let key = agent_id.to_string();
+                let mut indexes = self.message_indexes.lock().await;
+                let next = indexes.entry(key).or_default();
+                *next = (*next).max(message_index);
+                drop(indexes);
+                Box::pin(self.on_event(SubagentObservation::Message { agent_id, message })).await;
+            }
             SubagentObservation::Message { agent_id, message } => {
                 if matches!(&message, ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle")
                 {
@@ -565,8 +579,12 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     .emit(ClientEvent::SessionAgentMessage {
                         session_id: bound.session_id.clone(),
                         agent_id: key.clone(),
-                        message_index,
-                        message: dto,
+                        row: SessionAgentMessageRowDto {
+                            message_index,
+                            message_uuid: message.id().as_uuid().to_string(),
+                            message: dto,
+                            api_error_json: None,
+                        },
                     })
                     .await;
                 self.emit_observed(
@@ -586,6 +604,64 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     false,
                 )
                 .await;
+            }
+            SubagentObservation::ServerFallbackTombstone {
+                agent_id,
+                message,
+                display_only,
+            } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentTombstone {
+                        session_id: bound.session_id,
+                        agent_id: agent_key,
+                        message_uuid: message.uuid.as_uuid().to_string(),
+                        display_only,
+                    })
+                    .await;
+            }
+            SubagentObservation::ServerFallbackApiErrorRow {
+                agent_id,
+                row,
+                message_index,
+            } => {
+                // Keep the full API-error envelope in the typed observer event
+                // until this host boundary; the session-agent message DTO is
+                // only the visible conversation projection.
+                let message = row.query_message();
+                let key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&key).cloned() else {
+                    return;
+                };
+                let dto = {
+                    let mut indexes = self.tool_indexes.lock().await;
+                    let index = indexes.entry(key.clone()).or_default();
+                    client::adapter::lowering::lower_conversation_message_with(&message, index)
+                };
+                let message_index = {
+                    let mut indexes = self.message_indexes.lock().await;
+                    let next = indexes.entry(key.clone()).or_default();
+                    *next = (*next).max(message_index.saturating_add(1));
+                    message_index
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentMessage {
+                        session_id: bound.session_id,
+                        agent_id: key,
+                        row: SessionAgentMessageRowDto {
+                            message_index,
+                            message_uuid: row.uuid.as_uuid().to_string(),
+                            message: dto,
+                            api_error_json: Some(
+                                serde_json::to_string(&row)
+                                    .expect("fallback API-error row serializes"),
+                            ),
+                        },
+                    })
+                    .await;
             }
             SubagentObservation::Completed { agent_id, .. } => {
                 let persistent = self
@@ -760,7 +836,8 @@ mod tests {
     fn completed(agent_id: lingxi_core::types::AgentId) -> SubagentObservation {
         SubagentObservation::Completed {
             agent_id,
-            content: serde_json::json!("done"),
+            content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""done""#)
+                .expect("completed observation fixture is JSON"),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
@@ -959,6 +1036,7 @@ mod tests {
                         content: "idle".into(),
                         subtype: Some("agent_idle".into()),
                         compact_metadata: None,
+                        model_fallback: None,
                         refusal_fallback: None,
                     },
                 })
@@ -1042,6 +1120,7 @@ mod tests {
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: true,
@@ -1256,6 +1335,7 @@ mod tests {
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed output".to_string(),
+                        citations: None,
                     }],
                     stop_reason: None,
                 },
@@ -1263,8 +1343,8 @@ mod tests {
             .await;
         assert!(sink.events().await.iter().any(|event| matches!(
             event,
-            ClientEvent::SessionAgentMessage { agent_id: emitted, message_index: 4, .. }
-                if emitted == &agent_id.to_string()
+            ClientEvent::SessionAgentMessage { agent_id: emitted, row, .. }
+                if emitted == &agent_id.to_string() && row.message_index == 4
         )));
         assert!(sink.events().await.iter().any(|event| matches!(
             event,

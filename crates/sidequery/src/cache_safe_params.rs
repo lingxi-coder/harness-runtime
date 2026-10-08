@@ -10,7 +10,9 @@
 //! avoid clobbering a newer snapshot use [`CacheSafeParamsSlot::save_if_generation_matches`]
 //! (see spec §B10 anti-stale rule).
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::ConversationMessage;
+use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,8 +27,11 @@ use tokio::sync::RwLock;
 /// here would print MCP connection ids that may contain user secrets.
 #[derive(Clone)]
 pub struct CacheSafeParams {
-    /// Frozen system prompt (`Arc<str>` so cheap to clone into a fork).
-    pub system_prompt: Arc<str>,
+    /// Frozen rendered system prompt source, cheap to clone into a fork.
+    pub system_prompt: Arc<Utf16JsonProjection>,
+    /// Original provider system structure from the parent's physical request.
+    /// This preserves Native source-vector sections and marker classification.
+    pub system_prompt_input: Option<SystemPromptInput>,
     /// User-tier context bindings (env, mounted files, ...).
     pub user_context: HashMap<String, String>,
     /// Engine-tier context bindings (model id, working dir, ...).
@@ -40,7 +45,7 @@ pub struct CacheSafeParams {
     pub tool_use_options: tool_api::ToolUseOptions,
     /// Tool schemas sent with the parent's prompt, in their original order.
     /// Compaction replays these even though it never executes tool calls.
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
     /// Effective output effort used by the parent's model request.
     pub effort: Option<serde_json::Value>,
     /// Conversation prefix forks must replay verbatim.

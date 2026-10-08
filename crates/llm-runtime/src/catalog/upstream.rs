@@ -138,7 +138,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
                 },
                 models,
                 pricing: crate::PricingConfig {
-                    billing_mode: billing_mode(profile.pricing.billing_mode),
+                    // This mode is an observed value from the SDK catalog, not
+                    // a user override. Materialize it for host consumers while
+                    // preserving the same source in `wire_profile`.
+                    billing_mode: Some(billing_mode(profile.pricing.billing_mode)),
                     ..Default::default()
                 },
                 signing: profile.signing.as_ref().and_then(|s| {
@@ -180,7 +183,7 @@ pub fn builtin_presets() -> BuiltinCatalog {
             id: chatgpt.profile_name.clone(),
         };
         chatgpt.supports_websockets = true;
-        chatgpt.pricing.billing_mode = lingxi_core::host::ModelBillingMode::Subscription;
+        chatgpt.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Subscription);
         chatgpt.models.retain(|m| {
             matches!(
                 m.request_model.as_str(),

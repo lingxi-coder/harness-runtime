@@ -9,7 +9,7 @@
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
 use orchestrator::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
@@ -60,8 +60,10 @@ async fn resume_session_adopts_history_named_id_and_runtime_model() {
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "prior assistant turn".to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         },
     ];
 

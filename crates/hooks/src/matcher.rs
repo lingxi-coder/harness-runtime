@@ -24,10 +24,12 @@
 //! [`crate::registry::HookRegistry::match_event`].
 
 use crate::events::HookEventType;
-use permission::shell_command::{command_from_input, rule_matches_any_subcommand};
-use permission::shell_rule_matching::match_wildcard_pattern;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use permission::shell_command::rule_matches_any_subcommand_with_candidate_units;
+use permission::shell_rule_matching::match_wildcard_pattern_utf16;
 use permission::PermissionRuleValue;
-use regex::Regex;
+use rquickjs::{Context, Runtime};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// the binary's `atf` membership exactly (note: `FileChanged`,
@@ -130,60 +132,103 @@ pub fn matches_pattern_with(
     comma_mode: bool,
     tool_aliases: Option<&HashMap<String, String>>,
 ) -> bool {
-    // TS: `if (!t || t === "*") return true`
-    if matcher.is_empty() || matcher == "*" {
+    matches_pattern_projection_with(
+        &Utf16JsonProjection::from(match_query),
+        matcher,
+        comma_mode,
+        tool_aliases,
+    )
+}
+
+/// Match a query that may contain isolated UTF-16 units against a hook matcher.
+/// Regex patterns run in the crate's JavaScript engine, matching Native's
+/// `new RegExp(pattern).test(query)` syntax and string semantics rather than
+/// Rust's different regex dialect.
+pub(crate) fn matches_pattern_projection_with(
+    match_query: &Utf16JsonProjection,
+    matcher: &str,
+    comma_mode: bool,
+    tool_aliases: Option<&HashMap<String, String>>,
+) -> bool {
+    matches_pattern_source_with(
+        match_query,
+        &Utf16JsonProjection::from(matcher),
+        comma_mode,
+        tool_aliases,
+    )
+}
+
+/// Source-native matcher for a hook query and matcher string.
+pub(crate) fn matches_pattern_source_with(
+    match_query: &Utf16JsonProjection,
+    matcher: &Utf16JsonProjection,
+    comma_mode: bool,
+    tool_aliases: Option<&HashMap<String, String>>,
+) -> bool {
+    let Some(query_units) = match_query.string_units("") else {
+        return false;
+    };
+    let Some(matcher_units) = matcher.string_units("") else {
+        return false;
+    };
+    if matcher_units.is_empty() || matcher_units == [b'*' as u16] {
         return true;
     }
 
-    // TS: `if ((n ? /^[a-zA-Z0-9_|, -]+$/ : /^[a-zA-Z0-9_|]+$/).test(t))`.
-    if is_simple_pattern(matcher, comma_mode) {
-        // TS: `t.split(n ? /[|,]/ : "|").map(trim).filter(Boolean)
-        //        .flatMap(i => ofn(xP(i), r)).includes(e)`.
-        for segment in matcher.split(|c| c == '|' || (comma_mode && c == ',')) {
-            let segment = segment.trim();
-            if segment.is_empty() {
-                // `.filter(Boolean)` drops empty segments (e.g. trailing `,`).
+    if is_simple_pattern_units(&matcher_units, comma_mode) {
+        let mut segment_start = 0;
+        for index in 0..=matcher_units.len() {
+            let separator = index == matcher_units.len()
+                || matcher_units[index] == b'|' as u16
+                || (comma_mode && matcher_units[index] == b',' as u16);
+            if !separator {
                 continue;
             }
-            // `xP(i)` = normalizeLegacyToolName; `ofn(name, r)` yields
-            // `[name]`, or `[name, mapped]` when the alias map remaps it to a
-            // different name — `.includes(e)` matches if EITHER equals the query.
-            let normalized = normalize_legacy_tool_name(segment);
-            if normalized == match_query {
+            let segment = trim_js_units(&matcher_units[segment_start..index]);
+            segment_start = index + 1;
+            if segment.is_empty() {
+                continue;
+            }
+            let Ok(segment) = String::from_utf16(segment) else {
+                return false;
+            };
+            let normalized = normalize_legacy_tool_name(&segment);
+            if query_units == normalized.encode_utf16().collect::<Vec<_>>() {
                 return true;
             }
-            if let Some(map) = tool_aliases {
-                if let Some(mapped) = map.get(&normalized) {
-                    if mapped != &normalized && mapped == match_query {
-                        return true;
-                    }
+            if let Some(mapped) = tool_aliases.and_then(|aliases| aliases.get(&normalized)) {
+                if mapped != &normalized && query_units == mapped.encode_utf16().collect::<Vec<_>>()
+                {
+                    return true;
                 }
             }
         }
         return false;
     }
 
-    // TS: otherwise treat as regex.
-    let regex = cached_hook_regex(matcher);
-    let Some(regex) = regex.as_ref() else {
-        return false;
-    };
-    if regex.is_match(match_query) {
+    if js_regexp_test(matcher, match_query).unwrap_or_else(|error| {
+        tracing::debug!(error = %error, "Invalid regex pattern in hook matcher");
+        false
+    }) {
         return true;
     }
-    // TS: also test the query's legacy names so patterns like "^Task$" still
-    // match the canonical name (e.g. query "Agent" → legacy ["Task"]) — `rfn(e)`.
-    for legacy_name in get_legacy_tool_names(match_query) {
-        if regex.is_match(&legacy_name) {
-            return true;
+
+    if let Some(query_text) = match_query.string_at("") {
+        for legacy_name in get_legacy_tool_names(query_text) {
+            if js_regexp_test(matcher, &Utf16JsonProjection::from(legacy_name.as_str()))
+                .unwrap_or(false)
+            {
+                return true;
+            }
         }
     }
-    // TS: `for (let i of sfn(e, r)) if (s.test(i)) return true` — the extra alias
-    // map's reverse lookup (keys whose value equals the query). No-op when the
-    // port passes `None`.
-    if let Some(map) = tool_aliases {
-        for (key, value) in map {
-            if value == match_query && regex.is_match(key) {
+
+    if let Some(aliases) = tool_aliases {
+        for (key, value) in aliases {
+            if query_units == value.encode_utf16().collect::<Vec<_>>()
+                && js_regexp_test(matcher, &Utf16JsonProjection::from(key.as_str()))
+                    .unwrap_or(false)
+            {
                 return true;
             }
         }
@@ -191,146 +236,178 @@ pub fn matches_pattern_with(
     false
 }
 
-fn cached_hook_regex(matcher: &str) -> Option<std::sync::Arc<Regex>> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<std::collections::HashMap<String, Option<Arc<Regex>>>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    {
-        let guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(hit) = guard.get(matcher) {
-            return hit.clone();
-        }
-    }
-    let compiled = match Regex::new(matcher) {
-        Ok(regex) => Some(Arc::new(regex)),
-        Err(_) => {
-            tracing::debug!(matcher = %matcher, "Invalid regex pattern in hook matcher");
-            None
-        }
-    };
-    {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.len() < 256 {
-            guard.insert(matcher.to_string(), compiled.clone());
-        }
-    }
-    compiled
+pub(crate) fn is_simple_pattern_units(units: &[u16], comma_mode: bool) -> bool {
+    !units.is_empty()
+        && units.iter().all(|unit| {
+            matches!(*unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+                || *unit == b'_' as u16
+                || *unit == b'|' as u16
+                || (comma_mode && matches!(*unit, 0x002c | 0x0020 | 0x002d))
+        })
 }
 
-/// Returns `true` when `matcher` is a *bare MCP server matcher* — a simple
-/// (comma-mode) pattern in which some segment is `mcp__<server>` with no tool
-/// suffix (`mcp__<server>__<tool>`).
-///
-/// Byte-faithful port of claude-code 2.1.195's `isBareMcpServerMatcher`
-/// (`Qic`): `/^[a-zA-Z0-9_|, -]+$/.test(e)` then any `[|,]`-split, trimmed
-/// segment that `startsWith("mcp__")` whose remainder contains no `"__"`.
-/// claude warns (once) that such a matcher should be written `mcp__server__.*`
-/// ("See CHANGELOG v2.1.195"); the registry uses this to emit that deprecation.
-#[must_use]
-pub fn is_bare_mcp_server_matcher(matcher: &str) -> bool {
-    if !is_simple_pattern(matcher, true) {
+pub(crate) fn trim_js_units(mut units: &[u16]) -> &[u16] {
+    while units.first().is_some_and(|unit| is_js_trim_unit(*unit)) {
+        units = &units[1..];
+    }
+    while units.last().is_some_and(|unit| is_js_trim_unit(*unit)) {
+        units = &units[..units.len() - 1];
+    }
+    units
+}
+
+fn is_js_trim_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009..=0x000d
+            | 0x0020
+            | 0x00a0
+            | 0x1680
+            | 0x2000..=0x200a
+            | 0x2028..=0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    )
+}
+
+struct HookRegexpContext {
+    context: Context,
+    _runtime: Runtime,
+}
+
+thread_local! {
+    static HOOK_REGEXP_CONTEXT: RefCell<Option<HookRegexpContext>> = const { RefCell::new(None) };
+}
+
+fn js_regexp_test(
+    pattern: &Utf16JsonProjection,
+    value: &Utf16JsonProjection,
+) -> Result<bool, String> {
+    let input = Utf16JsonProjection::array(vec![pattern.clone(), value.clone()])
+        .map_err(|error| error.to_string())?
+        .to_json_string()
+        .map_err(|error| error.to_string())?;
+    let program = format!(
+        "(()=>{{const [pattern, value] = JSON.parse({}); return new RegExp(pattern).test(value);}})()",
+        js_string_literal(&input)
+    );
+    eval_hook_regexp(&program)
+}
+
+pub(crate) fn is_valid_hook_regexp(pattern: &str) -> bool {
+    is_valid_hook_regexp_projection(&Utf16JsonProjection::from(pattern))
+}
+
+pub(crate) fn is_valid_hook_regexp_projection(pattern: &Utf16JsonProjection) -> bool {
+    if pattern.string_units("").is_none() {
         return false;
     }
-    matcher.split(['|', ',']).map(str::trim).any(|seg| {
-        seg.strip_prefix("mcp__")
-            .is_some_and(|rest| !rest.contains("__"))
+    let input = Utf16JsonProjection::array(vec![pattern.clone()])
+        .and_then(|projection| projection.to_json_string())
+        .unwrap_or_default();
+    let program = format!(
+        "(()=>{{const [pattern] = JSON.parse({}); new RegExp(pattern); return true;}})()",
+        js_string_literal(&input)
+    );
+    eval_hook_regexp(&program).unwrap_or(false)
+}
+
+fn eval_hook_regexp(program: &str) -> Result<bool, String> {
+    HOOK_REGEXP_CONTEXT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let runtime = Runtime::new().map_err(|error| error.to_string())?;
+            let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+            *slot = Some(HookRegexpContext {
+                context,
+                _runtime: runtime,
+            });
+        }
+        let engine = slot
+            .as_ref()
+            .expect("Hook regex context was just initialized");
+        engine
+            .context
+            .with(|context| context.eval::<bool, _>(program))
+            .map_err(|error| error.to_string())
     })
 }
 
-/// Returns `true` if a hook's `if`-condition `if_condition` (a permission-rule
-/// string such as `"Bash(git push:*)"`) matches the current tool invocation.
-///
-/// Byte-faithful port of `prepareIfConditionMatcher`'s returned closure
-/// (`utils/hooks.ts:1404-1421`) composed with each tool's
-/// `preparePermissionMatcher` (`BashTool.tsx:445`, `FileEditTool.ts:122`,
-/// `FileReadTool.ts:395`, `FileWriteTool.ts:132`, `GlobTool.ts:91`,
-/// `GrepTool.ts:198`):
-///
-/// 1. Parse `if_condition` into `{ tool_name, rule_content }` via
-///    [`PermissionRuleValue::from_rule_string`] (`permissionRuleValueFromString`).
-/// 2. If the rule's (legacy-normalized) tool name differs from the event's
-///    (legacy-normalized) `tool_name` → no match.
-/// 3. If the rule carries no content (bare `Tool`, or `Tool()` / `Tool(*)`) →
-///    match — tool-name agreement alone (`if (!parsed.ruleContent) return true`).
-/// 4. Otherwise dispatch to the tool's content matcher. Only the six tools that
-///    implement `preparePermissionMatcher` in claude-code can match a content
-///    rule; for every other tool (and an input missing the matched field) the
-///    TS `patternMatcher` is `undefined`, so the closure returns `false`.
-///
-/// `tool_name` is the event's tool (canonicalized internally);
-/// `tool_input` is the tool's raw JSON input (`hookInput.tool_input`).
-///
-/// ## Documented divergences (reused permission-crate matchers; safe direction)
-/// The per-tool content match reuses the permission crate's matchers rather than
-/// re-deriving each tool's closure:
-/// - **Bash** uses [`rule_matches_any_subcommand`] — the crate's deny-like
-///   "fires if ANY subcommand matches" aggregation, which is exactly the
-///   semantics the TS Bash matcher targets ("compound commands must fire the
-///   hook if ANY subcommand matches"). It strips safe wrappers / env-var
-///   prefixes and uses the quote-aware delimiter splitter (the crate's
-///   documented stand-in for tree-sitter `parseForSecurity`); all such
-///   differences make the hook fire MORE readily (the deny-safe direction the
-///   TS comment intends), never less, and the `prefix` / `wildcard` / exact
-///   match rules are identical.
-/// - **File / Glob / Grep** use [`match_wildcard_pattern`] (the port of
-///   `matchWildcardPattern`) against the raw `file_path` / search `pattern`
-///   string — byte-identical to TS (anchored wildcard, NOT a root-relative
-///   gitignore glob).
+fn js_string_literal(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("Rust strings are valid JSON strings")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// Evaluate a Hook per-entry if condition using its exact source string.
+/// Permission-rule parsing keeps the content units intact, then dispatches the
+/// same Bash or file/search matcher used by the current Hook input path.
+/// Missing/non-string tool fields remain non-matches.
 #[must_use]
 pub fn matches_if_condition(
     if_condition: &str,
     tool_name: &str,
-    tool_input: &serde_json::Value,
+    tool_input: &Utf16JsonProjection,
 ) -> bool {
-    let parsed = PermissionRuleValue::from_rule_string(if_condition);
-    // `from_rule_string` already legacy-normalizes the parsed tool name; the
-    // event tool name is normalized here so the comparison matches TS's
-    // `normalizeLegacyToolName(parsed.toolName) === normalizeLegacyToolName(toolName)`.
+    matches_if_condition_projection(
+        &Utf16JsonProjection::from(if_condition),
+        tool_name,
+        tool_input,
+    )
+}
+
+/// The rule parser retains arbitrary content units; the tool name remains a
+/// typed identifier and must decode as valid Rust text.
+pub(crate) fn matches_if_condition_projection(
+    if_condition: &Utf16JsonProjection,
+    tool_name: &str,
+    tool_input: &Utf16JsonProjection,
+) -> bool {
+    let Some(parsed) = PermissionRuleValue::from_rule_projection(if_condition) else {
+        return false;
+    };
     let canonical_tool = normalize_legacy_tool_name(tool_name);
     if parsed.tool_name != canonical_tool {
         return false;
     }
-    // Bare tool name / `Tool()` / `Tool(*)` → tool-name agreement is enough.
-    let Some(content) = parsed.rule_content.as_deref() else {
+    let Some(content_units) = parsed.rule_content_units() else {
         return true;
     };
-    matches_content_rule(&canonical_tool, content, tool_input)
+    matches_content_rule_units(&canonical_tool, &content_units, tool_input)
 }
 
-/// The per-tool content matcher — the body of each tool's
-/// `preparePermissionMatcher` closure. `tool_name` is already
-/// legacy-normalized; `content` is the rule's parenthesized content.
-fn matches_content_rule(tool_name: &str, content: &str, input: &serde_json::Value) -> bool {
+fn matches_content_rule_units(
+    tool_name: &str,
+    content_units: &[u16],
+    input: &Utf16JsonProjection,
+) -> bool {
     match tool_name {
-        // BashTool: split into subcommands, fire if ANY matches the content
-        // (prefix / wildcard / exact). Missing `command` field ⇒ TS input
-        // schema parse fails ⇒ `patternMatcher` undefined ⇒ false.
-        "Bash" => {
-            command_from_input(input).is_some_and(|cmd| rule_matches_any_subcommand(content, cmd))
+        "Bash" => input
+            .get_property("command")
+            .and_then(|value| value.code_units())
+            .is_some_and(|command| {
+                rule_matches_any_subcommand_with_candidate_units(content_units, command, &[])
+            }),
+        "Edit" | "Write" | "Read" => {
+            matches_source_wildcard_field(content_units, input, "file_path")
         }
-        // File tools match the content as a wildcard against the RAW `file_path`
-        // string (`matchWildcardPattern(pattern, file_path)`).
-        "Edit" | "Write" | "Read" => string_field(input, "file_path")
-            .is_some_and(|p| match_wildcard_pattern(content, p, false)),
-        // Glob / Grep match against the SEARCH `pattern` field, not a path.
-        "Glob" | "Grep" => string_field(input, "pattern")
-            .is_some_and(|p| match_wildcard_pattern(content, p, false)),
-        // Every other tool (PowerShell, NotebookEdit, MCP, …) has no
-        // `preparePermissionMatcher` in claude-code, so a content rule cannot
-        // match (TS `patternMatcher` is `undefined` → the closure returns false).
+        "Glob" | "Grep" => matches_source_wildcard_field(content_units, input, "pattern"),
         _ => false,
     }
 }
 
-/// Extract a string field from a tool's JSON input, or `None` when absent /
-/// non-string (mirrors a TS input-schema parse failure for that field).
-fn string_field<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str> {
-    input.get(field).and_then(serde_json::Value::as_str)
+fn matches_source_wildcard_field(
+    pattern: &[u16],
+    input: &Utf16JsonProjection,
+    field: &str,
+) -> bool {
+    input
+        .get_property(field)
+        .and_then(|value| value.code_units())
+        .is_some_and(|units| match_wildcard_pattern_utf16(pattern, units))
 }
 
 /// True when `s` is non-empty and every byte is in the "simple pattern" char
@@ -345,6 +422,23 @@ fn is_simple_pattern(s: &str, comma_mode: bool) -> bool {
                 || b == b'|'
                 || (comma_mode && (b == b',' || b == b' ' || b == b'-'))
         })
+}
+
+/// Returns `true` when `matcher` is a simple comma-mode list containing a
+/// bare MCP server matcher (`mcp__<server>`) with no tool suffix.
+///
+/// This supports the existing deprecation warning that suggests
+/// `mcp__server__.*` when a matcher names only an MCP server.
+#[must_use]
+pub fn is_bare_mcp_server_matcher(matcher: &str) -> bool {
+    if !is_simple_pattern(matcher, true) {
+        return false;
+    }
+    matcher.split(['|', ',']).map(str::trim).any(|segment| {
+        segment
+            .strip_prefix("mcp__")
+            .is_some_and(|rest| !rest.contains("__"))
+    })
 }
 
 #[cfg(test)]
@@ -396,6 +490,120 @@ mod tests {
         // But a plain "Bash" is a SIMPLE pattern → exact match, not substring:
         // it must NOT match "MultiBash".
         assert!(!matches_pattern("MultiBash", "Bash"));
+    }
+
+    #[test]
+    fn source_matcher_preserves_lone_and_paired_surrogate_code_units() {
+        let lone = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+        assert!(matches_pattern_projection_with(&lone, "^.$", false, None));
+        assert!(matches_pattern_projection_with(
+            &lone,
+            r"^\uD800$",
+            false,
+            None
+        ));
+        assert!(!matches_pattern_projection_with(&lone, "^..$", false, None));
+
+        let paired = Utf16JsonProjection::parse(r#""😀""#).unwrap();
+        assert!(matches_pattern_projection_with(
+            &paired, "^..$", false, None
+        ));
+        assert!(!matches_pattern_projection_with(
+            &paired, "^.$", false, None
+        ));
+    }
+
+    #[test]
+    fn source_matcher_preserves_cross_ascii_non_ascii_ranges_and_line_terminators() {
+        let first_non_ascii = Utf16JsonProjection::parse(r#""\u0080""#).unwrap();
+        let next_non_ascii = Utf16JsonProjection::parse(r#""\u0081""#).unwrap();
+        let range = "^[A-\u{80}]$";
+        assert!(matches_pattern_projection_with(
+            &Utf16JsonProjection::from("A"),
+            range,
+            false,
+            None
+        ));
+        assert!(matches_pattern_projection_with(
+            &first_non_ascii,
+            range,
+            false,
+            None
+        ));
+        assert!(matches_pattern_projection_with(
+            &first_non_ascii,
+            r"^[A-\x80]$",
+            false,
+            None
+        ));
+        assert!(!matches_pattern_projection_with(
+            &next_non_ascii,
+            range,
+            false,
+            None
+        ));
+
+        let line_separator = Utf16JsonProjection::parse(r#""\u2028""#).unwrap();
+        assert!(!matches_pattern_projection_with(
+            &line_separator,
+            "^.$",
+            false,
+            None
+        ));
+
+        let nbsp = Utf16JsonProjection::parse(r#""\u00a0""#).unwrap();
+        let nel = Utf16JsonProjection::parse(r#""\u0085""#).unwrap();
+        assert!(matches_pattern_projection_with(&nbsp, r"^\s$", false, None));
+        assert!(matches_pattern_projection_with(
+            &nbsp, r"^[\s]$", false, None
+        ));
+        assert!(!matches_pattern_projection_with(&nel, r"^\s$", false, None));
+
+        let feff = Utf16JsonProjection::parse(r#""\ufeff""#).unwrap();
+        assert!(matches_pattern_projection_with(&feff, r"^\s$", false, None));
+
+        // Private-use source scalars remain literal values rather than
+        // colliding with any temporary marker alphabet.
+        let pua = Utf16JsonProjection::parse(r#""\ue000""#).unwrap();
+        let pua_neighbor = Utf16JsonProjection::parse(r#""\ue001""#).unwrap();
+        assert!(matches_pattern_projection_with(
+            &pua,
+            "^[\u{e000}-\u{e001}]$",
+            false,
+            None
+        ));
+        assert!(!matches_pattern_projection_with(
+            &pua_neighbor,
+            "^[\u{e000}-\u{e000}]$",
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn regex_branch_uses_javascript_lookaround_and_backreferences() {
+        assert!(matches_pattern("BashTool", r"Bash(?=Tool)"));
+        assert!(matches_pattern("aa", r"^(.)\1$"));
+        assert!(!matches_pattern("ab", r"^(.)\1$"));
+        // Rust-only inline flags are invalid in the Native RegExp constructor.
+        assert!(!matches_pattern("Bash", r"(?i)Bash"));
+    }
+
+    #[test]
+    fn regex_branch_matches_source_query_with_exact_surrogate_units() {
+        let query = Utf16JsonProjection::parse(r#""\ud800Tool""#).unwrap();
+        assert!(matches_pattern_projection_with(
+            &query,
+            r"\uD800Tool",
+            false,
+            None
+        ));
+        assert!(!matches_pattern_projection_with(
+            &query,
+            r"\uD801Tool",
+            false,
+            None
+        ));
     }
 
     #[test]
@@ -455,7 +663,11 @@ mod tests {
 
     // ── `if`-condition matcher (prepareIfConditionMatcher + per-tool) ──────────
 
-    use serde_json::json;
+    macro_rules! json {
+        ($($tokens:tt)+) => {
+            Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)+)).unwrap()
+        };
+    }
 
     #[test]
     fn if_bash_prefix_rule_fires_on_matching_command() {
@@ -579,6 +791,73 @@ mod tests {
             &nb
         ));
         assert!(matches_if_condition("NotebookEdit", "NotebookEdit", &nb));
+    }
+
+    #[test]
+    fn if_file_and_search_wildcards_match_unpaired_source_units() {
+        let file = Utf16JsonProjection::parse(r#"{"file_path":"/proj/\ud800.rs"}"#).unwrap();
+        assert!(file.string_units("/file_path").unwrap().contains(&0xd800));
+        assert!(matches_if_condition("Edit(*.rs)", "Edit", &file));
+        assert!(!matches_if_condition("Edit(*.txt)", "Edit", &file));
+        assert!(matches_if_condition("Edit(/proj/**/*.rs)", "Edit", &file));
+
+        let glob = Utf16JsonProjection::parse(r#"{"pattern":"src/\ud800/*.rs"}"#).unwrap();
+        assert!(matches_if_condition("Glob(src/*/*.rs)", "Glob", &glob));
+        assert!(!matches_if_condition("Glob(src/*/*.txt)", "Glob", &glob));
+
+        let paired = Utf16JsonProjection::parse(r#"{"file_path":"/proj/😀.rs"}"#).unwrap();
+        assert!(matches_if_condition("Edit(*😀.rs)", "Edit", &paired));
+        let pua = Utf16JsonProjection::parse(r#"{"file_path":"/proj/\ue000.rs"}"#).unwrap();
+        let pua_rule = Utf16JsonProjection::parse(r#""Edit(*\ue000.rs)""#).unwrap();
+        let neighbor_rule = Utf16JsonProjection::parse(r#""Edit(*\ue001.rs)""#).unwrap();
+        assert!(matches_if_condition_projection(&pua_rule, "Edit", &pua));
+        assert!(!matches_if_condition_projection(
+            &neighbor_rule,
+            "Edit",
+            &pua
+        ));
+
+        // Pattern trimming follows JavaScript String.trim: FEFF is removed,
+        // while NEL (U+0085) remains a literal and therefore does not match.
+        let plain_path = Utf16JsonProjection::parse(r#"{"file_path":"/proj/file"}"#).unwrap();
+        let feff_rule = Utf16JsonProjection::parse(r#""Edit(\ufeff/proj/file)""#).unwrap();
+        let nel_rule = Utf16JsonProjection::parse(r#""Edit(\u0085/proj/file)""#).unwrap();
+        assert!(matches_if_condition_projection(
+            &feff_rule,
+            "Edit",
+            &plain_path
+        ));
+        assert!(!matches_if_condition_projection(
+            &nel_rule,
+            "Edit",
+            &plain_path
+        ));
+
+        let command = Utf16JsonProjection::parse(r#"{"command":"git push \ud800"}"#).unwrap();
+        assert!(matches_if_condition("Bash(git push:*)", "Bash", &command));
+        // Bare tool-name rules do not inspect a string field and still match.
+        assert!(matches_if_condition("Bash", "Bash", &command));
+    }
+
+    #[test]
+    fn source_if_rule_and_shell_command_keep_unpaired_units() {
+        let if_rule = Utf16JsonProjection::parse(r#""Bash(git \ud800:*)""#).unwrap();
+        let command = Utf16JsonProjection::parse(r#"{"command":"git \ud800 push"}"#).unwrap();
+        assert!(matches_if_condition_projection(&if_rule, "Bash", &command));
+
+        let other_command = Utf16JsonProjection::parse(r#"{"command":"git \ud801 push"}"#).unwrap();
+        assert!(!matches_if_condition_projection(
+            &if_rule,
+            "Bash",
+            &other_command
+        ));
+
+        let file_rule = Utf16JsonProjection::parse(r#""Edit(*\ud800.rs)""#).unwrap();
+        let file = Utf16JsonProjection::parse(r#"{"file_path":"/proj/\ud800.rs"}"#).unwrap();
+        assert!(matches_if_condition_projection(&file_rule, "Edit", &file));
+
+        let wrong_rule = Utf16JsonProjection::parse(r#""Edit(*\ud801.rs)""#).unwrap();
+        assert!(!matches_if_condition_projection(&wrong_rule, "Edit", &file));
     }
 
     #[test]

@@ -81,8 +81,11 @@ macro_rules! impl_test_tool {
             ) -> String {
                 $name.into()
             }
-            async fn prompt(&self, _opts: &PromptOptions) -> String {
-                String::new()
+            async fn prompt(
+                &self,
+                _opts: &PromptOptions,
+            ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+                String::new().into()
             }
             async fn call(
                 &self,
@@ -145,7 +148,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -155,7 +158,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let start = std::time::Instant::now();
     let _ = orch.run_turn_streaming("call two tools").await.expect("ok");

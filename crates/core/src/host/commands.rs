@@ -5,6 +5,7 @@
 //! `core::host` so the orchestrator and CLI can depend on the dispatch
 //! abstraction without pulling in `lingxi-commands` directly.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 
 /// Result of [`SlashCommandDispatcher::dispatch`].
@@ -14,8 +15,8 @@ pub enum SlashDispatchResult {
     /// `/help`, `/model`, builtins) — it is NOT fed back to the model. Mirrors
     /// claude-code's `type: "local" | "local-jsx"` commands.
     Handled {
-        /// Text the dispatcher wants to surface to the user.
-        display: String,
+        /// Exact source text the dispatcher wants to surface to the user.
+        display: Utf16JsonProjection,
     },
     /// A prompt-expanding slash command (claude-code `type: "prompt"`: bundled
     /// skills like `/loop`, plus Markdown/Plugin prompt commands). The host must
@@ -24,17 +25,25 @@ pub enum SlashDispatchResult {
     /// actually schedule + execute, matching the binary which injects the
     /// `getPromptForCommand` result as the user message.
     RunAsTurn {
-        /// The expanded prompt text to submit as the user turn.
-        prompt: String,
+        /// The exact source projection of the expanded prompt to submit as the user turn.
+        prompt: Utf16JsonProjection,
     },
     /// Input did not start with `/` — treat as a regular user prompt.
     NotASlashCommand,
+    /// Input started with `/` but the parser could not extract a command name.
+    /// Interactive hosts can show the syntax hint; noninteractive hosts should
+    /// submit `input` as an ordinary user turn, matching Native behavior.
+    ParseFailure {
+        /// The original slash-start input, retained exactly for ordinary-turn
+        /// fallback and diagnostics.
+        input: Utf16JsonProjection,
+    },
     /// Input started with `/` but the name is not registered.
     Unknown {
-        /// The unknown command name (without leading `/`).
-        name: String,
-        /// The locked `"Unknown command: /{name}"` literal.
-        display: String,
+        /// The exact unknown command name (without leading `/`).
+        name: Utf16JsonProjection,
+        /// The locked `"Unknown command: /{name}"` literal, retaining name units.
+        display: Utf16JsonProjection,
     },
 }
 
@@ -44,5 +53,5 @@ pub trait SlashCommandDispatcher: Send + Sync {
     /// Dispatch the raw input (with or without leading `/`) and return the
     /// handler's display string, or the locked unknown-command literal if
     /// the name is not registered.
-    async fn dispatch(&self, raw: &str) -> SlashDispatchResult;
+    async fn dispatch(&self, raw: Utf16JsonProjection) -> SlashDispatchResult;
 }

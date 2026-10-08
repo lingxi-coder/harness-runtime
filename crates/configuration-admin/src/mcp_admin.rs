@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::mcp_bridge::{remove_server, upsert_server, McpPaths};
-use crate::settings_bridge::{apply_patch, build_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch_source, build_snapshot, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonBuilder, Utf16JsonProjection};
 
 #[derive(Debug, Serialize)]
 struct ScopeSnapshot {
@@ -55,14 +56,12 @@ pub fn snapshot_json(
         context.active_snapshot(),
         context.managed.clone(),
     );
-    let local_layer = Value::Object(
-        settings_snapshot
-            .layers
-            .get("local")
-            .cloned()
-            .unwrap_or_default(),
-    );
-    let approval = approval_snapshot(&local_layer, &global_raw, &paths.project_dir);
+    let local_layer = settings_snapshot
+        .layers
+        .get("local")
+        .cloned()
+        .unwrap_or_else(empty_source_object);
+    let approval = approval_snapshot(&local_layer, &global_raw, &paths.project_dir)?;
     let snapshot = McpSnapshot {
         scopes: vec![
             ScopeSnapshot {
@@ -144,8 +143,17 @@ pub fn set_project_approval(
         context.active_snapshot(),
         context.managed.clone(),
     );
-    let local_layer = Value::Object(snapshot.layers.get("local").cloned().unwrap_or_default());
-    let actual = plugin_source_sha256(local_layer.to_string().as_bytes());
+    let local_layer = snapshot
+        .layers
+        .get("local")
+        .cloned()
+        .unwrap_or_else(empty_source_object);
+    let actual = plugin_source_sha256(
+        local_layer
+            .to_json_string()
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    );
     if actual != revision_sha256 {
         return Err(format!(
             "revision conflict: expected {revision_sha256}, found {actual}"
@@ -153,16 +161,16 @@ pub fn set_project_approval(
     }
     let name = required_string(&payload, "name")?;
     let decision = required_string(&payload, "decision")?;
-    let mut enabled = string_list(local_layer.get("enabledMcpjsonServers"));
-    let mut disabled = string_list(local_layer.get("disabledMcpjsonServers"));
+    let mut enabled = source_string_list(local_layer.get_property("enabledMcpjsonServers"));
+    let mut disabled = source_string_list(local_layer.get_property("disabledMcpjsonServers"));
     enabled.retain(|entry| entry != name);
     disabled.retain(|entry| entry != name);
     let enable_all = match decision {
         "approve_all" => true,
         "clear" => false,
         _ => local_layer
-            .get("enableAllProjectMcpServers")
-            .and_then(Value::as_bool)
+            .get_property("enableAllProjectMcpServers")
+            .and_then(JsonValueView::as_bool)
             .unwrap_or(false),
     };
     match decision {
@@ -171,25 +179,21 @@ pub fn set_project_approval(
         "clear" | "approve_all" => {}
         _ => return Err(format!("unknown approval decision `{decision}`")),
     }
-    apply_patch(
+    apply_patch_source(
         &context.paths,
         WritableScopeDto::Local,
         vec![
             (
                 "enabledMcpjsonServers".to_string(),
-                Some(Value::Array(
-                    enabled.into_iter().map(Value::String).collect(),
-                )),
+                Some(source_string_array(enabled)?),
             ),
             (
                 "disabledMcpjsonServers".to_string(),
-                Some(Value::Array(
-                    disabled.into_iter().map(Value::String).collect(),
-                )),
+                Some(source_string_array(disabled)?),
             ),
             (
                 "enableAllProjectMcpServers".to_string(),
-                Some(Value::Bool(enable_all)),
+                Some(source_bool(enable_all)?),
             ),
         ],
     )
@@ -280,10 +284,10 @@ fn ensure_scope_revision(paths: &McpPaths, scope: &str, expected: &str) -> Resul
 }
 
 fn approval_snapshot(
-    local_layer: &Value,
+    local_layer: &Utf16JsonProjection,
     global_raw: &str,
     project_dir: &Path,
-) -> ApprovalSnapshot {
+) -> Result<ApprovalSnapshot, String> {
     let project_key = migrations::global_config::project_path_for_config(project_dir);
     let legacy = serde_json::from_str::<Value>(global_raw)
         .ok()
@@ -291,21 +295,21 @@ fn approval_snapshot(
         .and_then(|projects| projects.get(&project_key).cloned())
         .unwrap_or(Value::Null);
     let enabled = {
-        let mut values = string_list(local_layer.get("enabledMcpjsonServers"));
-        values.extend(string_list(legacy.get("enabledMcpjsonServers")));
+        let mut values = source_string_list(local_layer.get_property("enabledMcpjsonServers"));
+        values.extend(value_string_list(legacy.get("enabledMcpjsonServers")));
         dedupe(values)
     };
     let disabled = {
-        let mut values = string_list(local_layer.get("disabledMcpjsonServers"));
-        values.extend(string_list(legacy.get("disabledMcpjsonServers")));
+        let mut values = source_string_list(local_layer.get_property("disabledMcpjsonServers"));
+        values.extend(value_string_list(legacy.get("disabledMcpjsonServers")));
         dedupe(values)
     };
-    ApprovalSnapshot {
+    Ok(ApprovalSnapshot {
         enabled_servers: enabled,
         disabled_servers: disabled,
         enable_all_project_servers: local_layer
-            .get("enableAllProjectMcpServers")
-            .and_then(Value::as_bool)
+            .get_property("enableAllProjectMcpServers")
+            .and_then(JsonValueView::as_bool)
             .or_else(|| {
                 legacy
                     .get("enableAllProjectMcpServers")
@@ -313,11 +317,16 @@ fn approval_snapshot(
             })
             .unwrap_or(false),
         legacy_source_present: !legacy.is_null(),
-        revision_sha256: plugin_source_sha256(local_layer.to_string().as_bytes()),
-    }
+        revision_sha256: plugin_source_sha256(
+            local_layer
+                .to_json_string()
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        ),
+    })
 }
 
-fn string_list(value: Option<&Value>) -> Vec<String> {
+fn value_string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .map(|values| {
@@ -328,6 +337,41 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn source_string_list(value: Option<JsonValueView<'_>>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let Some(length) = value.array_len() else {
+        return Vec::new();
+    };
+    (0..length)
+        .filter_map(|index| value.get_index(index).and_then(JsonValueView::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty source object is valid")
+}
+
+fn source_string_array(values: Vec<String>) -> Result<Utf16JsonProjection, String> {
+    let mut builder = Utf16JsonBuilder::new();
+    let items = values
+        .iter()
+        .map(|value| builder.push_string(value))
+        .collect();
+    let root = builder
+        .push_array(items)
+        .map_err(|error| error.to_string())?;
+    builder.finish(root).map_err(|error| error.to_string())
+}
+
+fn source_bool(value: bool) -> Result<Utf16JsonProjection, String> {
+    let mut builder = Utf16JsonBuilder::new();
+    let root = builder.push_bool(value);
+    builder.finish(root).map_err(|error| error.to_string())
 }
 
 fn dedupe(values: Vec<String>) -> Vec<String> {

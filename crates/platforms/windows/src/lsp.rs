@@ -10,9 +10,9 @@ use jsonrpc::Connection;
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use lsp::LspClient;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -143,9 +143,8 @@ impl LspTransport for WindowsLspTransport {
             .lookup_client_and_config(conn.connection_id)
             .await
             .ok_or_else(|| LspError::Transport("connection not found".into()))?;
-        client
-            .register_workspace_configuration(config.settings.clone())
-            .await;
+        let settings = config.settings.clone();
+        client.register_workspace_configuration(settings).await;
         let caps = client.initialize(root_uri, &config).await?;
         Ok(LspServerCapabilities {
             text_document_sync: lsp::client::text_document_sync_label(
@@ -167,20 +166,20 @@ impl LspTransport for WindowsLspTransport {
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
-    ) -> Result<Value, LspError> {
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         let client = self
             .lookup_client(conn.connection_id)
             .await
             .ok_or_else(|| LspError::Transport("connection not found".into()))?;
-        client.request::<Value, Value>(method, params).await
+        client.request(method, params).await
     }
 
     async fn notify(
         &self,
         conn: &LspRawConnection,
         method: &str,
-        params: Value,
+        params: Utf16JsonProjection,
     ) -> Result<(), LspError> {
         let client = self
             .lookup_client(conn.connection_id)

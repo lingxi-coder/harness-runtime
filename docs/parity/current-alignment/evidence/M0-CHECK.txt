@@ -1,0 +1,8 @@
+M0 partial check — 2026-10-07
+Worktree: harness-runtime (codex/claude-alignment-integration)
+Command: cargo check --locked --offline -p core -p session -p permission -p hooks -p lsp --lib
+Environment: CARGO_TARGET_DIR=/private/tmp/mods-current-core-session-graph-gates-v1312/target; CARGO_BUILD_JOBS=2; CARGO_INCREMENTAL=0; CARGO_PROFILE_DEV_DEBUG=0
+Result: exit 0; dev profile 17.87s; no errors. Existing unused/dead-code warnings remain.
+Scope: five production libraries only; this does not complete the full Harness production or Native acceptance gates.
+JSON-RPC: cargo test --locked --offline -p jsonrpc; exit 0; 71 unit + 12 integration passed; test profile 2.19s; existing unused JsonPayload warning.
+MCP attempt: cargo test --locked --offline -p mcp exited 101 before tests; Cargo unexpectedly compiled SDK and reported 226 errors from an in-progress import snapshot. Not an MCP test verdict; no further rebuild until stable batch.

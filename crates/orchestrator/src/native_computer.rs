@@ -7,8 +7,11 @@ use lingxi_core::host::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
     ToolExecutionIdentity, ToolExecutionOutcome, ToolExecutionRecord, ToolExecutionStage,
 };
-use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId, ToolUseId,
+};
 use lingxi_llm_client::protocol::{self as wire, computer::*};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -55,6 +58,44 @@ struct StoredExecutionBinding {
     frame: ComputerFrame,
     binding: NativeContinuationBinding,
     provider_response_id: String,
+}
+
+#[derive(Serialize)]
+struct NativeBindingPayload<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    call: &'a NativeComputerCall,
+    tool_use_ids: &'a [String],
+    original_blocks: &'a [wire::ContentBlock],
+    frame: &'a ComputerFrame,
+    binding: &'a NativeContinuationBinding,
+    provider_response_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct NativeContinuationPayload<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    continuation: &'a wire::ContinuationRef,
+}
+
+#[derive(Serialize)]
+struct NativeReceiptAckPayload<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    call_ids: &'a [String],
+    provider_response_id: &'a str,
+    receipts: &'a [ReceiptAcknowledgement],
+}
+
+#[derive(Serialize)]
+struct NativeReceiptPayload<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    call_id: &'a str,
+    provider_response_id: &'a str,
+    receipt_id: &'a str,
+    block: &'a wire::ContentBlock,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -204,6 +245,73 @@ fn digest(value: &Value) -> Result<String, OrchestratorError> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn digest_source(value: &Utf16JsonProjection) -> Result<String, OrchestratorError> {
+    let source = value.to_json_string().map_err(internal)?;
+    Ok(format!("{:x}", Sha256::digest(source.as_bytes())))
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn source_payload(value: &impl Serialize) -> Result<Utf16JsonProjection, OrchestratorError> {
+    let source = serde_json::to_string(value).map_err(internal)?;
+    Utf16JsonProjection::parse(&source).map_err(internal)
+}
+
+fn decode_payload<T: serde::de::DeserializeOwned>(
+    value: &Utf16JsonProjection,
+) -> Result<T, OrchestratorError> {
+    let source = value.to_json_string().map_err(internal)?;
+    serde_json::from_str(&source).map_err(internal)
+}
+
+fn decode_payload_field<T: serde::de::DeserializeOwned>(
+    value: &Utf16JsonProjection,
+    pointer: &str,
+) -> Result<T, OrchestratorError> {
+    let field = value.subprojection(pointer).map_err(internal)?;
+    decode_payload(&field)
+}
+
+fn sdk_payload_from_core(
+    value: &Utf16JsonProjection,
+) -> Result<wire::JsonPayload, OrchestratorError> {
+    let source = value.to_json_string().map_err(internal)?;
+    wire::JsonPayload::parse(&source).map_err(internal)
+}
+
+fn sdk_array_from_core(
+    values: &[Utf16JsonProjection],
+) -> Result<wire::JsonPayload, OrchestratorError> {
+    let mut source = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            source.push(',');
+        }
+        source.push_str(sdk_payload_from_core(value)?.as_json_source());
+    }
+    source.push(']');
+    wire::JsonPayload::parse(&source).map_err(internal)
+}
+
+fn core_array_items(
+    value: Option<&Utf16JsonProjection>,
+) -> Result<Vec<Utf16JsonProjection>, OrchestratorError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(len) = value.array_len("") else {
+        if value.to_json_string().map_err(internal)? == "null" {
+            return Ok(Vec::new());
+        }
+        return Err(internal("stored tool-result content is not an array"));
+    };
+    (0..len)
+        .map(|index| value.subprojection(&format!("/{index}")).map_err(internal))
+        .collect()
+}
+
 fn protocol(provider: NativeComputerProvider) -> wire::ProtocolFamily {
     match provider {
         NativeComputerProvider::OpenAi => wire::ProtocolFamily::OpenAiResponses,
@@ -291,11 +399,11 @@ pub(crate) async fn prepare_projection(
     orch: &ConversationOrchestrator,
     model: &str,
     profile: Option<&str>,
-    tools: &[Value],
+    tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
     let available = tools
         .iter()
-        .any(|t| t["name"] == "computer" && t["defer_loading"] != true);
+        .any(|tool| tool.name == "computer" && !tool.defer_loading);
     let tool = if available {
         orch.filtered_available_tools().await.into_iter().find(|t| {
             t.name() == "computer" && !t.is_mcp() && t.native_computer_capabilities().is_some()
@@ -317,19 +425,23 @@ pub(crate) async fn prepare_projection(
         })
         .filter_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value["type"] == "lingxi_computer_continuation" =>
+                if value.string_at("/type") == Some("lingxi_computer_continuation") =>
             {
-                Some(value["continuation"].clone())
+                value.subprojection("/continuation").ok()
             }
             _ => None,
         })
         .collect::<Vec<_>>();
     let mut state = orch.computer_runtime.state.lock().await;
+    let retained_continuation = state
+        .continuation
+        .as_ref()
+        .map(source_payload)
+        .transpose()?;
     if state.pending_receipts.is_empty()
-        && state.continuation.as_ref().is_some_and(|reference| {
-            !retained_continuations
-                .contains(&serde_json::to_value(reference).expect("continuation serializes"))
-        })
+        && retained_continuation
+            .as_ref()
+            .is_some_and(|reference| !retained_continuations.contains(reference))
     {
         state.continuation = None;
         state.continuation_binding = None;
@@ -400,7 +512,7 @@ pub(crate) async fn prepare_projection(
                 let declarations = llm_runtime::convert::to_tool_declarations(
                     tools
                         .iter()
-                        .filter(|t| t["name"] != "computer")
+                        .filter(|tool| tool.name != "computer")
                         .cloned()
                         .collect(),
                 )
@@ -552,7 +664,7 @@ pub(crate) async fn bind_response(
             let mut replacement = Vec::new();
             let originals: Vec<_> = canonical
                 .iter()
-                .filter(|b| computer_call_id(b) == Some(call.context.call_id.as_str()))
+                .filter(|b| computer_call_id(b).as_deref() == Some(call.context.call_id.as_str()))
                 .cloned()
                 .collect();
             if originals.is_empty() {
@@ -564,6 +676,7 @@ pub(crate) async fn bind_response(
                     .tool
                     .lower_computer_operation(operation, &binding.frame)
                     .map_err(internal)?;
+                let input = source_payload(&input)?;
                 let identity = ToolExecutionIdentity {
                     session_id,
                     provider_response_id: response.id.clone(),
@@ -598,7 +711,15 @@ pub(crate) async fn bind_response(
             let call_id = call.context.call_id.clone();
             replacement.push(ContentBlock::ProviderContent {
                 protocol: protocol_name(binding.provider),
-                value: json!({"type":"lingxi_computer_binding","call":call.as_ref(),"tool_use_ids":ids,"original_blocks":originals,"frame":binding.frame,"binding":execution_binding,"provider_response_id":response.id}),
+                value: source_payload(&NativeBindingPayload {
+                    kind: "lingxi_computer_binding",
+                    call: call.as_ref(),
+                    tool_use_ids: &ids,
+                    original_blocks: &originals,
+                    frame: &binding.frame,
+                    binding: &execution_binding,
+                    provider_response_id: &response.id,
+                })?,
             });
             replacements.insert(call_id, replacement);
         }
@@ -649,7 +770,10 @@ pub(crate) async fn bind_response(
                 .as_str()
                 .unwrap()
                 .into(),
-            value: json!({"type":"lingxi_computer_continuation","continuation":continuation}),
+            value: source_payload(&NativeContinuationPayload {
+                kind: "lingxi_computer_continuation",
+                continuation: &continuation,
+            })?,
         });
         let mut state = orch.computer_runtime.state.lock().await;
         state.continuation_binding = llm_runtime::computer::response_execution_binding(response)
@@ -678,9 +802,16 @@ pub(crate) async fn bind_response(
             .native_computer_provider(&model, profile.as_deref())
             .or_else(|| binding_provider(&blocks));
         if let Some(provider) = provider {
+            let receipts = receipt_acknowledgement_bindings(orch).await?;
+            let value = source_payload(&NativeReceiptAckPayload {
+                kind: "lingxi_computer_receipt_ack",
+                call_ids: &acknowledged,
+                provider_response_id: &response.id,
+                receipts: &receipts,
+            })?;
             blocks.push(ContentBlock::ProviderContent {
                 protocol: protocol_name(provider),
-                value: json!({"type":"lingxi_computer_receipt_ack","call_ids":acknowledged,"provider_response_id":response.id,"receipts":receipt_acknowledgement_bindings(orch).await?}),
+                value,
             });
         }
     }
@@ -694,13 +825,15 @@ fn host_native_call_id(block: &ContentBlock) -> Option<String> {
         } => Some(provider_id.clone().unwrap_or_else(|| id.to_string())),
         ContentBlock::ProviderContent { value, .. }
             if matches!(
-                value["type"].as_str(),
+                value.string_at("/type"),
                 Some("lingxi_native_content" | "lingxi_replay_metadata")
             ) =>
         {
-            serde_json::from_value::<wire::ContentBlock>(value["block"].clone())
+            value
+                .subprojection("/block")
                 .ok()
-                .and_then(|block| computer_call_id(&block).map(str::to_owned))
+                .and_then(|block| decode_payload(&block).ok())
+                .and_then(|block| computer_call_id(&block))
         }
         _ => None,
     }
@@ -723,7 +856,7 @@ pub(crate) async fn before_execution(
     orch: &ConversationOrchestrator,
     id: &ToolUseId,
     tool: &Arc<dyn Tool>,
-    input: &Value,
+    input: &Utf16JsonProjection,
     ctx: &ToolUseContext,
 ) -> Result<Option<ToolExecutionRecord>, ToolError> {
     let Some(work) = NATIVE_WORK.try_with(Clone::clone).ok() else {
@@ -766,7 +899,9 @@ pub(crate) async fn before_execution(
     {
         return Err(ToolError::Aborted);
     }
-    if input["geometry_version"] != work.frame.geometry_version {
+    let geometry_matches =
+        input.string_at("/geometry_version") == Some(work.frame.geometry_version.as_str());
+    if !geometry_matches {
         return Err(ToolError::InvalidInput(
             "final native input changed or removed observation geometry".into(),
         ));
@@ -774,7 +909,7 @@ pub(crate) async fn before_execution(
     if matches!(
         work.call.operations[work.index],
         ComputerOperation::Screenshot | ComputerOperation::Zoom { .. }
-    ) && !matches!(input["action"].as_str(), Some("screenshot" | "zoom"))
+    ) && !matches!(input.string_at("/action"), Some("screenshot" | "zoom"))
     {
         return Err(ToolError::InvalidInput(
             "native observation requires an image-producing final action".into(),
@@ -792,7 +927,8 @@ pub(crate) async fn before_execution(
             decision_reason_type: Some("safetyCheck".into()),
             decision_reason: Some(
                 serde_json::to_string(&work.call.context.pending_safety_checks)
-                    .map_err(|e| ToolError::Internal(e.to_string()))?,
+                    .map_err(|e| ToolError::Internal(e.to_string().into()))?
+                    .into(),
             ),
             ..Default::default()
         };
@@ -830,10 +966,11 @@ pub(crate) async fn before_execution(
     let record = ToolExecutionRecord {
         identity: work.identity.clone(),
         tool_name: tool.name().into(),
-        input_digest: digest(input).map_err(|e| ToolError::Internal(e.to_string()))?,
+        input_digest: digest_source(input)
+            .map_err(|e| ToolError::Internal(e.to_string().into()))?,
         recovery_binding: store_execution_binding(orch, &work)
             .await
-            .map_err(|e| ToolError::Io(e.to_string()))?,
+            .map_err(|e| ToolError::Io(e.to_string().into()))?,
         acknowledged_safety_checks,
         stage: ToolExecutionStage::Started,
         outcome: None,
@@ -842,7 +979,7 @@ pub(crate) async fn before_execution(
     let ack = journal
         .record_execution(record.clone())
         .await
-        .map_err(|e| ToolError::Io(e.to_string()))?;
+        .map_err(|e| ToolError::Io(e.to_string().into()))?;
     if ack.duplicate {
         return Err(ToolError::InvalidInput(
             "native input already started; automatic replay refused".into(),
@@ -876,7 +1013,7 @@ pub(crate) fn after_execution<'a>(
             .ok_or_else(|| ToolError::Internal("native journal disappeared".into()))?
             .record_execution(record)
             .await
-            .map_err(|e| ToolError::Io(e.to_string()))?;
+            .map_err(|e| ToolError::Io(e.to_string().into()))?;
         Ok(())
     }
 }
@@ -894,7 +1031,7 @@ fn result_error(id: &ToolUseId, message: &str) -> ContentBlock {
 /// Only native sequences are ordered here; ordinary batches retain their scheduler.
 pub(crate) async fn dispatch_tools(
     orch: &ConversationOrchestrator,
-    uses: &[(ToolUseId, String, Value, Option<String>)],
+    uses: &[(ToolUseId, String, Utf16JsonProjection, Option<String>)],
     assistant_id: MessageId,
     facts: crate::turn_loop::ToolUseDispatchFacts,
     fence: crate::autonomous_tool_scheduler::ToolDispatchPublicationFence,
@@ -917,6 +1054,7 @@ pub(crate) async fn dispatch_tools(
     let mut ctx =
         crate::turn_loop::streaming_tool_context_base(orch, facts.query_history.clone()).await;
     ctx.cancel = current_turn_cancel();
+    ctx.native_query_depth = Some(facts.native_query_depth);
     let tool = uses
         .iter()
         .find_map(|(id, ..)| work.get(id))
@@ -1009,7 +1147,7 @@ fn merge_dispatch(
 async fn record_no_input(
     orch: &ConversationOrchestrator,
     work: &Work,
-    input: &Value,
+    input: &Utf16JsonProjection,
     outcome: ToolExecutionOutcome,
 ) -> Result<(), OrchestratorError> {
     let journal = orch
@@ -1019,7 +1157,7 @@ async fn record_no_input(
     let mut record = ToolExecutionRecord {
         identity: work.identity.clone(),
         tool_name: work.tool.name().into(),
-        input_digest: digest(input)?,
+        input_digest: digest_source(input)?,
         recovery_binding: store_execution_binding(orch, work).await?,
         acknowledged_safety_checks: vec![],
         stage: ToolExecutionStage::Started,
@@ -1099,10 +1237,11 @@ pub(crate) async fn final_model_result(
         };
         let mut ctx = crate::turn_loop::streaming_tool_context_base(orch, Vec::new()).await;
         ctx.tool_use_id = Some(tool_use_id.clone());
-        let mut visible = content_blocks.clone().unwrap_or_default();
+        let mut visible = core_array_items(content_blocks.as_ref()).map_err(internal)?;
         for sibling in blocks {
             if let ContentBlock::Image { .. } = sibling {
-                visible.push(serde_json::to_value(sibling).map_err(internal)?);
+                let source = serde_json::to_string(sibling).map_err(internal)?;
+                visible.push(Utf16JsonProjection::parse(&source).map_err(internal)?);
             }
         }
         tool.computer_model_output(&ctx, content, Some(&visible))
@@ -1117,7 +1256,7 @@ pub(crate) async fn final_model_result(
 async fn store_payload(
     orch: &ConversationOrchestrator,
     id: &str,
-    payload: &Value,
+    payload: &impl Serialize,
 ) -> Result<DurableToolOutput, OrchestratorError> {
     let home = orch
         .config_home
@@ -1129,9 +1268,9 @@ async fn store_payload(
         &orch.current_cwd().to_string_lossy(),
         &session_id.as_uuid().to_string(),
     );
-    let hash = digest(payload)?;
-    let media_id = format!("computer-{}", digest(&json!([id, hash]))?);
     let body = serde_json::to_string(payload).map_err(internal)?;
+    let hash = digest_bytes(body.as_bytes());
+    let media_id = format!("computer-{}", digest(&json!([id, hash]))?);
     if body.len() > 32 * 1024 * 1024 {
         return Err(internal("native final result exceeds media limit"));
     }
@@ -1139,7 +1278,7 @@ async fn store_payload(
         home,
         &dir,
         &media_id,
-        &body,
+        &body.as_str().into(),
         true,
         32 * 1024 * 1024,
     )
@@ -1182,12 +1321,12 @@ async fn store_execution_binding(
     store_payload(
         orch,
         &format!("{}:binding", work.identity.execution_id()),
-        &serde_json::to_value(binding).map_err(internal)?,
+        &binding,
     )
     .await
 }
 
-async fn load_payload(output: &DurableToolOutput) -> Result<Value, OrchestratorError> {
+async fn load_payload(output: &DurableToolOutput) -> Result<Vec<u8>, OrchestratorError> {
     let path = output.payload["path"]
         .as_str()
         .ok_or_else(|| internal("native result media reference missing"))?;
@@ -1196,16 +1335,15 @@ async fn load_payload(output: &DurableToolOutput) -> Result<Value, OrchestratorE
         return Err(internal("native media reference unsafe or oversized"));
     }
     let bytes = tokio::fs::read(path).await.map_err(internal)?;
-    let value = serde_json::from_slice(&bytes).map_err(internal)?;
-    if digest(&value)? != output.digest {
+    if digest_bytes(&bytes) != output.digest {
         return Err(internal("native result media digest mismatch"));
     }
-    Ok(value)
+    Ok(bytes)
 }
 
 async fn load_output(output: &DurableToolOutput) -> Result<StoredOutput, OrchestratorError> {
     let mut stored: StoredOutput =
-        serde_json::from_value(load_payload(output).await?).map_err(internal)?;
+        serde_json::from_slice(&load_payload(output).await?).map_err(internal)?;
     session::jsonl::exact_json::set_message_utf16_overrides(
         &mut stored.row,
         stored.utf16_overrides.clone(),
@@ -1215,7 +1353,7 @@ async fn load_output(output: &DurableToolOutput) -> Result<StoredOutput, Orchest
 
 async fn load_receipt(output: &DurableToolOutput) -> Result<StoredReceipt, OrchestratorError> {
     let mut stored: StoredReceipt =
-        serde_json::from_value(load_payload(output).await?).map_err(internal)?;
+        serde_json::from_slice(&load_payload(output).await?).map_err(internal)?;
     session::jsonl::exact_json::set_message_utf16_overrides(
         &mut stored.row,
         stored.utf16_overrides.clone(),
@@ -1243,17 +1381,22 @@ async fn prepare_stored_row(
         None,
     );
     if let Some(result) = orch.take_tool_use_result(message).await {
-        row.extra.insert("toolUseResult".into(), result);
+        row.extra
+            .set_field("toolUseResult", result)
+            .map_err(internal)?;
     }
     if let Some(kind) = orch.take_tool_denial_kind(message).await {
-        row.extra.insert("toolDenialKind".into(), json!(kind));
+        row.extra
+            .set_field("toolDenialKind", kind.into())
+            .map_err(internal)?;
     }
     if let Some(meta) = orch.take_tool_use_mcp_meta(message).await {
-        row.extra.insert("mcpMeta".into(), meta);
+        row.extra.set_field("mcpMeta", meta).map_err(internal)?;
     }
     if let Some(source) = orch.take_source_tool_assistant_uuid(message).await {
         row.extra
-            .insert("sourceToolAssistantUUID".into(), json!(source));
+            .set_field("sourceToolAssistantUUID", source.into())
+            .map_err(internal)?;
     }
     Ok(row)
 }
@@ -1311,18 +1454,17 @@ pub(crate) async fn persist_native_assistant(
             .iter()
             .find_map(|block| match block {
                 ContentBlock::ProviderContent { value, .. }
-                    if value["type"] == "lingxi_computer_receipt_ack" =>
+                    if value.string_at("/type") == Some("lingxi_computer_receipt_ack") =>
                 {
                     Some(value)
                 }
                 _ => None,
             })
             .ok_or_else(|| internal("append hook removed receipt acknowledgement"))?;
-        if ack["call_ids"] != json!(expected_ack)
-            || ack["provider_response_id"] != response.id
-            || ack["receipts"]
-                != serde_json::to_value(receipt_acknowledgement_bindings(orch).await?)
-                    .map_err(internal)?
+        if decode_payload_field::<Vec<String>>(ack, "/call_ids")? != expected_ack
+            || ack.string_at("/provider_response_id") != Some(response.id.as_str())
+            || decode_payload_field::<Vec<ReceiptAcknowledgement>>(ack, "/receipts")?
+                != receipt_acknowledgement_bindings(orch).await?
         {
             return Err(internal("append hook changed receipt acknowledgement"));
         }
@@ -1330,10 +1472,10 @@ pub(crate) async fn persist_native_assistant(
     if let Some(reference) =
         llm_runtime::computer::response_continuation(response).map_err(internal)?
     {
-        let saved = serde_json::to_value(reference).map_err(internal)?;
         if !content.iter().any(|block| {
             matches!(block, ContentBlock::ProviderContent { value, .. }
-            if value["type"] == "lingxi_computer_continuation" && value["continuation"] == saved)
+            if value.string_at("/type") == Some("lingxi_computer_continuation")
+                && decode_payload_field::<wire::ContinuationRef>(value, "/continuation").ok().as_ref() == Some(&reference))
         }) {
             return Err(internal(
                 "append hook removed or changed the response continuation",
@@ -1345,7 +1487,7 @@ pub(crate) async fn persist_native_assistant(
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value["type"] == "lingxi_computer_binding" =>
+                if value.string_at("/type") == Some("lingxi_computer_binding") =>
             {
                 Some(value)
             }
@@ -1359,14 +1501,9 @@ pub(crate) async fn persist_native_assistant(
         .collect::<std::collections::HashSet<_>>();
     let mut observed = std::collections::HashSet::new();
     for binding in bindings {
-        let ids = binding["tool_use_ids"]
-            .as_array()
-            .ok_or_else(|| internal("native binding member IDs missing"))?;
+        let ids = decode_payload_field::<Vec<String>>(binding, "/tool_use_ids")?;
         for id in ids {
-            let id = ToolUseId::from(
-                id.as_str()
-                    .ok_or_else(|| internal("native member ID invalid"))?,
-            );
+            let id = ToolUseId::from(id);
             let member = work
                 .get(&id)
                 .ok_or_else(|| internal("native member does not match admitted response"))?;
@@ -1376,16 +1513,23 @@ pub(crate) async fn persist_native_assistant(
             )
             .map_err(internal)?
             .into_iter()
-            .filter(|block| computer_call_id(block) == Some(member.call.context.call_id.as_str()))
+            .filter(|block| {
+                computer_call_id(block).as_deref() == Some(member.call.context.call_id.as_str())
+            })
             .collect::<Vec<_>>();
+            let saved_call = decode_payload_field::<NativeComputerCall>(binding, "/call")?;
+            let saved_frame = decode_payload_field::<ComputerFrame>(binding, "/frame")?;
+            let saved_binding =
+                decode_payload_field::<NativeContinuationBinding>(binding, "/binding")?;
+            let saved_originals =
+                decode_payload_field::<Vec<wire::ContentBlock>>(binding, "/original_blocks")?;
             if !observed.insert(id.clone())
                 || !expected.contains(&id)
-                || binding["call"]
-                    != serde_json::to_value(member.call.as_ref()).map_err(internal)?
-                || binding["frame"] != serde_json::to_value(&member.frame).map_err(internal)?
-                || binding["binding"] != serde_json::to_value(&member.binding).map_err(internal)?
-                || binding["provider_response_id"] != response.id
-                || binding["original_blocks"] != serde_json::to_value(original).map_err(internal)?
+                || saved_call != *member.call
+                || saved_frame != member.frame
+                || saved_binding != member.binding
+                || binding.string_at("/provider_response_id") != Some(response.id.as_str())
+                || saved_originals != original
             {
                 return Err(internal("append hook changed a native response binding"));
             }
@@ -1421,10 +1565,12 @@ pub(crate) async fn persist_native_assistant(
         request_id,
         None,
     );
-    row.extra.insert(
-        "modelProfile".into(),
-        json!(orch.session.lock().await.model_profile),
-    );
+    row.extra
+        .set_field(
+            "modelProfile",
+            source_payload(&json!(orch.session.lock().await.model_profile))?,
+        )
+        .map_err(internal)?;
     let uuid = row.uuid.clone();
     let exact = session::jsonl::exact_json::message_utf16_overrides(&row);
     let saved_response = if expected_ack.is_empty() {
@@ -1434,8 +1580,7 @@ pub(crate) async fn persist_native_assistant(
             store_payload(
                 orch,
                 &format!("native-response:{}", response.id),
-                &serde_json::to_value(StoredOutput::new(accepted.clone(), row.clone()))
-                    .map_err(internal)?,
+                &StoredOutput::new(accepted.clone(), row.clone()),
             )
             .await?,
         )
@@ -1481,7 +1626,7 @@ pub(crate) async fn persist_native_assistant(
 }
 
 pub(crate) fn has_native_binding(message: &ConversationMessage) -> bool {
-    matches!(message, ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_computer_binding")))
+    matches!(message, ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, ContentBlock::ProviderContent { value, .. } if value.string_at("/type") == Some("lingxi_computer_binding"))))
 }
 
 pub(crate) async fn publish_native_result(
@@ -1525,11 +1670,7 @@ pub(crate) async fn publish_native_result(
                 store_payload(
                     orch,
                     &record.execution_id(),
-                    &serde_json::to_value(StoredOutput::new(
-                        message.clone(),
-                        prepare_stored_row(orch, message).await?,
-                    ))
-                    .map_err(internal)?,
+                    &StoredOutput::new(message.clone(), prepare_stored_row(orch, message).await?),
                 )
                 .await?,
             );
@@ -1660,10 +1801,11 @@ pub(crate) async fn prepare_receipts(
                     _ => None,
                 })
                 .ok_or_else(|| internal("native output association invalid"))?;
-            let mut visible = result.1.unwrap_or_default();
+            let mut visible = core_array_items(result.1.as_ref())?;
             for block in blocks {
                 if let ContentBlock::Image { .. } = block {
-                    visible.push(serde_json::to_value(block).map_err(internal)?);
+                    let source = serde_json::to_string(&block).map_err(internal)?;
+                    visible.push(Utf16JsonProjection::parse(&source).map_err(internal)?);
                 }
             }
             let status = match record.outcome {
@@ -1677,8 +1819,8 @@ pub(crate) async fn prepare_receipts(
             results.push(NativeComputerResult {
                 operation_index: member.index,
                 status,
-                content: result.0,
-                blocks: Some(visible),
+                content: sdk_payload_from_core(&result.0)?,
+                blocks: Some(sdk_array_from_core(&visible)?),
             });
             execution_ids.push(record.execution_id());
         }
@@ -1729,15 +1871,26 @@ pub(crate) async fn prepare_receipts(
                 return Err(internal(error));
             }
         };
+        let receipt_payload = source_payload(&NativeReceiptPayload {
+            kind: "lingxi_computer_receipt",
+            call_id: &call.context.call_id,
+            provider_response_id: &members[0].1.identity.provider_response_id,
+            receipt_id: &receipt_id,
+            block: &block,
+        })?;
         let message = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ProviderContent {
                 protocol: protocol_name(call.context.provider),
-                value: json!({"type":"lingxi_computer_receipt","call_id":call.context.call_id,"provider_response_id":members[0].1.identity.provider_response_id,"receipt_id":receipt_id,"block":block}),
+                value: receipt_payload,
             }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let row = prepare_stored_row(orch, &message).await?;
         let stored = StoredReceipt {
@@ -1748,12 +1901,7 @@ pub(crate) async fn prepare_receipts(
             call: call.as_ref().clone(),
             frame: members[0].1.frame.clone(),
         };
-        let payload = store_payload(
-            orch,
-            &receipt_id,
-            &serde_json::to_value(&stored).map_err(internal)?,
-        )
-        .await?;
+        let payload = store_payload(orch, &receipt_id, &stored).await?;
         let record = NativeReceiptRecord {
             response: None,
             session_id: members[0].1.identity.session_id,

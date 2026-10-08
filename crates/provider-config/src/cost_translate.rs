@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use lingxi_llm_client::protocol::BillingMode;
 use llm_runtime::{ProviderId as LlmProviderId, ProviderProfile, TokenPricing};
 
 use cost::pricing::{
@@ -138,14 +139,61 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
     let mut catalog = PricingCatalog::builtin_reference();
     // Real per-model rates from the bundled models.dev slices (deepseek, openai,
     // openrouter, zai/glm, github-copilot, …), keyed by (llm ProviderId, id).
-    let preset_pricing = llm_runtime::builtin_presets().pricing;
+    let presets = llm_runtime::builtin_presets();
+    let preset_profiles = presets.providers;
+    let preset_pricing = presets.pricing;
     for profile in providers {
+        // An omitted host mode inherits an actual matching SDK/source profile.
+        // If there is no such profile, Unknown remains Unknown; we never infer
+        // per-token billing from a tariff or from the wrapper protocol alone.
+        let source_profile = profile.wire_profile.as_ref().or_else(|| {
+            preset_profiles
+                .iter()
+                .find(|candidate| {
+                    candidate.provider_id == profile.provider_id
+                        && candidate.protocol == profile.protocol
+                })
+                .and_then(|candidate| candidate.wire_profile.as_ref())
+        });
         let provider = cost_provider_id(&profile.profile_name, &profile.provider_id);
         for model in &profile.models {
             let mr = ModelRef {
                 provider: provider.clone(),
                 model: model.billing_model.clone(),
             };
+            let source_row = source_profile.and_then(|source| {
+                source
+                    .models
+                    .iter()
+                    .find(|source_model| {
+                        source_model.display_model == model.display_model
+                            && source_model.request_model == model.request_model
+                    })
+                    .or_else(|| {
+                        // Match the SDK projection rule when a user changes a
+                        // display label: inherit only a unique request-model row.
+                        let mut matches = source.models.iter().filter(|source_model| {
+                            source_model.request_model == model.request_model
+                        });
+                        let source_model = matches.next()?;
+                        matches.next().is_none().then_some(source_model)
+                    })
+            });
+            let source_mode = source_row
+                .and_then(|source_model| source_model.billing_mode)
+                .or_else(|| source_profile.map(|source| source.pricing.billing_mode));
+            let effective_mode = profile
+                .pricing
+                .billing_mode
+                .or_else(|| {
+                    model
+                        .metadata
+                        .pricing
+                        .as_ref()
+                        .map(|pricing| pricing.billing_mode)
+                })
+                .or_else(|| source_mode.map(host_billing_mode_from_source))
+                .unwrap_or(ModelBillingMode::Unknown);
             // A concrete user override is authoritative, including for a
             // profile that was initially marked as subscription-backed.
             if let Some((_, override_price)) = profile.pricing.overrides.iter().find(|(id, _)| {
@@ -161,17 +209,12 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
             }
             // A subscription must never inherit a token price from a
             // models.dev slice that happens to use the same provider/model id.
-            if profile.pricing.billing_mode == ModelBillingMode::Subscription {
+            if effective_mode == ModelBillingMode::Subscription {
                 catalog = catalog.mark_unpriced(mr);
                 continue;
             }
-            let published_row = profile.wire_profile.as_ref().and_then(|source| {
-                source.models.iter().find(|source_model| {
-                    source_model.display_model == model.display_model
-                        && source_model.request_model == model.request_model
-                })
-            });
-            let conditional = profile.wire_profile.as_ref().is_some_and(|source| {
+            let published_row = source_row;
+            let conditional = source_profile.is_some_and(|source| {
                 source.pricing.peak.is_some()
                     || published_row
                         .and_then(|model| model.pricing.as_ref())
@@ -227,6 +270,15 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
         }
     }
     catalog
+}
+
+fn host_billing_mode_from_source(mode: BillingMode) -> ModelBillingMode {
+    match mode {
+        BillingMode::PerToken => ModelBillingMode::PerToken,
+        BillingMode::Subscription => ModelBillingMode::Subscription,
+        BillingMode::Free => ModelBillingMode::Free,
+        BillingMode::Unknown => ModelBillingMode::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -290,7 +342,7 @@ mod tests {
         let mut checked_reference = 0;
         let mut checked_complete = 0;
         for profile in &providers {
-            if profile.pricing.billing_mode == ModelBillingMode::Subscription {
+            if profile.pricing.billing_mode == Some(ModelBillingMode::Subscription) {
                 continue;
             }
             let Some(wire_profile) = &profile.wire_profile else {
@@ -562,7 +614,7 @@ mod tests {
         let mut checked = 0;
         for profile in &providers {
             if profile.profile_name == "anthropic"
-                || profile.pricing.billing_mode != ModelBillingMode::PerToken
+                || profile.pricing.billing_mode != Some(ModelBillingMode::PerToken)
             {
                 continue;
             }
@@ -682,7 +734,7 @@ mod tests {
     #[test]
     fn subscription_profile_does_not_inherit_preset_token_price() {
         let mut profile = user_profile("github-copilot", "claude-opus-4.6");
-        profile.pricing.billing_mode = ModelBillingMode::Subscription;
+        profile.pricing.billing_mode = Some(ModelBillingMode::Subscription);
         let cat = pricing_for(&[profile]);
         let mr = ModelRef {
             provider: CostProviderId::OpenAICompatible {
@@ -692,6 +744,23 @@ mod tests {
         };
         assert!(matches!(
             cat.resolve(&mr),
+            Err(cost::pricing::CostError::UnpricedModel(_))
+        ));
+    }
+
+    #[test]
+    fn omitted_mode_inherits_real_sdk_subscription_mode() {
+        let profile = user_profile("github-copilot", "claude-opus-4.6");
+        assert_eq!(profile.pricing.billing_mode, None);
+        let catalog = pricing_for(&[profile]);
+        let model = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            model: "claude-opus-4.6".to_string(),
+        };
+        assert!(matches!(
+            catalog.resolve(&model),
             Err(cost::pricing::CostError::UnpricedModel(_))
         ));
     }
@@ -853,7 +922,7 @@ mod tests {
     #[test]
     fn explicit_override_prices_a_subscription_profile() {
         let mut profile = user_profile("github-copilot", "claude-opus-4.6");
-        profile.pricing.billing_mode = ModelBillingMode::Subscription;
+        profile.pricing.billing_mode = Some(ModelBillingMode::Subscription);
         profile.pricing.overrides.push((
             "claude-opus-4.6".to_string(),
             PricingOverride::input_output(1.0, 2.0),

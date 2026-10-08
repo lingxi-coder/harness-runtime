@@ -1,33 +1,122 @@
-//! Slash-command parser: splits raw input like `/memory add foo bar` into
-//! a name and tokenized argument list, honouring quoted strings.
+//! Slash-command parser over exact JavaScript UTF-16 source text.
 
-/// A parsed slash-command invocation.
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+/// A parsed slash-command invocation with exact source strings.
 #[derive(Debug, Clone)]
 pub struct ParsedSlashCommand {
-    /// Command name (without the leading `/`).
-    pub name: String,
-    /// The raw argument string after the command name.
-    pub raw_args: String,
-    /// Argument tokens after quote-aware splitting.
-    pub positional_args: Vec<String>,
+    /// Exact command name (without the leading `/`).
+    pub name: Utf16JsonProjection,
+    /// Exact raw argument string after leading command whitespace.
+    pub raw_args: Utf16JsonProjection,
+    /// Exact argument tokens after quote-aware splitting.
+    pub positional_args: Vec<Utf16JsonProjection>,
 }
 
-/// Parse a slash-command line.
+impl ParsedSlashCommand {
+    /// Borrow text for command semantics that require a Unicode Rust string.
+    /// This returns `None` for an exact source string containing an unpaired
+    /// surrogate instead of silently replacing its code unit.
+    #[must_use]
+    pub fn raw_args_utf8(&self) -> Option<&str> {
+        let text = self.raw_args.string_at("")?;
+        self.raw_args
+            .string_units("")?
+            .iter()
+            .copied()
+            .eq(text.encode_utf16())
+            .then_some(text)
+    }
+
+    /// Borrow a positional token only when it is valid Unicode text.
+    #[must_use]
+    pub fn positional_arg_utf8(&self, index: usize) -> Option<&str> {
+        let value = self.positional_args.get(index)?;
+        let text = value.string_at("")?;
+        value
+            .string_units("")?
+            .iter()
+            .copied()
+            .eq(text.encode_utf16())
+            .then_some(text)
+    }
+}
+
+/// Parse one exact slash-command source string.
 ///
-/// Returns `None` if the input does not begin with `/`.
+/// Mirrors Native 2.1.293's `Iv`/`Pve`: trim JavaScript whitespace around the
+/// line, split the command name at the first JavaScript whitespace unit, then
+/// trim both ends of the raw argument tail.
 #[must_use]
-pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand> {
-    let trimmed_input = input.strip_prefix('/')?;
-    let (name, args_str) = match trimmed_input.find(char::is_whitespace) {
-        Some(i) => (&trimmed_input[..i], trimmed_input[i + 1..].trim_start()),
-        None => (trimmed_input, ""),
+pub fn parse_slash_command(input: &Utf16JsonProjection) -> Option<ParsedSlashCommand> {
+    let input_units = input.string_units("")?;
+    let units = trim_js_whitespace_units(&input_units);
+    if units.first().copied()? != b'/' as u16 {
+        return None;
+    }
+    let tail = &units[1..];
+    let separator = tail.iter().position(|unit| is_js_whitespace_unit(*unit));
+    let (mut name, mut raw_args) = match separator {
+        Some(index) => (
+            tail[..index].to_vec(),
+            trim_js_whitespace_units(&tail[index + 1..]).to_vec(),
+        ),
+        None => (tail.to_vec(), Vec::new()),
     };
-    let positional = tokenize_args(args_str);
+
+    // Native `Iv` treats a slash with no command name as a syntax failure,
+    // including when whitespace follows the slash. This check precedes the
+    // optional MCP marker handling in the source parser as well.
+    if name.is_empty() {
+        return None;
+    }
+
+    // Native recognizes the MCP disambiguator as part of the command name.
+    // Its remaining argument string starts after the marker's whitespace.
+    const MCP_MARKER: &[u16] = &[
+        b'(' as u16,
+        b'M' as u16,
+        b'C' as u16,
+        b'P' as u16,
+        b')' as u16,
+    ];
+    if raw_args.starts_with(MCP_MARKER)
+        && (raw_args.len() == MCP_MARKER.len() || is_js_whitespace_unit(raw_args[MCP_MARKER.len()]))
+    {
+        name.extend(" (MCP)".encode_utf16());
+        raw_args = trim_js_whitespace_units(&raw_args[MCP_MARKER.len()..]).to_vec();
+    }
+
+    let positional_args = tokenize_args_source(&raw_args);
     Some(ParsedSlashCommand {
-        name: name.to_string(),
-        raw_args: args_str.to_string(),
-        positional_args: positional,
+        name: projection_from_units(name),
+        raw_args: projection_from_units(raw_args),
+        positional_args,
     })
+}
+
+/// Trim ECMAScript `String.trim` whitespace from both ends without decoding
+/// source UTF-16, so unpaired surrogates remain untouched.
+pub(crate) fn trim_js_whitespace_units(input: &[u16]) -> &[u16] {
+    let mut start = 0;
+    let mut end = input.len();
+    while start < end && is_js_whitespace_unit(input[start]) {
+        start += 1;
+    }
+    while end > start && is_js_whitespace_unit(input[end - 1]) {
+        end -= 1;
+    }
+    &input[start..end]
+}
+
+pub(crate) fn is_js_whitespace_unit(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(lingxi_core::host::effort::javascript_whitespace)
+}
+
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
 }
 
 /// Tokenize an argument string the way the TS port does (ARGS.1).
@@ -38,7 +127,7 @@ pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand> {
 /// (`*`/`?`), and comment (`#…`) entries become non-string `ParseEntry` objects
 /// that are dropped. On a shell-quote parse error (a `${…}` "Bad substitution")
 /// the TS code falls back to `args.split(/\s+/).filter(Boolean)`; we mirror that
-/// with [`str::split_whitespace`].
+/// with ECMAScript whitespace splitting.
 ///
 /// Shared with [`crate::argument_substitution::parse_arguments`].
 #[must_use]
@@ -46,8 +135,218 @@ pub(crate) fn tokenize_args(s: &str) -> Vec<String> {
     match shell_quote_parse(s) {
         Ok(tokens) => tokens,
         // TS: `tryParseShellCommand` failed -> `args.split(/\s+/).filter(Boolean)`.
-        Err(ShellParseError::BadSubstitution) => s.split_whitespace().map(str::to_string).collect(),
+        Err(ShellParseError::BadSubstitution) => s
+            .split(lingxi_core::host::effort::javascript_whitespace)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect(),
     }
+}
+
+pub(crate) fn tokenize_args_source(input: &[u16]) -> Vec<Utf16JsonProjection> {
+    match shell_quote_parse_units(input) {
+        Ok(tokens) => tokens.into_iter().map(projection_from_units).collect(),
+        Err(ShellParseError::BadSubstitution) => {
+            let mut tokens = Vec::new();
+            let mut start = 0;
+            for (index, unit) in input.iter().copied().enumerate() {
+                if is_js_whitespace_unit(unit) {
+                    if start < index {
+                        tokens.push(projection_from_units(input[start..index].to_vec()));
+                    }
+                    start = index + 1;
+                }
+            }
+            if start < input.len() {
+                tokens.push(projection_from_units(input[start..].to_vec()));
+            }
+            tokens
+        }
+    }
+}
+
+fn flush_word_units(
+    out: &mut Vec<Vec<u16>>,
+    current: &mut Vec<u16>,
+    started: &mut bool,
+    glob: &mut bool,
+) {
+    if *started {
+        if *glob {
+            current.clear();
+        } else {
+            out.push(std::mem::take(current));
+        }
+    }
+    *started = false;
+    *glob = false;
+}
+
+fn parse_env_var_units(chars: &[u16], index: &mut usize) -> Result<Vec<u16>, ShellParseError> {
+    let length = chars.len();
+    *index += 1;
+    let name = match chars.get(*index).copied() {
+        Some(unit) if unit == b'{' as u16 => {
+            *index += 1;
+            if chars.get(*index).copied() == Some(b'}' as u16) {
+                return Err(ShellParseError::BadSubstitution);
+            }
+            let end = chars[*index..]
+                .iter()
+                .position(|unit| *unit == b'}' as u16)
+                .map(|offset| *index + offset)
+                .ok_or(ShellParseError::BadSubstitution)?;
+            let name = chars[*index..end].to_vec();
+            *index = end;
+            name
+        }
+        Some(unit)
+            if unit == b'*' as u16
+                || unit == b'@' as u16
+                || unit == b'#' as u16
+                || unit == b'?' as u16
+                || unit == b'$' as u16
+                || unit == b'!' as u16
+                || unit == b'_' as u16
+                || unit == b'-' as u16 =>
+        {
+            *index += 1;
+            vec![unit]
+        }
+        _ => {
+            let start = *index;
+            while *index < length
+                && ((chars[*index] >= b'A' as u16 && chars[*index] <= b'Z' as u16)
+                    || (chars[*index] >= b'a' as u16 && chars[*index] <= b'z' as u16)
+                    || (chars[*index] >= b'0' as u16 && chars[*index] <= b'9' as u16)
+                    || chars[*index] == b'_' as u16)
+            {
+                *index += 1;
+            }
+            if *index == length {
+                chars[start..length].to_vec()
+            } else {
+                let name = chars[start..*index].to_vec();
+                *index = (*index).saturating_sub(1);
+                name
+            }
+        }
+    };
+    let mut output = vec![b'$' as u16];
+    output.extend(name);
+    Ok(output)
+}
+
+fn shell_quote_parse_units(input: &[u16]) -> Result<Vec<Vec<u16>>, ShellParseError> {
+    const SINGLE_QUOTE: u16 = 39;
+    const DOUBLE_QUOTE: u16 = 34;
+    const BACKSLASH: u16 = 92;
+    const DOLLAR: u16 = 36;
+
+    let mut output = Vec::<Vec<u16>>::new();
+    let mut current = Vec::new();
+    let mut started = false;
+    let mut glob = false;
+    let mut quote: Option<u16> = None;
+    let mut escaped = false;
+    let mut index = 0;
+
+    while index < input.len() {
+        let unit = input[index];
+        if quote.is_none() && (unit == b'*' as u16 || unit == b'?' as u16) {
+            glob = true;
+        }
+        if escaped {
+            current.push(unit);
+            started = true;
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if unit == active_quote {
+                quote = None;
+                index += 1;
+                continue;
+            }
+            if active_quote == SINGLE_QUOTE {
+                current.push(unit);
+                index += 1;
+                continue;
+            }
+            if unit == BACKSLASH {
+                match input.get(index + 1).copied() {
+                    Some(next) if next == DOUBLE_QUOTE || next == BACKSLASH || next == DOLLAR => {
+                        current.push(next)
+                    }
+                    Some(next) => {
+                        current.push(BACKSLASH);
+                        current.push(next);
+                    }
+                    None => current.push(BACKSLASH),
+                }
+                started = true;
+                index += 2;
+                continue;
+            }
+            if unit == DOLLAR {
+                current.extend(parse_env_var_units(input, &mut index)?);
+                started = true;
+                index += 1;
+                continue;
+            }
+            current.push(unit);
+            started = true;
+            index += 1;
+            continue;
+        }
+        if unit == DOUBLE_QUOTE || unit == SINGLE_QUOTE {
+            quote = Some(unit);
+            started = true;
+            index += 1;
+            continue;
+        }
+        if unit == b'&' as u16
+            || unit == b';' as u16
+            || unit == b'(' as u16
+            || unit == b')' as u16
+            || unit == b'|' as u16
+            || unit == b'<' as u16
+            || unit == b'>' as u16
+        {
+            flush_word_units(&mut output, &mut current, &mut started, &mut glob);
+            index += 1;
+            continue;
+        }
+        if unit == b'#' as u16 {
+            if !current.is_empty() {
+                output.push(std::mem::take(&mut current));
+            }
+            return Ok(output);
+        }
+        if unit == BACKSLASH {
+            escaped = true;
+            started = true;
+            index += 1;
+            continue;
+        }
+        if unit == DOLLAR {
+            current.extend(parse_env_var_units(input, &mut index)?);
+            started = true;
+            index += 1;
+            continue;
+        }
+        if is_js_whitespace_unit(unit) {
+            flush_word_units(&mut output, &mut current, &mut started, &mut glob);
+            index += 1;
+            continue;
+        }
+        current.push(unit);
+        started = true;
+        index += 1;
+    }
+    flush_word_units(&mut output, &mut current, &mut started, &mut glob);
+    Ok(output)
 }
 
 /// The only way `shell-quote@1.8.1`'s `parse()` throws: a `${…}` substitution
@@ -313,22 +612,126 @@ fn parse_env_var(chars: &[char], i: &mut usize) -> Result<String, ShellParseErro
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_parser_trims_the_complete_line_and_argument_tail() {
+        let parsed = parse_slash_command(&Utf16JsonProjection::from(
+            "\u{feff} \t/effort\u{2003}  low\u{00a0} ",
+        ))
+        .unwrap();
+        assert_eq!(parsed.name.string_at(""), Some("effort"));
+        assert_eq!(parsed.raw_args.string_at(""), Some("low"));
+    }
+
+    #[test]
+    fn native_mcp_marker_becomes_a_command_name_suffix() {
+        let parsed = parse_slash_command(&Utf16JsonProjection::from(
+            "/github:review (MCP)\u{2003}owner",
+        ))
+        .unwrap();
+        assert_eq!(parsed.name.string_at(""), Some("github:review (MCP)"));
+        assert_eq!(parsed.raw_args.string_at(""), Some("owner"));
+
+        let empty =
+            parse_slash_command(&Utf16JsonProjection::from("/github:review (MCP)")).unwrap();
+        assert_eq!(empty.raw_args.string_at(""), Some(""));
+    }
+
+    #[test]
+    fn native_parser_rejects_empty_command_names() {
+        for input in ["/", "/ ", "/\t", "/\u{2003}", "/ (MCP)"] {
+            assert!(
+                parse_slash_command(&Utf16JsonProjection::from(input)).is_none(),
+                "expected empty command name to be a parse failure for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_separators_use_ecmascript_whitespace_and_complete_utf8_characters() {
+        for separator in ["\u{00a0}", "\u{2003}", "\u{feff}"] {
+            let parsed =
+                parse_slash_command(&Utf16JsonProjection::from(format!("/effort{separator}low")))
+                    .unwrap();
+            assert_eq!(parsed.name.string_at(""), Some("effort"));
+            assert_eq!(parsed.raw_args.string_at(""), Some("low"));
+        }
+        let parsed =
+            parse_slash_command(&Utf16JsonProjection::from("/effort \u{0085}low\u{0085}")).unwrap();
+        assert_eq!(parsed.raw_args.string_at(""), Some("\u{0085}low\u{0085}"));
+    }
+
+    #[test]
+    fn exact_source_name_and_argument_units_survive_tokenization() {
+        let mut units = "/cmd".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.push(b' ' as u16);
+        units.extend([
+            b'a' as u16,
+            0xdfff,
+            b' ' as u16,
+            b'"' as u16,
+            b'b' as u16,
+            0xd800,
+            b'"' as u16,
+        ]);
+        let input =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap();
+        let parsed = parse_slash_command(&input).unwrap();
+        assert_eq!(
+            parsed.name.string_units(""),
+            Some(vec![b'c' as u16, b'm' as u16, b'd' as u16, 0xd800])
+        );
+        assert_eq!(
+            parsed.raw_args.string_units(""),
+            Some(vec![
+                b'a' as u16,
+                0xdfff,
+                b' ' as u16,
+                b'"' as u16,
+                b'b' as u16,
+                0xd800,
+                b'"' as u16
+            ])
+        );
+        assert_eq!(
+            parsed.positional_args[0].string_units(""),
+            Some(vec![b'a' as u16, 0xdfff])
+        );
+        assert_eq!(
+            parsed.positional_args[1].string_units(""),
+            Some(vec![b'b' as u16, 0xd800])
+        );
+    }
+
     fn toks(s: &str) -> Vec<String> {
         tokenize_args(s)
     }
 
     #[test]
     fn parses_name_and_args() {
-        let p = parse_slash_command("/memory add foo bar").unwrap();
-        assert_eq!(p.name, "memory");
-        assert_eq!(p.positional_args, vec!["add", "foo", "bar"]);
-        assert_eq!(p.raw_args, "add foo bar");
+        let p = parse_slash_command(&Utf16JsonProjection::from("/memory add foo bar")).unwrap();
+        assert_eq!(p.name.string_at(""), Some("memory"));
+        assert_eq!(
+            p.positional_args
+                .iter()
+                .map(|value| value.string_at(""))
+                .collect::<Vec<_>>(),
+            vec![Some("add"), Some("foo"), Some("bar")]
+        );
+        assert_eq!(p.raw_args.string_at(""), Some("add foo bar"));
     }
 
     #[test]
     fn handles_quoted_args() {
-        let p = parse_slash_command("/skill run \"git commit\"").unwrap();
-        assert_eq!(p.positional_args, vec!["run", "git commit"]);
+        let p =
+            parse_slash_command(&Utf16JsonProjection::from("/skill run \"git commit\"")).unwrap();
+        assert_eq!(
+            p.positional_args
+                .iter()
+                .map(|value| value.string_at(""))
+                .collect::<Vec<_>>(),
+            vec![Some("run"), Some("git commit")]
+        );
     }
 
     // ----- ARGS.1: shell-quote@1.8.1 parity vectors -----

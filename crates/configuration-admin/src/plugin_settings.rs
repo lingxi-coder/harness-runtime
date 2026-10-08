@@ -26,7 +26,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use migrations::settings_update::{read_settings_map, update_settings};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use migrations::settings_update::{
+    read_settings_source, update_settings_source_with_before_publish,
+};
 use serde_json::{Map, Value};
 
 use crate::plugin_policy;
@@ -114,28 +117,49 @@ pub fn marketplace_source(
 
 /// The `enabledPlugins` map from a scope's settings file (missing key / missing
 /// / malformed file ⇒ empty map).
-pub fn read_enabled(path: &Path) -> Map<String, Value> {
-    read_settings_map(path)
+pub fn read_enabled(path: &Path) -> Utf16JsonProjection {
+    read_settings_source(path)
         .ok()
-        .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
-        .unwrap_or_default()
+        .and_then(|settings| {
+            settings.get_property("enabledPlugins")?.object_entries()?;
+            settings.subprojection("/enabledPlugins").ok()
+        })
+        .unwrap_or_else(empty_source_object)
 }
 
 /// The current allowlist value of `id` in a scope (`None` when the key is
 /// absent or is not a bool).
 fn current_value(path: &Path, id: &str) -> Option<bool> {
-    read_enabled(path).get(id).and_then(Value::as_bool)
+    read_enabled(path)
+        .get_property(id)
+        .and_then(JsonValueView::as_bool)
 }
 
 /// Read-modify-write `enabledPlugins[id] = value` into a scope's settings file,
 /// preserving every other key (delegates to the JSON-faithful settings writer).
 fn set_value(path: &Path, id: &str, value: bool) -> Result<(), String> {
     let mut map = read_enabled(path);
-    map.insert(id.to_string(), Value::Bool(value));
-    update_settings(
+    map.set_field(id, source_bool(value)?)
+        .map_err(|error| error.to_string())?;
+    write_enabled(path, map)
+}
+
+fn write_enabled(path: &Path, map: Utf16JsonProjection) -> Result<(), String> {
+    update_settings_source_with_before_publish(
         path,
-        vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
+        vec![("enabledPlugins".to_string(), Some(map))],
+        || {},
     )
+}
+
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty source object is valid")
+}
+
+fn source_bool(value: bool) -> Result<Utf16JsonProjection, String> {
+    let mut builder = lingxi_core::types::utf16_json::Utf16JsonBuilder::new();
+    let root = builder.push_bool(value);
+    builder.finish(root).map_err(|error| error.to_string())
 }
 
 fn installed_plugins(home: &Path) -> Value {
@@ -235,7 +259,12 @@ fn enabled_dependents(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|owner| enabled.get(*owner).and_then(Value::as_bool) == Some(true))
+        .filter(|owner| {
+            enabled
+                .get_property(*owner)
+                .and_then(JsonValueView::as_bool)
+                == Some(true)
+        })
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -252,8 +281,17 @@ fn resolve_id(plugin: &str, home: &Path, cwd: &Path) -> Result<String, String> {
     }
     for scope in EDITABLE {
         let map = read_enabled(&scope_path(scope, home, cwd));
-        if let Some(key) = map.keys().find(|k| name_of(k) == plugin) {
-            return Ok(key.clone());
+        if let Some(key) = map
+            .object_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|entry| {
+                String::from_utf16(entry.code_units)
+                    .ok()
+                    .filter(|key| name_of(key) == plugin)
+            })
+        {
+            return Ok(key);
         }
     }
     Err(format!(
@@ -265,9 +303,11 @@ fn resolve_id(plugin: &str, home: &Path, cwd: &Path) -> Result<String, String> {
 /// The first editable scope whose allowlist carries `id` as a key (any value),
 /// for auto-detect when no `--scope` is given.
 fn scope_holding(id: &str, home: &Path, cwd: &Path) -> Option<WritableScope> {
-    EDITABLE
-        .into_iter()
-        .find(|scope| read_enabled(&scope_path(*scope, home, cwd)).contains_key(id))
+    EDITABLE.into_iter().find(|scope| {
+        read_enabled(&scope_path(*scope, home, cwd))
+            .get_property(id)
+            .is_some()
+    })
 }
 
 /// The formatted `✘ Failed to <verb> plugin "<id>": <reason>` line.
@@ -323,13 +363,13 @@ pub fn run_enable(
     enable.insert(id.clone());
     let mut map = read_enabled(&path);
     for plugin_id in enable {
-        map.insert(plugin_id, Value::Bool(true));
+        map.set_field(
+            &plugin_id,
+            source_bool(true).map_err(|error| fail("enable", &id, &error))?,
+        )
+        .map_err(|error| fail("enable", &id, &error.to_string()))?;
     }
-    update_settings(
-        &path,
-        vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
-    )
-    .map_err(|e| fail("enable", &id, &e))?;
+    write_enabled(&path, map).map_err(|e| fail("enable", &id, &e))?;
     Ok(format!(
         "✔ Successfully enabled plugin: {} (scope: {})",
         name_of(&id),
@@ -359,19 +399,27 @@ pub fn run_disable(
             let path = scope_path(scope, home, cwd);
             let mut map = read_enabled(&path);
             let mut changed = false;
-            for value in map.values_mut() {
-                if value.as_bool() == Some(true) {
-                    *value = Value::Bool(false);
+            let entries = map.object_entries().unwrap_or_default();
+            let mut fields = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let value = map
+                    .subprojection_property_units(entry.code_units)
+                    .map_err(|error| fail("disable", "--all", &error.to_string()))?;
+                if entry.value.as_bool() == Some(true) {
+                    fields.push((
+                        entry.code_units.to_vec(),
+                        source_bool(false).map_err(|error| fail("disable", "--all", &error))?,
+                    ));
                     count += 1;
                     changed = true;
+                } else {
+                    fields.push((entry.code_units.to_vec(), value));
                 }
             }
             if changed {
-                update_settings(
-                    &path,
-                    vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
-                )
-                .map_err(|e| fail("disable", "--all", &e))?;
+                map = Utf16JsonProjection::object_units(fields)
+                    .map_err(|error| fail("disable", "--all", &error.to_string()))?;
+                write_enabled(&path, map).map_err(|e| fail("disable", "--all", &e))?;
             }
         }
         return Ok(format!("✔ Disabled {count} plugins"));
@@ -514,6 +562,35 @@ mod tests {
     }
 
     #[test]
+    fn enable_preserves_exact_source_siblings_and_existing_ids() {
+        let e = env();
+        let path = e.home.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":{"value":"\ud800"}},"enabledPlugins":{"a@m":true},"opaque":{"value":"\udfff"}}"#,
+        )
+        .unwrap();
+
+        run_enable("b@m", None, &e.home, &e.cwd).unwrap();
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(
+            source.string_units("/hooks/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
+        let enabled = source.subprojection("/enabledPlugins").unwrap();
+        assert_eq!(
+            enabled.get_property("a@m").and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            enabled.get_property("b@m").and_then(JsonValueView::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn enable_already_enabled_errors() {
         let e = env();
         run_enable("foo@bar", None, &e.home, &e.cwd).unwrap();
@@ -617,6 +694,40 @@ mod tests {
         assert_eq!(
             user_settings(&e),
             json!({"enabledPlugins": {"a@m": false, "b@m": false}})
+        );
+    }
+
+    #[test]
+    fn disable_all_keeps_exact_utf16_plugin_keys_and_sibling_source() {
+        let e = env();
+        let path = e.home.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"input":"\udfff"},"enabledPlugins":{"\ud800":true,"foo@m":true}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run_disable(None, None, true, &e.home, &e.cwd).unwrap(),
+            "✔ Disabled 2 plugins"
+        );
+
+        let source = read_settings_source(&path).unwrap();
+        assert_eq!(source.string_units("/hooks/input"), Some(vec![0xDFFF]));
+        let enabled = source.subprojection("/enabledPlugins").unwrap();
+        let entries = enabled.object_entries().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.code_units == [0xD800])
+                .and_then(|entry| entry.value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            enabled
+                .get_property("foo@m")
+                .and_then(JsonValueView::as_bool),
+            Some(false)
         );
     }
 

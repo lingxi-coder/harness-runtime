@@ -26,7 +26,9 @@ use lingxi_core::host::tool_invoker::{
     SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
 };
 use lingxi_core::host::{EvidenceCheckStatus, EvidenceKind, PanelReport};
-use serde_json::{json, Value};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+#[cfg(test)]
+use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -362,16 +364,32 @@ async fn grep_count(
     path: &str,
     pattern: &str,
 ) -> Result<u64, EvidenceCheckStatus> {
-    let input = json!({ "pattern": pattern, "path": path, "output_mode": "count" });
+    let input = Utf16JsonProjection::object(vec![
+        ("pattern".to_owned(), pattern.into()),
+        ("path".to_owned(), path.into()),
+        ("output_mode".to_owned(), "count".into()),
+    ])
+    .map_err(|_| EvidenceCheckStatus::Unverifiable)?;
     match invoker.invoke("Grep", input, host_context()).await {
         Ok(data) => data
-            .get("numMatches")
-            .and_then(Value::as_u64)
+            .number_at("/numMatches")
+            .filter(|count| {
+                count.is_finite()
+                    && *count >= 0.0
+                    && count.fract() == 0.0
+                    && *count <= u64::MAX as f64
+            })
+            .map(|count| count as u64)
             .ok_or(EvidenceCheckStatus::Unverifiable),
         // Grep reports a missing search path as invalid input; it probes the
         // path only after the permission check, so this never leaks the
         // existence of a path the session may not look at.
-        Err(ToolInvokerError::InvalidInput(message)) if message.contains("does not exist") => {
+        Err(ToolInvokerError::InvalidInput(message))
+            if message
+                .string_units("")
+                .and_then(|units| String::from_utf16(&units).ok())
+                .is_some_and(|message| message.contains("does not exist")) =>
+        {
             Err(EvidenceCheckStatus::MissingFile)
         }
         // How the invoker surfaces a permission denial or a path outside the
@@ -387,9 +405,13 @@ async fn grep_count(
 /// non-interactive session so an ask resolves to a denial.
 fn host_context() -> SubagentInvocationContext {
     SubagentInvocationContext {
+        cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,
         parent_agent_id: None,
+        native_query_depth: None,
         origin_session_id: None,
+        instruction_context: None,
+        fork_context: None,
         tool_execution_policy: ToolExecutionPolicy::Ordinary,
         agent_name: None,
         team_name: None,
@@ -403,6 +425,11 @@ fn host_context() -> SubagentInvocationContext {
         observer: None,
         parent_model: None,
         parent_model_profile: None,
+        agent_spawn_provenance: Default::default(),
+        tool_context_state: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
+        current_history: Vec::new(),
         mode_override: None,
         request_source: None,
         frozen_command_denies: Vec::new(),
@@ -463,14 +490,16 @@ mod tests {
         async fn invoke(
             &self,
             name: &str,
-            input: Value,
+            input: Utf16JsonProjection,
             ctx: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
             assert_eq!(name, "Grep");
             assert!(ctx.is_non_interactive_session);
             assert!(!ctx.can_show_permission_prompts);
-            let path = input["path"].as_str().unwrap().to_string();
-            let pattern = input["pattern"].as_str().unwrap().to_string();
+            let path = String::from_utf16(&input.string_units("/path").unwrap())
+                .expect("test path is valid UTF-16");
+            let pattern = String::from_utf16(&input.string_units("/pattern").unwrap())
+                .expect("test pattern is valid UTF-16");
             self.calls
                 .lock()
                 .unwrap()
@@ -484,15 +513,19 @@ mod tests {
                 ));
             }
             let Some(body) = self.files.get(&path) else {
-                return Err(ToolInvokerError::InvalidInput(format!(
-                    "Path does not exist: {path}."
-                )));
+                return Err(ToolInvokerError::InvalidInput(
+                    format!("Path does not exist: {path}.").into(),
+                ));
             };
             let count = body
                 .lines()
                 .filter(|line| Self::matches(line, &pattern))
                 .count();
-            Ok(json!({ "mode": "count", "numMatches": count }))
+            Ok(Utf16JsonProjection::from_serde_value(&json!({
+                "mode": "count",
+                "numMatches": count
+            }))
+            .expect("test result is valid JSON"))
         }
 
         fn as_any(&self) -> &dyn std::any::Any {

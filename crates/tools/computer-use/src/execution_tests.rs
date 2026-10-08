@@ -227,12 +227,17 @@ async fn invoke(
     ctx: ToolUseContext,
 ) -> Result<ToolCallResult, ToolError> {
     let result = tool
-        .call(input, ctx.clone(), tool_api::test_support::fresh_tx())
+        .call(
+            test_projection(&input),
+            ctx.clone(),
+            tool_api::test_support::fresh_tx(),
+        )
         .await?;
     let blocks = tool_api::tool_result_media::image_content_blocks(&result.data);
+    let empty = Utf16JsonProjection::from("");
     tool.computer_model_output(
         &ctx,
-        result.model_content.as_deref().unwrap_or_default(),
+        result.model_content.as_ref().unwrap_or(&empty),
         blocks.as_deref(),
     )
     .await?;
@@ -375,17 +380,18 @@ async fn computer_batch_delivers_ordered_images_and_only_adopts_the_final_full_o
         let owner = ctx();
         let result = tool
             .call(
-                json!({"action":"computer_batch","actions":actions}),
+                test_projection(&json!({"action":"computer_batch","actions":actions})),
                 owner.clone(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
-        assert!(result.data.get("results").is_some());
-        let text = result
+        assert!(test_data(&result.data).get("results").is_some());
+        let model_text = result
             .model_content
-            .as_deref()
-            .expect("batch media needs safe metadata text");
+            .as_ref()
+            .expect("model text is present");
+        let text = test_model_text(Some(model_text)).expect("batch media needs safe metadata text");
         assert!(
             !text.contains("base64"),
             "image bytes must not also be JSON text"
@@ -393,15 +399,18 @@ async fn computer_batch_delivers_ordered_images_and_only_adopts_the_final_full_o
         let blocks = tool_api::tool_result_media::media_content_blocks_for_tool(
             "computer",
             &result.data,
-            text,
+            model_text,
         )
         .expect("nested computer images must reach the ordinary media mapper");
         assert_eq!(
-            blocks.iter().filter(|b| b["type"] == "image").count(),
+            blocks
+                .iter()
+                .filter(|block| block.string_at("/type") == Some("image"))
+                .count(),
             image_count
         );
         assert!(tool.native_computer_frame(&owner).await.unwrap().is_none());
-        tool.computer_model_output(&owner, text, Some(&blocks))
+        tool.computer_model_output(&owner, model_text, Some(&blocks))
             .await
             .unwrap();
         assert_eq!(
@@ -417,25 +426,31 @@ async fn batch_observation_rejects_a_removed_final_image_or_rewritten_geometry()
     for change_geometry in [false, true] {
         let tool = make_tool(Arc::new(RecordingBackend::default()));
         let owner = ctx();
-        let result = tool.call(json!({"action":"computer_batch","actions":[{"action":"screenshot"},{"action":"screenshot"}]}), owner.clone(), tool_api::test_support::fresh_tx())
+        let result = tool.call(test_projection(&json!({"action":"computer_batch","actions":[{"action":"screenshot"},{"action":"screenshot"}]})), owner.clone(), tool_api::test_support::fresh_tx())
             .await.unwrap();
-        let mut text = result.model_content.unwrap();
+        let original_model_text = result
+            .model_content
+            .as_ref()
+            .expect("model text is present");
+        let mut model_text = original_model_text.clone();
+        let text = test_model_text(Some(original_model_text)).unwrap();
         let mut blocks = tool_api::tool_result_media::media_content_blocks_for_tool(
             "computer",
             &result.data,
-            &text,
+            original_model_text,
         )
         .unwrap();
         if change_geometry {
-            let mut metadata: Value = serde_json::from_str(&text).unwrap();
-            metadata["results"][1]["result"]["computer_frame"]["width"] = json!(1);
-            text = metadata.to_string();
+            let one = Utf16JsonProjection::parse("1").expect("integer source");
+            model_text
+                .replace_pointer_projection("/results/1/result/computer_frame/width", one)
+                .expect("width pointer exists");
         } else {
             // The two screenshots have identical pixels. An earlier image
             // alone still cannot stand in for the batch's final capture.
             blocks.pop();
         }
-        tool.computer_model_output(&owner, &text, Some(&blocks))
+        tool.computer_model_output(&owner, &model_text, Some(&blocks))
             .await
             .unwrap();
         assert!(tool.native_computer_frame(&owner).await.unwrap().is_none());
@@ -1030,7 +1045,7 @@ async fn screenshot_requires_final_image_and_hook_replacement_invalidates_readin
     let context = ctx();
     let _result = tool
         .call(
-            json!({"action":"screenshot"}),
+            test_projection(&json!({"action":"screenshot"})),
             context.clone(),
             tool_api::test_support::fresh_tx(),
         )
@@ -1041,7 +1056,8 @@ async fn screenshot_requires_final_image_and_hook_replacement_invalidates_readin
         .await
         .unwrap()
         .is_none());
-    tool.computer_model_output(&context, "image removed", None)
+    let removed_text = Utf16JsonProjection::from("image removed");
+    tool.computer_model_output(&context, &removed_text, None)
         .await
         .unwrap();
     assert!(tool
@@ -1051,15 +1067,21 @@ async fn screenshot_requires_final_image_and_hook_replacement_invalidates_readin
         .is_none());
     let result = tool
         .call(
-            json!({"action":"screenshot"}),
+            test_projection(&json!({"action":"screenshot"})),
             context.clone(),
             tool_api::test_support::fresh_tx(),
         )
         .await
         .unwrap();
     let mut blocks = tool_api::tool_result_media::image_content_blocks(&result.data).unwrap();
-    blocks[0]["source"]["data"] = json!("replacement-image");
-    tool.computer_model_output(&context, "image replaced", Some(&blocks))
+    blocks[0]
+        .replace_pointer_projection(
+            "/source/data",
+            Utf16JsonProjection::from("replacement-image"),
+        )
+        .unwrap();
+    let replaced_text = Utf16JsonProjection::from("image replaced");
+    tool.computer_model_output(&context, &replaced_text, Some(&blocks))
         .await
         .unwrap();
     assert!(tool
@@ -1069,14 +1091,15 @@ async fn screenshot_requires_final_image_and_hook_replacement_invalidates_readin
         .is_none());
     let result = tool
         .call(
-            json!({"action":"screenshot"}),
+            test_projection(&json!({"action":"screenshot"})),
             context.clone(),
             tool_api::test_support::fresh_tx(),
         )
         .await
         .unwrap();
     let blocks = tool_api::tool_result_media::image_content_blocks(&result.data).unwrap();
-    tool.computer_model_output(&context, "captured", Some(&blocks))
+    let captured_text = Utf16JsonProjection::from("captured");
+    tool.computer_model_output(&context, &captured_text, Some(&blocks))
         .await
         .unwrap();
     assert!(tool

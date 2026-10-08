@@ -1,5 +1,5 @@
 //! Inbound JSON-RPC request handlers required by the
-//! `{roots:{listChanged:true}, elicitation:{}}` capability declaration.
+//! roots and form/URL elicitation capability declaration.
 //!
 //! Implementations match claude-code's defaults in
 //! `services/mcp/client.ts` lines 1009-1018 (roots) and 1188-1197
@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use jsonrpc::{InboundHandler, Request, Response};
+use jsonrpc::{InboundHandler, JsonPayload, Request, Response};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::tengu::mcp::{ElicitationMode, ElicitationResponsePayload, ElicitationShownPayload};
@@ -189,48 +190,24 @@ impl ElicitationCreateHandler {
         }
     }
 
-    /// Build the byte-faithful [`ElicitationHookRequest`] from the inbound
-    /// request params, mirroring how claude-code's `runElicitationHooks`
-    /// reads `params.message` / `params.mode` / `params.url` /
-    /// `params.elicitationId` / `params.requestedSchema`
-    /// (`elicitationHandler.ts:220-239`). Missing fields default to empty /
-    /// `None` so a sparse server payload still produces a valid hook input.
-    fn build_hook_request(&self, params: Option<&Value>) -> ElicitationHookRequest {
-        let p = params.and_then(Value::as_object);
-        let str_field = |k: &str| {
-            p.and_then(|o| o.get(k))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        };
+    /// Preserve the complete inbound params object for the orchestrator's
+    /// hook projection. The known request fields are selected there; schema
+    /// payloads and exact JavaScript strings never pass through Value.
+    fn build_hook_request(&self, params: Utf16JsonProjection) -> ElicitationHookRequest {
         ElicitationHookRequest {
             server_name: self.server_name.clone(),
-            message: str_field("message").unwrap_or_default(),
-            // claude-code normalizes mode to "form" unless it is exactly "url".
-            mode: str_field("mode"),
-            url: str_field("url"),
-            // claude-code reads `params.elicitationId`; the wire payload key is
-            // `elicitation_id`. Accept either so the seam is robust to both.
-            elicitation_id: str_field("elicitationId").or_else(|| str_field("elicitation_id")),
-            requested_schema: p
-                .and_then(|o| {
-                    o.get("requestedSchema")
-                        .or_else(|| o.get("requested_schema"))
-                })
-                .cloned(),
+            params,
         }
     }
 
     /// Provider-neutral MCP elicitation telemetry normalizes the wire mode the
     /// same way the oracle's hook path does: only the exact `"url"` literal
     /// stays URL mode; everything else is treated as form.
-    fn telemetry_mode(params: Option<&Value>) -> ElicitationMode {
-        match params
-            .and_then(Value::as_object)
-            .and_then(|o| o.get("mode"))
-            .and_then(Value::as_str)
-        {
-            Some("url") => ElicitationMode::Url,
-            Some(_) | None => ElicitationMode::Form,
+    fn telemetry_mode(params: &Utf16JsonProjection) -> ElicitationMode {
+        if params.string_at("/mode") == Some("url") {
+            ElicitationMode::Url
+        } else {
+            ElicitationMode::Form
         }
     }
 }
@@ -243,7 +220,14 @@ impl InboundHandler for ElicitationCreateHandler {
         // `tengu_mcp_elicitation_shown`).
         self.pending.fetch_add(1, Ordering::AcqRel);
         let _open = PendingElicitation(Arc::clone(&self.pending));
-        let mode = Self::telemetry_mode(req.params.as_ref());
+        let params = req
+            .params
+            .as_ref()
+            .map(|params| Utf16JsonProjection::parse(params.as_json()))
+            .transpose()
+            .expect("JSON-RPC JsonPayload was validated at decode")
+            .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null JSON"));
+        let mode = Self::telemetry_mode(&params);
         emit_elicitation_shown(mode);
         // When a dispatcher is wired, consult the `Elicitation` hook first.
         // Mirrors `runElicitationHooks` (elicitationHandler.ts:91-107):
@@ -251,13 +235,21 @@ impl InboundHandler for ElicitationCreateHandler {
         //   * hook DENIES     -> {"action":"decline"}.
         //   * hook PASSES     -> fall through to the default below.
         if let Some(dispatcher) = &self.dispatcher {
-            let hook_req = self.build_hook_request(req.params.as_ref());
+            let hook_req = self.build_hook_request(params);
             match dispatcher.dispatch_elicitation(hook_req).await {
                 ElicitationHookOutcome::Respond(answer) => {
-                    if let Some(action) = answer.get("action").and_then(Value::as_str) {
+                    if let Some(action) = answer
+                        .get_property("action")
+                        .and_then(|value| value.as_str())
+                    {
                         emit_elicitation_response(mode, action);
                     }
-                    return Response::success(req.id, answer);
+                    let result_json = answer
+                        .to_json_string()
+                        .expect("validated Hook projection serializes as JSON");
+                    let result = JsonPayload::parse(result_json)
+                        .expect("projection serializer produced a valid JSON response result");
+                    return Response::success(req.id, result);
                 }
                 ElicitationHookOutcome::Deny => {
                     emit_elicitation_response(mode, "decline");
@@ -333,10 +325,19 @@ fn record_test_elicitation_telemetry_event<T: serde::Serialize>(name: &'static s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonrpc::Id;
+    use jsonrpc::{Id, JsonPayload};
 
     fn req(method: &str) -> Request {
         Request::new(method, None, Id::Number(1))
+    }
+
+    fn result_value(response: &Response) -> Value {
+        response
+            .result
+            .as_ref()
+            .expect("success result")
+            .to_value()
+            .expect("test response is valid JSON")
     }
 
     #[tokio::test]
@@ -346,7 +347,7 @@ mod tests {
             additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         // Wire shape MUST be {"roots": [{"uri": "..."}]}.
         let roots = result["roots"].as_array().expect("roots array");
         assert_eq!(roots.len(), 1);
@@ -365,7 +366,7 @@ mod tests {
             ]),
         };
         let resp = handler.handle(req("roots/list")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         let roots = result["roots"].as_array().expect("roots array");
         assert_eq!(roots.len(), 3, "cwd + 2 extras");
         assert_eq!(roots[0]["uri"], "file:///proj", "cwd is first");
@@ -386,7 +387,7 @@ mod tests {
             ]),
         };
         let resp = handler.handle(req("roots/list")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         let roots = result["roots"].as_array().expect("roots array");
         assert_eq!(roots.len(), 2, "cwd + one unique extra (dups dropped)");
         assert_eq!(roots[0]["uri"], "file:///proj");
@@ -405,14 +406,14 @@ mod tests {
         };
 
         // Before any add: cwd-only.
-        let before = handler.handle(req("roots/list")).await.result.unwrap();
+        let before = result_value(&handler.handle(req("roots/list")).await);
         assert_eq!(before["roots"].as_array().unwrap().len(), 1);
 
         // Runtime add pushes into the shared cell.
         cell.write().unwrap().push(PathBuf::from("/extra"));
 
         // The next roots/list reflects it immediately, cwd still first.
-        let after = handler.handle(req("roots/list")).await.result.unwrap();
+        let after = result_value(&handler.handle(req("roots/list")).await);
         let roots = after["roots"].as_array().unwrap();
         assert_eq!(roots.len(), 2, "cwd + the live-added dir");
         assert_eq!(roots[0]["uri"], "file:///proj");
@@ -426,7 +427,7 @@ mod tests {
             additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         let bytes = serde_json::to_vec(&result).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         assert!(
@@ -444,7 +445,7 @@ mod tests {
             additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         assert!(
             result.is_object(),
             "roots/list result MUST be an object, not a bare array: {result}",
@@ -458,7 +459,7 @@ mod tests {
     async fn elicitation_create_returns_cancel_literal() {
         let handler = ElicitationCreateHandler::new();
         let resp = handler.handle(req("elicitation/create")).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         // EXACT shape {"action": "cancel"} — no extra fields.
         let obj = result.as_object().expect("object");
         assert_eq!(obj.len(), 1, "exactly one field");
@@ -470,7 +471,7 @@ mod tests {
         let resp = ElicitationCreateHandler::new()
             .handle(req("elicitation/create"))
             .await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         let bytes = serde_json::to_vec(&result).unwrap();
         assert_eq!(bytes, br#"{"action":"cancel"}"#);
     }
@@ -530,7 +531,28 @@ mod tests {
     }
 
     fn elicit_req(params: Value) -> Request {
-        Request::new("elicitation/create", Some(params), Id::Number(9))
+        Request::new(
+            "elicitation/create",
+            Some(JsonPayload::from_serializable(&params).unwrap()),
+            Id::Number(9),
+        )
+    }
+
+    fn elicit_req_source(source: &str) -> Request {
+        Request::new(
+            "elicitation/create",
+            Some(JsonPayload::parse(source.to_owned()).unwrap()),
+            Id::Number(9),
+        )
+    }
+
+    fn exact_answer(source: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(source).expect("test answer is valid exact JSON")
+    }
+
+    fn serialized_result(response: &Response) -> Value {
+        let response = serde_json::to_value(response).expect("serialize JSON-RPC response");
+        response.get("result").expect("success result").clone()
     }
 
     #[tokio::test]
@@ -554,17 +576,39 @@ mod tests {
 
         let seen = mock.seen.lock().unwrap().clone().expect("hook fired");
         assert_eq!(seen.server_name, "github");
-        assert_eq!(seen.message, "Authorize?");
-        assert_eq!(seen.mode.as_deref(), Some("url"));
-        assert_eq!(seen.url.as_deref(), Some("https://example.test"));
-        assert_eq!(seen.elicitation_id.as_deref(), Some("e-1"));
-        assert_eq!(seen.requested_schema, Some(json!({"type": "object"})));
+        assert_eq!(seen.params.string_at("/message"), Some("Authorize?"));
+        assert_eq!(seen.params.string_at("/mode"), Some("url"));
+        assert_eq!(seen.params.string_at("/url"), Some("https://example.test"));
+        assert_eq!(seen.params.string_at("/elicitationId"), Some("e-1"));
+        assert_eq!(
+            seen.params
+                .subprojection("/requestedSchema")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"type":"object"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn elicitation_keeps_raw_schema_source_through_hook_dispatch() {
+        let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Pass));
+        let handler = ElicitationCreateHandler::with_dispatcher(
+            "github",
+            Some(mock.clone() as Arc<dyn HookDispatcher>),
+        );
+        let source = r#"{"message":"Choose","requestedSchema":{"title":"\ud800"}}"#;
+        let _ = handler.handle(elicit_req_source(source)).await;
+        let seen = mock.seen.lock().unwrap().clone().expect("hook fired");
+        let retained = seen.params.to_json_string().unwrap();
+        assert!(retained.contains(r#""title":"\ud800""#), "{retained}");
+        assert!(!retained.contains('�'), "{retained}");
     }
 
     #[tokio::test]
     async fn elicitation_uses_hook_provided_response() {
         // (b) A hook-provided response is used verbatim as the answer.
-        let answer = json!({"action": "accept", "content": {"token": "xyz"}});
+        let answer = exact_answer(r#"{"action":"accept","content":{"token":"xyz"}}"#);
         let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Respond(
             answer.clone(),
         )));
@@ -573,8 +617,25 @@ mod tests {
             Some(mock as Arc<dyn HookDispatcher>),
         );
         let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
-        let result = resp.result.expect("success result");
-        assert_eq!(result, answer);
+        assert_eq!(
+            serialized_result(&resp),
+            json!({"action": "accept", "content": {"token": "xyz"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn elicitation_hook_response_preserves_isolated_surrogate_in_content() {
+        let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Respond(
+            exact_answer(r#"{"action":"accept","content":{"token":"\ud800"}}"#),
+        )));
+        let handler = ElicitationCreateHandler::with_dispatcher(
+            "linear",
+            Some(mock as Arc<dyn HookDispatcher>),
+        );
+        let response = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
+        let wire = serde_json::to_string(&response).expect("serialize response");
+        assert!(wire.contains(r#""token":"\ud800""#), "wire: {wire}");
+        assert!(!wire.contains('�'), "wire: {wire}");
     }
 
     #[tokio::test]
@@ -587,7 +648,7 @@ mod tests {
             Some(mock as Arc<dyn HookDispatcher>),
         );
         let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
-        let result = resp.result.expect("success result");
+        let result = result_value(&resp);
         let obj = result.as_object().expect("object");
         assert_eq!(obj.len(), 1);
         assert_eq!(obj["action"], "decline");
@@ -638,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn an_open_elicitation_is_counted_and_released_on_every_path() {
         for outcome in [
-            ElicitationHookOutcome::Respond(json!({"action": "accept"})),
+            ElicitationHookOutcome::Respond(exact_answer(r#"{"action":"accept"}"#)),
             ElicitationHookOutcome::Deny,
             ElicitationHookOutcome::Pass,
         ] {
@@ -690,7 +751,7 @@ mod tests {
         );
         let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
-        assert_eq!(result, json!({"action": "cancel"}));
+        assert_eq!(result.to_value().unwrap(), json!({"action": "cancel"}));
     }
 
     #[tokio::test]
@@ -700,8 +761,7 @@ mod tests {
         let handler = ElicitationCreateHandler::with_dispatcher("github", None);
         let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
-        let bytes = serde_json::to_vec(&result).unwrap();
-        assert_eq!(bytes, br#"{"action":"cancel"}"#);
+        assert_eq!(result.as_json().as_bytes(), br#"{"action":"cancel"}"#);
     }
 
     #[tokio::test]
@@ -709,7 +769,10 @@ mod tests {
         clear_test_elicitation_telemetry_events();
         let handler = ElicitationCreateHandler::new();
         let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
-        assert_eq!(resp.result.unwrap(), json!({"action": "cancel"}));
+        assert_eq!(
+            resp.result.unwrap().to_value().unwrap(),
+            json!({"action": "cancel"})
+        );
         assert_eq!(
             take_test_elicitation_telemetry_events(),
             vec![
@@ -739,7 +802,10 @@ mod tests {
         let resp = handler
             .handle(elicit_req(json!({"message": "Pick", "mode": "url"})))
             .await;
-        assert_eq!(resp.result.unwrap(), json!({"action": "cancel"}));
+        assert_eq!(
+            resp.result.unwrap().to_value().unwrap(),
+            json!({"action": "cancel"})
+        );
         assert_eq!(
             take_test_elicitation_telemetry_events(),
             vec![
@@ -773,7 +839,10 @@ mod tests {
         let resp = handler
             .handle(elicit_req(json!({"message": "Pick", "mode": "other"})))
             .await;
-        assert_eq!(resp.result.unwrap(), json!({"action": "decline"}));
+        assert_eq!(
+            resp.result.unwrap().to_value().unwrap(),
+            json!({"action": "decline"})
+        );
         assert_eq!(
             take_test_elicitation_telemetry_events(),
             vec![
@@ -800,7 +869,7 @@ mod tests {
     async fn elicitation_hook_response_emits_actual_url_action() {
         clear_test_elicitation_telemetry_events();
         let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Respond(
-            json!({"action": "accept", "content": {"token": "xyz"}}),
+            exact_answer(r#"{"action":"accept","content":{"token":"xyz"}}"#),
         )));
         let handler = ElicitationCreateHandler::with_dispatcher(
             "linear",
@@ -810,7 +879,7 @@ mod tests {
             .handle(elicit_req(json!({"message": "Pick", "mode": "url"})))
             .await;
         assert_eq!(
-            resp.result.unwrap(),
+            serialized_result(&resp),
             json!({"action": "accept", "content": {"token": "xyz"}})
         );
         assert_eq!(

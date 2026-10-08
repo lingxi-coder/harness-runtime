@@ -2,29 +2,41 @@
 //! the trait every built-in handler implements.
 
 use crate::parser::ParsedSlashCommand;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{Effect, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Port of the reference bundled-skill `getPromptForCommand(args)` seam
-/// (`claude-code/src/skills/bundledSkills.ts` → `loop.ts:84`). Builds the
-/// model-facing prompt dynamically from the raw (untrimmed) args, enabling the
-/// empty→usage vs non-empty→buildPrompt two-branch behavior that static
-/// `$ARGUMENTS` templating cannot express (the two texts share no template).
-///
-/// Carried on [`SlashCommandKind::Bundled`] and projected onto the Skill tool's
-/// descriptor; [`SkillTool::call`] invokes `build(args)` INSTEAD of the static
-/// argument substitution when it is present.
+/// Owning session context for a dynamic bundled skill prompt. Every production
+/// expansion supplies its model and directories; preloading keeps activation off.
+#[derive(Clone, Copy)]
+pub struct BundledPromptContext<'a> {
+    /// Owning session's project root.
+    pub project_root: &'a std::path::Path,
+    /// Current execution directory, including isolated child worktrees.
+    pub cwd: &'a std::path::Path,
+    /// Loading instructions must not activate the skill.
+    pub is_preload: bool,
+    /// Dispatching session or child's selected model, rather than its parent.
+    pub main_loop_model: Option<&'a str>,
+}
+
+/// A context-aware dynamic bundled skill prompt.
 pub trait BundledPromptFn: Send + Sync {
-    /// Produce the model-facing prompt for the given raw args string. The
-    /// implementation does its own trimming/branching (mirrors the reference's
-    /// `args.trim()` inside `getPromptForCommand`, `loop.ts:85`).
-    fn build(&self, args: &str) -> String;
+    /// Whether expansion consumes the selected model. Stateless templates do
+    /// not need route lookup merely to produce their fixed instructions.
+    fn needs_model_context(&self) -> bool {
+        false
+    }
+
+    /// Produce the model-facing prompt for the exact raw args source. Builders
+    /// retain UTF-16 code units when inserting user text into the prompt.
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection;
 
     /// Build instructions for agent skill preloading, without treating the load
     /// as a user invocation. Stateless builders can use the normal expansion.
-    fn build_for_preload(&self, args: &str) -> String {
+    fn build_for_preload(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
         self.build(args)
     }
 
@@ -33,17 +45,96 @@ pub trait BundledPromptFn: Send + Sync {
     /// different instructions. Preloading must not activate a command.
     fn try_build_at(
         &self,
-        args: &str,
-        _project_root: &std::path::Path,
-        _cwd: &std::path::Path,
-        is_preload: bool,
-    ) -> std::io::Result<String> {
-        Ok(if is_preload {
+        args: &Utf16JsonProjection,
+        context: BundledPromptContext<'_>,
+    ) -> std::io::Result<Utf16JsonProjection> {
+        Ok(if context.is_preload {
             self.build_for_preload(args)
         } else {
             self.build(args)
         })
     }
+}
+
+/// Build an exact root-string projection from UTF-16 units.
+pub(crate) fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
+}
+
+/// Append generated Rust text to a source prompt's UTF-16 buffer.
+pub(crate) fn append_text_units(output: &mut Vec<u16>, text: &str) {
+    output.extend(text.encode_utf16());
+}
+
+/// Append the exact units from a root-string source projection.
+pub(crate) fn append_source_units(output: &mut Vec<u16>, source: &Utf16JsonProjection) {
+    output.extend_from_slice(&source.string_units("").unwrap_or_default());
+}
+
+/// One exact text fragment in a generated prompt.
+pub(crate) enum PromptPart<'a> {
+    /// Generated UTF-8 Rust text.
+    Text(&'a str),
+    /// User or provider text that must retain its source UTF-16 units.
+    Source(&'a Utf16JsonProjection),
+}
+
+/// Concatenate generated text and source projections into one exact prompt.
+pub(crate) fn source_concat<'a>(
+    parts: impl IntoIterator<Item = PromptPart<'a>>,
+) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for part in parts {
+        match part {
+            PromptPart::Text(text) => append_text_units(&mut units, text),
+            PromptPart::Source(source) => append_source_units(&mut units, source),
+        }
+    }
+    source_from_units(units)
+}
+
+/// Trim JavaScript whitespace from both ends without decoding the source.
+pub(crate) fn trim_source_text(source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = source.string_units("").unwrap_or_default();
+    let mut start = 0;
+    let mut end = units.len();
+    while start < end && source_whitespace_unit(units[start]) {
+        start += 1;
+    }
+    while end > start && source_whitespace_unit(units[end - 1]) {
+        end -= 1;
+    }
+    source_from_units(units[start..end].to_vec())
+}
+
+#[cfg(test)]
+pub(crate) trait SourceTextTestExt {
+    fn contains(&self, needle: &str) -> bool;
+    fn starts_with(&self, prefix: &str) -> bool;
+    fn ends_with(&self, suffix: &str) -> bool;
+}
+
+#[cfg(test)]
+impl SourceTextTestExt for Utf16JsonProjection {
+    fn contains(&self, needle: &str) -> bool {
+        self.string_at("").is_some_and(|text| text.contains(needle))
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.string_at("")
+            .is_some_and(|text| text.starts_with(prefix))
+    }
+
+    fn ends_with(&self, suffix: &str) -> bool {
+        self.string_at("")
+            .is_some_and(|text| text.ends_with(suffix))
+    }
+}
+
+fn source_whitespace_unit(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(lingxi_core::host::effort::javascript_whitespace)
 }
 
 impl std::fmt::Debug for dyn BundledPromptFn {
@@ -63,77 +154,139 @@ impl std::fmt::Debug for dyn BundledPromptFn {
 /// `#[serde(default, skip_serializing_if = …)]` so that when absent the wire
 /// JSON is byte-identical to the pre-existing `{name, description, source,
 /// kind}` shape.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
-    /// Command name (without the leading `/`).
-    pub name: String,
-    /// Short user-facing description.
-    pub description: String,
+    /// Command name (without the leading `/`), retained as exact JavaScript text.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub name: Utf16JsonProjection,
+    /// Short user-facing description, retained as exact JavaScript text.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     /// Origin classification.
     pub source: CommandSource,
     /// Concrete dispatch shape — built-in handler, markdown template, etc.
     pub kind: SlashCommandKind,
-    /// Whether the model is forbidden from invoking this command (TS
-    /// `disableModelInvocation`). Filtered out by
-    /// [`crate::registry::CommandRegistry::model_invocable_commands`].
+    /// Whether the model is forbidden from invoking this command.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_model_invocation: bool,
-    /// Whether the description came from an explicit user/frontmatter
-    /// `description` (TS `hasUserSpecifiedDescription`) rather than being
-    /// auto-derived from the markdown body.
+    /// Whether the description came from an explicit user/frontmatter field.
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_user_specified_description: bool,
-    /// Where the command was loaded from (TS `loadedFrom` string union:
-    /// `commands_DEPRECATED` | `skills` | `plugin` | `managed` | `bundled` |
-    /// `mcp`). Kept as a free-form string to mirror the TS union without a
-    /// closed Rust enum.
+    /// Where the command was loaded from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_from: Option<String>,
-    /// Detailed "when to use" guidance for the model (TS `whenToUse`, from the
-    /// Skill spec).
+    /// Advisory model guidance from skill metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_to_use: Option<String>,
-    /// Gitignore-style patterns from a skill's `paths:` frontmatter. `Some`
-    /// makes this a CONDITIONAL skill — withheld from the model-facing listing
-    /// until the session touches a matching file (claude-code `lhr`; upstream
-    /// carries `paths` on the command metadata beside `whenToUse` too).
+    /// Gitignore-style conditional skill path patterns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
-    /// Alternate names this command also resolves by (TS `aliases`). Indexed by
-    /// [`crate::registry::CommandRegistry::register_command`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-    /// Hint text for the command's arguments, shown after the name (TS
-    /// `argumentHint`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub argument_hint: Option<String>,
-    /// Declared positional argument names (TS `argNames`), already filtered
-    /// through `parseArgumentNames` (no empty/numeric-only names). Drives the
-    /// in-TUI progressive argument-hint (TS `generateProgressiveArgumentHint`
-    /// shown by `useTypeahead` → `BaseTextInput` in the `commandWithoutArgs`
-    /// state). Empty for every built-in, so the `skip_serializing_if` keeps the
-    /// wire JSON byte-identical to the pre-existing `{name, description, source,
-    /// kind, …}` shape when no names are declared.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub argument_names: Vec<String>,
-    /// Directory root for a directory-format skill command. Unset for ordinary
-    /// `.lingxi/commands/*.md` markdown commands.
+    /// Alternate names this command also resolves by, with exact identity units.
+    #[serde(
+        default,
+        with = "projection_string_array_serde",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub aliases: Vec<Utf16JsonProjection>,
+    /// Exact argument hint text shown after the command name.
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub argument_hint: Option<Utf16JsonProjection>,
+    /// Exact declared positional argument names.
+    #[serde(
+        default,
+        with = "projection_string_array_serde",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub argument_names: Vec<Utf16JsonProjection>,
+    /// Directory root for a directory-format skill command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_root: Option<PathBuf>,
-    /// Whether a skill command is user-invocable. Kept optional so legacy command
-    /// JSON stays unchanged when absent.
+    /// Whether a skill command is user-invocable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_invocable: Option<bool>,
     /// Raw markdown byte length for file-backed skills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<usize>,
-    /// Compact label shown in the `/` command menu (TS `menuDescription`). The
-    /// reference's completion-popup row builder uses `menuDescription ??
-    /// description` for the visible text; `None` falls back to
-    /// [`Self::description`]. Set for bundled skills whose menu label is shorter
-    /// than their full model-facing description.
+    /// Compact UI label, absent when the full description is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_description: Option<String>,
+}
+
+impl Default for SlashCommand {
+    fn default() -> Self {
+        Self {
+            name: String::new().into(),
+            description: String::new().into(),
+            source: CommandSource::default(),
+            kind: SlashCommandKind::default(),
+            disable_model_invocation: false,
+            has_user_specified_description: false,
+            loaded_from: None,
+            when_to_use: None,
+            paths: None,
+            aliases: Vec::new(),
+            argument_hint: None,
+            argument_names: Vec::new(),
+            skill_root: None,
+            user_invocable: None,
+            content_length: None,
+            menu_description: None,
+        }
+    }
+}
+
+fn deserialize_prompt_template<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let projection = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if projection.string_units("").is_none() {
+        return Err(serde::de::Error::custom(
+            "expected a JSON string prompt template",
+        ));
+    }
+    Ok(projection)
+}
+
+/// Raw JSON adapter for arrays of exact root-string projections.
+mod projection_string_array_serde {
+    use super::Utf16JsonProjection;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(values: &Vec<Utf16JsonProjection>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let array =
+            Utf16JsonProjection::array(values.clone()).map_err(serde::ser::Error::custom)?;
+        lingxi_core::types::utf16_json::raw_json_serde::serialize(&array, serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let array = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let len = array
+            .array_len("")
+            .ok_or_else(|| serde::de::Error::custom("expected an array of strings"))?;
+        (0..len)
+            .map(|index| {
+                let value = array
+                    .subprojection(&format!("/{index}"))
+                    .map_err(serde::de::Error::custom)?;
+                if value.string_units("").is_none() {
+                    return Err(serde::de::Error::custom("expected an array of strings"));
+                }
+                Ok(value)
+            })
+            .collect()
+    }
 }
 
 /// Serde `skip_serializing_if` predicate for `bool` fields that default to
@@ -158,7 +311,11 @@ pub enum SlashCommandKind {
         /// Parsed YAML frontmatter.
         frontmatter: CommandFrontmatter,
         /// Markdown body (template with `$ARGUMENTS` / `$N` placeholders).
-        prompt_template: String,
+        #[serde(
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize",
+            deserialize_with = "deserialize_prompt_template"
+        )]
+        prompt_template: Utf16JsonProjection,
     },
     /// Markdown command shipped by a plugin.
     Plugin {
@@ -169,14 +326,19 @@ pub enum SlashCommandKind {
         /// Parsed YAML frontmatter.
         frontmatter: CommandFrontmatter,
         /// Markdown body (template).
-        prompt_template: String,
+        #[serde(
+            serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize",
+            deserialize_with = "deserialize_prompt_template"
+        )]
+        prompt_template: Utf16JsonProjection,
     },
     /// Bridged to an MCP server's named prompt.
     Mcp {
         /// MCP connection that owns the prompt.
         connection_id: McpConnectionId,
         /// Prompt name to fetch via `prompts/get`.
-        prompt_name: String,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        prompt_name: Utf16JsonProjection,
         /// Server-declared named arguments, in wire order.
         #[serde(default)]
         arguments: Vec<lingxi_core::host::McpPromptArgumentDto>,
@@ -312,20 +474,20 @@ pub enum CommandSource {
 pub enum CommandResult {
     /// Synchronous completion with an optional inline display string.
     Done {
-        /// Optional human-readable text to show.
-        display: Option<String>,
+        /// Optional exact source text to show or serialize.
+        display: Option<Utf16JsonProjection>,
     },
     /// Inject `content` into the conversation as the next user message.
     InjectMessage {
         /// Content to inject as a user message.
-        content: String,
+        content: Utf16JsonProjection,
     },
     /// Emit effects to be processed by the run loop.
     EmitEffects {
         /// Effects to route through the engine.
         effects: Vec<Effect>,
-        /// Optional human-readable text to show before effects apply.
-        display: Option<String>,
+        /// Optional exact source text to show before effects apply.
+        display: Option<Utf16JsonProjection>,
     },
     /// Ask the user to confirm before applying the supplied effects.
     RequestConfirmation {
@@ -360,5 +522,129 @@ pub trait BuiltinCommandHandler: Send + Sync {
     /// handler is unaffected.
     fn allowed_tools(&self) -> &'static [&'static str] {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn slash_command_raw_serde_keeps_exact_name_text_and_route_aliases() {
+        let lone_name = Utf16JsonProjection::root_string(
+            "cmd�".into(),
+            vec![b'c' as u16, b'm' as u16, b'd' as u16, 0xd800],
+        )
+        .unwrap();
+        let lone_description = Utf16JsonProjection::root_string(
+            "desc�".into(),
+            vec![b'd' as u16, b'e' as u16, b's' as u16, b'c' as u16, 0xdfff],
+        )
+        .unwrap();
+        let command = SlashCommand {
+            name: lone_name.clone(),
+            description: lone_description.clone(),
+            aliases: vec![Utf16JsonProjection::root_string(
+                "alt�".into(),
+                vec![b'a' as u16, b'l' as u16, b't' as u16, 0xd800],
+            )
+            .unwrap()],
+            argument_hint: Some(
+                Utf16JsonProjection::root_string(
+                    "<arg�>".into(),
+                    vec![
+                        b'<' as u16,
+                        b'a' as u16,
+                        b'r' as u16,
+                        b'g' as u16,
+                        0xdfff,
+                        b'>' as u16,
+                    ],
+                )
+                .unwrap(),
+            ),
+            argument_names: vec![Utf16JsonProjection::root_string(
+                "arg�".into(),
+                vec![b'a' as u16, b'r' as u16, b'g' as u16, 0xd800],
+            )
+            .unwrap()],
+            kind: SlashCommandKind::Mcp {
+                connection_id: McpConnectionId::new(),
+                prompt_name: lone_name.clone(),
+                arguments: Vec::new(),
+            },
+            ..SlashCommand::default()
+        };
+
+        let wire = serde_json::to_string(&command).unwrap();
+        assert!(wire.contains("\\ud800"));
+        assert!(wire.contains("\\udfff"));
+        let decoded: SlashCommand = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.name.string_units(""), lone_name.string_units(""));
+        assert_eq!(
+            decoded.description.string_units(""),
+            lone_description.string_units("")
+        );
+        assert_eq!(
+            decoded.aliases[0].string_units(""),
+            command.aliases[0].string_units("")
+        );
+        assert_eq!(
+            decoded.argument_hint.unwrap().string_units(""),
+            command.argument_hint.unwrap().string_units("")
+        );
+        assert_eq!(
+            decoded.argument_names[0].string_units(""),
+            command.argument_names[0].string_units("")
+        );
+        let SlashCommandKind::Mcp { prompt_name, .. } = decoded.kind else {
+            panic!("expected MCP prompt")
+        };
+        assert_eq!(prompt_name.string_units(""), lone_name.string_units(""));
+    }
+
+    #[test]
+    fn markdown_and_plugin_templates_round_trip_exact_utf16_units() {
+        let template = Utf16JsonProjection::parse(r#""prompt \ud800 text""#).unwrap();
+        let kinds = [
+            SlashCommandKind::Markdown {
+                file_path: PathBuf::from("command.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: template.clone(),
+            },
+            SlashCommandKind::Plugin {
+                plugin_id: PluginId::new(),
+                file_path: PathBuf::from("plugin-command.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: template.clone(),
+            },
+        ];
+
+        for kind in kinds {
+            let command = SlashCommand {
+                kind,
+                ..SlashCommand::default()
+            };
+            let wire = serde_json::to_string(&command).unwrap();
+            assert!(wire.contains(r#""prompt \ud800 text""#), "{wire}");
+            let decoded: SlashCommand = serde_json::from_str(&wire).unwrap();
+            let decoded_template = match decoded.kind {
+                SlashCommandKind::Markdown {
+                    prompt_template, ..
+                }
+                | SlashCommandKind::Plugin {
+                    prompt_template, ..
+                } => prompt_template,
+                _ => panic!("expected a markdown-backed command"),
+            };
+            assert_eq!(decoded_template.string_units(""), template.string_units(""));
+        }
+    }
+
+    #[test]
+    fn markdown_template_deserialization_requires_a_root_string() {
+        let invalid =
+            r#"{"Markdown":{"file_path":"command.md","frontmatter":{},"prompt_template":{}}}"#;
+        assert!(serde_json::from_str::<SlashCommandKind>(invalid).is_err());
     }
 }

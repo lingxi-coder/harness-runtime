@@ -70,8 +70,11 @@ impl Tool for NamedTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -151,6 +154,62 @@ async fn no_reminder_when_provider_absent() {
 }
 
 // ── PLANMODE (plan_mode_turn_messages) ────────────────────────────────
+
+#[tokio::test]
+async fn mod_attachment_receives_native_plan_details_for_entry_and_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("plan-attachment.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+          on('prompt.attachment', { type: 'plan_mode' }, ($, e) => ({
+            text: `${e.detail.reminder}:${e.detail.planFilePath}:${e.detail.hasPlan}`,
+          }));
+          on('prompt.attachment', { type: 'plan_mode_exit' }, ($, e) => ({
+            text: `exit:${e.detail.planFilePath}:${e.detail.hasPlan}`,
+          }));
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "plan-attachment",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = orch_with(ToolRegistry::new(), None)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    let plan_path = {
+        let session_ref = orch.session();
+        let mut session = session_ref.lock().await;
+        session.plan_mode = true;
+        session.plan_reminder_shown = false;
+        orch.session_plan_file_path(&session.session_id)
+    };
+    let has_plan = std::path::Path::new(&plan_path).exists();
+    let entry = orch.collect_turn_reminders(true, true, None).await;
+    assert!(entry.transient.iter().any(|message| {
+        message.text_content()
+            == format!("<system-reminder>\nfull:{plan_path}:{has_plan}\n</system-reminder>")
+    }));
+
+    {
+        let session_ref = orch.session();
+        let mut session = session_ref.lock().await;
+        session.plan_mode = false;
+        session.plan_mode_exit_pending = true;
+    }
+    let exit = orch.collect_turn_reminders(true, true, None).await;
+    assert!(exit.transient.iter().any(|message| {
+        message.text_content()
+            == format!("<system-reminder>\nexit:{plan_path}:{has_plan}\n</system-reminder>")
+    }));
+}
 
 #[tokio::test]
 async fn plan_mode_reminder_none_when_plan_mode_off() {
@@ -306,7 +365,7 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
                 content: vec![lingxi_core::types::ContentBlock::ToolResult {
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "ok".into(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -427,10 +486,18 @@ impl SkillListingProvider for MutableSkills {
 fn skill(name: &str) -> SkillListingEntry {
     SkillListingEntry {
         name: name.into(),
-        description: format!("desc for {name}"),
+        description: format!("desc for {name}").into(),
         when_to_use: None,
         is_bundled: false,
     }
+}
+
+fn source_name(units: Vec<u16>) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("skill names are root strings")
 }
 
 #[tokio::test]
@@ -495,12 +562,136 @@ async fn skill_listing_delta_emits_only_new_skill_on_later_turn() {
     );
 }
 
+#[tokio::test]
+async fn skill_listing_deduplicates_names_by_exact_utf16_units() {
+    let mut reg = ToolRegistry::new();
+    reg.register_builtin(Arc::new(NamedTool("Skill")));
+    let replacement_display = "�";
+    let orch = orch_with(
+        reg,
+        Some(Arc::new(FixtureSkills(vec![
+            SkillListingEntry {
+                name: source_name(vec![0xd800]),
+                description: "lone surrogate skill".into(),
+                when_to_use: None,
+                is_bundled: false,
+            },
+            SkillListingEntry {
+                name: source_name(replacement_display.encode_utf16().collect()),
+                description: "replacement character skill".into(),
+                when_to_use: None,
+                is_bundled: false,
+            },
+        ]))),
+    );
+
+    let message = orch
+        .skill_listing_reminder_message()
+        .await
+        .expect("the two distinct source names both appear");
+    let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
+        panic!("skill listing should be a user meta message");
+    };
+    let lingxi_core::types::ContentBlock::TextJsUtf16 {
+        utf16_code_units, ..
+    } = &content[0]
+    else {
+        panic!("skill listing text should retain its UTF-16 source units");
+    };
+    assert!(utf16_code_units.contains(&0xd800));
+    assert!(utf16_code_units.contains(&0xfffd));
+    assert!(
+        orch.skill_listing_reminder_message().await.is_none(),
+        "both exact names are remembered after emission"
+    );
+}
+
 struct OnceAsyncResponses(std::sync::Mutex<Vec<String>>);
 #[async_trait::async_trait]
 impl crate::prompt::async_hook_response::AsyncHookResponseProvider for OnceAsyncResponses {
-    async fn take_pending_responses(&self) -> Vec<String> {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+}
+
+struct OnceDetailedAsyncResponses(
+    std::sync::Mutex<Vec<crate::prompt::async_hook_response::AsyncHookResponse>>,
+);
+#[async_trait::async_trait]
+impl crate::prompt::async_hook_response::AsyncHookResponseProvider for OnceDetailedAsyncResponses {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+            .into_iter()
+            .map(|response| response.text)
+            .collect()
+    }
+
+    async fn take_pending_with_events(
+        &self,
+    ) -> Vec<crate::prompt::async_hook_response::AsyncHookResponse> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
+}
+
+#[tokio::test]
+async fn mod_attachment_receives_each_async_hook_event_origin() {
+    use crate::prompt::async_hook_response::AsyncHookResponse;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("async-attachment.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+          on('prompt.attachment', { type: 'async_hook_response' }, ($, e, next) => {
+            if (e.origin.kind !== 'hook' || !e.origin.event) throw new Error('missing hook origin');
+            return next({ ...e, text: `${e.origin.event}: ${e.text}` });
+          });
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "async-attachment",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let provider = Arc::new(OnceDetailedAsyncResponses(std::sync::Mutex::new(vec![
+        AsyncHookResponse {
+            text: "first".into(),
+            hook_event: Some("PostToolUse".into()),
+            publication_guard: None,
+        },
+        AsyncHookResponse {
+            text: "second".into(),
+            hook_event: Some("SessionStart".into()),
+            publication_guard: None,
+        },
+    ])));
+    let orch = orch_with(ToolRegistry::new(), None)
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
+        .with_async_hook_responses(provider);
+    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    let texts: Vec<_> = reminders
+        .transient
+        .iter()
+        .map(ConversationMessage::text_content)
+        .filter(|text| text.contains(": first") || text.contains(": second"))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "<system-reminder>\nPostToolUse: first\n</system-reminder>",
+            "<system-reminder>\nSessionStart: second\n</system-reminder>"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -511,9 +702,11 @@ async fn async_hook_response_reminder_folds_in_then_drains_once() {
     )));
     // Turn 0: the completed background-hook response is folded in, wrapped.
     let t0 = orch
-        .async_hook_response_reminder_message()
+        .async_hook_response_mod_messages()
         .await
+        .pop()
         .expect("turn-0 async hook response")
+        .message
         .text_content();
     assert!(t0.contains("<system-reminder>"), "must be wrapped: {t0}");
     assert!(
@@ -522,7 +715,7 @@ async fn async_hook_response_reminder_folds_in_then_drains_once() {
     );
     // Turn 1: consume-once — the delivered response must NOT re-appear.
     assert!(
-        orch.async_hook_response_reminder_message().await.is_none(),
+        orch.async_hook_response_mod_messages().await.is_empty(),
         "a delivered async-hook response must be drained, not repeated"
     );
 }
@@ -532,7 +725,7 @@ async fn async_hook_response_reminder_none_without_provider() {
     let reg = ToolRegistry::new();
     let orch = orch_with(reg, None);
     assert!(
-        orch.async_hook_response_reminder_message().await.is_none(),
+        orch.async_hook_response_mod_messages().await.is_empty(),
         "no provider wired ⇒ strict no-op"
     );
 }
@@ -753,7 +946,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     )));
 
     let before = orch.session.lock().await.history.len();
-    let reminders = orch.collect_turn_reminders(true).await;
+    let reminders = orch.collect_turn_reminders(true, false, None).await;
     assert_eq!(
         reminders.task_notifications.len(),
         1,
@@ -770,10 +963,14 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     let history = orch.session.lock().await.history.clone();
     assert_eq!(
         history.len(),
-        before + 1,
-        "the completion must survive the turn as a history entry",
+        before + reminders.task_notifications.len() + reminders.model_reminders.len(),
+        "durable completions and model reminders must survive as history entries",
     );
-    let rendered = format!("{:?}", history.last().expect("the appended message"));
+    let notification = history
+        .iter()
+        .find(|message| message.id() == reminders.task_notifications[0].id())
+        .expect("the appended notification");
+    let rendered = format!("{notification:?}");
     assert!(
         rendered.contains("b87654321"),
         "the appended entry must be the completion, got: {rendered}",
@@ -782,7 +979,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     // Consume-once still holds: a second drain has nothing left, so the
     // completion cannot be appended twice.
     assert!(
-        orch.collect_turn_reminders(true)
+        orch.collect_turn_reminders(true, false, None)
             .await
             .task_notifications
             .is_empty(),

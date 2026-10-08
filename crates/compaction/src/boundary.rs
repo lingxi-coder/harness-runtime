@@ -8,9 +8,11 @@
 //! (`preCompactDiscoveredTools`, `buildPostCompactMessages`).
 //!
 //! The in-memory marker now carries the same typed `subtype` and
-//! `compactMetadata` fields as the persisted boundary. Exact-content matching
-//! remains only as a compatibility fallback for legacy in-memory snapshots.
+//! `compactMetadata` fields as the persisted boundary. Recognition requires
+//! the current typed subtype, matching native 2.1.287 Bi; ordinary system text
+//! cannot truncate model history.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 pub use lingxi_core::types::{
     CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin, CompactTrigger,
     PreservedMessages, PreservedSegment,
@@ -19,7 +21,6 @@ use lingxi_core::types::{ConversationMessage, MessageId};
 
 /// Exact content string TS stamps on every compact-boundary system message
 /// (`createCompactBoundaryMessage` sets `content` to `Conversation compacted`).
-/// Legacy markers without a subtype are still recognized by this sentinel.
 pub const BOUNDARY_CONTENT: &str = "Conversation compacted";
 
 /// Convert the engine-owned active-goal state into its compact wire snapshot.
@@ -78,7 +79,7 @@ pub fn create_compact_boundary(
     trigger: CompactTrigger,
     pre_tokens: u64,
     last_pre_compact_message_uuid: Option<MessageId>,
-    user_context: Option<String>,
+    user_context: Option<Utf16JsonProjection>,
     messages_summarized: Option<u32>,
     discovered_tools: &[String],
 ) -> (ConversationMessage, CompactBoundaryMetadata) {
@@ -189,7 +190,7 @@ pub fn create_compact_boundary_with_preserved_tail(
     trigger: CompactTrigger,
     pre_tokens: u64,
     last_pre_compact_message_uuid: Option<MessageId>,
-    user_context: Option<String>,
+    user_context: Option<Utf16JsonProjection>,
     messages_summarized: Option<u32>,
     discovered_tools: &[String],
     kept_tail: &[ConversationMessage],
@@ -212,8 +213,7 @@ pub fn create_compact_boundary_with_preserved_tail(
 /// Whether `message` is a compact-boundary marker.
 ///
 /// TS `isCompactBoundaryMessage`: `type === 'system' && subtype ===
-/// 'compact_boundary'`. Exact-content matching is retained only for legacy
-/// markers serialized before the typed subtype was available.
+/// 'compact_boundary'`. The body does not determine the message type.
 #[must_use]
 pub fn is_compact_boundary(message: &ConversationMessage) -> bool {
     matches!(
@@ -222,13 +222,6 @@ pub fn is_compact_boundary(message: &ConversationMessage) -> bool {
             subtype: Some(subtype),
             ..
         } if subtype == "compact_boundary"
-    ) || matches!(
-        message,
-        ConversationMessage::System {
-            subtype: None,
-            content,
-            ..
-        } if content == BOUNDARY_CONTENT
     )
 }
 
@@ -278,7 +271,7 @@ mod tests {
             CompactTrigger::Auto,
             123_456,
             Some(last),
-            Some("ctx".to_string()),
+            Some("ctx".into()),
             Some(7),
             &[
                 "Zebra".to_string(),
@@ -289,7 +282,12 @@ mod tests {
 
         assert_eq!(meta.trigger, CompactTrigger::Auto);
         assert_eq!(meta.pre_tokens, 123_456);
-        assert_eq!(meta.user_context.as_deref(), Some("ctx"));
+        assert_eq!(
+            meta.user_context
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("ctx")
+        );
         assert_eq!(meta.messages_summarized, Some(7));
         // sorted (byte order: uppercase before lowercase)
         assert_eq!(
@@ -310,7 +308,10 @@ mod tests {
         assert!(is_compact_boundary(&marker));
         match marker {
             ConversationMessage::System { content, .. } => {
-                assert_eq!(content, "Conversation compacted");
+                assert_eq!(
+                    content.string_at("").as_deref(),
+                    Some("Conversation compacted")
+                );
             }
             _ => panic!("expected a System marker"),
         }
@@ -354,9 +355,10 @@ mod tests {
         assert!(is_compact_boundary(&boundary()));
         let plain = ConversationMessage::System {
             id: MessageId::new(),
-            content: "some other system text".to_string(),
+            content: "some other system text".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert!(!is_compact_boundary(&plain));
@@ -364,15 +366,79 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sentinel_without_subtype_remains_a_boundary() {
-        let legacy = ConversationMessage::System {
+    fn matching_body_without_typed_subtype_is_an_ordinary_system_message() {
+        let ordinary = ConversationMessage::System {
             id: MessageId::new(),
-            content: BOUNDARY_CONTENT.to_string(),
+            content: BOUNDARY_CONTENT.into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
-        assert!(is_compact_boundary(&legacy));
+        assert!(!is_compact_boundary(&ordinary));
+        let messages = vec![user("before"), ordinary, user("after")];
+        assert_eq!(find_last_compact_boundary_index(&messages), None);
+        assert_eq!(get_messages_after_compact_boundary(&messages), messages);
+    }
+
+    #[test]
+    fn typed_boundary_predicate_and_history_match_actual_native_287() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/compact_boundary_2_1_287.json"
+        ))
+        .unwrap();
+        assert_eq!(oracle["cases"].as_array().unwrap().len(), 6);
+        for case in oracle["cases"].as_array().unwrap() {
+            let messages = case["input"]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    let content = row["content"].as_str().unwrap().to_owned();
+                    if row["type"] == "system" {
+                        ConversationMessage::System {
+                            id: MessageId::new(),
+                            content: content.into(),
+                            subtype: row
+                                .get("subtype")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                            compact_metadata: None,
+                            model_fallback: None,
+                            refusal_fallback: None,
+                        }
+                    } else if row["isCompactSummary"] == true {
+                        ConversationMessage::compact_summary(MessageId::new(), content)
+                    } else {
+                        ConversationMessage::user(MessageId::new(), content)
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                serde_json::json!(messages.iter().map(is_compact_boundary).collect::<Vec<_>>()),
+                case["expected"]["boundaries"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::json!(messages
+                    .iter()
+                    .map(crate::selector::is_prior_compaction_artifact)
+                    .collect::<Vec<_>>()),
+                case["expected"]["artifacts"],
+                "{}",
+                case["name"]
+            );
+            let native_index = case["expected"]["boundaryIndex"].as_i64().unwrap();
+            let expected_index = usize::try_from(native_index).ok();
+            assert_eq!(find_last_compact_boundary_index(&messages), expected_index);
+            assert_eq!(
+                get_messages_after_compact_boundary(&messages),
+                &messages[expected_index.unwrap_or(0)..],
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]
@@ -573,7 +639,7 @@ mod tests {
             CompactTrigger::Auto,
             1000,
             None,
-            Some("ctx".to_string()),
+            Some("ctx".into()),
             Some(9),
             &["Read".to_string()],
             &kept,

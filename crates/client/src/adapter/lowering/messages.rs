@@ -1,7 +1,8 @@
 //! Message and transcript conversion.
 use super::value_to_json_string;
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
-use lingxi_core::types::ConversationMessage;
+use crate::protocol::text::ClientTextDto;
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
 
 /// Lower one [`ConversationMessage`] to a [`MessageDto`] — the resumed-scrollback
 /// twin of the per-turn [`crate::adapter::turn::synthesize_message`].
@@ -14,9 +15,8 @@ use lingxi_core::types::ConversationMessage;
 /// `images` field because clients render it before the user's text row; document
 /// content has no client message projection and is dropped.
 ///
-/// A [`ConversationMessage::System`] carries a flat `content: String` (no blocks),
-/// so it lowers to a single [`MessageBlockDto::Text`] — a faithful, lossless
-/// scrollback rendering of the system body.
+/// A [`ConversationMessage::System`] carries a flat source string (no blocks),
+/// so its exact UTF-16 units lower directly into the client text carrier.
 #[must_use]
 pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
     lower_conversation_message_with(message, &mut crate::adapter::turn::ToolUseIndex::default())
@@ -44,7 +44,7 @@ pub fn lower_conversation_message_with(
                         })
                         .collect()
                 },
-                |text| vec![MessageBlockDto::Text { text }],
+                |text| vec![MessageBlockDto::Text { text: text.into() }],
             );
             MessageDto {
                 loop_wakeup: None,
@@ -65,22 +65,39 @@ pub fn lower_conversation_message_with(
         ConversationMessage::System {
             content, subtype, ..
         } if subtype.as_deref() == Some("scheduled_task_fire") => {
-            let payload: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            if payload.get("taskKindLoop") == Some(&serde_json::json!(false)) {
+            let payload = content
+                .string_units("")
+                .and_then(|units| Utf16JsonProjection::parse_utf16_json(&units).ok());
+            if payload
+                .as_ref()
+                .and_then(|payload| payload.at_pointer("/taskKindLoop"))
+                .and_then(|value| value.as_bool())
+                == Some(false)
+            {
+                let text = payload
+                    .as_ref()
+                    .and_then(|payload| payload.subprojection("/message").ok())
+                    .and_then(|text| ClientTextDto::from_projection(&text).ok())
+                    .unwrap_or_else(|| ClientTextDto::from_utf8(""));
                 MessageDto {
                     role: "system".into(),
                     images: Vec::new(),
                     loop_wakeup: None,
-                    blocks: vec![MessageBlockDto::Text {
-                        text: payload["message"].as_str().unwrap_or_default().into(),
-                    }],
+                    blocks: vec![MessageBlockDto::Text { text }],
                 }
             } else {
+                let loop_wakeup = payload
+                    .as_ref()
+                    .and_then(|payload| payload.to_json_string().ok())
+                    .and_then(|source| {
+                        serde_json::from_str::<crate::protocol::message::LoopWakeupDto>(&source)
+                            .ok()
+                    });
                 MessageDto {
                     role: "system".into(),
                     blocks: Vec::new(),
                     images: Vec::new(),
-                    loop_wakeup: serde_json::from_value(payload).ok(),
+                    loop_wakeup,
                 }
             }
         }
@@ -105,7 +122,8 @@ pub fn lower_conversation_message_with(
             loop_wakeup: None,
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::Text {
-                text: content.clone(),
+                text: ClientTextDto::from_projection(content)
+                    .expect("system content is a root JSON string"),
             }],
             images: Vec::new(),
         },
@@ -120,7 +138,7 @@ fn legacy_cron_slash_line(content: &[lingxi_core::types::ContentBlock]) -> Optio
     const PREFIX: &str = "The user explicitly invoked `/cron` to manage scheduled prompts.";
     const ARGUMENTS_MARKER: &str = "\nArguments: ";
 
-    let [lingxi_core::types::ContentBlock::Text { text }] = content else {
+    let [lingxi_core::types::ContentBlock::Text { text, .. }] = content else {
         return None;
     };
     if !text.starts_with(PREFIX) {
@@ -221,7 +239,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
     // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
     // pairs with its `ToolResult` in user message N+1.
     let mut tool_uses = crate::adapter::turn::ToolUseIndex::default();
-    let mut pending_loop_companion: Option<String> = None;
+    let mut pending_loop_companion: Option<Vec<u16>> = None;
     for message in history {
         if let Some(expected) = pending_loop_companion.take() {
             if let ConversationMessage::User {
@@ -232,12 +250,16 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
             {
                 let text = content
                     .iter()
-                    .filter_map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
+                    .flat_map(|block| match block {
+                        lingxi_core::types::ContentBlock::Text { text, .. } => {
+                            text.encode_utf16().collect::<Vec<_>>()
+                        }
+                        lingxi_core::types::ContentBlock::TextJsUtf16 {
+                            utf16_code_units, ..
+                        } => utf16_code_units.clone(),
+                        _ => Vec::new(),
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<Vec<_>>();
                 if text == expected {
                     continue;
                 }
@@ -248,9 +270,10 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
         } = message
         {
             if subtype.as_deref() == Some("scheduled_task_fire") {
-                pending_loop_companion = serde_json::from_str::<serde_json::Value>(content)
-                    .ok()
-                    .and_then(|value| value["companion"].as_str().map(str::to_owned));
+                pending_loop_companion = content
+                    .string_units("")
+                    .and_then(|units| Utf16JsonProjection::parse_utf16_json(&units).ok())
+                    .and_then(|value| value.string_units("/companion"));
             }
         }
         match message {
@@ -262,7 +285,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 let summary = content
                     .iter()
                     .filter_map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()

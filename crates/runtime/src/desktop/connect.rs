@@ -376,6 +376,12 @@ mod oauth_connect_tests {
     struct OkAuth;
     #[async_trait]
     impl AuthHandle for OkAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(LoginInfo {
                 email: "me@example.com".into(),
@@ -411,6 +417,12 @@ mod oauth_connect_tests {
     }
     #[async_trait]
     impl AuthHandle for RecordingAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(LoginInfo {
                 email: self.email.clone(),
@@ -428,6 +440,12 @@ mod oauth_connect_tests {
     struct CancelAuth;
     #[async_trait]
     impl AuthHandle for CancelAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }

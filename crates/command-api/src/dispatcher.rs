@@ -5,23 +5,36 @@
 
 use crate::expand::{expand_markdown_command, ExpandCtx};
 use crate::model::{CommandResult, CommandSource, SlashCommandKind};
-use crate::parser::parse_slash_command;
+use crate::parser::{
+    is_js_whitespace_unit, parse_slash_command, tokenize_args_source, ParsedSlashCommand,
+};
 use crate::registry::CommandRegistry;
 use crate::shell_expansion::{
     execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionProvider, ShellOut,
     ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
 };
+use crate::ModCommandRunContext;
 use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
 use lingxi_core::host::permission_gate::PermissionGate;
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
-use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+type UJP = Utf16JsonProjection;
+
+/// Selected model identity supplied by the owning session for bundled prompts.
+pub type BundledPromptModelProvider = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// Supplies the per-dispatch [`HookContext`] (session id, cwd, transcript path,
 /// permission mode) for the `UserPromptExpansion` hook. The dispatcher does not
@@ -44,10 +57,10 @@ pub type ExpansionHookContextProvider = Arc<
 /// conversation. The composition root supplies the actual subagent runtime.
 pub type BackgroundPromptLauncher = Arc<
     dyn Fn(
-            String,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
-        + Send
+            Utf16JsonProjection,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Utf16JsonProjection, String>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -56,11 +69,11 @@ pub type BackgroundPromptLauncher = Arc<
 pub type McpPromptResolver = Arc<
     dyn Fn(
             McpConnectionId,
-            String,
-            Value,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
-        + Send
+            Utf16JsonProjection,
+            Utf16JsonProjection,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Utf16JsonProjection, String>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -68,8 +81,26 @@ pub type McpPromptResolver = Arc<
 /// root uses this late-bound seam to arm plugin `on-skill-invoke` monitors;
 /// hosts without plugin monitors leave it unwired.
 pub type SkillInvocationObserver = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+    dyn Fn(Utf16JsonProjection) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
 >;
+
+/// Host bridge that runs `command.run` middleware around a resolved ordinary
+/// command. The supplied dispatcher exposes the core path so a hook's `next`
+/// can execute rewritten arguments without recursively entering the same chain.
+#[async_trait]
+pub trait ModCommandRunInterceptor: Send + Sync {
+    /// Dispatch a resolved command through Mods, preserving the core result's
+    /// prompt and side effects when a hook calls `next`.
+    async fn run(
+        &self,
+        dispatcher: &RegistrySlashDispatcher,
+        command: &Utf16JsonProjection,
+        args: &Utf16JsonProjection,
+        context: ModCommandRunContext,
+    ) -> SlashDispatchResult;
+}
 
 /// The `UserPromptExpansion` firing dependencies threaded into a
 /// [`RegistrySlashDispatcher`]: the engine's hook executor plus the
@@ -104,7 +135,7 @@ struct UnavailableShellRunner;
 impl ShellRunner for UnavailableShellRunner {
     async fn run(
         &self,
-        _command: &str,
+        _command: &Utf16JsonProjection,
         _shell: Option<crate::FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
         Err(ShellRunError {
@@ -121,7 +152,7 @@ struct DenyShellPermissionGate;
 impl ShellPermissionGate for DenyShellPermissionGate {
     fn check(
         &self,
-        _command: &str,
+        _command: &Utf16JsonProjection,
         _shell: Option<crate::FrontmatterShell>,
     ) -> ShellPermissionDecision {
         ShellPermissionDecision::Deny {
@@ -138,6 +169,7 @@ impl ShellPermissionGate for DenyShellPermissionGate {
 /// runtime. Dispatching only takes a read lock.
 pub struct RegistrySlashDispatcher {
     registry: Arc<RwLock<CommandRegistry>>,
+    mod_command_interceptor: Option<Arc<dyn ModCommandRunInterceptor>>,
     /// `UserPromptExpansion` firing deps (#39). `None` keeps the dispatcher a
     /// strict no-op for that event — the default for every existing caller and
     /// for hosts without a hook-capable engine. Wired by the composition root
@@ -171,6 +203,7 @@ pub struct RegistrySlashDispatcher {
     /// the default stays display-only for existing embedded/mobile callers.
     injected_messages_as_turns: bool,
     prompt_paths: Option<Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>>,
+    bundled_prompt_model: Option<BundledPromptModelProvider>,
     /// Permission gate that receives each input's frontmatter
     /// `disallowed-tools` (claude-code `Tbt(setToolPermissionContext, …)`).
     /// `None` — every existing caller — leaves the field inert, so a host that
@@ -195,19 +228,29 @@ impl RegistrySlashDispatcher {
     /// Resolved for EVERY input, including non-slash text, because the empty
     /// answer is what CLEARS the previous command's denies. Returning early for
     /// a plain prompt would make the last skill's restrictions permanent.
-    async fn command_input_denies(&self, raw: &str) -> Vec<String> {
+    async fn command_input_denies(
+        &self,
+        raw: &Utf16JsonProjection,
+    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        if !starts_with_raw_slash(raw) {
+            return Vec::new();
+        }
         let Some(parsed) = parse_slash_command(raw) else {
             return Vec::new();
         };
         let reg = self.registry.read().await;
-        let Some(command) = reg.resolve(&parsed.name) else {
+        let Some((command, _)) = resolve_command_invocation(&reg, parsed) else {
             return Vec::new();
         };
         match &command.kind {
             SlashCommandKind::Markdown { frontmatter, .. }
-            | SlashCommandKind::Plugin { frontmatter, .. } => {
-                frontmatter.disallowed_tools.clone().unwrap_or_default()
-            }
+            | SlashCommandKind::Plugin { frontmatter, .. } => frontmatter
+                .disallowed_tools
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -217,6 +260,7 @@ impl RegistrySlashDispatcher {
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
         Self {
             registry,
+            mod_command_interceptor: None,
             expansion_hooks: None,
             shell_expansion: None,
             skill_usage_home: None,
@@ -225,8 +269,19 @@ impl RegistrySlashDispatcher {
             skill_invocation_observer: None,
             injected_messages_as_turns: false,
             prompt_paths: None,
+            bundled_prompt_model: None,
             permission_gate: None,
         }
+    }
+
+    /// Intercept ordinary slash commands at the command-run boundary.
+    #[must_use]
+    pub fn with_mod_command_interceptor(
+        mut self,
+        interceptor: Arc<dyn ModCommandRunInterceptor>,
+    ) -> Self {
+        self.mod_command_interceptor = Some(interceptor);
+        self
     }
 
     /// Supply the session project root and live cwd for checked bundled expansion.
@@ -236,6 +291,13 @@ impl RegistrySlashDispatcher {
         paths: Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>,
     ) -> Self {
         self.prompt_paths = Some(paths);
+        self
+    }
+
+    /// Supply the live selected model; an absent provider means absent model context.
+    #[must_use]
+    pub fn with_bundled_prompt_model(mut self, provider: BundledPromptModelProvider) -> Self {
+        self.bundled_prompt_model = Some(provider);
         self
     }
 
@@ -291,9 +353,9 @@ impl RegistrySlashDispatcher {
         self
     }
 
-    async fn observe_skill_invocation(&self, name: &str) {
+    async fn observe_skill_invocation(&self, name: &Utf16JsonProjection) {
         if let Some(observer) = self.skill_invocation_observer.as_ref() {
-            observer(name.to_string()).await;
+            observer(name.clone()).await;
         }
     }
 
@@ -320,16 +382,24 @@ impl RegistrySlashDispatcher {
     /// prompt is queried). Strict no-op when no expansion hook is wired. The
     /// aggregate is discarded — best-effort, so a failing / blocking
     /// `UserPromptExpansion` hook never breaks dispatch.
-    async fn fire_user_prompt_expansion(&self, name: &str, raw_args: &str, source: CommandSource) {
+    async fn fire_user_prompt_expansion(
+        &self,
+        name: &Utf16JsonProjection,
+        raw_args: &Utf16JsonProjection,
+        source: CommandSource,
+    ) {
         let Some(eh) = self.expansion_hooks.as_ref() else {
             return;
         };
-        // claude-code `o = t ? `/${e.name} ${t}` : `/${e.name}``.
-        let prompt = if raw_args.is_empty() {
-            format!("/{name}")
-        } else {
-            format!("/{name} {raw_args}")
-        };
+        // Keep the command name exact while adding generated slash/space text.
+        let mut prompt_units = vec![b'/' as u16];
+        prompt_units.extend(name.string_units("").unwrap_or_default());
+        let raw_arg_units = raw_args.string_units("").unwrap_or_default();
+        if !raw_arg_units.is_empty() {
+            prompt_units.push(b' ' as u16);
+            prompt_units.extend_from_slice(&raw_arg_units);
+        }
+        let prompt = projection_from_units(prompt_units);
         // claude-code `e.source==="mcp" ? "mcp_prompt" : "slash_command"`.
         let expansion_type = if matches!(source, CommandSource::Mcp) {
             PromptExpansionType::McpPrompt
@@ -342,9 +412,9 @@ impl RegistrySlashDispatcher {
             .execute(
                 HookEvent::UserPromptExpansion {
                     expansion_type,
-                    command_name: name.to_string(),
-                    command_args: raw_args.to_string(),
-                    command_source: Some(command_source_str(source).to_string()),
+                    command_name: name.clone(),
+                    command_args: raw_args.clone(),
+                    command_source: Some(command_source_str(source).into()),
                     prompt,
                 },
                 ctx,
@@ -375,6 +445,7 @@ impl RegistrySlashDispatcher {
     pub fn clone_shared(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            mod_command_interceptor: self.mod_command_interceptor.clone(),
             // The `UserPromptExpansion` wiring (executor + context provider) is
             // cheap to clone (two `Arc`s) and must travel with the shared
             // dispatcher so every consumer fires the event identically.
@@ -392,6 +463,7 @@ impl RegistrySlashDispatcher {
             skill_invocation_observer: self.skill_invocation_observer.clone(),
             injected_messages_as_turns: self.injected_messages_as_turns,
             prompt_paths: self.prompt_paths.clone(),
+            bundled_prompt_model: self.bundled_prompt_model.clone(),
             // The gate must travel too: a shared dispatcher that did not clear
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
@@ -399,7 +471,7 @@ impl RegistrySlashDispatcher {
         }
     }
 
-    fn injected_message_result(&self, content: String) -> SlashDispatchResult {
+    fn injected_message_result(&self, content: Utf16JsonProjection) -> SlashDispatchResult {
         if self.injected_messages_as_turns {
             SlashDispatchResult::RunAsTurn { prompt: content }
         } else {
@@ -416,7 +488,7 @@ impl RegistrySlashDispatcher {
             .into_iter()
             .cloned()
             .collect();
-        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands.sort_by(|a, b| a.name.string_units("").cmp(&b.name.string_units("")));
         commands
     }
 
@@ -427,7 +499,7 @@ impl RegistrySlashDispatcher {
     pub async fn list_palette_commands(&self) -> Vec<crate::model::SlashCommand> {
         let registry = self.registry.read().await;
         let mut commands = registry.palette_commands();
-        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands.sort_by(|a, b| a.name.string_units("").cmp(&b.name.string_units("")));
         commands
     }
 
@@ -437,55 +509,48 @@ impl RegistrySlashDispatcher {
     /// (e.g. when reporting an error from a `/help` lookup that finds a
     /// dangling alias).
     #[must_use]
-    pub fn unknown_command_literal(name: &str) -> String {
-        format!("Unknown command: /{name}")
+    pub fn unknown_command_literal(name: &Utf16JsonProjection) -> Utf16JsonProjection {
+        crate::model::source_concat([
+            crate::model::PromptPart::Text("Unknown command: /"),
+            crate::model::PromptPart::Source(name),
+        ])
     }
 }
 
-#[async_trait]
-impl SlashCommandDispatcher for RegistrySlashDispatcher {
-    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
-        // 0. `Tbt(setToolPermissionContext, result.disallowedTools ?? [])` —
-        //    REPLACE, once per processed user input. Resolved BEFORE the
-        //    early-outs below so a plain prompt, an unknown name, or a builtin
-        //    all clear the previous command's denies; that clearing is what
-        //    gives a skill's `disallowed-tools` its "until the next user
-        //    message" lifetime.
-        if let Some(gate) = self.permission_gate.as_ref() {
-            let denies = self.command_input_denies(raw).await;
-            gate.set_command_input_denies(&denies, false);
-        }
-
-        // 1. Detect slash prefix.
-        if !raw.starts_with('/') {
+impl RegistrySlashDispatcher {
+    /// Execute an already-admitted slash command without firing Mod middleware.
+    /// A `command.run` core callback uses this to prevent recursive dispatch.
+    pub async fn dispatch_without_mod_hooks(
+        &self,
+        raw: &Utf16JsonProjection,
+    ) -> SlashDispatchResult {
+        // The top-level Native consumer checks `startsWith("/")` before it
+        // calls `Iv`, even though `Iv` itself trims the full line. Preserve
+        // that distinction so a leading-space slash remains an ordinary turn.
+        if !starts_with_raw_slash(raw) {
             return SlashDispatchResult::NotASlashCommand;
         }
 
-        // 2. "/" alone — parse returns Some(name=""), so we still get an
-        //    Unknown branch below. But we surface it explicitly so the test
-        //    is unambiguous.
-        if raw == "/" {
-            return SlashDispatchResult::Unknown {
-                name: String::new(),
-                display: Self::unknown_command_literal(""),
-            };
-        }
-
-        // 3. Parse into name + args via the existing M1.15 parser.
-        //    parse_slash_command expects input WITH leading '/' and returns
-        //    Option<ParsedSlashCommand>.
+        // Parse into name + args via the Native-compatible source parser.
         let Some(parsed) = parse_slash_command(raw) else {
-            // parse_slash_command only returns None when the input does not
-            // start with '/' — already handled above. Belt-and-braces:
-            return SlashDispatchResult::NotASlashCommand;
+            return SlashDispatchResult::ParseFailure { input: raw.clone() };
         };
 
-        // 4. Look up the command.
+        // Look up the exact source name, including any unpaired UTF-16 units.
         let reg = self.registry.read().await;
-        let Some(command) = reg.resolve(&parsed.name).cloned() else {
+        let unknown_name = parsed.name.clone();
+        let Some((command, parsed)) = resolve_command_invocation(&reg, parsed) else {
+            // Native only reports a valid, unregistered command as Unknown.
+            // A source name outside its ASCII command-name grammar falls back
+            // to a normal model turn using the untouched input projection.
+            if !has_native_command_name_syntax(&unknown_name) {
+                return SlashDispatchResult::RunAsTurn {
+                    prompt: raw.clone(),
+                };
+            }
             return SlashDispatchResult::Unknown {
-                name: parsed.name.clone(),
-                display: Self::unknown_command_literal(&parsed.name),
+                display: Self::unknown_command_literal(&unknown_name),
+                name: unknown_name,
             };
         };
 
@@ -495,7 +560,8 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
         //     through to the Unknown branch. Keyed by the command's canonical
         //     name so a disabled command is unreachable via an alias too.
         if matches!(command.kind, SlashCommandKind::Builtin { .. })
-            && crate::builtin_support::names::is_command_env_disabled(&command.name)
+            && source_text(&command.name)
+                .is_some_and(crate::builtin_support::names::is_command_env_disabled)
         {
             return SlashDispatchResult::Unknown {
                 name: parsed.name.clone(),
@@ -530,15 +596,43 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         },
                         |paths| paths(),
                     );
-                    let content =
-                        match pf.try_build_at(&parsed.raw_args, &project_root, &cwd, false) {
-                            Ok(content) => content,
+                    let model = match self
+                        .bundled_prompt_model
+                        .as_ref()
+                        .filter(|_| pf.needs_model_context())
+                    {
+                        Some(provider) => match provider().await {
+                            Ok(model) => model,
                             Err(error) => {
                                 return SlashDispatchResult::Handled {
-                                    display: format!("{} expansion failed: {error}", command.name),
-                                }
+                                    display: command_source_message(
+                                        &command.name,
+                                        &format!(" expansion failed: {error}"),
+                                    ),
+                                };
                             }
-                        };
+                        },
+                        None => None,
+                    };
+                    let content = match pf.try_build_at(
+                        &parsed.raw_args,
+                        crate::BundledPromptContext {
+                            project_root: &project_root,
+                            cwd: &cwd,
+                            is_preload: false,
+                            main_loop_model: model.as_deref(),
+                        },
+                    ) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            return SlashDispatchResult::Handled {
+                                display: command_source_message(
+                                    &command.name,
+                                    &format!(" expansion failed: {error}"),
+                                ),
+                            };
+                        }
+                    };
                     self.observe_skill_invocation(&command.name).await;
                     self.fire_user_prompt_expansion(
                         &command.name,
@@ -553,17 +647,23 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                             Some(launcher) => match launcher(content).await {
                                 Ok(display) => SlashDispatchResult::Handled { display },
                                 Err(error) => SlashDispatchResult::Handled {
-                                    display: format!(
-                                        "Could not start /{} in the background: {error}",
-                                        command.name
-                                    ),
+                                    display: crate::model::source_concat([
+                                        crate::model::PromptPart::Text("Could not start /"),
+                                        crate::model::PromptPart::Source(&command.name),
+                                        crate::model::PromptPart::Text(&format!(
+                                            " in the background: {error}"
+                                        )),
+                                    ]),
                                 },
                             },
                             None => SlashDispatchResult::Handled {
-                                display: format!(
-                                    "Could not start /{} in the background: no background launcher is wired",
-                                    command.name
-                                ),
+                                display: crate::model::source_concat([
+                                    crate::model::PromptPart::Text("Could not start /"),
+                                    crate::model::PromptPart::Source(&command.name),
+                                    crate::model::PromptPart::Text(
+                                        " in the background: no background launcher is wired",
+                                    ),
+                                ]),
                             },
                         };
                     }
@@ -572,7 +672,9 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                     // prompt becomes the user TURN, not display text. A typed
                     // `/loop 5m /foo` must actually run the model so the cron is
                     // scheduled + the prompt executed now.
-                    SlashDispatchResult::RunAsTurn { prompt: content }
+                    SlashDispatchResult::RunAsTurn {
+                        prompt: content.into(),
+                    }
                 }
                 None => SlashDispatchResult::Unknown {
                     name: parsed.name.clone(),
@@ -593,44 +695,50 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             let resolver = self.mcp_prompt_resolver.clone();
             drop(reg);
 
-            let wire_arguments =
-                match bind_mcp_prompt_arguments(&arguments, &parsed.positional_args) {
-                    Ok(arguments) => arguments,
-                    Err(error) => {
-                        return SlashDispatchResult::Handled {
-                            display: format!("{}: {error}", command.name),
-                        };
-                    }
-                };
+            let positional = split_mcp_prompt_arguments(&parsed.raw_args);
+            let wire_arguments = match bind_mcp_prompt_arguments(&arguments, &positional) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    return SlashDispatchResult::Handled {
+                        display: command_source_message(&command.name, &format!(": {error}")),
+                    };
+                }
+            };
             let Some(resolver) = resolver else {
                 return SlashDispatchResult::Handled {
-                    display: format!(
-                        "{}: MCP prompt expansion is unavailable in this host",
-                        command.name
+                    display: command_source_message(
+                        &command.name,
+                        ": MCP prompt expansion is unavailable in this host",
                     ),
                 };
             };
 
             self.fire_user_prompt_expansion(&command.name, &parsed.raw_args, CommandSource::Mcp)
                 .await;
-            return match resolver(connection_id, prompt_name, Value::Object(wire_arguments)).await {
+            return match resolver(connection_id, prompt_name, wire_arguments).await {
                 Ok(result) => match render_mcp_prompt_result(&result) {
                     Ok(prompt) => {
                         if let Some(config_home) = self.skill_usage_home.as_deref() {
                             if let Err(error) =
                                 crate::skill_usage::record_skill_usage(config_home, &command.name)
                             {
-                                tracing::warn!(command = %command.name, %error, "failed to record MCP prompt usage");
+                                tracing::warn!(command = %source_display(&command.name), %error, "failed to record MCP prompt usage");
                             }
                         }
                         SlashDispatchResult::RunAsTurn { prompt }
                     }
                     Err(error) => SlashDispatchResult::Handled {
-                        display: format!("{}: invalid MCP prompt result: {error}", command.name),
+                        display: command_source_message(
+                            &command.name,
+                            &format!(": invalid MCP prompt result: {error}"),
+                        ),
                     },
                 },
                 Err(error) => SlashDispatchResult::Handled {
-                    display: format!("{}: MCP prompt expansion failed: {error}", command.name),
+                    display: command_source_message(
+                        &command.name,
+                        &format!(": MCP prompt expansion failed: {error}"),
+                    ),
                 },
             };
         }
@@ -683,7 +791,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                             if let Err(error) =
                                 crate::skill_usage::record_skill_usage(config_home, &command.name)
                             {
-                                tracing::warn!(command = %command.name, %error, "failed to record skill usage");
+                                tracing::warn!(command = %source_display(&command.name), %error, "failed to record skill usage");
                             }
                         }
                     }
@@ -702,12 +810,17 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                     // `type: "prompt"`: the expanded body is submitted as the
                     // user turn (the model runs it), not printed. Mirrors the
                     // bundled-skill path above.
-                    SlashDispatchResult::RunAsTurn { prompt: content }
+                    SlashDispatchResult::RunAsTurn {
+                        prompt: content.into(),
+                    }
                 }
                 // Expansion FAILURE stays display-only (there is no prompt to
                 // run) — surface the error text to the user instead.
                 Err(e) => SlashDispatchResult::Handled {
-                    display: format!("{} expansion failed: {e}", command.name),
+                    display: command_source_message(
+                        &command.name,
+                        &format!(" expansion failed: {e}"),
+                    ),
                 },
             };
         }
@@ -729,7 +842,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             // other variants safely anyway so M5-10/M5-11 can extend.
             CommandResult::Done { display } | CommandResult::EmitEffects { display, .. } => {
                 SlashDispatchResult::Handled {
-                    display: display.unwrap_or_default(),
+                    display: display.unwrap_or_else(|| Utf16JsonProjection::from("")),
                 }
             }
             CommandResult::InjectMessage { content } => {
@@ -744,7 +857,13 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                 // the WHOLE expansion aborts (patterns are never left in place) —
                 // surface the error text instead of the unexpanded template. A
                 // strict no-op (verbatim content) when unset / MCP / no patterns.
-                let has_embedded = content.contains("```!") || content.contains("!`");
+                let has_embedded = content.string_units("").is_some_and(|units| {
+                    units.windows(4).any(|window| {
+                        window == [b'`' as u16, b'`' as u16, b'`' as u16, b'!' as u16]
+                    }) || units
+                        .windows(2)
+                        .any(|window| window == [b'!' as u16, b'`' as u16])
+                });
                 match self.shell_expansion.as_ref() {
                     Some(provider)
                         if has_embedded && !matches!(command.source, CommandSource::Mcp) =>
@@ -758,114 +877,332 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         match execute_shell_commands_in_prompt(
                             &content,
                             &shell_ctx,
-                            &format!("/{}", command.name),
+                            &command.name,
                             None,
                         )
                         .await
                         {
                             Ok(expanded) => self.injected_message_result(expanded),
                             Err(e) => SlashDispatchResult::Handled {
-                                display: format!("{} expansion failed: {e}", command.name),
+                                display: command_source_message(
+                                    &command.name,
+                                    &format!(" expansion failed: {e}"),
+                                ),
                             },
                         }
                     }
                     _ => self.injected_message_result(content),
                 }
             }
-            CommandResult::RequestConfirmation { prompt, .. } => {
-                SlashDispatchResult::Handled { display: prompt }
-            }
+            CommandResult::RequestConfirmation { prompt, .. } => SlashDispatchResult::Handled {
+                display: prompt.into(),
+            },
         }
     }
+}
+
+#[async_trait]
+impl SlashCommandDispatcher for RegistrySlashDispatcher {
+    async fn dispatch(&self, raw: Utf16JsonProjection) -> SlashDispatchResult {
+        // Clear or replace this input's command-scoped tool restrictions even
+        // when a Mod answers without calling the core command.
+        if let Some(gate) = self.permission_gate.as_ref() {
+            let denies = self.command_input_denies(&raw).await;
+            gate.set_command_input_denies(&denies, false);
+        }
+        let intercept_parse = starts_with_raw_slash(&raw)
+            .then(|| parse_slash_command(&raw))
+            .flatten();
+        if let (Some(interceptor), Some(parsed)) =
+            (self.mod_command_interceptor.as_ref(), intercept_parse)
+        {
+            let resolved = {
+                let registry = self.registry.read().await;
+                resolve_command_invocation(&registry, parsed).and_then(|(command, parsed)| {
+                    let disabled = matches!(command.kind, SlashCommandKind::Builtin { .. })
+                        && source_text(&command.name)
+                            .is_some_and(crate::builtin_support::names::is_command_env_disabled);
+                    (!disabled && registry.mod_owner_of(&command.name).is_none())
+                        .then_some((command.name.clone(), parsed.raw_args))
+                })
+            };
+            if let Some((command, args)) = resolved {
+                return interceptor
+                    .run(
+                        self,
+                        &command,
+                        &args,
+                        crate::mod_catalog::current_command_context(),
+                    )
+                    .await;
+            }
+        }
+        self.dispatch_without_mod_hooks(&raw).await
+    }
+}
+
+fn starts_with_raw_slash(input: &Utf16JsonProjection) -> bool {
+    input
+        .string_units("")
+        .is_some_and(|units| units.first().copied() == Some(b'/' as u16))
+}
+
+fn has_native_command_name_syntax(name: &Utf16JsonProjection) -> bool {
+    let Some(units) = name.string_units("") else {
+        return false;
+    };
+    let Some((first, rest)) = units.split_first() else {
+        return false;
+    };
+    let is_ascii_alphanumeric = |unit: u16| {
+        (b'a' as u16..=b'z' as u16).contains(&unit)
+            || (b'A' as u16..=b'Z' as u16).contains(&unit)
+            || (b'0' as u16..=b'9' as u16).contains(&unit)
+    };
+    let is_allowed_rest = |unit: u16| {
+        is_ascii_alphanumeric(unit)
+            || unit == b'_' as u16
+            || unit == b':' as u16
+            || unit == b'-' as u16
+    };
+    (is_ascii_alphanumeric(*first) || *first == b'_' as u16)
+        && rest.iter().copied().all(is_allowed_rest)
+}
+
+/// Resolve the Native direct-name/alias route first, then its fallback
+/// `/<namespace> <command> ...` route. The returned parse retains source units
+/// for the command name and the remaining raw argument tail.
+fn resolve_command_invocation(
+    registry: &CommandRegistry,
+    parsed: ParsedSlashCommand,
+) -> Option<(crate::model::SlashCommand, ParsedSlashCommand)> {
+    if let Some(command) = registry.resolve(&parsed.name) {
+        return Some((command.clone(), parsed));
+    }
+
+    let raw_args = parsed.raw_args.string_units("")?;
+    let command_end = raw_args
+        .iter()
+        .position(|unit| is_js_whitespace_unit(*unit))
+        .unwrap_or(raw_args.len());
+    if command_end == 0 {
+        return None;
+    }
+
+    let mut namespaced_units = parsed.name.string_units("")?.to_vec();
+    namespaced_units.push(b':' as u16);
+    namespaced_units.extend_from_slice(&raw_args[..command_end]);
+    let name = projection_from_units(namespaced_units);
+    let command = registry.resolve(&name)?.clone();
+
+    let mut tail_start = command_end;
+    while tail_start < raw_args.len() && is_js_whitespace_unit(raw_args[tail_start]) {
+        tail_start += 1;
+    }
+    let remaining = raw_args[tail_start..].to_vec();
+    let raw_args = projection_from_units(remaining.clone());
+    let positional_args = tokenize_args_source(&remaining);
+    Some((
+        command,
+        ParsedSlashCommand {
+            name,
+            raw_args,
+            positional_args,
+        },
+    ))
+}
+
+fn split_mcp_prompt_arguments(raw_args: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
+    let Some(units) = raw_args.string_units("") else {
+        return Vec::new();
+    };
+    let mut values = Vec::new();
+    let mut start = None;
+    for (index, unit) in units.iter().copied().enumerate() {
+        if is_js_whitespace_unit(unit) {
+            if let Some(start) = start.take() {
+                values.push(projection_from_units(units[start..index].to_vec()));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(start) = start {
+        values.push(projection_from_units(units[start..].to_vec()));
+    }
+    values
 }
 
 fn bind_mcp_prompt_arguments(
     declarations: &[lingxi_core::host::McpPromptArgumentDto],
-    positional: &[String],
-) -> Result<Map<String, Value>, String> {
-    if positional.len() > declarations.len() {
-        return Err(format!(
-            "expected at most {} argument{}, received {}",
-            declarations.len(),
-            if declarations.len() == 1 { "" } else { "s" },
-            positional.len()
-        ));
-    }
-
-    let mut bound = Map::new();
+    positional: &[Utf16JsonProjection],
+) -> Result<UJP, String> {
+    let mut fields = Vec::with_capacity(declarations.len().min(positional.len()));
     for (index, declaration) in declarations.iter().enumerate() {
         match positional.get(index) {
-            Some(value) => {
-                bound.insert(declaration.name.clone(), Value::String(value.clone()));
-            }
+            Some(value) => fields.push((
+                declaration.name.string_units("").unwrap_or_default(),
+                value.clone(),
+            )),
             None if declaration.required => {
-                return Err(format!("missing required argument <{}>", declaration.name));
+                return Err(format!(
+                    "missing required argument <{}>",
+                    source_display(&declaration.name)
+                ));
             }
             None => {}
         }
     }
-    Ok(bound)
+    UJP::object_units(fields).map_err(|error| error.to_string())
 }
 
-fn render_mcp_prompt_result(result: &Value) -> Result<String, String> {
+fn render_mcp_prompt_result(result: &UJP) -> Result<UJP, String> {
     let messages = result
-        .get("messages")
-        .and_then(Value::as_array)
+        .at_pointer("")
+        .and_then(|root| root.get_property("messages"))
+        .and_then(|messages| messages.array_len())
         .ok_or_else(|| "missing messages array".to_string())?;
-    if messages.is_empty() {
+    if messages == 0 {
         return Err("messages array is empty".to_string());
     }
 
-    let mut rendered = Vec::with_capacity(messages.len());
-    for message in messages {
+    let mut rendered = Vec::with_capacity(messages);
+    for index in 0..messages {
+        let message = result
+            .subprojection(&format!("/messages/{index}"))
+            .map_err(|_| "message is missing content".to_string())?;
         let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("user");
+            .at_pointer("")
+            .and_then(|message| message.get_property("role"))
+            .and_then(|role| role.code_units().map(<[u16]>::to_vec))
+            .unwrap_or_else(|| "user".encode_utf16().collect());
         let content = message
-            .get("content")
-            .ok_or_else(|| "message is missing content".to_string())?;
-        let text = render_mcp_prompt_content(content)?;
+            .subprojection("/content")
+            .map_err(|_| "message is missing content".to_string())?;
+        let text = render_mcp_prompt_content(&content)?;
         rendered.push((role, text));
     }
 
-    if rendered.len() == 1 && rendered[0].0 == "user" {
+    let user_role = "user".encode_utf16().collect::<Vec<_>>();
+    if rendered.len() == 1 && rendered[0].0 == user_role {
         return Ok(rendered.pop().expect("one element").1);
     }
-    Ok(rendered
-        .into_iter()
-        .map(|(role, content)| format!("[{role}]\n{content}"))
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+
+    let mut units = Vec::new();
+    for (index, (role, content)) in rendered.into_iter().enumerate() {
+        if index > 0 {
+            units.extend("\n\n".encode_utf16());
+        }
+        units.push(b'[' as u16);
+        units.extend(role);
+        units.extend("]\n".encode_utf16());
+        units.extend(content.string_units("").unwrap_or_default());
+    }
+    Ok(projection_from_units(units))
 }
 
-fn render_mcp_prompt_content(content: &Value) -> Result<String, String> {
-    match content {
-        Value::String(text) => Ok(text.clone()),
-        Value::Array(parts) => parts
-            .iter()
-            .map(render_mcp_prompt_content)
-            .collect::<Result<Vec<_>, _>>()
-            .map(|parts| parts.join("\n")),
-        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("text") => {
-            object
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| "text content is missing text".to_string())
-        }
-        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("resource") => {
-            let resource = object
-                .get("resource")
-                .ok_or_else(|| "resource content is missing resource".to_string())?;
-            if let Some(text) = resource.get("text").and_then(Value::as_str) {
-                Ok(text.to_string())
-            } else {
-                serde_json::to_string(resource).map_err(|error| error.to_string())
-            }
-        }
-        other => serde_json::to_string(other).map_err(|error| error.to_string()),
+/// Render MCP prompt content without converting its source strings through a
+/// recursive `serde_json::Value`. Array traversal is iterative and flat.
+fn render_mcp_prompt_content(content: &UJP) -> Result<UJP, String> {
+    enum Work {
+        Projection(UJP),
+        Newline,
     }
+
+    let mut pending = vec![Work::Projection(content.clone())];
+    let mut output = Vec::new();
+    while let Some(work) = pending.pop() {
+        let Work::Projection(source) = work else {
+            output.push(b'\n' as u16);
+            continue;
+        };
+        let root = source
+            .at_pointer("")
+            .ok_or_else(|| "invalid prompt content".to_string())?;
+        if let Some(units) = root.code_units() {
+            output.extend_from_slice(units);
+            continue;
+        }
+        if let Some(length) = root.array_len() {
+            for index in (0..length).rev() {
+                let child = source
+                    .subprojection(&format!("/{index}"))
+                    .map_err(|error| error.to_string())?;
+                pending.push(Work::Projection(child));
+                if index > 0 {
+                    pending.push(Work::Newline);
+                }
+            }
+            continue;
+        }
+
+        let kind = root.get_property("type").and_then(|value| value.as_str());
+        if kind == Some("text") {
+            let text = source
+                .subprojection("/text")
+                .map_err(|_| "text content is missing text".to_string())?;
+            if text.string_units("").is_none() {
+                return Err("text content is missing text".to_string());
+            }
+            pending.push(Work::Projection(text));
+            continue;
+        }
+        if kind == Some("resource") {
+            let resource = source
+                .subprojection("/resource")
+                .map_err(|_| "resource content is missing resource".to_string())?;
+            let resource_view = resource
+                .at_pointer("")
+                .ok_or_else(|| "resource content is missing resource".to_string())?;
+            if resource_view
+                .get_property("text")
+                .and_then(|text| text.code_units())
+                .is_some()
+            {
+                pending.push(Work::Projection(
+                    resource
+                        .subprojection("/text")
+                        .map_err(|_| "resource content is missing text".to_string())?,
+                ));
+            } else {
+                output.extend(
+                    UJP::from(resource.to_json_string().map_err(|e| e.to_string())?)
+                        .string_units("")
+                        .unwrap_or_default(),
+                );
+            }
+            continue;
+        }
+
+        output.extend(
+            UJP::from(source.to_json_string().map_err(|error| error.to_string())?)
+                .string_units("")
+                .unwrap_or_default(),
+        );
+    }
+    Ok(projection_from_units(output))
+}
+
+fn projection_from_units(units: Vec<u16>) -> UJP {
+    let display = String::from_utf16_lossy(&units);
+    UJP::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
+}
+
+fn source_text(value: &UJP) -> Option<&str> {
+    value.string_at("")
+}
+
+/// Convert to the safe display form only for UI/log/error output.
+fn source_display(value: &UJP) -> String {
+    value.string_at("").unwrap_or_default().to_owned()
+}
+
+fn command_source_message(name: &UJP, suffix: &str) -> UJP {
+    crate::model::source_concat([
+        crate::model::PromptPart::Source(name),
+        crate::model::PromptPart::Text(suffix),
+    ])
 }
 
 #[cfg(test)]
@@ -876,6 +1213,153 @@ mod tests {
     use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use crate::registry::CommandRegistry;
     use std::path::PathBuf;
+
+    fn prompt_text(prompt: &Utf16JsonProjection) -> &str {
+        prompt.string_at("").expect("test prompt is valid Unicode")
+    }
+
+    fn display_text(display: &Utf16JsonProjection) -> &str {
+        display
+            .string_at("")
+            .expect("test display is a root string")
+    }
+
+    #[tokio::test]
+    async fn empty_slash_command_is_parse_failure_with_original_input() {
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
+
+        for text in ["/", "/  \t", "/\u{2003}", "/ (MCP)"] {
+            let raw = UJP::from(text);
+            assert_eq!(
+                dispatcher.dispatch(raw.clone()).await,
+                SlashDispatchResult::ParseFailure { input: raw },
+                "input must remain intact for the host's mode-specific fallback"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leading_space_slash_stays_an_ordinary_input_at_dispatch_boundary() {
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
+        assert_eq!(
+            dispatcher.dispatch(UJP::from(" /not-a-command")).await,
+            SlashDispatchResult::NotASlashCommand
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_names_outside_native_grammar_fall_back_with_exact_source() {
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
+        let units = vec![b'/' as u16, 0xd800, b' ' as u16, b'x' as u16];
+        let raw = UJP::root_string(String::from_utf16_lossy(&units), units).unwrap();
+        assert_eq!(
+            dispatcher.dispatch(raw.clone()).await,
+            SlashDispatchResult::RunAsTurn { prompt: raw }
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_unregistered_name_remains_unknown() {
+        let dispatcher =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(CommandRegistry::new())));
+        assert_eq!(
+            dispatcher.dispatch(UJP::from("/missing-command")).await,
+            SlashDispatchResult::Unknown {
+                name: UJP::from("missing-command"),
+                display: "Unknown command: /missing-command".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_exact_command_and_raw_prompt_utf16_units() {
+        let name = UJP::root_string(
+            "custom�".into(),
+            vec![
+                b'c' as u16,
+                b'u' as u16,
+                b's' as u16,
+                b't' as u16,
+                b'o' as u16,
+                b'm' as u16,
+                0xd800,
+            ],
+        )
+        .unwrap();
+        let mut raw_units = vec![b'/' as u16];
+        raw_units.extend(name.string_units("").unwrap());
+        raw_units.push(b' ' as u16);
+        raw_units.extend([b'x' as u16, 0xdfff]);
+        let raw = UJP::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
+
+        let mut registry = CommandRegistry::new();
+        registry.register_command(crate::model::SlashCommand {
+            name: name.clone(),
+            description: "custom prompt".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/custom.md"),
+                frontmatter: crate::model::CommandFrontmatter::default(),
+                prompt_template: "$ARGUMENTS".into(),
+            },
+            ..crate::model::SlashCommand::default()
+        });
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+
+        let SlashDispatchResult::RunAsTurn { prompt } =
+            dispatcher.dispatch_without_mod_hooks(&raw).await
+        else {
+            panic!("exact source command should resolve and expand")
+        };
+        assert_eq!(prompt.string_units(""), Some(vec![b'x' as u16, 0xdfff]));
+    }
+
+    #[tokio::test]
+    async fn namespaced_dispatch_keeps_exact_name_and_argument_units() {
+        let name_units = [
+            "team:review".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+        ]
+        .concat();
+        let name =
+            UJP::root_string(String::from_utf16_lossy(&name_units), name_units.clone()).unwrap();
+        let command = SlashCommand {
+            name,
+            description: "review".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/source-review.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "$ARGUMENTS".into(),
+            },
+            ..SlashCommand::default()
+        };
+        let mut registry = CommandRegistry::new();
+        registry.register_command(command);
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+
+        let raw_units = [
+            vec![0xfeff, b' ' as u16, b'/' as u16],
+            "team\u{2003}review".encode_utf16().collect(),
+            vec![0xd800],
+            " arg".encode_utf16().collect(),
+            vec![0xdfff],
+        ]
+        .concat();
+        let raw = UJP::root_string(String::from_utf16_lossy(&raw_units), raw_units).unwrap();
+        let SlashDispatchResult::RunAsTurn { prompt } =
+            dispatcher.dispatch_without_mod_hooks(&raw).await
+        else {
+            panic!("Native namespace fallback should resolve the exact command source")
+        };
+        assert_eq!(
+            prompt.string_units(""),
+            Some(["arg".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat())
+        );
+    }
 
     /// Pins the per-source provenance token that reaches the
     /// `UserPromptExpansion` hook payload as `command_source`. Byte-locked to
@@ -937,17 +1421,70 @@ mod tests {
                 core_description(name),
             )));
         }
-        reg.register_alias("continue".to_string(), "resume".to_string());
+        reg.register_alias("continue".into(), "resume".into());
         RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn stateless_bundled_prompt_does_not_require_a_model_route() {
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_bundled_skills(&mut registry, true);
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_bundled_prompt_model(Arc::new(|| {
+                Box::pin(async { Err("model route is unavailable".into()) })
+            }));
+        assert!(
+            matches!(dispatcher.dispatch("/dataviz revenue".into()).await,
+            SlashDispatchResult::RunAsTurn { prompt } if prompt_text(&prompt).contains("revenue"))
+        );
+        assert!(matches!(dispatcher.dispatch("/loop check".into()).await,
+            SlashDispatchResult::Handled { display } if display_text(&display) == "loop expansion failed: model route is unavailable"));
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn bundled_loop_reads_live_model_and_shared_clone_keeps_it() {
+        let _guard = crate::builtins::bundled::loop_skill::LOOP_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model = Arc::new(RwLock::new("claude-fable-5".to_string()));
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_bundled_skills(&mut registry, true);
+        let provider_model = model.clone();
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_bundled_prompt_model(Arc::new(move || {
+                let model = provider_model.clone();
+                Box::pin(async move { Ok(Some(model.read().await.clone())) })
+            }));
+        let get_prompt = |result| match result {
+            SlashDispatchResult::RunAsTurn { prompt } => prompt,
+            other => panic!("expected model turn, got {other:?}"),
+        };
+        let first = get_prompt(dispatcher.dispatch("/loop check the deploy".into()).await);
+        assert!(prompt_text(&first).contains("3. **Briefly confirm**"));
+        assert!(prompt_text(&first).contains("immediately BEFORE calling ScheduleWakeup"));
+        *model.write().await = "claude-sonnet-5-5".into();
+        let second = get_prompt(
+            dispatcher
+                .clone_shared()
+                .dispatch("/loop check the deploy".into())
+                .await,
+        );
+        assert!(prompt_text(&second).contains("3. **Decide whether the loop continues.**"));
+        assert!(prompt_text(&second).contains("4. **After the wakeup is armed, briefly confirm**"));
     }
 
     #[tokio::test]
     async fn dispatches_known_command_to_locked_stub() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/teleport").await;
+        let result = d.dispatch("/teleport".into()).await;
         match result {
             SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)");
+                assert_eq!(
+                    display_text(&display),
+                    "teleport: not implemented in v0.6.0 (M5)"
+                );
             }
             other => panic!("expected Handled, got {other:?}"),
         }
@@ -956,10 +1493,13 @@ mod tests {
     #[tokio::test]
     async fn dispatches_known_command_with_args_to_locked_stub() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/clear --force").await;
+        let result = d.dispatch("/clear --force".into()).await;
         match result {
             SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "clear: not implemented in v0.6.0 (M5)");
+                assert_eq!(
+                    display_text(&display),
+                    "clear: not implemented in v0.6.0 (M5)"
+                );
             }
             other => panic!("expected Handled, got {other:?}"),
         }
@@ -969,20 +1509,22 @@ mod tests {
     async fn dispatches_markdown_command_via_registry_resolve() {
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "demo".to_string(),
-            description: "Demo".to_string(),
+            name: "demo".into(),
+            description: "Demo".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
-                prompt_template: "Use $ARGUMENTS".to_string(),
+                prompt_template: "Use $ARGUMENTS".into(),
             },
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         // Markdown prompt commands run AS a turn (claude-code `type: "prompt"`).
-        match d.dispatch("/demo this").await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use this"),
+        match d.dispatch("/demo this".into()).await {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt_text(&prompt), "Use this")
+            }
             other => panic!("expected markdown command to run-as-turn, got {other:?}"),
         }
     }
@@ -995,18 +1537,26 @@ mod tests {
         // non-empty→buildPrompt branch.
         struct B;
         impl crate::model::BundledPromptFn for B {
-            fn build(&self, args: &str) -> String {
-                if args.trim().is_empty() {
-                    "USAGE".to_string()
+            fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+                let trimmed = crate::model::trim_source_text(args);
+                if trimmed
+                    .string_units("")
+                    .is_some_and(|units| units.is_empty())
+                {
+                    "USAGE".into()
                 } else {
-                    format!("BUILT[{}]", args.trim())
+                    crate::model::source_concat([
+                        crate::model::PromptPart::Text("BUILT["),
+                        crate::model::PromptPart::Source(&trimmed),
+                        crate::model::PromptPart::Text("]"),
+                    ])
                 }
             }
         }
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "loop".to_string(),
-            description: "Loop".to_string(),
+            name: "loop".into(),
+            description: "Loop".into(),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter::default(),
@@ -1019,16 +1569,16 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         // Non-empty args → built prompt, run AS a turn (claude-code bundled
         // skills are `type: "prompt"` / `userInvocable`).
-        match d.dispatch("/loop 5m /babysit-prs").await {
+        match d.dispatch("/loop 5m /babysit-prs".into()).await {
             SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt, "BUILT[5m /babysit-prs]");
+                assert_eq!(prompt_text(&prompt), "BUILT[5m /babysit-prs]");
             }
             other => panic!("expected bundled skill to run-as-turn, got {other:?}"),
         }
         // Empty args → usage. Still RunAsTurn (the model receives the usage as
         // its prompt and surfaces it) — never Unknown.
-        match d.dispatch("/loop").await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "USAGE"),
+        match d.dispatch("/loop".into()).await {
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt_text(&prompt), "USAGE"),
             other => panic!("expected usage run-as-turn, got {other:?}"),
         }
     }
@@ -1037,15 +1587,20 @@ mod tests {
     async fn fork_context_bundled_skill_uses_background_launcher_not_main_turn() {
         struct ReviewPrompt;
         impl crate::model::BundledPromptFn for ReviewPrompt {
-            fn build(&self, args: &str) -> String {
-                format!("REVIEW[{}]", args.trim())
+            fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+                let trimmed = crate::model::trim_source_text(args);
+                crate::model::source_concat([
+                    crate::model::PromptPart::Text("REVIEW["),
+                    crate::model::PromptPart::Source(&trimmed),
+                    crate::model::PromptPart::Text("]"),
+                ])
             }
         }
 
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "code-review".to_string(),
-            description: "Review".to_string(),
+            name: "code-review".into(),
+            description: "Review".into(),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
@@ -1066,31 +1621,34 @@ mod tests {
                 let captured = captured.clone();
                 Box::pin(async move {
                     captured.lock().await.push(prompt);
-                    Ok("started review agent".to_string())
+                    Ok("started review agent".into())
                 })
             }));
 
         assert_eq!(
-            d.dispatch("/code-review high --fix src").await,
+            d.dispatch("/code-review high --fix src".into()).await,
             SlashDispatchResult::Handled {
-                display: "started review agent".to_string()
+                display: "started review agent".into()
             }
         );
-        assert_eq!(launched.lock().await.as_slice(), ["REVIEW[high --fix src]"]);
+        assert_eq!(
+            prompt_text(&launched.lock().await[0]),
+            "REVIEW[high --fix src]"
+        );
     }
 
     #[tokio::test]
     async fn fork_context_bundled_skill_fails_closed_without_launcher() {
         struct ReviewPrompt;
         impl crate::model::BundledPromptFn for ReviewPrompt {
-            fn build(&self, _: &str) -> String {
-                "review".to_string()
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
+                "review".into()
             }
         }
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "code-review".to_string(),
-            description: "Review".to_string(),
+            name: "code-review".into(),
+            description: "Review".into(),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter {
@@ -1104,9 +1662,9 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
-        match d.dispatch("/code-review").await {
+        match d.dispatch("/code-review".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert!(display.contains("no background launcher is wired"));
+                assert!(display_text(&display).contains("no background launcher is wired"));
             }
             other => panic!("fork-context command must never run inline: {other:?}"),
         }
@@ -1120,19 +1678,21 @@ mod tests {
             core_description("commit"),
         )));
         reg.register_command(SlashCommand {
-            name: "commit".to_string(),
-            description: "Custom commit".to_string(),
+            name: "commit".into(),
+            description: "Custom commit".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/commit.md"),
                 frontmatter: CommandFrontmatter::default(),
-                prompt_template: "Custom $ARGUMENTS".to_string(),
+                prompt_template: "Custom $ARGUMENTS".into(),
             },
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        match d.dispatch("/commit now").await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Custom now"),
+        match d.dispatch("/commit now".into()).await {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt_text(&prompt), "Custom now")
+            }
             other => panic!("expected custom markdown run-as-turn, got {other:?}"),
         }
     }
@@ -1144,12 +1704,15 @@ mod tests {
     #[tokio::test]
     async fn dispatches_continue_alias_to_resume() {
         let d = seeded_dispatcher_with_resume_alias();
-        let result = d.dispatch("/continue").await;
+        let result = d.dispatch("/continue".into()).await;
         match result {
             SlashDispatchResult::Handled { display } => {
                 // Seeded with the stub handler under "resume", so the alias
                 // routes there and we get the resume stub literal back.
-                assert_eq!(display, "resume: not implemented in v0.6.0 (M5)");
+                assert_eq!(
+                    display_text(&display),
+                    "resume: not implemented in v0.6.0 (M5)"
+                );
             }
             other => panic!("expected Handled for /continue, got {other:?}"),
         }
@@ -1158,11 +1721,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_returns_locked_literal() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/notacommand").await;
+        let result = d.dispatch("/notacommand".into()).await;
         match result {
             SlashDispatchResult::Unknown { name, display } => {
-                assert_eq!(name, "notacommand");
-                assert_eq!(display, "Unknown command: /notacommand");
+                assert_eq!(name.string_at(""), Some("notacommand"));
+                assert_eq!(display_text(&display), "Unknown command: /notacommand");
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
@@ -1180,16 +1743,16 @@ mod tests {
         // Default: /doctor resolves to its (stub) handler → Handled.
         std::env::remove_var(var);
         assert!(matches!(
-            d.dispatch("/doctor").await,
+            d.dispatch("/doctor".into()).await,
             SlashDispatchResult::Handled { .. }
         ));
 
         // Gate tripped: /doctor is Unknown.
         std::env::set_var(var, "1");
-        match d.dispatch("/doctor").await {
+        match d.dispatch("/doctor".into()).await {
             SlashDispatchResult::Unknown { name, display } => {
-                assert_eq!(name, "doctor");
-                assert_eq!(display, "Unknown command: /doctor");
+                assert_eq!(name.string_at(""), Some("doctor"));
+                assert_eq!(display_text(&display), "Unknown command: /doctor");
             }
             other => panic!("expected Unknown for gated /doctor, got {other:?}"),
         }
@@ -1199,29 +1762,25 @@ mod tests {
     #[tokio::test]
     async fn non_slash_input_is_not_a_slash_command() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("hello world").await;
+        let result = d.dispatch("hello world".into()).await;
         assert!(matches!(result, SlashDispatchResult::NotASlashCommand));
     }
 
     #[tokio::test]
     async fn empty_input_is_not_a_slash_command() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("").await;
+        let result = d.dispatch("".into()).await;
         assert!(matches!(result, SlashDispatchResult::NotASlashCommand));
     }
 
     #[tokio::test]
-    async fn just_slash_is_not_a_command() {
+    async fn just_slash_is_a_parse_failure() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/").await;
-        // After stripping the leading '/', the name is empty — treat as unknown.
-        match result {
-            SlashDispatchResult::Unknown { name, display } => {
-                assert_eq!(name, "");
-                assert_eq!(display, "Unknown command: /");
-            }
-            other => panic!("expected Unknown for '/', got {other:?}"),
-        }
+        let raw = UJP::from("/");
+        assert_eq!(
+            d.dispatch(raw.clone()).await,
+            SlashDispatchResult::ParseFailure { input: raw }
+        );
     }
 
     #[tokio::test]
@@ -1229,11 +1788,11 @@ mod tests {
         let d = seeded_dispatcher();
         // Per Task 0 step 4 L3 expansion: the parser does NOT case-fold; the
         // registry only holds lowercase keys.
-        let result = d.dispatch("/CLEAR").await;
+        let result = d.dispatch("/CLEAR".into()).await;
         match result {
             SlashDispatchResult::Unknown { name, display } => {
-                assert_eq!(name, "CLEAR");
-                assert_eq!(display, "Unknown command: /CLEAR");
+                assert_eq!(name.string_at(""), Some("CLEAR"));
+                assert_eq!(display_text(&display), "Unknown command: /CLEAR");
             }
             other => panic!("expected Unknown for /CLEAR, got {other:?}"),
         }
@@ -1252,15 +1811,15 @@ mod tests {
 
         // Register a markdown command (with argNames) via the ORIGINAL Arc.
         shared.write().await.register_command(SlashCommand {
-            name: "deploy".to_string(),
-            description: "Deploy".to_string(),
+            name: "deploy".into(),
+            description: "Deploy".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: std::path::PathBuf::from("/x/deploy.md"),
                 frontmatter: crate::model::CommandFrontmatter::default(),
-                prompt_template: String::new(),
+                prompt_template: String::new().into(),
             },
-            argument_names: vec!["env".to_string(), "region".to_string()],
+            argument_names: vec!["env".into(), "region".into()],
             ..SlashCommand::default()
         });
 
@@ -1268,11 +1827,14 @@ mod tests {
         let via_accessor = d.registry();
         let guard = via_accessor.read().await;
         let cmd = guard
-            .resolve("deploy")
+            .resolve(&"deploy".into())
             .expect("command visible via registry()");
         assert_eq!(
-            cmd.argument_names,
-            vec!["env".to_string(), "region".to_string()]
+            cmd.argument_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            vec!["env", "region"]
         );
     }
 
@@ -1280,13 +1842,13 @@ mod tests {
     async fn list_commands_excludes_model_hidden_entries() {
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
-            name: "visible".to_string(),
-            description: "Visible".to_string(),
+            name: "visible".into(),
+            description: "Visible".into(),
             ..SlashCommand::default()
         });
         registry.register_command(SlashCommand {
-            name: "hidden".to_string(),
-            description: "Hidden".to_string(),
+            name: "hidden".into(),
+            description: "Hidden".into(),
             disable_model_invocation: true,
             ..SlashCommand::default()
         });
@@ -1297,7 +1859,7 @@ mod tests {
         assert_eq!(
             commands
                 .iter()
-                .map(|command| command.name.as_str())
+                .map(|command| command.name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
             vec!["visible"]
         );
@@ -1307,33 +1869,43 @@ mod tests {
     async fn list_palette_commands_keeps_manual_only_and_aliases() {
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
-            name: "review".to_string(),
-            description: "Review".to_string(),
+            name: "review".into(),
+            description: "Review".into(),
             disable_model_invocation: true,
-            aliases: vec!["rv".to_string()],
-            argument_hint: Some("[target]".to_string()),
+            aliases: vec!["rv".into()],
+            argument_hint: Some("[target]".into()),
             ..SlashCommand::default()
         });
-        registry.register_alias("check".to_string(), "review".to_string());
+        registry.register_alias("check".into(), "review".into());
 
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
         let commands = dispatcher.list_palette_commands().await;
 
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].name, "review");
+        assert_eq!(commands[0].name.string_at(""), Some("review"));
         assert_eq!(
-            commands[0].aliases,
-            vec!["check".to_string(), "rv".to_string()]
+            commands[0]
+                .aliases
+                .iter()
+                .map(|alias| alias.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            vec!["check", "rv"]
         );
-        assert_eq!(commands[0].argument_hint.as_deref(), Some("[target]"));
+        assert_eq!(
+            commands[0]
+                .argument_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("[target]")
+        );
     }
 
     #[tokio::test]
     async fn list_palette_commands_keeps_hidden_entries_for_exact_matching() {
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
-            name: "auto-mode-setup".to_string(),
-            description: "Hidden in bare palette".to_string(),
+            name: "auto-mode-setup".into(),
+            description: "Hidden in bare palette".into(),
             ..SlashCommand::default()
         });
 
@@ -1341,7 +1913,7 @@ mod tests {
         let commands = dispatcher.list_palette_commands().await;
 
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].name, "auto-mode-setup");
+        assert_eq!(commands[0].name.string_at(""), Some("auto-mode-setup"));
     }
 
     #[tokio::test]
@@ -1349,14 +1921,14 @@ mod tests {
         let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
-            name: "hidden-skill".to_string(),
-            description: "Hidden".to_string(),
+            name: "hidden-skill".into(),
+            description: "Hidden".into(),
             user_invocable: Some(false),
             ..SlashCommand::default()
         });
         registry.register_command(SlashCommand {
-            name: "doctor".to_string(),
-            description: "Doctor".to_string(),
+            name: "doctor".into(),
+            description: "Doctor".into(),
             source: CommandSource::Builtin,
             ..SlashCommand::default()
         });
@@ -1515,13 +2087,13 @@ mod tests {
         use crate::model::{CommandFrontmatter, SlashCommand};
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "demo".to_string(),
-            description: "Demo".to_string(),
+            name: "demo".into(),
+            description: "Demo".into(),
             source,
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
-                prompt_template: "Use $ARGUMENTS".to_string(),
+                prompt_template: "Use $ARGUMENTS".into(),
             },
             ..SlashCommand::default()
         });
@@ -1545,11 +2117,11 @@ mod tests {
         .with_skill_usage_home(root.clone());
 
         assert!(matches!(
-            dispatcher.dispatch("/demo one").await,
+            dispatcher.dispatch("/demo one".into()).await,
             SlashDispatchResult::RunAsTurn { .. }
         ));
         assert!(matches!(
-            dispatcher.dispatch("/demo two").await,
+            dispatcher.dispatch("/demo two".into()).await,
             SlashDispatchResult::RunAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
@@ -1577,9 +2149,9 @@ mod tests {
         .with_expansion_hooks(exec, provider);
 
         // Expansion still produces the body, AND the hook fires.
-        match d.dispatch("/demo this and that").await {
+        match d.dispatch("/demo this and that".into()).await {
             SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt, "Use this and that")
+                assert_eq!(prompt_text(&prompt), "Use this and that")
             }
             other => panic!("expected markdown expansion, got {other:?}"),
         }
@@ -1610,7 +2182,7 @@ mod tests {
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Mcp))
             .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/demo arg").await;
+        let _ = d.dispatch("/demo arg".into()).await;
 
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
@@ -1621,28 +2193,27 @@ mod tests {
 
     fn registry_with_mcp_prompt(connection_id: McpConnectionId) -> Arc<RwLock<CommandRegistry>> {
         let mut registry = CommandRegistry::new();
-        registry.register_command(SlashCommand {
-            name: "github:review".to_string(),
-            description: "Review a pull request".to_string(),
-            source: CommandSource::Mcp,
-            kind: SlashCommandKind::Mcp {
-                connection_id,
-                prompt_name: "review".to_string(),
+        let command = crate::mcp_prompts::mcp_prompt_commands(&[(
+            "github".to_string(),
+            connection_id,
+            lingxi_core::host::McpPromptDto {
+                name: "review".into(),
+                description: Some("Review a pull request".into()),
                 arguments: vec![
                     lingxi_core::host::McpPromptArgumentDto {
-                        name: "repository".to_string(),
+                        name: "repository".into(),
                         description: None,
                         required: true,
                     },
                     lingxi_core::host::McpPromptArgumentDto {
-                        name: "focus".to_string(),
+                        name: "focus".into(),
                         description: None,
                         required: false,
                     },
                 ],
             },
-            ..SlashCommand::default()
-        });
+        )]);
+        registry.register_command(command.into_iter().next().unwrap());
         Arc::new(RwLock::new(registry))
     }
 
@@ -1667,11 +2238,11 @@ mod tests {
             .with_mcp_prompt_resolver(resolver);
 
         match dispatcher
-            .dispatch("/github:review lingxi \"unsafe code\"")
+            .dispatch("/github review lingxi \"unsafe code\" ignored".into())
             .await
         {
             SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt, "Review src/lib.rs");
+                assert_eq!(prompt_text(&prompt), "Review src/lib.rs");
             }
             other => panic!("expected MCP prompt turn, got {other:?}"),
         }
@@ -1680,7 +2251,19 @@ mod tests {
         assert_eq!(call.1, "review");
         assert_eq!(
             call.2,
-            serde_json::json!({"repository": "lingxi", "focus": "unsafe code"})
+            serde_json::json!({"repository": "lingxi", "focus": "\"unsafe"})
+        );
+
+        assert!(matches!(
+            dispatcher
+                .dispatch("/github:review (MCP) lingxi focus ignored".into())
+                .await,
+            SlashDispatchResult::RunAsTurn { .. }
+        ));
+        let marker_call = seen.lock().unwrap().clone().expect("marker resolver call");
+        assert_eq!(
+            marker_call.2,
+            serde_json::json!({"repository": "lingxi", "focus": "focus"})
         );
     }
 
@@ -1696,9 +2279,9 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
             .with_mcp_prompt_resolver(resolver);
 
-        match dispatcher.dispatch("/github:review").await {
+        match dispatcher.dispatch("/github:review".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert!(display.contains("missing required argument <repository>"));
+                assert!(display_text(&display).contains("missing required argument <repository>"));
             }
             other => panic!("expected validation error, got {other:?}"),
         }
@@ -1717,7 +2300,7 @@ mod tests {
         )))
         .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/demo").await;
+        let _ = d.dispatch("/demo".into()).await;
 
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
@@ -1738,8 +2321,8 @@ mod tests {
             lingxi_core::types::SettingsScope::Project,
         )));
 
-        match d.dispatch("/demo x").await {
-            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use x"),
+        match d.dispatch("/demo x".into()).await {
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt_text(&prompt), "Use x"),
             other => panic!("expected markdown expansion, got {other:?}"),
         }
 
@@ -1766,7 +2349,7 @@ mod tests {
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_expansion_hooks(exec, provider);
 
-        let _ = d.dispatch("/clear").await;
+        let _ = d.dispatch("/clear".into()).await;
 
         assert!(
             log.lock().unwrap().is_empty(),
@@ -1789,11 +2372,11 @@ mod tests {
     impl ShellRunner for EchoShellRunner {
         async fn run(
             &self,
-            command: &str,
+            command: &Utf16JsonProjection,
             _shell: Option<crate::FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
             Ok(ShellOut {
-                stdout: format!("OUT[{command}]"),
+                stdout: format!("OUT[{}]", command.string_at("").unwrap_or_default()),
                 stderr: String::new(),
                 interrupted: false,
             })
@@ -1801,13 +2384,21 @@ mod tests {
     }
     struct AllowGate;
     impl ShellPermissionGate for AllowGate {
-        fn check(&self, _c: &str, _s: Option<crate::FrontmatterShell>) -> ShellPermissionDecision {
+        fn check(
+            &self,
+            _c: &Utf16JsonProjection,
+            _s: Option<crate::FrontmatterShell>,
+        ) -> ShellPermissionDecision {
             ShellPermissionDecision::Allow
         }
     }
     struct DenyGate;
     impl ShellPermissionGate for DenyGate {
-        fn check(&self, _c: &str, _s: Option<crate::FrontmatterShell>) -> ShellPermissionDecision {
+        fn check(
+            &self,
+            _c: &Utf16JsonProjection,
+            _s: Option<crate::FrontmatterShell>,
+        ) -> ShellPermissionDecision {
             ShellPermissionDecision::Deny {
                 message: Some("not allowed".to_string()),
             }
@@ -1870,8 +2461,8 @@ mod tests {
         use crate::model::CommandFrontmatter;
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "demo".to_string(),
-            description: "Demo".to_string(),
+            name: "demo".into(),
+            description: "Demo".into(),
             source,
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/x/demo.md"),
@@ -1879,7 +2470,7 @@ mod tests {
                     allowed_tools: allowed,
                     ..CommandFrontmatter::default()
                 },
-                prompt_template: body.to_string(),
+                prompt_template: body.to_string().into(),
             },
             ..SlashCommand::default()
         });
@@ -1901,9 +2492,9 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/demo").await {
+        match d.dispatch("/demo".into()).await {
             SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt, "before OUT[echo hi] after");
+                assert_eq!(prompt_text(&prompt), "before OUT[echo hi] after");
             }
             other => panic!("expected expanded run-as-turn, got {other:?}"),
         }
@@ -1929,9 +2520,9 @@ mod tests {
         });
         let d =
             RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
-        match d.dispatch("/demo").await {
+        match d.dispatch("/demo".into()).await {
             SlashDispatchResult::Handled { display } => assert_eq!(
-                display,
+                display_text(&display),
                 "demo expansion failed: Shell command permission check failed for pattern \"!`echo hi`\": not allowed"
             ),
             other => panic!("expected expansion-failed display, got {other:?}"),
@@ -1950,9 +2541,9 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/commit").await {
+        match d.dispatch("/commit".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "commit: OUT[git status] now");
+                assert_eq!(display_text(&display), "commit: OUT[git status] now");
             }
             other => panic!("expected expanded InjectMessage, got {other:?}"),
         }
@@ -1970,9 +2561,9 @@ mod tests {
         let mut reg = CommandRegistry::new();
         reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        match d.dispatch("/commit").await {
+        match d.dispatch("/commit".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "commit: !`git status` now");
+                assert_eq!(display_text(&display), "commit: !`git status` now");
             }
             other => panic!("expected verbatim InjectMessage, got {other:?}"),
         }
@@ -1985,9 +2576,9 @@ mod tests {
         let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_injected_messages_as_turns();
 
-        match dispatcher.dispatch("/commit").await {
+        match dispatcher.dispatch("/commit".into()).await {
             SlashDispatchResult::RunAsTurn { prompt } => {
-                assert_eq!(prompt, "commit: !`git status` now");
+                assert_eq!(prompt_text(&prompt), "commit: !`git status` now");
             }
             other => panic!("expected thin-client InjectMessage turn, got {other:?}"),
         }
@@ -2005,9 +2596,12 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
             .with_shell_expansion(provider.clone());
-        match d.dispatch("/demo").await {
+        match d.dispatch("/demo".into()).await {
             SlashDispatchResult::Handled { display } => {
-                assert!(display.contains("expansion failed"), "got {display:?}");
+                assert!(
+                    display_text(&display).contains("expansion failed"),
+                    "got {display:?}"
+                );
             }
             other => panic!("expected stub-denied MCP expansion, got {other:?}"),
         }
@@ -2020,17 +2614,18 @@ mod tests {
     async fn bundled_checked_expansion_receives_paths_and_surfaces_read_errors() {
         struct Checked;
         impl crate::BundledPromptFn for Checked {
-            fn build(&self, _: &str) -> String {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
                 panic!("unchecked expansion");
             }
             fn try_build_at(
                 &self,
-                args: &str,
-                root: &std::path::Path,
-                cwd: &std::path::Path,
-                preload: bool,
-            ) -> std::io::Result<String> {
-                assert_eq!(args, "task");
+                args: &Utf16JsonProjection,
+                context: crate::BundledPromptContext<'_>,
+            ) -> std::io::Result<Utf16JsonProjection> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(args.string_at(""), Some("task"));
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));
                 assert!(!preload);
@@ -2055,26 +2650,37 @@ mod tests {
             .with_prompt_paths(Arc::new(|| {
                 (PathBuf::from("/project"), PathBuf::from("/project/subdir"))
             }));
-        assert!(matches!(dispatcher.dispatch("/checked-loop task").await,
-            SlashDispatchResult::Handled { display } if display == "checked-loop expansion failed: loop.md denied"));
+        assert!(
+            matches!(dispatcher.dispatch("/checked-loop task".into()).await,
+            SlashDispatchResult::Handled { display } if display_text(&display) == "checked-loop expansion failed: loop.md denied")
+        );
     }
     // ---- MP-1: `disallowed-tools` reaches the permission gate --------------
 
     /// Records every `set_command_input_denies` call the dispatcher makes.
     #[derive(Default)]
     struct RecordingDenyGate {
-        calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
+        calls: std::sync::Mutex<
+            Vec<(
+                Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+                bool,
+            )>,
+        >,
     }
     #[async_trait]
     impl PermissionGate for RecordingDenyGate {
         async fn check(
             &self,
             _name: &str,
-            _input: &Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
-        fn set_command_input_denies(&self, specs: &[String], union: bool) {
+        fn set_command_input_denies(
+            &self,
+            specs: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+            union: bool,
+        ) {
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2085,8 +2691,8 @@ mod tests {
     fn dispatcher_with_recording_gate() -> (RegistrySlashDispatcher, Arc<RecordingDenyGate>) {
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "tight".to_string(),
-            description: "A skill that narrows its own tools".to_string(),
+            name: "tight".into(),
+            description: "A skill that narrows its own tools".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
@@ -2094,18 +2700,18 @@ mod tests {
                     disallowed_tools: Some(vec!["Bash".to_string(), "Write".to_string()]),
                     ..CommandFrontmatter::default()
                 },
-                prompt_template: "body".to_string(),
+                prompt_template: "body".into(),
             },
             ..SlashCommand::default()
         });
         reg.register_command(SlashCommand {
-            name: "open".to_string(),
-            description: "A skill that narrows nothing".to_string(),
+            name: "open".into(),
+            description: "A skill that narrows nothing".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/open.md"),
                 frontmatter: CommandFrontmatter::default(),
-                prompt_template: "body".to_string(),
+                prompt_template: "body".into(),
             },
             ..SlashCommand::default()
         });
@@ -2118,11 +2724,11 @@ mod tests {
     #[tokio::test]
     async fn an_inline_skills_disallowed_tools_reaches_the_gate() {
         let (d, gate) = dispatcher_with_recording_gate();
-        let _ = d.dispatch("/tight").await;
+        let _ = d.dispatch("/tight".into()).await;
         let calls = gate.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
-            vec![(vec!["Bash".to_string(), "Write".to_string()], false)],
+            vec![(vec!["Bash".into(), "Write".into()], false)],
             "the frontmatter denies must be published in REPLACE mode, once"
         );
     }
@@ -2134,11 +2740,11 @@ mod tests {
         // an unknown name, a builtin and a command declaring nothing all publish
         // an empty list.
         let (d, gate) = dispatcher_with_recording_gate();
-        let _ = d.dispatch("/tight").await;
-        let _ = d.dispatch("just a normal prompt").await;
-        let _ = d.dispatch("/open").await;
-        let _ = d.dispatch("/no-such-command").await;
-        let _ = d.dispatch("/").await;
+        let _ = d.dispatch("/tight".into()).await;
+        let _ = d.dispatch("just a normal prompt".into()).await;
+        let _ = d.dispatch("/open".into()).await;
+        let _ = d.dispatch("/no-such-command".into()).await;
+        let _ = d.dispatch("/".into()).await;
         let calls = gate.calls.lock().unwrap().clone();
         assert_eq!(
             calls,
@@ -2158,8 +2764,8 @@ mod tests {
         // Every existing host wires none; the field must stay inert for them.
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
-            name: "tight".to_string(),
-            description: "d".to_string(),
+            name: "tight".into(),
+            description: "d".into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
@@ -2167,13 +2773,13 @@ mod tests {
                     disallowed_tools: Some(vec!["Bash".to_string()]),
                     ..CommandFrontmatter::default()
                 },
-                prompt_template: "body".to_string(),
+                prompt_template: "body".into(),
             },
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         assert!(matches!(
-            d.dispatch("/tight").await,
+            d.dispatch("/tight".into()).await,
             SlashDispatchResult::RunAsTurn { .. }
         ));
     }
@@ -2184,7 +2790,7 @@ mod tests {
         // standing for every input routed through it.
         let (d, gate) = dispatcher_with_recording_gate();
         let shared = d.clone_shared();
-        let _ = shared.dispatch("/tight").await;
+        let _ = shared.dispatch("/tight".into()).await;
         assert_eq!(
             gate.calls.lock().unwrap().len(),
             1,

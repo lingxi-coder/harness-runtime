@@ -57,6 +57,7 @@ use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use agent::context::SubagentContext;
 use agent::definition::{
@@ -66,13 +67,13 @@ use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::StateMachinePool;
 // `PermissionMode` is re-exported from the `agent` crate (which depends on
 // `permission`) so `tasks` can reference it without a new `permission` dep.
-use agent::resolve_agent_model;
+use agent::model_resolution::{ModelResolutionContext, ModelResolutionContextProvider};
 use agent::runner::SubagentEvent;
 use agent::PermissionMode;
 use agent::SubagentApiClient;
 
 enum TeammateInput {
-    Message(String),
+    Message(Utf16JsonProjection),
     PlanApproval(lingxi_core::host::teammate_plan::PlanApprovalResponse),
 }
 
@@ -98,6 +99,26 @@ pub const TEAMMATE_SYSTEM_PROMPT_ADDENDUM: &str = "\n# Agent Teammate Communicat
 IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team, use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates.\n\
 Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.\n\
 The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.\n";
+
+/// Best-effort write of a source-owned team-member activity fact. Failure to
+/// update the coordinator roster must not change query/task execution.
+async fn publish_team_member_activity(
+    status_sink: &dyn TaskStatusSink,
+    task_id: &str,
+    agent_id: &lingxi_core::types::AgentId,
+    active: bool,
+) {
+    if let Err(error) = status_sink.set_team_member_active(*agent_id, active).await {
+        tracing::warn!(
+            target: "lingxi_tasks::in_process_teammate",
+            task_id,
+            agent_id = %agent_id,
+            active,
+            error = %error,
+            "team member activity update failed"
+        );
+    }
+}
 
 // ── Swarm auto-claim (oracle 2.1.241 `zvb` / `Vvb` / `rIp`, in-process runner) ──
 
@@ -128,15 +149,33 @@ pub(crate) fn pick_next_task(tasks: &[task_store::TodoTask]) -> Option<&task_sto
 /// a trailing SPACE after the colon at end-of-line, and a leading space
 /// before the subject (`` `…task #${id}: \n\n ${subject}` ``); the
 /// description (when non-empty) follows after a blank line.
-pub(crate) fn claimed_task_prompt(task: &task_store::TodoTask) -> String {
-    let mut t = format!(
-        "Complete all open tasks. Start with task #{}: \n\n {}",
-        task.id, task.subject
+pub(crate) fn claimed_task_prompt(task: &task_store::TodoTask) -> Utf16JsonProjection {
+    let mut units = format!(
+        "Complete all open tasks. Start with task #{}: \n\n ",
+        task.id
+    )
+    .encode_utf16()
+    .collect::<Vec<_>>();
+    units.extend(
+        task.subject
+            .string_units("")
+            .expect("TodoTask.subject is a root-string projection"),
     );
-    if !task.description.is_empty() {
-        t.push_str(&format!("\n\n{}", task.description));
+    let description = task
+        .description
+        .string_units("")
+        .expect("TodoTask.description is a root-string projection");
+    if !description.is_empty() {
+        units.extend("\n\n".encode_utf16());
+        units.extend(description);
     }
-    t
+    root_string_from_units(units)
+}
+
+fn root_string_from_units(code_units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&code_units);
+    Utf16JsonProjection::root_string(display, code_units)
+        .expect("display is derived from the exact UTF-16 code units")
 }
 
 /// Escape an XML attribute exactly like the oracle's `Hd`: `&`, `<`, `>`,
@@ -146,21 +185,6 @@ pub(crate) fn claimed_task_prompt(task: &task_store::TodoTask) -> String {
 /// first is what keeps the entities it introduces from being re-escaped) but
 /// allocates a fresh `String` and re-scans the whole input five times even when
 /// nothing matches — and this runs twice per teammate message.
-fn escape_xml_attribute(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Neutralize literal teammate-envelope tags inside untrusted message text.
 ///
 /// Same rule as `lingxi_core::host::subagent_output_guard`'s harness-envelope neutralizer
@@ -170,34 +194,88 @@ fn escape_xml_attribute(value: &str) -> String {
 /// re-spelled — an ASCII-only `is_ascii_whitespace` would let
 /// `<teammate-message\u{a0}>` (NBSP) and `</teammate-message\u{2028}>` through
 /// here while the sibling guard escapes them.
-fn escape_teammate_tags(text: &str) -> String {
+fn escape_teammate_tags_units(text: &[u16]) -> Vec<u16> {
     const TAG: &str = "teammate-message";
-    let mut out = String::with_capacity(text.len());
+    let mut out = Vec::with_capacity(text.len());
     let mut start = 0;
-    // `match_indices` yields guaranteed char-boundary byte offsets, and `<` is
-    // ASCII so it can never occur inside a multi-byte sequence.
-    for (index, _) in text.match_indices('<') {
-        let rest = &text[index + 1..];
-        let name = rest.strip_prefix('/').unwrap_or(rest);
-        let Some(suffix) = name
-            .as_bytes()
-            .get(..TAG.len())
-            .filter(|prefix| prefix.eq_ignore_ascii_case(TAG.as_bytes()))
-            // The 16 matched bytes are ASCII, so `TAG.len()` is a char boundary.
-            .map(|_| &name[TAG.len()..])
-        else {
+    for (index, unit) in text.iter().enumerate() {
+        if *unit != b'<' as u16 {
+            continue;
+        }
+        let mut name_start = index + 1;
+        if text.get(name_start) == Some(&(b'/' as u16)) {
+            name_start += 1;
+        }
+        let name_end = name_start + TAG.len();
+        let Some(name) = text.get(name_start..name_end) else {
             continue;
         };
-        if suffix.chars().next().is_none_or(|c| {
-            c == '>' || c == '/' || lingxi_core::host::subagent_output_guard::is_js_space(c)
+        if !name.iter().zip(TAG.bytes()).all(|(actual, expected)| {
+            *actual <= u8::MAX as u16 && (*actual as u8).eq_ignore_ascii_case(&expected)
         }) {
-            out.push_str(&text[start..=index]);
-            out.push('\\');
+            continue;
+        }
+        let boundary = text.get(name_end).copied();
+        let is_boundary = boundary.is_none_or(|unit| {
+            unit == b'>' as u16
+                || unit == b'/' as u16
+                || char::from_u32(u32::from(unit))
+                    .is_some_and(lingxi_core::host::subagent_output_guard::is_js_space)
+        });
+        if is_boundary {
+            out.extend_from_slice(&text[start..=index]);
+            out.push(b'\\' as u16);
             start = index + 1;
         }
     }
-    out.push_str(&text[start..]);
+    out.extend_from_slice(&text[start..]);
     out
+}
+
+fn escape_xml_attribute_units(value: &[u16]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(value.len());
+    for unit in value {
+        match *unit {
+            x if x == b'&' as u16 => out.extend("&amp;".encode_utf16()),
+            x if x == b'<' as u16 => out.extend("&lt;".encode_utf16()),
+            x if x == b'>' as u16 => out.extend("&gt;".encode_utf16()),
+            x if x == b'"' as u16 => out.extend("&quot;".encode_utf16()),
+            x if x == b'\'' as u16 => out.extend("&apos;".encode_utf16()),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn js_trimmed_first_line(value: &Utf16JsonProjection) -> Option<Vec<u16>> {
+    let units = value.string_units("")?;
+    let first_line = &units[..units
+        .iter()
+        .position(|unit| *unit == b'\n' as u16)
+        .unwrap_or(units.len())];
+    let is_space = |unit: &u16| {
+        char::from_u32(u32::from(*unit))
+            .is_some_and(lingxi_core::host::subagent_output_guard::is_js_space)
+    };
+    let start = first_line.iter().position(|unit| !is_space(unit))?;
+    let end = first_line.iter().rposition(|unit| !is_space(unit))? + 1;
+    let trimmed = &first_line[start..end];
+    let mut index = 0;
+    let mut count = 0;
+    while index < trimmed.len() {
+        let unit = trimmed[index];
+        let pair = (0xd800..=0xdbff).contains(&unit)
+            && trimmed
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next));
+        let width = if pair { 2 } else { 1 };
+        if count + width > 200 {
+            break;
+        }
+        count += width;
+        index += width;
+    }
+    (index > 0).then(|| trimmed[..index].to_vec())
 }
 
 /// Wrap an inter-agent message in the exact `<teammate-message>` envelope used
@@ -205,41 +283,34 @@ fn escape_teammate_tags(text: &str) -> String {
 /// 200 UTF-16 code units, and is omitted when empty (`dge` / `l5f`).
 pub fn teammate_message_envelope_with_summary(
     from: &str,
-    text: &str,
-    summary: Option<&str>,
-) -> String {
-    let summary = summary
-        .map(|value| value.split('\n').next().unwrap_or_default().trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            let mut utf16_units = 0;
-            value
-                .chars()
-                .take_while(|character| {
-                    let next = utf16_units + character.len_utf16();
-                    if next > 200 {
-                        return false;
-                    }
-                    utf16_units = next;
-                    true
-                })
-                .collect::<String>()
-        });
-    let summary_attr = summary.as_deref().map_or_else(String::new, |value| {
-        format!(" summary=\"{}\"", escape_xml_attribute(value))
-    });
-    format!(
-        "<teammate-message teammate_id=\"{}\"{}>\n{}\n</teammate-message>",
-        escape_xml_attribute(from),
-        summary_attr,
-        escape_teammate_tags(text)
-    )
+    text: &Utf16JsonProjection,
+    summary: Option<&Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    let mut units = "<teammate-message teammate_id=\""
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(escape_xml_attribute_units(
+        &from.encode_utf16().collect::<Vec<_>>(),
+    ));
+    units.push(b'"' as u16);
+    if let Some(summary) = summary.and_then(js_trimmed_first_line) {
+        units.extend(" summary=\"".encode_utf16());
+        units.extend(escape_xml_attribute_units(&summary));
+        units.push(b'"' as u16);
+    }
+    units.extend(">\n".encode_utf16());
+    let text = text
+        .string_units("")
+        .expect("teammate message content is a root-string projection");
+    units.extend(escape_teammate_tags_units(&text));
+    units.extend("\n</teammate-message>".encode_utf16());
+    root_string_from_units(units)
 }
 
 /// Convenience wrapper for senders that carry no summary (task-list and the
 /// initial team-lead assignment).
 #[must_use]
-pub fn teammate_message_envelope(from: &str, text: &str) -> String {
+pub fn teammate_message_envelope(from: &str, text: &Utf16JsonProjection) -> Utf16JsonProjection {
     teammate_message_envelope_with_summary(from, text, None)
 }
 
@@ -248,26 +319,39 @@ pub fn teammate_message_envelope(from: &str, text: &str) -> String {
 #[async_trait]
 pub trait TeammateSystemPromptRenderer: Send + Sync {
     /// Render the default (not main-thread overridden) system prompt.
-    async fn render_default_system_prompt(&self) -> String;
+    async fn render_default_system_prompt(&self) -> Utf16JsonProjection;
 }
 
-fn render_teammate_system_prompt(base: &str, custom: Option<&str>) -> Arc<str> {
-    let custom = custom.filter(|value| !value.is_empty());
-    let mut rendered = String::with_capacity(
-        base.len()
-            + TEAMMATE_SYSTEM_PROMPT_ADDENDUM.len()
-            + custom.map_or(0, |value| value.len() + 31),
-    );
-    rendered.push_str(base);
-    if !base.is_empty() && !base.ends_with('\n') {
-        rendered.push('\n');
+fn render_teammate_system_prompt(
+    base: &Utf16JsonProjection,
+    custom: Option<&Utf16JsonProjection>,
+) -> Arc<Utf16JsonProjection> {
+    let base_units = base
+        .string_units("")
+        .expect("default system prompt is a JSON string");
+    let custom = custom.filter(|value| {
+        value
+            .string_units("")
+            .is_some_and(|units| !units.is_empty())
+    });
+    let mut units = base_units.clone();
+    if !base_units.is_empty() && base_units.last() != Some(&('\n' as u16)) {
+        units.push('\n' as u16);
     }
-    rendered.push_str(TEAMMATE_SYSTEM_PROMPT_ADDENDUM);
+    units.extend(TEAMMATE_SYSTEM_PROMPT_ADDENDUM.encode_utf16());
     if let Some(custom) = custom {
-        rendered.push_str("\n\n# Custom Agent Instructions\n");
-        rendered.push_str(custom);
+        units.extend("\n\n# Custom Agent Instructions\n".encode_utf16());
+        units.extend(
+            custom
+                .string_units("")
+                .expect("agent custom system prompt is a JSON string"),
+        );
     }
-    Arc::from(rendered)
+    let display = String::from_utf16_lossy(&units);
+    Arc::new(
+        Utf16JsonProjection::root_string(display, units)
+            .expect("teammate prompt display matches its source units"),
+    )
 }
 
 /// Resolve the task-list id a teammate's auto-claim reads.
@@ -302,7 +386,7 @@ pub(crate) fn resolve_teammate_list_id(team_name: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct ClaimedTask {
     task_id: String,
-    prompt: String,
+    prompt: Utf16JsonProjection,
 }
 
 /// Check the shared task list and atomically claim the next available task.
@@ -339,7 +423,9 @@ pub(crate) async fn check_and_claim_next_task(
         .await;
     tracing::info!(
         target: "lingxi_tasks::in_process_teammate",
-        "[inProcessRunner] Claimed task #{}: {}", next.id, next.subject
+        "[inProcessRunner] Claimed task #{}: {}",
+        next.id,
+        next.subject.string_at("").unwrap_or_default()
     );
     Some(ClaimedTask {
         task_id: next.id.clone(),
@@ -403,6 +489,7 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
         name: &str,
     ) -> Option<AgentDefinition> {
         Some(AgentDefinition {
+            omit_claude_md: false,
             cache_ttl: None,
             agent_type: name.to_string(),
             when_to_use: String::new(),
@@ -431,6 +518,7 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         })
     }
 }
@@ -502,9 +590,17 @@ pub struct InProcessTeammateHandler {
     /// runtime resolution; without it (the default) the Inherit branch returns the
     /// parent model unchanged (mirrors `PoolSubagentSpawner::model_setting`).
     model_setting: Option<String>,
+    /// Exact host route authority shared with the parent model selection.
+    model_resolution_context_provider: Option<Arc<dyn ModelResolutionContextProvider>>,
+    /// Profile selected for the main session's current model route.
+    default_model_profile: Option<String>,
+    /// Same live session route cell used by the ordinary Agent spawner.
+    default_model_selection_provider: Arc<OnceLock<agent::DefaultModelSelectionProvider>>,
     /// Owning session mode for prompt/provider gates inside the independently
     /// spawned persistent runner. `None` preserves the legacy fallback.
     session_interactive: Option<bool>,
+    instruction_provider:
+        Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
     /// Creates one passive-LSP-diagnostics consumer per teammate. A factory is
     /// required here: sharing one source would also share its dedup cursor, so
     /// the first teammate to poll would consume diagnostics for every peer.
@@ -583,7 +679,11 @@ impl InProcessTeammateHandler {
             default_model: None,
             permission_mode: PermissionMode::Default,
             model_setting: None,
+            model_resolution_context_provider: None,
+            default_model_profile: None,
+            default_model_selection_provider: Arc::new(OnceLock::new()),
             session_interactive: None,
+            instruction_provider: None,
             new_diagnostics_source_factory: None,
             tool_registry: Arc::new(OnceLock::new()),
             tool_wide_deny_names: Arc::new(OnceLock::new()),
@@ -704,6 +804,15 @@ impl InProcessTeammateHandler {
 
     /// Set the owning session mode for this handler's independent runners.
     #[must_use]
+    pub fn with_instruction_provider(
+        mut self,
+        provider: Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>,
+    ) -> Self {
+        self.instruction_provider = Some(provider);
+        self
+    }
+
+    #[must_use]
     pub fn with_session_interactive(mut self, interactive: bool) -> Self {
         self.session_interactive = Some(interactive);
         self
@@ -729,6 +838,36 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
+        self
+    }
+
+    /// Attach the same host-owned route resolver used by the main session and
+    /// ordinary Agent spawns. Family aliases cannot be resolved without this
+    /// authority.
+    #[must_use]
+    pub fn with_model_resolution_context_provider(
+        mut self,
+        provider: Arc<dyn ModelResolutionContextProvider>,
+    ) -> Self {
+        self.model_resolution_context_provider = Some(provider);
+        self
+    }
+
+    /// Set the profile that actually serves the main session's default model.
+    #[must_use]
+    pub fn with_default_model_profile(mut self, profile: Option<String>) -> Self {
+        self.default_model_profile = profile;
+        self
+    }
+
+    /// Share the ordinary Agent spawner's live model/profile selection cell so
+    /// teammates spawned after a session `/model` change use the active route.
+    #[must_use]
+    pub fn with_default_model_selection_provider_handle(
+        mut self,
+        provider: Arc<OnceLock<agent::DefaultModelSelectionProvider>>,
+    ) -> Self {
+        self.default_model_selection_provider = provider;
         self
     }
 
@@ -844,20 +983,132 @@ impl InProcessTeammateHandler {
         agent_id: lingxi_core::types::AgentId,
         name: &str,
         team_name: &str,
-        description: &str,
+        description: impl Into<Utf16JsonProjection> + Send,
+        definition: AgentDefinition,
+    ) -> Result<SubagentContext, TaskError> {
+        self.build_context_for_profile(
+            agent_id,
+            name,
+            team_name,
+            description,
+            self.default_model_profile.as_deref(),
+            definition,
+        )
+        .await
+    }
+
+    async fn build_context_for_profile(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        name: &str,
+        team_name: &str,
+        description: impl Into<Utf16JsonProjection> + Send,
+        route_profile: Option<&str>,
         mut definition: AgentDefinition,
     ) -> Result<SubagentContext, TaskError> {
+        let description = description.into();
+        let description_units = description
+            .string_units("")
+            .expect("teammate prompt description is a root string");
         // Resolve the model preference to a concrete wire id, mirroring the
         // `PoolSubagentSpawner` seam (`Inherit`→parent model, family alias→
         // concrete id), so a wired teammate runs against a live provider. Unset
         // `default_model` (tests / no boot wiring) leaves it RAW (legacy).
-        if let Some(parent_model) = &self.default_model {
-            definition.model = AgentModel::Explicit(resolve_agent_model(
+        let has_live_selection_provider = self.default_model_selection_provider.get().is_some();
+        let live_selection = self
+            .default_model_selection_provider
+            .get()
+            .map(|provider| provider())
+            .transpose()
+            .map_err(|error| TaskError::Internal(error.to_string()))?
+            .flatten();
+        if has_live_selection_provider && live_selection.is_none() {
+            return Err(TaskError::Internal(
+                "model/provider selection is unavailable".into(),
+            ));
+        }
+        let parent_model = live_selection
+            .as_ref()
+            .map(|selection| &selection.model)
+            .or(self.default_model.as_ref());
+        let default_profile = live_selection
+            .as_ref()
+            .and_then(|selection| selection.model_profile.as_deref())
+            .or(self.default_model_profile.as_deref());
+        let model_resolves_from_parent_context = matches!(
+            &definition.model,
+            AgentModel::Inherit | AgentModel::Alias(_)
+        );
+        let mut selected_profile = None;
+        if let Some(parent_model) = parent_model {
+            let parent_context = if let Some(selection) = live_selection.as_ref() {
+                if route_profile.is_none() || route_profile == selection.model_profile.as_deref() {
+                    selection.model_resolution_context.clone()
+                } else if let Some(provider) = &self.model_resolution_context_provider {
+                    provider
+                        .context_for_route(parent_model, route_profile)
+                        .map_err(|error| TaskError::Internal(error.to_string()))?
+                } else {
+                    return Err(TaskError::Internal(
+                        "model route profile override has no host route resolver".into(),
+                    ));
+                }
+            } else if let Some(provider) = &self.model_resolution_context_provider {
+                provider
+                    .context_for_route(parent_model, route_profile.or(default_profile))
+                    .map_err(|error| TaskError::Internal(error.to_string()))?
+            } else {
+                ModelResolutionContext {
+                    route: agent::model_resolution::ModelRouteFacts {
+                        model: parent_model.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            };
+            let resolved = agent::resolve_agent_model_with_context(
                 &definition.model,
                 parent_model,
                 self.permission_mode,
                 self.model_setting.as_deref(),
-            ));
+                &parent_context,
+            )
+            .map_err(|error| TaskError::Internal(error.to_string()))?;
+
+            // An explicit request profile is the selected child route. Without
+            // one, an Inherit/Alias result was resolved by the live parent
+            // context itself, so its profile is already the authoritative
+            // route for that result. A changed explicit wire model has no such
+            // inherited route fact: resolve it unqualified and fail admission
+            // if the host cannot identify one unique profile.
+            selected_profile = if let Some(profile) = route_profile {
+                let provider =
+                    self.model_resolution_context_provider
+                        .as_ref()
+                        .ok_or_else(|| {
+                            TaskError::Internal(
+                                "explicit model profile has no host route resolver".into(),
+                            )
+                        })?;
+                let child_context = provider
+                    .context_for_route(&resolved, Some(profile))
+                    .map_err(|error| TaskError::Internal(error.to_string()))?;
+                child_context
+                    .route
+                    .profile
+                    .or_else(|| Some(profile.to_owned()))
+            } else if resolved == *parent_model || model_resolves_from_parent_context {
+                parent_context.route.profile.clone()
+            } else if let Some(provider) = &self.model_resolution_context_provider {
+                provider
+                    .context_for_route(&resolved, None)
+                    .map_err(|error| TaskError::Internal(error.to_string()))?
+                    .route
+                    .profile
+            } else {
+                None
+            };
+            definition.model = AgentModel::Explicit(resolved);
         }
         // Advertise the teammate's tool pool (claude-code `assembleToolPool`) via
         // the SAME shared resolver `PoolSubagentSpawner` uses, keyed on the
@@ -895,13 +1146,28 @@ impl InProcessTeammateHandler {
         // Code runs it through the same teammate-message renderer as mailbox
         // input, with `from:"team-lead"`; a raw user message changes both the
         // prompt bytes and the trust boundary.
-        let prompt_messages = if description.is_empty() {
+        let prompt_messages = if description_units.is_empty() {
             vec![]
         } else {
-            vec![lingxi_core::types::ConversationMessage::user(
-                lingxi_core::types::MessageId::new(),
-                teammate_message_envelope(TEAM_LEAD_NAME, description),
-            )]
+            let rendered = teammate_message_envelope(TEAM_LEAD_NAME, &description);
+            let rendered_units = rendered
+                .string_units("")
+                .expect("rendered prompt is a root-string projection");
+            vec![lingxi_core::types::ConversationMessage::User {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&rendered_units),
+                    utf16_code_units: rendered_units,
+                    citations: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
+            }]
         };
         // Oracle order: freshly assembled default prompt, exact teammate
         // addendum, then an optional `# Custom Agent Instructions` section.
@@ -909,15 +1175,19 @@ impl InProcessTeammateHandler {
         // teammate addendum; production always wires the live renderer.
         let base_system_prompt = match self.system_prompt_renderer.get() {
             Some(renderer) => renderer.render_default_system_prompt().await,
-            None => String::new(),
+            None => Utf16JsonProjection::from(""),
         };
         let rendered_system_prompt =
-            render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_deref());
+            render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_ref());
         let icon = definition.icon.clone();
         Ok(SubagentContext {
+            server_fallback_model_enforcement: None,
+            handback: None,
+            handback_restore_start: None,
             task_registry: self.status_sink.task_registry(),
             agent_id,
             parent_agent_id: None,
+            agent_spawn_provenance: Default::default(),
             // Swarm identity (claude-code `TeammateContext.agentName` /
             // `.teamName`): the DISPLAY name is always reachable here (it is the
             // spawn input); `team_name` is threaded from the coordinator team via
@@ -953,6 +1223,9 @@ impl InProcessTeammateHandler {
             resumed_history: None,
             rendered_system_prompt: Some(rendered_system_prompt),
             mobile_runtime_environment_reminder: None,
+            instruction_context: Default::default(),
+            instruction_context_is_override: false,
+            instruction_provider: self.instruction_provider.clone(),
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -960,7 +1233,7 @@ impl InProcessTeammateHandler {
                 color: AgentColor::Cyan,
                 icon,
             },
-            model_profile: None,
+            model_profile: selected_profile,
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
             // Invoke the factory for every context. Cloning one source here
@@ -975,6 +1248,8 @@ impl InProcessTeammateHandler {
             tool_schemas,
             // Teammates have no structured-output schema.
             schema: None,
+            structured_output_validator: None,
+            native_query_depth: 1,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
             // Inherit the shared budget enforcer when wired (claude-code teammates
@@ -1009,7 +1284,7 @@ impl InProcessTeammateHandler {
 }
 
 /// Render one outbound [`SubagentEvent`] as a spool line (no trailing newline;
-/// the appender adds it). `None` for events we do not surface.
+/// the appender adds it). Empty for events we do not surface.
 fn event_line(ev: &SubagentEvent) -> String {
     match ev {
         SubagentEvent::Progress {
@@ -1017,23 +1292,67 @@ fn event_line(ev: &SubagentEvent) -> String {
             token_count,
             ..
         } => format!("progress: tool_uses={tool_use_count} tokens={token_count}"),
-        SubagentEvent::Message { message, .. } => {
+        // Host-only settled transcript state must not enter teammate output.
+        SubagentEvent::TranscriptSnapshot { .. } => String::new(),
+        // Spools are append-only output logs, not UUID-addressed transcripts;
+        // the tombstone is consumed by transcript-aware observers instead.
+        SubagentEvent::ServerFallbackTombstone { .. } => String::new(),
+        // The host-created row is the visible assistant refusal for this turn.
+        // Project its query message once, in the same form as ordinary Message
+        // events; this runner emits the typed row instead of a duplicate Message.
+        SubagentEvent::ServerFallbackApiErrorRow { row, .. } => {
+            let message = serde_json::to_string(&row.query_message())
+                .expect("fallback API-error query message serializes");
             format!("message: {message}")
         }
-        SubagentEvent::Completed { result, .. } => format!("completed: {result}"),
+        SubagentEvent::Message { message, .. } => {
+            format!(
+                "message: {}",
+                message
+                    .to_json_string()
+                    .expect("agent message source is valid JSON")
+            )
+        }
+        SubagentEvent::Completed { result, .. } => format!(
+            "completed: {}",
+            result
+                .to_json_string()
+                .expect("agent result source is valid JSON")
+        ),
         SubagentEvent::Failed { error, .. } => format!("failed: {error}"),
         SubagentEvent::Killed { .. } => "killed".to_string(),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn event_spool_keeps_source_text_as_json_instead_of_display_or_carrier_fields() {
+    let event = SubagentEvent::Message {
+        agent_id: lingxi_core::types::AgentId::new(),
+        message: Utf16JsonProjection::parse(r#"{"content":"line\n\ud800Ω"}"#).unwrap(),
+        message_index: Some(1),
+    };
+    assert_eq!(
+        event_line(&event),
+        r#"message: {"content":"line\n\ud800Ω"}"#
+    );
 }
 
 fn apply_spawn_context(
     context: &mut SubagentContext,
     request: lingxi_core::host::SubagentSpawnRequest,
 ) {
+    context.agent_spawn_provenance = request.agent_spawn_provenance.clone();
+    context.instruction_context_is_override =
+        context.agent_definition.is_fork() && request.instruction_context.is_some();
+    context.instruction_context = request.instruction_context.unwrap_or_default();
+    context.resumed_history = request.resumed_history;
     context.cwd = request.cwd.map(Into::into);
     context.origin_session_id = request.origin_session_id;
     context.depth = request.depth;
-    context.model_profile = request.model_profile;
+    if request.model_profile.is_some() {
+        context.model_profile = request.model_profile;
+    }
     if request.mode.as_deref() == Some("plan") {
         context.permission_mode_override = Some("plan".into());
     }
@@ -1057,6 +1376,16 @@ fn apply_spawn_context(
     }
 }
 
+fn is_unresolved_model_alias(model: &str) -> bool {
+    let model = lingxi_core::host::effort::trim_js_whitespace(model).to_ascii_lowercase();
+    let base =
+        lingxi_core::host::effort::trim_js_whitespace(model.strip_suffix("[1m]").unwrap_or(&model));
+    matches!(
+        base,
+        "inherit" | "opus" | "opusplan" | "sonnet" | "haiku" | "fable" | "best"
+    )
+}
+
 /// Map a [`SubagentEvent`] to the terminal [`TaskStatus`] that ends the
 /// teammate. `None` for events that do NOT terminate it.
 ///
@@ -1071,7 +1400,10 @@ fn terminal_status(ev: &SubagentEvent) -> Option<TaskStatus> {
         SubagentEvent::Killed { .. } => Some(TaskStatus::Killed),
         SubagentEvent::Completed { .. }
         | SubagentEvent::Progress { .. }
-        | SubagentEvent::Message { .. } => None,
+        | SubagentEvent::Message { .. }
+        | SubagentEvent::TranscriptSnapshot { .. }
+        | SubagentEvent::ServerFallbackTombstone { .. }
+        | SubagentEvent::ServerFallbackApiErrorRow { .. } => None,
     }
 }
 
@@ -1092,15 +1424,80 @@ fn is_idle_event(ev: &SubagentEvent) -> bool {
 /// Render the model-visible continuation content from one `TeammateIdle` hook
 /// result. Blocking feedback is already the oracle's exact bare meta-message
 /// text; `additionalContext` uses the generic hook `<system-reminder>` form.
-fn teammate_idle_follow_up(outcome: &hooks::TeammateIdleOutcome) -> Option<String> {
-    let mut messages = outcome.blocking_feedback.clone();
+fn teammate_idle_follow_up(outcome: &hooks::TeammateIdleOutcome) -> Option<hooks::ExactHookText> {
+    let mut messages: Vec<hooks::ExactHookText> =
+        outcome.blocking_feedback.iter().cloned().collect();
     if !outcome.additional_contexts.is_empty() {
-        messages.push(format!(
-            "<system-reminder>\nTeammateIdle hook additional context: {}\n</system-reminder>",
-            outcome.additional_contexts.join("\n")
+        let body = hooks::ExactHookText::join(&outcome.additional_contexts, "\n");
+        messages.push(hooks::ExactHookText::wrapped(
+            "<system-reminder>\nTeammateIdle hook additional context: ",
+            &body,
+            "\n</system-reminder>",
         ));
     }
-    (!messages.is_empty()).then(|| messages.join("\n\n"))
+    (!messages.is_empty()).then(|| hooks::ExactHookText::join(&messages, "\n\n"))
+}
+
+fn teammate_idle_user_message_event(content: hooks::ExactHookText) -> lingxi_core::Event {
+    let message_id = lingxi_core::types::MessageId::new();
+    let request_id = lingxi_core::types::RequestId::new();
+    if content
+        .display
+        .encode_utf16()
+        .eq(content.utf16_code_units.iter().copied())
+    {
+        lingxi_core::Event::UserMessage {
+            message_id,
+            request_id,
+            content: content.display,
+        }
+    } else {
+        lingxi_core::Event::UserMessageJsUtf16 {
+            message_id,
+            request_id,
+            content: content.display,
+            utf16_code_units: content.utf16_code_units,
+        }
+    }
+}
+
+fn source_user_message_event(content: Utf16JsonProjection) -> lingxi_core::Event {
+    let display = content
+        .string_at("")
+        .expect("teammate input is a root-string projection")
+        .to_owned();
+    let utf16_code_units = content
+        .string_units("")
+        .expect("teammate input is a root-string projection");
+    match String::from_utf16(&utf16_code_units) {
+        Ok(content) => lingxi_core::Event::UserMessage {
+            message_id: lingxi_core::types::MessageId::new(),
+            request_id: lingxi_core::types::RequestId::new(),
+            content,
+        },
+        Err(_) => lingxi_core::Event::UserMessageJsUtf16 {
+            message_id: lingxi_core::types::MessageId::new(),
+            request_id: lingxi_core::types::RequestId::new(),
+            content: display,
+            utf16_code_units,
+        },
+    }
+}
+
+fn join_source_strings(messages: &[Utf16JsonProjection], separator: &str) -> Utf16JsonProjection {
+    let separator = separator.encode_utf16().collect::<Vec<_>>();
+    let mut units = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            units.extend_from_slice(&separator);
+        }
+        units.extend(
+            message
+                .string_units("")
+                .expect("teammate message is a root-string projection"),
+        );
+    }
+    root_string_from_units(units)
 }
 
 #[async_trait]
@@ -1158,8 +1555,18 @@ impl Task for InProcessTeammateHandler {
                 definition.model = AgentModel::Explicit(model.clone());
             }
         }
+        let route_profile = spawn_request
+            .as_ref()
+            .and_then(|request| request.model_profile.as_deref());
         let mut subagent_ctx = self
-            .build_context(agent_id, &name, &team_name, &description, definition)
+            .build_context_for_profile(
+                agent_id,
+                &name,
+                &team_name,
+                description,
+                route_profile,
+                definition,
+            )
             .await?;
         if let Some(request) = spawn_request {
             apply_spawn_context(&mut subagent_ctx, request);
@@ -1168,6 +1575,14 @@ impl Task for InProcessTeammateHandler {
             subagent_ctx.tool_invoker = Some(inherit.tool_invoker);
             subagent_ctx.budget = Some(inherit.budget);
         }
+        let teammate_model = match &subagent_ctx.agent_definition.model {
+            AgentModel::Inherit => self.default_model.clone(),
+            AgentModel::Alias(_) => None,
+            AgentModel::Explicit(model) if is_unresolved_model_alias(model) => None,
+            AgentModel::Explicit(model) => Some(model.clone()),
+        };
+        let teammate_model_route =
+            teammate_model.map(|model| (model, subagent_ctx.model_profile.clone()));
         let plan_control = match (&self.plan_approval_mailbox, &subagent_ctx.tool_invoker) {
             (Some(mailbox), Some(inner))
                 if subagent_ctx.permission_mode_override.as_deref() == Some("plan") =>
@@ -1210,9 +1625,15 @@ impl Task for InProcessTeammateHandler {
                     .await
                     .is_ok()
                 {
-                    format!("A plan file already exists at {}. You can read it and make incremental edits using the Edit tool if you need to.",controller.plan_path())
+                    format!(
+                        "A plan file already exists at {}. You can read it and make incremental edits using the Edit tool if you need to.",
+                        controller.plan_path()
+                    )
                 } else {
-                    format!("No plan file exists yet. You should create your plan at {} using the Write tool if you need to.",controller.plan_path())
+                    format!(
+                        "No plan file exists yet. You should create your plan at {} using the Write tool if you need to.",
+                        controller.plan_path()
+                    )
                 };
                 subagent_ctx.prompt_messages.insert(0, lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(), format!("<system-reminder>\n## Plan File Info:\n{plan_file_info}\nYou should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.\n</system-reminder>")));
                 let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
@@ -1338,6 +1759,13 @@ impl Task for InProcessTeammateHandler {
                         )
                         .await;
                     }
+                    publish_team_member_activity(
+                        status_sink.as_ref(),
+                        &worker_task_id,
+                        &claim_agent_id,
+                        false,
+                    )
+                    .await;
                     status_sink
                         .set_failed(&worker_task_id, &error.to_string())
                         .await;
@@ -1360,6 +1788,13 @@ impl Task for InProcessTeammateHandler {
                 worker_entries.lock().await.remove(&worker_task_id);
                 return;
             }
+            publish_team_member_activity(
+                status_sink.as_ref(),
+                &worker_task_id,
+                &claim_agent_id,
+                true,
+            )
+            .await;
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
@@ -1374,6 +1809,13 @@ impl Task for InProcessTeammateHandler {
                         Some(ev) => ev,
                         None => {
                             if !stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                                publish_team_member_activity(
+                                    status_sink.as_ref(),
+                                    &worker_task_id,
+                                    &claim_agent_id,
+                                    false,
+                                )
+                                .await;
                                 status_sink
                                     .set_failed(&worker_task_id, "teammate runner closed unexpectedly")
                                     .await;
@@ -1395,19 +1837,19 @@ impl Task for InProcessTeammateHandler {
                                 while let Ok(message) = pending_message_rx.try_recv() {
                                     messages.push(message);
                                 }
-                                let mut rendered=Vec::new();
+                                let mut rendered = Vec::new();
                                 for message in messages {
                                     match message {
                                         TeammateInput::Message(text) => rendered.push(text),
                                         TeammateInput::PlanApproval(response) => {
                                             if let Some(control)=&plan_control {
-                                                if let Some(text)=control.apply(response).await { rendered.push(teammate_message_envelope(TEAM_LEAD_NAME,&text)); }
+                                                if let Some(text)=control.apply(response).await { rendered.push(teammate_message_envelope(TEAM_LEAD_NAME, &text)); }
                                             }
                                         }
                                     }
                                 }
                                 let messages=rendered;
-                                (!messages.is_empty()).then(|| (messages.join("\n\n"), None))
+                                (!messages.is_empty()).then(|| (join_source_strings(&messages, "\n\n"), None))
                             }
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                                 if plan_control.as_ref().is_some_and(|control| control.awaiting()) { continue; }
@@ -1450,17 +1892,17 @@ impl Task for InProcessTeammateHandler {
                         }
                         if let Some((content, claimed_task_id)) = next_message {
                             match claim_pool
-                                .send_event(
-                                    &claim_agent_id,
-                                    lingxi_core::Event::UserMessage {
-                                        message_id: lingxi_core::types::MessageId::new(),
-                                        request_id: lingxi_core::types::RequestId::new(),
-                                        content,
-                                    },
-                                )
+                                .send_event(&claim_agent_id, source_user_message_event(content))
                                 .await
                             {
                                 Ok(()) => {
+                                    publish_team_member_activity(
+                                        status_sink.as_ref(),
+                                        &worker_task_id,
+                                        &claim_agent_id,
+                                        true,
+                                    )
+                                    .await;
                                     idle = false;
                                     status_sink.set_status(&worker_task_id, TaskStatus::Running).await;
                                 },
@@ -1484,6 +1926,13 @@ impl Task for InProcessTeammateHandler {
                                         error = %e,
                                         "idle message injection failed; terminating teammate worker"
                                     );
+                                    publish_team_member_activity(
+                                        status_sink.as_ref(),
+                                        &worker_task_id,
+                                        &claim_agent_id,
+                                        false,
+                                    )
+                                    .await;
                                     status_sink
                                         .set_failed(&worker_task_id, &e.to_string())
                                         .await;
@@ -1496,6 +1945,15 @@ impl Task for InProcessTeammateHandler {
                 };
                 if stop_loop.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
+                }
+                if matches!(
+                    &ev,
+                    SubagentEvent::TranscriptSnapshot { .. }
+                        | SubagentEvent::ServerFallbackTombstone { .. }
+                ) {
+                    // Snapshot and tombstone events are host transcript control,
+                    // not teammate activity or append-only spool output.
+                    continue;
                 }
                 // Any runner event means the teammate is (or just was) active;
                 // is_idle_event re-opens the poll window below.
@@ -1557,17 +2015,17 @@ impl Task for InProcessTeammateHandler {
                         let content = teammate_idle_follow_up(&outcome)
                             .expect("continue-working outcome has model-visible content");
                         match claim_pool
-                            .send_event(
-                                &claim_agent_id,
-                                lingxi_core::Event::UserMessage {
-                                    message_id: lingxi_core::types::MessageId::new(),
-                                    request_id: lingxi_core::types::RequestId::new(),
-                                    content,
-                                },
-                            )
+                            .send_event(&claim_agent_id, teammate_idle_user_message_event(content))
                             .await
                         {
                             Ok(()) => {
+                                publish_team_member_activity(
+                                    status_sink.as_ref(),
+                                    &worker_task_id,
+                                    &claim_agent_id,
+                                    true,
+                                )
+                                .await;
                                 idle = false;
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Running)
@@ -1582,6 +2040,13 @@ impl Task for InProcessTeammateHandler {
                                     error = %e,
                                     "TeammateIdle feedback injection failed"
                                 );
+                                publish_team_member_activity(
+                                    status_sink.as_ref(),
+                                    &worker_task_id,
+                                    &claim_agent_id,
+                                    false,
+                                )
+                                .await;
                                 status_sink
                                     .set_failed(&worker_task_id, &e.to_string())
                                     .await;
@@ -1607,6 +2072,13 @@ impl Task for InProcessTeammateHandler {
                     // leader (`{idleReason:"failed", completedStatus:"failed",
                     // failureReason}`, binary @216293689).
                     if let SubagentEvent::Failed { error, .. } = &ev {
+                        publish_team_member_activity(
+                            status_sink.as_ref(),
+                            &worker_task_id,
+                            &claim_agent_id,
+                            false,
+                        )
+                        .await;
                         status_sink.set_failed(&worker_task_id, error).await;
                     } else {
                         status_sink.set_status(&worker_task_id, status).await;
@@ -1666,6 +2138,10 @@ impl Task for InProcessTeammateHandler {
         });
 
         let handle = TaskHandle::new(task_id, Some(cleanup));
+        let handle = match teammate_model_route {
+            Some((model, profile)) => handle.with_teammate_model_route(model, profile),
+            None => handle,
+        };
         Ok(match activation_tx {
             Some(activation_tx) => handle.with_activation(move || {
                 let _ = activation_tx.send(());
@@ -1681,7 +2157,7 @@ impl Task for InProcessTeammateHandler {
     async fn send_message(
         &self,
         task_id: &str,
-        message: String,
+        message: Utf16JsonProjection,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
         // Look up the live bounded pending-message queue. An unknown id means
@@ -1705,6 +2181,31 @@ impl Task for InProcessTeammateHandler {
             .send(TeammateInput::Message(message))
             .await
             .map_err(|_| TaskError::TerminatedTask)
+    }
+
+    async fn send_peer(
+        &self,
+        task_id: &str,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        let (agent_id, stop) = {
+            let entries = self.entries.lock().await;
+            let entry = entries.get(task_id).ok_or(TaskError::TerminatedTask)?;
+            (entry.agent_id, entry.stop.clone())
+        };
+        if stop.load(std::sync::atomic::Ordering::Acquire)
+            || !envelope.validate()
+            || !matches!(envelope.receipt.recipient, lingxi_core::host::handback::HandbackRecipient::Agent { agent_id: recipient, .. } if recipient == agent_id)
+        {
+            return Err(TaskError::TerminatedTask);
+        }
+        // The runner owns this typed queue and buffers arrivals while a model
+        // request is in flight. Acceptance does not wait for a resumed turn.
+        self.pool
+            .send_event(&agent_id, lingxi_core::Event::PeerMessage { envelope })
+            .await
+            .map_err(|error| TaskError::Internal(error.to_string()))
     }
 
     async fn apply_plan_approval(
@@ -1745,6 +2246,8 @@ impl Task for InProcessTeammateHandler {
         // `Failed { error }`) event this cooperative stop exists to collect —
         // the terminal line never reaches the spool and a real failure reason is
         // replaced by a generic `Killed`.
+        publish_team_member_activity(self.status_sink.as_ref(), task_id, &entry.agent_id, false)
+            .await;
         let _ = self
             .pool
             .send_event(&entry.agent_id, lingxi_core::Event::UserExit)

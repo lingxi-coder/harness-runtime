@@ -13,18 +13,21 @@
 //! 3. A `PostToolUseFailure` hook that itself returns an error outcome does NOT
 //!    break the turn (the loop still reaches `end_turn`).
 use async_trait::async_trait;
+use hooks::HookExecutorImpl;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResponse, HookResult};
-use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use lingxi_core::types::{ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId};
+use lingxi_core::types::{
+    ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId,
+    utf16_json::Utf16JsonProjection,
+};
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -124,8 +127,11 @@ impl Tool for AlwaysOkTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "ok".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -192,8 +198,11 @@ impl Tool for AlwaysFailTool {
     async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "fail".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -217,7 +226,7 @@ enum Seen {
     PostFailure {
         tool_name: String,
         tool_input: serde_json::Value,
-        error: String,
+        error: Utf16JsonProjection,
         tool_use_id: String,
     },
 }
@@ -383,6 +392,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
             vec![LlmContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -423,13 +433,9 @@ async fn errored_tool_fires_post_tool_use_failure_not_post_tool_use() {
             assert_eq!(tool_input, &json!({}));
             // The raw tool error string is carried verbatim (NOT the
             // "Error: "-prefixed model-facing content).
-            assert!(
-                error.contains("disk on fire"),
-                "failure payload carries the raw error: {error}"
-            );
-            assert!(
-                !error.starts_with("Error: "),
-                "must be the raw error, not the model-facing prefixed content: {error}"
+            assert_eq!(
+                error.string_units(""),
+                Some("disk on fire".encode_utf16().collect())
             );
         }
         other @ Seen::Post { .. } => {

@@ -18,6 +18,14 @@ use std::time::SystemTime;
 /// persists an LLM provider credential, profile, or account identifier.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerMetadata {
+    /// Current per-server initialize capability choice. Only the ordinary
+    /// stdio/SSE/HTTP/WS config schemas declare this optional boolean.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "bareElicitationCapability"
+    )]
+    pub bare_elicitation_capability: Option<bool>,
     /// Original transport label when the enum projection would lose it (for
     /// example `claudeai-proxy` is carried as an HTTP transport today).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +312,14 @@ pub enum McpConnectionState {
         /// Loopback port we are listening on.
         callback_port: u16,
     },
+    /// Connection settled without credentials that the server will accept.
+    /// Unlike `AwaitingOAuth`, no authorization callback is currently pending.
+    NeedsAuth {
+        /// Config requiring authentication before another connection attempt.
+        config: McpServerConfig,
+        /// Authentication failure exposed by status and action snapshots.
+        error: String,
+    },
     /// Active connection with discovered capabilities and tools.
     Connected {
         /// Config for the active connection.
@@ -355,6 +371,9 @@ pub enum McpConnectionState {
         /// Protocol family/version recorded when the cached catalog was
         /// populated. No transport is live in this state.
         negotiated: lingxi_core::host::McpNegotiatedProtocol,
+        /// Optional server implementation projected to native cached-client
+        /// name/version fields. Instructions and discovery data remain live-only.
+        server_info: Option<crate::discovery_cache::DiscoveryCacheServerInfo>,
         /// Tools from the cached `tools/list` round.
         tools: Vec<McpToolDto>,
         /// Resources from the cached `resources/list` round.
@@ -409,6 +428,7 @@ impl McpConnectionState {
             Self::Disconnected { config, .. }
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
+            | Self::NeedsAuth { config, .. }
             | Self::Connected { config, .. }
             | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }
@@ -427,6 +447,7 @@ impl McpConnectionState {
             Self::Disconnected { config, .. }
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
+            | Self::NeedsAuth { config, .. }
             | Self::Connected { config, .. }
             | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }
@@ -445,6 +466,7 @@ impl McpConnectionState {
             Self::Disconnected { config, .. }
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
+            | Self::NeedsAuth { config, .. }
             | Self::Connected { config, .. }
             | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }

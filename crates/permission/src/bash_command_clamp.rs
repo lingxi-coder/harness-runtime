@@ -43,6 +43,7 @@
 //! a clamp layer the behavior matches upstream exactly.
 
 use crate::shell_command::{command_exact_allowed, command_fully_allowed, split_command};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// `sMr` (binary @73808064) — the decision reason on all three clamp denials.
 pub const CLAMP_NO_MATCH_REASON: &str = "bashCommandClamp: no clamp rule matches this command";
@@ -76,7 +77,7 @@ pub struct ClampMiss {
     pub span: String,
     /// The clamp group the span was checked against (the FIRST group for
     /// `Unverifiable`, matching `group: t[0] ?? []`).
-    pub group: Vec<String>,
+    pub group: Vec<Utf16JsonProjection>,
     /// Which arm produced this miss.
     pub kind: ClampMissKind,
 }
@@ -84,23 +85,25 @@ pub struct ClampMiss {
 /// `Jkf` (cc-238 @290146703) — a surface that cannot be expressed as a Bash
 /// command form at all.
 #[must_use]
-pub fn clamp_surface_deny_message(tool_name: &str) -> String {
+pub fn clamp_surface_deny_message(tool_name: &str) -> Utf16JsonProjection {
     format!(
         "Permission to use {tool_name} has been denied: this agent carries a per-spawn \
 bashCommandClamp, which scopes shell execution to a fixed set of Bash command forms \u{2014} \
 this surface cannot match them. Use the clamped Bash forms instead."
     )
+    .into()
 }
 
 /// `gCi` (cc-238 @290147095) / `Gfm` (@294395082) — the FAIL-CLOSED verdict when
 /// the permission check itself crashed while a clamp is active. Both oracle
 /// helpers render the same template; `Gfm` is `gCi` with `"PowerShell"` bound.
 #[must_use]
-pub fn clamp_crash_deny_message(tool_name: &str) -> String {
+pub fn clamp_crash_deny_message(tool_name: &str) -> Utf16JsonProjection {
     format!(
         "The {tool_name} permission check crashed and this agent carries a per-spawn \
 bashCommandClamp; denying rather than running an unverified command."
     )
+    .into()
 }
 
 /// `M8n`'s clamp arm (cc-238 @290160634) — the Bash denial, with the two
@@ -110,24 +113,39 @@ bashCommandClamp; denying rather than running an unverified command."
 /// oracle does (`${e.command.trim()}`). The `unmatched` tail JSON-quotes the
 /// span (`${Ie(a.span)}`) and joins the group with `", "`.
 #[must_use]
-pub fn clamp_bash_deny_message(tool_name: &str, command: &str, miss: &ClampMiss) -> String {
+pub fn clamp_bash_deny_message(
+    tool_name: &str,
+    command: &str,
+    miss: &ClampMiss,
+) -> Utf16JsonProjection {
     let head = format!(
         "Permission to use {tool_name} with command {} has been denied: this agent's Bash use is \
 clamped to a fixed set of command forms (per-spawn bashCommandClamp), and ",
         command.trim()
     );
-    let tail = match miss.kind {
-        ClampMissKind::Unverifiable => "the command has structure the clamp cannot verify \
+    match miss.kind {
+        ClampMissKind::Unverifiable => crate::source_input::generated_text(&format!(
+            "{head}the command has structure the clamp cannot verify \
 (substitution, control flow, or an undecomposable compound) \u{2014} no clamp rule can admit it. \
 Issue plain commands matching the clamped forms."
-            .to_string(),
-        ClampMissKind::Unmatched => format!(
-            "the span {} matches none of them. Allowed forms: {}",
-            serde_json::Value::String(miss.span.clone()),
-            miss.group.join(", ")
-        ),
-    };
-    head + &tail
+        )),
+        ClampMissKind::Unmatched => {
+            let span = serde_json::to_string(&miss.span).expect("String is valid JSON");
+            let mut parts = vec![
+                crate::source_input::TextPart::Generated(&head),
+                crate::source_input::TextPart::Generated("the span "),
+                crate::source_input::TextPart::Generated(&span),
+                crate::source_input::TextPart::Generated(" matches none of them. Allowed forms: "),
+            ];
+            for (index, rule) in miss.group.iter().enumerate() {
+                if index > 0 {
+                    parts.push(crate::source_input::TextPart::Generated(", "));
+                }
+                parts.push(crate::source_input::TextPart::Source(rule));
+            }
+            crate::source_input::joined_text(&parts)
+        }
+    }
 }
 
 /// `hSv` (cc-238 @290146725) — does `command` satisfy EVERY clamp group?
@@ -170,7 +188,7 @@ Issue plain commands matching the clamped forms."
 ///   tool-wide `Bash` or a foreign `Read(...)` entry in a group contributes
 ///   NOTHING (and therefore cannot admit any span).
 #[must_use]
-pub fn find_clamp_miss(command: &str, clamps: &[Vec<String>]) -> Option<ClampMiss> {
+pub fn find_clamp_miss(command: &str, clamps: &[Vec<Utf16JsonProjection>]) -> Option<ClampMiss> {
     if clamps.is_empty() {
         return None;
     }
@@ -241,16 +259,13 @@ pub fn find_clamp_miss(command: &str, clamps: &[Vec<String>]) -> Option<ClampMis
 
 /// The `Lp`-filtered rule CONTENTS of one clamp group: only `Bash(<content>)`
 /// entries with a NON-EMPTY content survive.
-fn bash_rule_contents(group: &[String]) -> Vec<String> {
+fn bash_rule_contents(group: &[Utf16JsonProjection]) -> Vec<String> {
     group
         .iter()
-        .filter_map(|entry| {
-            let parsed = crate::rule::PermissionRuleValue::from_rule_string(entry);
-            if parsed.tool_name != "Bash" {
-                return None;
-            }
-            parsed.rule_content.filter(|content| !content.is_empty())
-        })
+        .filter_map(crate::rule::PermissionRuleValue::from_rule_projection)
+        .filter(|parsed| parsed.tool_name == "Bash")
+        .filter_map(|parsed| parsed.rule_content_text().map(str::to_owned))
+        .filter(|content| !content.is_empty())
         .collect()
 }
 
@@ -258,8 +273,15 @@ fn bash_rule_contents(group: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn group(rules: &[&str]) -> Vec<String> {
-        rules.iter().map(|r| (*r).to_string()).collect()
+    fn group(rules: &[&str]) -> Vec<Utf16JsonProjection> {
+        rules
+            .iter()
+            .map(|r| Utf16JsonProjection::from(*r))
+            .collect()
+    }
+
+    fn text(value: Utf16JsonProjection) -> String {
+        value.string_at("").unwrap_or_default().to_owned()
     }
 
     #[test]
@@ -322,7 +344,7 @@ mod tests {
     #[test]
     fn surface_deny_message_is_byte_locked() {
         assert_eq!(
-            clamp_surface_deny_message(MONITOR_WEBSOCKET_SURFACE),
+            text(clamp_surface_deny_message(MONITOR_WEBSOCKET_SURFACE)),
             "Permission to use Monitor websocket has been denied: this agent carries a per-spawn \
 bashCommandClamp, which scopes shell execution to a fixed set of Bash command forms \u{2014} this \
 surface cannot match them. Use the clamped Bash forms instead."
@@ -332,13 +354,13 @@ surface cannot match them. Use the clamped Bash forms instead."
     #[test]
     fn crash_deny_message_is_byte_locked_for_bash_and_powershell() {
         assert_eq!(
-            clamp_crash_deny_message("Bash"),
+            text(clamp_crash_deny_message("Bash")),
             "The Bash permission check crashed and this agent carries a per-spawn \
 bashCommandClamp; denying rather than running an unverified command."
         );
         // `Gfm` is the same template with "PowerShell" bound.
         assert_eq!(
-            clamp_crash_deny_message("PowerShell"),
+            text(clamp_crash_deny_message("PowerShell")),
             "The PowerShell permission check crashed and this agent carries a per-spawn \
 bashCommandClamp; denying rather than running an unverified command."
         );
@@ -363,7 +385,7 @@ bashCommandClamp; denying rather than running an unverified command."
             kind: ClampMissKind::Unmatched,
         };
         assert_eq!(
-            clamp_bash_deny_message("Bash", "  git push  ", &miss),
+            text(clamp_bash_deny_message("Bash", "  git push  ", &miss)),
             "Permission to use Bash with command git push has been denied: this agent's Bash use \
 is clamped to a fixed set of command forms (per-spawn bashCommandClamp), and the span \"git push\" \
 matches none of them. Allowed forms: Bash(git status:*), Bash(ls:*)"
@@ -378,7 +400,7 @@ matches none of them. Allowed forms: Bash(git status:*), Bash(ls:*)"
             kind: ClampMissKind::Unverifiable,
         };
         assert_eq!(
-            clamp_bash_deny_message("Bash", "eval \"$(x)\"", &miss),
+            text(clamp_bash_deny_message("Bash", "eval \"$(x)\"", &miss)),
             "Permission to use Bash with command eval \"$(x)\" has been denied: this agent's Bash \
 use is clamped to a fixed set of command forms (per-spawn bashCommandClamp), and the command has \
 structure the clamp cannot verify (substitution, control flow, or an undecomposable compound) \

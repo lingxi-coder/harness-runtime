@@ -94,14 +94,30 @@ impl PauseCause {
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
-            Self::RequestRejected => "Goal paused \u{b7} the API rejected the last request \u{b7} send a message to continue, or run /goal clear",
-            Self::TurnError => "Goal paused \u{b7} the last turn could not finish \u{b7} send a message to continue",
-            Self::HookStopped => "Goal paused \u{b7} a hook ended the turn \u{b7} send a message to continue",
-            Self::GoalCheckTimeout => "Goal paused \u{b7} the goal check timed out \u{b7} send a message to continue",
-            Self::GoalCheckCapped => "Goal paused \u{b7} goal checks kept finding it unmet this turn \u{b7} send a message to continue",
-            Self::RateLimited => "Goal paused \u{b7} the request was rate limited \u{b7} send a message to retry",
-            Self::UsageLimit => "Goal paused \u{b7} usage limit reached \u{b7} send a message after it resets to continue",
-            Self::UsageLimitWaiting => "Goal paused \u{b7} usage limit reached \u{b7} continues automatically when it resets",
+            Self::RequestRejected => {
+                "Goal paused \u{b7} the API rejected the last request \u{b7} send a message to continue, or run /goal clear"
+            }
+            Self::TurnError => {
+                "Goal paused \u{b7} the last turn could not finish \u{b7} send a message to continue"
+            }
+            Self::HookStopped => {
+                "Goal paused \u{b7} a hook ended the turn \u{b7} send a message to continue"
+            }
+            Self::GoalCheckTimeout => {
+                "Goal paused \u{b7} the goal check timed out \u{b7} send a message to continue"
+            }
+            Self::GoalCheckCapped => {
+                "Goal paused \u{b7} goal checks kept finding it unmet this turn \u{b7} send a message to continue"
+            }
+            Self::RateLimited => {
+                "Goal paused \u{b7} the request was rate limited \u{b7} send a message to retry"
+            }
+            Self::UsageLimit => {
+                "Goal paused \u{b7} usage limit reached \u{b7} send a message after it resets to continue"
+            }
+            Self::UsageLimitWaiting => {
+                "Goal paused \u{b7} usage limit reached \u{b7} continues automatically when it resets"
+            }
         }
     }
 
@@ -237,9 +253,33 @@ pub fn classify_api_error_interruption(
 }
 
 /// X7n/eps model-facing retry prompt.
-pub fn retry_body(condition: &str, cause: RetryCause) -> String {
-    let goal = super::sanitize::escape_reminder_html(condition);
-    format!("Goal check-in: «{goal}» is still active. The last turn ended before the goal could be evaluated: {}. Continue toward the goal.", cause.text())
+pub fn retry_body(
+    condition: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    cause: RetryCause,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    let mut units = "Goal check-in: «".encode_utf16().collect::<Vec<_>>();
+    let condition_units = condition
+        .string_units("")
+        .expect("active goal condition must be a JSON string");
+    for unit in condition_units {
+        units.extend_from_slice(match unit {
+            0x0026 => &[0x0026, 0x0061, 0x006d, 0x0070, 0x003b], // &amp;
+            0x003c => &[0x0026, 0x006c, 0x0074, 0x003b],         // &lt;
+            0x003e => &[0x0026, 0x0067, 0x0074, 0x003b],         // &gt;
+            _ => std::slice::from_ref(&unit),
+        });
+    }
+    units.extend(
+        "» is still active. The last turn ended before the goal could be evaluated: "
+            .encode_utf16(),
+    );
+    units.extend(cause.text().encode_utf16());
+    units.extend(". Continue toward the goal.".encode_utf16());
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("generated goal retry body is a valid source string")
 }
 
 #[cfg(test)]
@@ -373,6 +413,22 @@ mod tests {
             gave_up_announcement(RetryCause::Unclassified),
             "Goal paused after 3 automatic retries · the API returned an unexpected response · send a message to continue"
         );
+    }
+
+    #[test]
+    fn retry_body_preserves_goal_utf16_source_units() {
+        let condition = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "fix � now".to_string(),
+            vec![
+                0x0066, 0x0069, 0x0078, 0x0020, 0xd800, 0x0020, 0x006e, 0x006f, 0x0077,
+            ],
+        )
+        .unwrap();
+        let body = retry_body(&condition, RetryCause::ApiUnavailable);
+        let units = body.string_units("").unwrap();
+        assert!(units
+            .windows(3)
+            .any(|part| part == [0x0020, 0xd800, 0x0020]));
     }
 
     /// A rate limit PAUSES; it is never retried as a transient blip. Upstream

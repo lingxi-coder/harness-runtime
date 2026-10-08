@@ -556,7 +556,8 @@ impl DesktopFusionRecorder {
                     status,
                     &outbox.session_id.to_string(),
                     current_session == outbox.session_id,
-                );
+                )
+                .into();
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(250),
                     orchestrator.emit_background_system_notice(&body),

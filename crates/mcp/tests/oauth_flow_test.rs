@@ -21,6 +21,7 @@ use lingxi_core::host::{
     McpTransportKind, McpTransportSpec, SecureStorage, SecureStorageBackend, SecureStorageError,
     ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{
     HttpMethod, HttpRequest, HttpResponse, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };
@@ -289,9 +290,12 @@ impl McpTransport for RecordingTransport {
             self.fail_403_first.fetch_sub(1, Ordering::SeqCst);
             let scope = self.fail_403_scope.lock().unwrap().clone();
             // Flattened transport error mirroring a 403 WWW-Authenticate body.
-            return Err(McpError::Connection(format!(
-                "HTTP 403 Forbidden: Bearer error=\"insufficient_scope\", scope=\"{scope}\""
-            )));
+            return Err(McpError::Connection(
+                format!(
+                    "HTTP 403 Forbidden: Bearer error=\"insufficient_scope\", scope=\"{scope}\""
+                )
+                .into(),
+            ));
         }
         if self.fail_401_first.load(Ordering::SeqCst) > 0 {
             self.fail_401_first.fetch_sub(1, Ordering::SeqCst);
@@ -325,8 +329,8 @@ impl McpTransport for RecordingTransport {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: HashMap::new(),
-            extensions: HashMap::new(),
+            experimental: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
+            extensions: Utf16JsonProjection::parse("{}").expect("empty object is JSON"),
         })
     }
     async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
@@ -342,14 +346,14 @@ impl McpTransport for RecordingTransport {
         &self,
         _c: &McpRawConnection,
         _t: &str,
-        _i: serde_json::Value,
+        _i: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         Ok(McpToolResultDto::default())
     }
     async fn read_resource(
         &self,
         _c: &McpRawConnection,
-        _u: &str,
+        _u: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal("unused".into()))
     }

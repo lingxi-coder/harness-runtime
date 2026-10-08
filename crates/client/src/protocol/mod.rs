@@ -21,5 +21,6 @@ pub mod listings;
 pub mod local_apps;
 pub mod message;
 pub mod permission;
+pub mod text;
 pub mod tool_display;
 pub mod version;

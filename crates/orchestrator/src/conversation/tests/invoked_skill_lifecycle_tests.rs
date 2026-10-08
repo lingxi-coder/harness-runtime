@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use std::sync::Arc;
 
@@ -27,17 +27,19 @@ fn dropping_orchestrator_clears_its_invoked_skills() {
         .session_id
         .to_string();
     compaction::invoked_skills::register_scoped(
-        "build",
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from("build"),
         std::path::Path::new("/skill/build"),
-        "body",
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from("body"),
         compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
     );
 
     drop(orch);
 
-    assert!(compaction::invoked_skills::filter_for_scope(
-        compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None)
-    )
-    .is_empty());
+    assert!(
+        compaction::invoked_skills::filter_for_scope(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None)
+        )
+        .is_empty()
+    );
     compaction::invoked_skills::reset_for_test();
 }

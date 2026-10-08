@@ -4,13 +4,227 @@
 //! (`readSessionLite` head path) — we only need the head because the fields
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
+use crate::jsonl::exact_json::{Utf16Overrides, PRIVATE_UTF16_KEY};
 use crate::jsonl::schema::JsonlMessage;
 use lingxi_core::host::{FileSystem, FsError};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+
+/// Remove Native message, attachment, tool-result, and MCP metadata members before the
+/// remaining row enters the typed-metadata parser. These arbitrary payloads go
+/// directly into the flat UTF-16 carrier, so deep ToolUse input and exact
+/// tool-result strings never enter recursive `Value` trees.
+fn split_native_payloads(
+    input: &str,
+) -> Result<
+    (
+        String,
+        Option<Utf16JsonProjection>,
+        Option<Utf16JsonProjection>,
+        Option<Utf16JsonProjection>,
+        Option<Utf16JsonProjection>,
+    ),
+    &'static str,
+> {
+    let bytes = input.as_bytes();
+    let mut cursor = skip_json_whitespace(bytes, 0);
+    if bytes.get(cursor) != Some(&b'{') {
+        return Ok((input.to_owned(), None, None, None, None));
+    }
+    cursor += 1;
+    let mut members = Vec::<(Vec<u16>, std::ops::Range<usize>, std::ops::Range<usize>)>::new();
+
+    loop {
+        cursor = skip_json_whitespace(bytes, cursor);
+        if bytes.get(cursor) == Some(&b'}') {
+            cursor += 1;
+            break;
+        }
+
+        let key_start = cursor;
+        let key_end = scan_json_string(bytes, key_start)?;
+        let key_units = Utf16JsonProjection::parse(&input[key_start..key_end])
+            .map_err(|_| "invalid JSON object key")?
+            .string_units("")
+            .ok_or("invalid JSON object key")?;
+        cursor = skip_json_whitespace(bytes, key_end);
+        if bytes.get(cursor) != Some(&b':') {
+            return Err("expected JSON object colon");
+        }
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+        let value_start = cursor;
+        let value_end = scan_json_value(bytes, value_start)?;
+        members.push((key_units, key_start..key_end, value_start..value_end));
+
+        cursor = skip_json_whitespace(bytes, value_end);
+        match bytes.get(cursor) {
+            Some(b',') => cursor += 1,
+            Some(b'}') => {
+                cursor += 1;
+                break;
+            }
+            _ => return Err("expected JSON object comma or close"),
+        }
+    }
+
+    if skip_json_whitespace(bytes, cursor) != bytes.len() {
+        return Err("trailing characters after JSON object");
+    }
+
+    let type_key = b"type".iter().copied().map(u16::from).collect::<Vec<_>>();
+    let row_type = members
+        .iter()
+        .rev()
+        .find(|(key, _, _)| key == &type_key)
+        .and_then(|(_, _, value)| Utf16JsonProjection::parse(&input[value.clone()]).ok())
+        .and_then(|value| value.string_at("").map(str::to_owned))
+        .unwrap_or_default();
+    if !is_transcript_message_type(&row_type) {
+        return Ok((input.to_owned(), None, None, None, None));
+    }
+
+    let message_key = b"message"
+        .iter()
+        .copied()
+        .map(u16::from)
+        .collect::<Vec<_>>();
+    let attachment_key = b"attachment"
+        .iter()
+        .copied()
+        .map(u16::from)
+        .collect::<Vec<_>>();
+    let tool_use_result_key = b"toolUseResult"
+        .iter()
+        .copied()
+        .map(u16::from)
+        .collect::<Vec<_>>();
+    let mcp_meta_key = b"mcpMeta"
+        .iter()
+        .copied()
+        .map(u16::from)
+        .collect::<Vec<_>>();
+    let mut message = None;
+    let mut attachment = None;
+    let mut tool_use_result = None;
+    let mut mcp_meta = None;
+    let mut kept = Vec::new();
+    for (key, key_range, value_range) in members {
+        if key == message_key
+            || key == attachment_key
+            || key == tool_use_result_key
+            || key == mcp_meta_key
+        {
+            let raw = &input[value_range];
+            let projection = Utf16JsonProjection::parse(raw).map_err(|_| {
+                if key == message_key {
+                    "invalid JSON message value"
+                } else if key == attachment_key {
+                    "invalid JSON attachment value"
+                } else if key == tool_use_result_key {
+                    "invalid JSON tool result value"
+                } else {
+                    "invalid JSON MCP metadata value"
+                }
+            })?;
+            if key == message_key {
+                message = Some(projection);
+            } else if key == attachment_key {
+                attachment = Some(projection);
+            } else if key == tool_use_result_key {
+                tool_use_result = Some(projection);
+            } else {
+                mcp_meta = Some(projection);
+            }
+        } else {
+            kept.push(format!("{}:{}", &input[key_range], &input[value_range]));
+        }
+    }
+    Ok((
+        format!("{{{}}}", kept.join(",")),
+        message,
+        attachment,
+        tool_use_result,
+        mcp_meta,
+    ))
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn scan_json_string(bytes: &[u8], start: usize) -> Result<usize, &'static str> {
+    if bytes.get(start) != Some(&b'"') {
+        return Err("expected JSON string");
+    }
+    let mut cursor = start + 1;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        match byte {
+            b'"' => return Ok(cursor + 1),
+            b'\\' => cursor = cursor.checked_add(2).ok_or("JSON string offset overflow")?,
+            0..=0x1f => return Err("unescaped control byte in JSON string"),
+            _ => cursor += 1,
+        }
+    }
+    Err("unterminated JSON string")
+}
+
+fn scan_json_value(bytes: &[u8], start: usize) -> Result<usize, &'static str> {
+    let Some(first) = bytes.get(start).copied() else {
+        return Err("missing JSON value");
+    };
+    if first == b'"' {
+        return scan_json_string(bytes, start);
+    }
+    if !matches!(first, b'{' | b'[') {
+        let mut cursor = start;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !matches!(byte, b',' | b']' | b'}' | b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            cursor += 1;
+        }
+        return (cursor > start)
+            .then_some(cursor)
+            .ok_or("missing JSON scalar");
+    }
+
+    let mut closers = vec![if first == b'{' { b'}' } else { b']' }];
+    let mut cursor = start + 1;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        match byte {
+            b'"' => cursor = scan_json_string(bytes, cursor)?,
+            b'{' => {
+                closers.push(b'}');
+                cursor += 1;
+            }
+            b'[' => {
+                closers.push(b']');
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                if closers.pop() != Some(byte) {
+                    return Err("mismatched JSON container close");
+                }
+                cursor += 1;
+                if closers.is_empty() {
+                    return Ok(cursor);
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    Err("unterminated JSON container")
+}
 
 /// A line whose outer `type` admits it into the conversation chain — 1:1 with
 /// `claude-code/src/utils/sessionStorage.ts:139` `isTranscriptMessage`. These
@@ -20,6 +234,51 @@ use thiserror::Error;
 #[must_use]
 pub fn is_transcript_message_type(ty: &str) -> bool {
     matches!(ty, "user" | "assistant" | "attachment" | "system")
+}
+
+/// Build the existing process-local pointer index from a flat row. The row's
+/// projections already retain the exact units; this index serves callers that
+/// still need a stable pointer lookup and is never the source of truth for
+/// JSONL serialization.
+fn collect_utf16_overrides(projection: &Utf16JsonProjection) -> Utf16Overrides {
+    let Some(root) = projection.at_pointer("") else {
+        return Utf16Overrides::new();
+    };
+    let private_key = PRIVATE_UTF16_KEY.encode_utf16().collect::<Vec<_>>();
+    let mut overrides = Utf16Overrides::new();
+    let mut pending = vec![(root, String::new())];
+    while let Some((value, pointer)) = pending.pop() {
+        if let Some(units) = value.code_units() {
+            if String::from_utf16(units).is_err() {
+                overrides.insert(pointer, units.to_vec());
+            }
+            continue;
+        }
+        if let Some(length) = value.array_len() {
+            for index in (0..length).rev() {
+                if let Some(child) = value.get_index(index) {
+                    pending.push((child, format!("{pointer}/{index}")));
+                }
+            }
+            continue;
+        }
+        if let Some(entries) = value.object_entries() {
+            for entry in entries.into_iter().rev() {
+                if pointer.is_empty() && entry.code_units == private_key {
+                    continue;
+                }
+                let Ok(key) = String::from_utf16(entry.code_units) else {
+                    // The flat projection remains authoritative for this path;
+                    // the legacy pointer side index cannot represent a key
+                    // containing an unpaired surrogate in Rust `String`.
+                    continue;
+                };
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                pending.push((entry.value, format!("{pointer}/{escaped}")));
+            }
+        }
+    }
+    overrides
 }
 
 /// Parse Claude Code's pull-request selector representation.
@@ -131,6 +390,10 @@ pub struct LoadedTranscript {
     /// branch-aware DAG walk ([`crate::jsonl::loader::build_conversation_chain`]).
     /// Last-write-wins on a duplicate uuid, mirroring TS `messages.set(uuid, …)`.
     pub by_uuid: HashMap<String, JsonlMessage>,
+    /// Exact string leaves from native escaped UTF-16, indexed by transcript
+    /// UUID. The corresponding message retains the same private data through
+    /// loader clones; neither carrier is emitted as a native JSON field.
+    pub utf16_by_uuid: HashMap<String, Utf16Overrides>,
     /// `summary` entries keyed by their `leafUuid` (`sessionStorage.ts` routing
     /// loop: `summaries.set(entry.leafUuid, entry.summary)`). Lets the picker
     /// link a session's stored summary to its chain tip.
@@ -155,19 +418,22 @@ pub struct LoadedTranscript {
     /// Pull-request repository identifier keyed by `sessionId`.
     pub pr_repositories: HashMap<String, String>,
 
-    // ── Gap #1 fix: last-prompt resume tip ──────────────────────────────────
-    /// The last `last-prompt` entry whose `explicit===true` flag is set.
-    /// Binary `Yle` routing: `else if(N.type==="last-prompt"){if(N.leafUuid)
-    /// L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}` where `O` ends up
-    /// as the forced resume tip uuid and `L` (explicit) gates whether we force.
-    /// We store the raw last-seen `leafUuid` and the cumulative `explicit` flag
-    /// so `find_tip` can replicate the TS logic precisely.
-    ///
-    /// `None` when no `last-prompt` entry with a `leafUuid` was encountered.
+    /// Latest non-empty `last-prompt.leafUuid`, cleared by an explicit empty
+    /// checkpoint or a compact boundary. Ordinary checkpoints are eligible for
+    /// batch-aware continuation recovery (Claude Code 2.1.286 `jln` / `yan`).
     pub last_prompt_leaf_uuid: Option<String>,
-    /// Whether the last-prompt entry (or any prior one with the same leafUuid)
-    /// had `explicit===true`. Mirrors the TS `L` accumulation variable.
+    /// Active explicit checkpoint, accumulated for the same leaf UUID and
+    /// cleared when a subsequent main-thread transcript row is admitted.
     pub last_prompt_explicit: bool,
+    /// An explicit checkpoint keeps its branch boundary after later rows arrive.
+    /// Unlike `last_prompt_explicit`, this flag is not cleared by a new message.
+    pub last_prompt_was_explicit: bool,
+    /// Whether any `last-prompt` record supplied a `leafUuid` field.
+    pub last_prompt_seen: bool,
+    /// Explicit `leafUuid:null` marks an intentionally cleared conversation.
+    pub cleared_to_empty: bool,
+    /// Last admitted main-thread row in write order, excluding fork briefings.
+    pub last_transcript_uuid: Option<String>,
 
     // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────────
     /// `tag` entries: keyed by `sessionId`, LAST-WRITE-WINS single value.
@@ -233,15 +499,6 @@ pub enum ReaderError {
     /// Underlying filesystem error.
     #[error(transparent)]
     Fs(#[from] FsError),
-    /// Line `n` (0-indexed) failed to parse as `JsonlMessage`.
-    ///
-    /// RETAINED for API/back-compat only. As of the tolerant-reader gap fix the
-    /// load path NEVER produces this — malformed and non-message lines are
-    /// skipped (see [`route_lines`] / `JsonlReader::read_all`), matching
-    /// `claude-code`'s `parseJSONL` (`json.ts:155`). Kept so any external match
-    /// on `ReaderError` stays exhaustive.
-    #[error("parse failure at line {0}: {1}")]
-    Parse(usize, String),
     /// First line didn't contain a required metadata field.
     #[error("lite read: missing field {0}")]
     LiteMissing(&'static str),
@@ -292,8 +549,8 @@ impl JsonlReader {
     /// Metadata + unknown + malformed lines are dropped here — use
     /// [`Self::read_routed`] when the side-maps (summaries / titles) are needed.
     ///
-    /// The function is now infallible-on-content (no `ReaderError::Parse`); the
-    /// only error path left is the underlying [`FsError`] from the read itself.
+    /// Content errors are skipped; this method fails only when reading the
+    /// file produces an underlying [`FsError`].
     pub async fn read_all(&self) -> Result<Vec<JsonlMessage>, ReaderError> {
         Ok(self.read_routed().await?.messages_in_order)
     }
@@ -391,34 +648,62 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
         if line.is_empty() {
             continue;
         }
-        // Phase 1 — tolerant JSON parse; skip malformed lines (no error).
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        // Validate and capture the whole row in the flat arena first. Native
+        // message/attachment/tool payloads and every flattened extra stay out of
+        // recursive `Value` deserialization.
+        let Ok(row) = Utf16JsonProjection::parse(line) else {
             out.malformed_line_count += 1;
             continue;
         };
-        let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let ty = row.string_at("/type").unwrap_or("");
         if is_transcript_message_type(ty) {
-            // Phase 2a — chain participant. Route by `type` first, so we only
-            // attempt the strict `JsonlMessage` parse on lines that are SUPPOSED
-            // to be messages; a failure here means a corrupt transcript line, so
-            // skip it (still no hard error, matching the tolerant contract).
-            let Ok(msg) = serde_json::from_value::<JsonlMessage>(value) else {
+            let Ok(mut msg) = JsonlMessage::from_projection(&row) else {
                 out.malformed_line_count += 1;
                 continue;
             };
-            // A full compact boundary makes every earlier collapse span stale:
-            // its archived UUIDs are outside the new active chain. Claude's
-            // forward reader clears both side stores at this exact point; later
-            // marble records in the file build the post-boundary state anew.
+            let overrides = collect_utf16_overrides(&row);
+            if overrides.is_empty() {
+                out.utf16_by_uuid.remove(&msg.uuid);
+            } else {
+                crate::jsonl::exact_json::set_message_utf16_overrides(&mut msg, overrides.clone());
+                out.utf16_by_uuid.insert(msg.uuid.clone(), overrides);
+            }
             let clears_context_collapse = msg.message_type == "system"
-                && msg.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
+                && msg.extra.string_at("/subtype") == Some("compact_boundary");
+            if !msg.is_sidechain
+                && !(msg.message_type == "attachment"
+                    && msg
+                        .attachment_projection
+                        .as_ref()
+                        .and_then(|attachment| attachment.string_at("/type"))
+                        == Some("fork_briefing"))
+            {
+                out.last_transcript_uuid = Some(msg.uuid.clone());
+                out.last_prompt_explicit = false;
+                out.cleared_to_empty = false;
+            }
+            if clears_context_collapse {
+                out.last_prompt_leaf_uuid = None;
+                out.last_prompt_explicit = false;
+                out.last_prompt_was_explicit = false;
+            }
             out.by_uuid.insert(msg.uuid.clone(), msg.clone());
             out.messages_in_order.push(msg);
             if clears_context_collapse {
                 out.context_collapse_commits.clear();
                 out.context_collapse_snapshot = None;
             }
-        } else if ty == "summary" {
+            continue;
+        }
+
+        // The remaining side-record variants have named, bounded consumers;
+        // this compatibility projection is confined to those legacy DTOs.
+        // Transcript rows above never pass through serde_json::Value.
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            out.malformed_line_count += 1;
+            continue;
+        };
+        if ty == "summary" {
             // `summaries.set(entry.leafUuid, entry.summary)` — keyed by leafUuid.
             if let (Some(leaf), Some(summary)) = (
                 value.get("leafUuid").and_then(Value::as_str),
@@ -477,26 +762,25 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
 
         // ── Gap #1 fix: last-prompt → explicit resume tip ────────────────────
         } else if ty == "last-prompt" {
-            // Binary `Yle` (@ 206473264):
-            //   `else if(N.type==="last-prompt"){if(N.leafUuid)
-            //      L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}`
-            // L = explicit flag, O = forced tip uuid.
-            // We replicate: on each last-prompt entry that has a leafUuid:
-            //   - new_explicit = entry.explicit===true
-            //                    || (prior_explicit && leafUuid == prior_tip)
-            //   - update last_prompt_leaf_uuid to the new leafUuid
-            //   - update last_prompt_explicit to new_explicit
-            if let Some(leaf_uuid) = value.get("leafUuid").and_then(Value::as_str) {
-                let entry_explicit = value
-                    .get("explicit")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let prev_explicit = out.last_prompt_explicit;
-                let prev_uuid = out.last_prompt_leaf_uuid.as_deref().unwrap_or("");
-                // TS: L = N.explicit===true || L && N.leafUuid===O
-                let new_explicit = entry_explicit || (prev_explicit && leaf_uuid == prev_uuid);
-                out.last_prompt_leaf_uuid = Some(leaf_uuid.to_string());
-                out.last_prompt_explicit = new_explicit;
+            // Claude 2.1.286 jln: a new main-thread row clears the active
+            // explicit checkpoint, but an explicit branch boundary persists.
+            out.last_prompt_seen |= value.get("leafUuid").is_some();
+            let explicit = value.get("explicit").and_then(Value::as_bool) == Some(true);
+            if let Some(leaf_uuid) = value
+                .get("leafUuid")
+                .and_then(Value::as_str)
+                .filter(|uuid| !uuid.is_empty())
+            {
+                let same = out.last_prompt_leaf_uuid.as_deref() == Some(leaf_uuid);
+                out.last_prompt_explicit = explicit || (out.last_prompt_explicit && same);
+                out.last_prompt_was_explicit = explicit || (out.last_prompt_was_explicit && same);
+                out.last_prompt_leaf_uuid = Some(leaf_uuid.to_owned());
+                out.cleared_to_empty = false;
+            } else if value.get("leafUuid").is_some_and(Value::is_null) && explicit {
+                out.cleared_to_empty = true;
+                out.last_prompt_leaf_uuid = None;
+                out.last_prompt_explicit = false;
+                out.last_prompt_was_explicit = false;
             }
 
         // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────
@@ -678,4 +962,223 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+#[cfg(test)]
+mod native_attachment_projection_tests {
+    use super::*;
+
+    fn attachment_row(payload_member: &str) -> String {
+        format!(
+            r#"{{"parentUuid":null,"isSidechain":false,{payload_member},"type":"attachment","uuid":"u-attachment","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s"}}"#
+        )
+    }
+
+    #[test]
+    fn raw_deep_attachment_survives_reader_clone_drop_and_native_replay() {
+        let depth = 384usize;
+        let deep = format!("{}\"\\ud800\"{}", "[".repeat(depth), "]".repeat(depth));
+        let payload = format!(
+            r#"{{"type":"hook_success","content":"before\ud800after","deep":{deep},"wide":1e400,"underflow":-1e-4000,"zero":-0,"unicode":"🧪"}}"#
+        );
+        let line = attachment_row(&format!("\"attachment\":{payload}"));
+
+        let loaded = route_lines(&line);
+        assert_eq!(loaded.malformed_line_count, 0);
+        let row = &loaded.messages_in_order[0];
+        let attachment = row.attachment_projection.as_ref().unwrap();
+        let mut expected_content = "before".encode_utf16().collect::<Vec<_>>();
+        expected_content.push(0xd800);
+        expected_content.extend("after".encode_utf16());
+        assert_eq!(attachment.string_units("/content"), Some(expected_content));
+        assert_eq!(
+            attachment.string_units(&format!("/deep{}", "/0".repeat(depth))),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            attachment.at_pointer("/wide").unwrap().as_number(),
+            Some(f64::INFINITY)
+        );
+        assert_eq!(
+            attachment.at_pointer("/underflow").unwrap().as_number(),
+            Some(0.0)
+        );
+        assert_eq!(
+            attachment.at_pointer("/zero").unwrap().as_number(),
+            Some(0.0)
+        );
+        assert!(!row.extra.contains_property("attachment"));
+
+        let cloned = row.clone();
+        let encoded = crate::jsonl::exact_json::native_message_bytes(&cloned).unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let attachment_position = encoded.find("\"attachment\":").unwrap();
+        let type_position = encoded.find("\"type\":\"attachment\"").unwrap();
+        assert!(attachment_position < type_position, "{encoded}");
+        assert!(encoded.contains(r#""content":"before\ud800after""#));
+        assert!(encoded.contains(r#""wide":null""#));
+        assert!(encoded.contains(r#""underflow":0""#));
+        assert!(encoded.contains(r#""zero":0""#));
+
+        let direct = route_lines(&line)
+            .messages_in_order
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(!direct.extra.contains_property("attachment"));
+        assert_eq!(
+            direct
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_units("/content"),
+            attachment.string_units("/content")
+        );
+        drop(direct);
+        drop(cloned);
+        drop(loaded);
+    }
+
+    #[test]
+    fn raw_attachment_duplicate_null_absence_and_malformed_members_keep_roles() {
+        let repeated =
+            attachment_row(r#""attachment":{"type":"discarded"},"attachment":{"type":"last"}"#);
+        let loaded = route_lines(&repeated);
+        assert_eq!(loaded.malformed_line_count, 0);
+        assert_eq!(
+            loaded.messages_in_order[0]
+                .attachment_projection
+                .as_ref()
+                .unwrap()
+                .string_at("/type"),
+            Some("last")
+        );
+
+        let explicit_null = route_lines(&attachment_row(r#""attachment":null"#));
+        assert_eq!(explicit_null.malformed_line_count, 0);
+        assert!(explicit_null.messages_in_order[0]
+            .attachment_projection
+            .as_ref()
+            .unwrap()
+            .at_pointer("")
+            .unwrap()
+            .is_null());
+
+        let absent = route_lines(&attachment_row(""));
+        assert_eq!(absent.malformed_line_count, 0);
+        assert!(absent.messages_in_order[0].attachment_projection.is_none());
+
+        let malformed = route_lines(&attachment_row(r#""attachment":{"bad":[01]}"#));
+        assert_eq!(malformed.malformed_line_count, 1);
+        assert!(malformed.messages_in_order.is_empty());
+    }
+
+    #[test]
+    fn raw_tool_input_survives_jsonl_read_write_resume_without_recursive_value() {
+        let depth = 384usize;
+        let deep = format!("{}\"deep\"{}", "[".repeat(depth), "]".repeat(depth));
+        let message = format!(
+            r#"{{"role":"assistant","id":"22222222-2222-4222-8222-222222222222","content":[{{"type":"tool_use","id":"11111111-1111-4111-8111-111111111111","name":"Bash","input":{{"units":"\ud800","nested":{deep}}}}}]}}"#
+        );
+        let line = format!(
+            r#"{{"parentUuid":null,"isSidechain":false,"message":{message},"type":"assistant","uuid":"u-tool","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s"}}"#
+        );
+
+        let loaded = route_lines(&line);
+        assert_eq!(loaded.malformed_line_count, 0);
+        let row = &loaded.messages_in_order[0];
+        assert_eq!(
+            row.message.string_units("/content/0/input/units"),
+            Some(vec![0xd800])
+        );
+        let resumed = serde_json::from_str::<lingxi_core::types::ConversationMessage>(
+            &row.message.to_json_string().unwrap(),
+        )
+        .unwrap();
+        let lingxi_core::types::ConversationMessage::Assistant { content, .. } = resumed else {
+            panic!("expected assistant history message");
+        };
+        let lingxi_core::types::ContentBlock::ToolUse { input, .. } = &content[0] else {
+            panic!("expected tool-use block");
+        };
+        assert_eq!(input.string_units("/units"), Some(vec![0xd800]));
+        assert_eq!(
+            input
+                .at_pointer("/nested")
+                .unwrap()
+                .get_index(0)
+                .unwrap()
+                .array_len(),
+            Some(1)
+        );
+
+        let written = crate::jsonl::exact_json::native_message_bytes(row).unwrap();
+        let written = String::from_utf8(written).unwrap();
+        assert!(
+            written.contains(r#""input":{"units":"\ud800""#),
+            "{written}"
+        );
+        let reread = route_lines(&written);
+        assert_eq!(reread.malformed_line_count, 0);
+        assert_eq!(
+            reread.messages_in_order[0]
+                .message
+                .string_units("/content/0/input/units"),
+            Some(vec![0xd800])
+        );
+    }
+
+    #[test]
+    fn tool_use_result_sidecar_is_flat_raw_json_with_exact_surrogates() {
+        let depth = 384usize;
+        let deep = format!("{}\"leaf\"{}", "[".repeat(depth), "]".repeat(depth));
+        let line = format!(
+            r#"{{"parentUuid":null,"isSidechain":false,"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}}]}},"uuid":"u-result","timestamp":"2026-10-06T00:00:00.000Z","sessionId":"s","toolUseResult":{{"body":"\ud800","nested":{deep}}},"mcpMeta":{{"body":"\udfff","nested":{deep}}}}}"#
+        );
+        let loaded = route_lines(&line);
+        assert_eq!(loaded.malformed_line_count, 0);
+        let result = loaded.messages_in_order[0]
+            .tool_use_result_projection
+            .as_ref()
+            .expect("raw toolUseResult captured before Value parse");
+        assert_eq!(result.string_units("/body"), Some(vec![0xd800]));
+        assert_eq!(
+            result
+                .at_pointer("/nested")
+                .unwrap()
+                .get_index(0)
+                .unwrap()
+                .array_len(),
+            Some(1)
+        );
+        let written =
+            crate::jsonl::exact_json::native_message_bytes(&loaded.messages_in_order[0]).unwrap();
+        let written = String::from_utf8(written).unwrap();
+        assert!(
+            written.contains(r#""toolUseResult":{"body":"\ud800""#),
+            "{written}"
+        );
+        assert!(
+            written.contains(r#""mcpMeta":{"body":"\udfff""#),
+            "{written}"
+        );
+        let reread = route_lines(&written);
+        assert_eq!(reread.malformed_line_count, 0);
+        assert_eq!(
+            reread.messages_in_order[0]
+                .tool_use_result_projection
+                .as_ref()
+                .unwrap()
+                .string_units("/body"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            reread.messages_in_order[0]
+                .mcp_meta_projection
+                .as_ref()
+                .unwrap()
+                .string_units("/body"),
+            Some(vec![0xdfff])
+        );
+    }
 }

@@ -404,7 +404,7 @@ where
 mod tests {
     use super::*;
     use crate::codec::LineCodec;
-    use crate::messages::{Id, Request, Response};
+    use crate::messages::{Id, JsonPayload, Request, Response};
     use async_trait::async_trait;
     use serde_json::json;
     use std::time::Duration;
@@ -414,7 +414,11 @@ mod tests {
     #[async_trait]
     impl crate::inbound::InboundHandler for EchoHandler {
         async fn handle(&self, req: Request) -> Response {
-            Response::success(req.id, req.params.unwrap_or(json!(null)))
+            Response::success(
+                req.id,
+                req.params
+                    .unwrap_or_else(|| JsonPayload::parse("null").unwrap()),
+            )
         }
     }
 
@@ -548,7 +552,7 @@ mod tests {
 
         let req_bytes = serde_json::to_vec(&Message::Request(Request::new(
             "echo",
-            Some(json!({"x": 1})),
+            Some(JsonPayload::from_serializable(&json!({"x": 1})).unwrap()),
             Id::Number(7),
         )))
         .unwrap();
@@ -580,7 +584,7 @@ mod tests {
 
         let n_bytes = serde_json::to_vec(&Message::Notification(Notification::new(
             "evt",
-            Some(json!({"a": 1})),
+            Some(JsonPayload::from_serializable(&json!({"a": 1})).unwrap()),
         )))
         .unwrap();
         let mut bytes = BytesMut::from(&n_bytes[..]);
@@ -589,7 +593,7 @@ mod tests {
 
         let n = notif_rx.recv().await.expect("notification");
         assert_eq!(n.method, "evt");
-        assert_eq!(n.params, Some(json!({"a": 1})));
+        assert_eq!(n.params.unwrap().to_value().unwrap(), json!({"a": 1}));
     }
 
     #[tokio::test]

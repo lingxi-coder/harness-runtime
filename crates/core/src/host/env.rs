@@ -325,7 +325,7 @@ fn jem(e: &str) -> Option<f64> {
 /// the JS guards with `!v.is_nan() && v > 0.0` (or `>= 0.0`).
 #[must_use]
 pub fn parse_int_env(value: &str) -> f64 {
-    let t = value.trim();
+    let t = super::effort::trim_js_whitespace(value);
     jem(t).unwrap_or_else(|| js_parse_int_base10(t))
 }
 

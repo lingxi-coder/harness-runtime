@@ -1,27 +1,28 @@
 //! End-to-end implicit teammate activation: a real persistent worker drives
 //! model calls and client status without explicit team-management tools.
 
+use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client::adapter::test_support::MockSink;
 use client::adapter::AdapterOutputStream;
+use client::adapter::test_support::MockSink;
 use client::protocol::events::ClientEvent;
 use lingxi_core::host::filesystem::FileSystem;
 use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use lingxi_core::host::{OutputStream, RuntimeSpawner};
 use lingxi_core::types::AgentId;
 use platform_posix::{PosixFileSystem, PosixRuntime};
+use tasks::TaskType;
 use tasks::handlers::InProcessTeammateHandler;
 use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
-use tasks::TaskType;
 
 // ---------------------------------------------------------------------------
-// Scripted SubagentApiClient — one round-trip per `messages_create`, returning
+// Scripted SubagentApiClient — one round-trip per `stream(request)`, returning
 // an `end_turn` text turn so the persistent teammate finishes its first
 // turn-set cleanly and parks. The call count proves the handler actually ran a
 // real model round-trip (not a hollow `Pending` allocation).
@@ -46,28 +47,37 @@ impl ScriptedApiClient {
 
 #[async_trait]
 impl agent::api::SubagentApiClient for ScriptedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let next = self.responses.lock().unwrap().pop_front();
-        Ok(next.unwrap_or_else(|| llm_runtime::HistoryResponse {
-            id: "scripted".into(),
-            model: "scripted".into(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "done".into(),
-                cache_control: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            stop_details: None,
-            usage: llm_runtime::ExecutionUsage::default(),
-            cost: None,
-            provider_metadata: serde_json::Value::Null,
-        }))
+        _request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.responses.lock().unwrap().pop_front();
+            Ok(next.unwrap_or_else(|| llm_runtime::HistoryResponse {
+                id: "scripted".into(),
+                model: "scripted".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: llm_runtime::JsonPayload::default(),
+                resumable: None,
+            }))
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
@@ -607,18 +617,20 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     );
     assert_eq!(std::fs::read(&task_path).unwrap(), task_before);
     let initial = mailbox.drain();
-    assert!(initial
-        .iter()
-        .any(
-            |message| serde_json::from_str::<serde_json::Value>(&message.content)
-                .is_ok_and(|value| value["type"] == "shutdown_approved")
-        ));
-    assert!(!initial
-        .iter()
-        .any(
-            |message| serde_json::from_str::<serde_json::Value>(&message.content)
-                .is_ok_and(|value| value["type"] == "teammate_terminated")
-        ));
+    assert!(initial.iter().any(|message| {
+        message
+            .content
+            .string_at("")
+            .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
+            .is_some_and(|frame| frame.string_at("/type") == Some("shutdown_approved"))
+    }));
+    assert!(!initial.iter().any(|message| {
+        message
+            .content
+            .string_at("")
+            .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
+            .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated"))
+    }));
     std::fs::remove_dir(&config_path).unwrap();
     std::fs::write(&config_path, config_before).unwrap();
 
@@ -641,11 +653,13 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     );
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    assert!(!config["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|member| member["name"] == "alpha"));
+    assert!(
+        !config["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member["name"] == "alpha")
+    );
     let task: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&task_path).unwrap()).unwrap();
     assert!(task.get("owner").is_none());
@@ -655,8 +669,11 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         completed
             .iter()
             .filter(
-                |message| serde_json::from_str::<serde_json::Value>(&message.content)
-                    .is_ok_and(|value| value["type"] == "teammate_terminated")
+                |message| message
+                    .content
+                    .string_at("")
+                    .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
+                    .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated"))
             )
             .count(),
         1
@@ -670,8 +687,10 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         )
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("is not running (status: killed)"));
+    assert!(
+        error
+            .to_string()
+            .contains("is not running (status: killed)")
+    );
     assert!(mailbox.drain().is_empty());
 }

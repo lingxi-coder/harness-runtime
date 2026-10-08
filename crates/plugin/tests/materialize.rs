@@ -22,6 +22,7 @@ use lingxi_core::host::{
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use lsp::LspRegistry;
 use mcp::{McpConnectionState, McpRegistry, McpServerRole};
@@ -172,14 +173,15 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
         // Plugin commands are namespaced `{plugin}:{name}` — `getCommandNameFromFile`
         // (`loadPluginCommands.ts:60-97`) always prefixes `${pluginName}:`.
         let cmd = reg
-            .resolve("myplugin:hello")
+            .resolve(&"myplugin:hello".into())
             .expect("plugin command `myplugin:hello` should be registered");
         assert_eq!(cmd.source, command_api::CommandSource::Plugin);
         // Verification fix #2: the command body + frontmatter must be loaded
         // from the markdown file — NOT empty. An empty prompt_template expands
         // to an inert prompt (expand.rs:74 substitutes over prompt_template).
         assert_eq!(
-            cmd.description, "greets the world",
+            cmd.description.string_at(""),
+            Some("greets the world"),
             "frontmatter description loaded from the command file"
         );
         match &cmd.kind {
@@ -203,6 +205,443 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
         assert!(all[0]
             .events
             .contains(&hooks::events::HookEventType::PreToolUse));
+    }
+}
+
+#[tokio::test]
+async fn enable_and_disable_materialize_and_remove_mod_handlers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().join("mod-plugin");
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin/plugin.json"),
+        r#"{"name":"mod-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join("hooks/hooks.json"),
+        r#"{"modules":["./register.js"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join("hooks/register.js"),
+        r#"
+      export function register(on) {
+        on('tool.call', { tool: 'Bash' }, () => ({ deny: 'blocked by plugin' }));
+      }
+    "#,
+    )
+    .unwrap();
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials.clone(),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry.clone(),
+        Arc::new(RwLock::new(SkillRegistry::new())),
+        hook_registry.clone(),
+        Arc::new(RwLock::new(OutputStyleRegistry::new())),
+        Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+        Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+        Arc::new(RwLock::new(ToolRegistry::new())),
+    );
+    let (id, manifest, dir) = plugin::discover_installed_plugins(tmp.path())
+        .await
+        .remove(0);
+    manager.enable(&id, manifest, dir).await.unwrap();
+    let host = hook_registry
+        .read()
+        .await
+        .mod_host()
+        .expect("Mod host registered");
+    let result = host
+        .dispatch(
+            "tool.call",
+            serde_json::json!({"tool":"Bash","command":"ls"}),
+            |_| async { Ok(serde_json::json!({"result":"core"})) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, serde_json::json!({"deny":"blocked by plugin"}));
+
+    manager.disable(&id).await.unwrap();
+    assert!(hook_registry.read().await.mod_host().is_none());
+    let result = host
+        .dispatch(
+            "tool.call",
+            serde_json::json!({"tool":"Bash","command":"ls"}),
+            |_| async { Ok(serde_json::json!({"result":"core"})) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, serde_json::json!({"result":"core"}));
+
+    for (trusted, mods_enabled) in [(false, true), (true, false)] {
+        let gated_hooks = Arc::new(RwLock::new(HookRegistry::new()));
+        let gated_manager = PluginManager::new(
+            tmp.path().to_path_buf(),
+            Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials.clone(),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            gated_hooks.clone(),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_workspace_trusted(trusted)
+        .with_mods_enabled(mods_enabled);
+        let (id, manifest, dir) = plugin::discover_installed_plugins(tmp.path())
+            .await
+            .remove(0);
+        gated_manager.enable(&id, manifest, dir).await.unwrap();
+        assert!(gated_hooks.read().await.mod_host().is_none());
+    }
+}
+
+#[tokio::test]
+async fn plugin_register_refusal_prevents_module_evaluation_and_command_materialization() {
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["guard", "target"] {
+        let dir = tmp.path().join(name);
+        fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
+        fs::create_dir_all(dir.join("hooks")).unwrap();
+        fs::write(
+            dir.join(".lingxi-plugin/plugin.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("hooks/hooks.json"),
+            r#"{"modules":["./register.js"]}"#,
+        )
+        .unwrap();
+    }
+    fs::write(
+        tmp.path().join("guard/hooks/register.js"),
+        r#"
+      export function register(on) {
+        on('plugin.register', { name: 'target' }, ($, e, next) => {
+          if (Object.keys(e).join(',') !== 'name,tier,root,version,provenance,uses' ||
+              e.provenance !== 'target@inline' || e.tier !== 'user' ||
+              e.uses.events[0] !== 'tool.call' ||
+              JSON.stringify(e.uses.calls) !== JSON.stringify(['fs.read'])) {
+            return { refuse: 'candidate scan was wrong' };
+          }
+          return { refuse: 'blocked by guard' };
+        });
+      }
+    "#,
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("target/hooks/register.js"),
+        r#"
+      async function readTarget($) { return $.fs.read('README.md'); }
+      function unusedTarget($) { return $.tool.list(); }
+      throw new Error('candidate was evaluated before policy');
+      export function register(on) {
+        on('tool.call', async ($, e, next) => { await readTarget($); return next(e); });
+      }
+    "#,
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("target/commands")).unwrap();
+    fs::write(
+        tmp.path().join("target/commands/hello.md"),
+        "---\ndescription: hello\n---\nHello",
+    )
+    .unwrap();
+
+    let commands = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hooks = Arc::new(RwLock::new(HookRegistry::new()));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        commands.clone(),
+        Arc::new(RwLock::new(SkillRegistry::new())),
+        hooks,
+        Arc::new(RwLock::new(OutputStyleRegistry::new())),
+        Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+        Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+        Arc::new(RwLock::new(ToolRegistry::new())),
+    );
+    let (guard_id, guard_manifest, guard_dir) =
+        plugin::discover_cli_plugin_dirs(&[tmp.path().join("guard")])
+            .await
+            .remove(0);
+    manager
+        .enable(&guard_id, guard_manifest, guard_dir)
+        .await
+        .unwrap();
+    let (target_id, target_manifest, target_dir) =
+        plugin::discover_cli_plugin_dirs(&[tmp.path().join("target")])
+            .await
+            .remove(0);
+    let error = manager
+        .enable(&target_id, target_manifest, target_dir)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("blocked by guard"), "{error}");
+    assert!(commands
+        .read()
+        .await
+        .resolve(&"target:hello".into())
+        .is_none());
+    assert!(manager.plugin_state(&target_id).await.is_none());
+
+    let invalid_modules = [
+        (
+            "dynamic-event",
+            r#"export function register(on) {
+              on(EVENT, ($, e, next) => next(e));
+            }"#,
+            "event name passed to on() is not a string literal",
+        ),
+        (
+            "computed-method",
+            r#"export function register(on) {
+              on('tool.call', ($, e, next) => $.fs[name]('README.md'));
+            }"#,
+            "$.fs is used as a value",
+        ),
+        (
+            "namespace-alias",
+            r#"export function register(on) {
+              on('tool.call', ($, e, next) => {
+                const fs = $.fs;
+                return next(e);
+              });
+            }"#,
+            "$.fs is used as a value",
+        ),
+    ];
+    for (case, module_source, expected_error) in invalid_modules {
+        let plugin_dir = tmp.path().join("target");
+        fs::write(
+            plugin_dir.join("hooks/register.js"),
+            format!("throw new Error('candidate was evaluated');\n{module_source}"),
+        )
+        .unwrap();
+
+        let mut discovered =
+            plugin::discover_cli_plugin_dirs(std::slice::from_ref(&plugin_dir)).await;
+        assert_eq!(
+            discovered.len(),
+            1,
+            "target fixture for {case} was not discovered at {}",
+            plugin_dir.display()
+        );
+        let (id, manifest, dir) = discovered.remove(0);
+        let error = manager.enable(&id, manifest, dir).await.unwrap_err();
+        assert!(
+            error.to_string().contains(expected_error),
+            "{case}: {error}"
+        );
+        assert!(commands
+            .read()
+            .await
+            .resolve(&"target:hello".into())
+            .is_none());
+        assert!(manager.plugin_state(&id).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn managed_plugin_register_policy_refuses_declarative_user_plugin() {
+    struct ManagedPolicySession(PathBuf);
+    #[async_trait]
+    impl hooks::mods::ModSessionContext for ManagedPolicySession {
+        fn cwd(&self) -> PathBuf {
+            self.0.clone()
+        }
+        fn root(&self) -> PathBuf {
+            self.0.clone()
+        }
+        async fn model(&self) -> String {
+            "test".into()
+        }
+        async fn id(&self) -> String {
+            "policy-test".into()
+        }
+        async fn turns(&self) -> u64 {
+            0
+        }
+        async fn settings_read(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, hooks::mods::ModError> {
+            Ok(
+                serde_json::json!({"pluginConfigs":{"cc-plugin-sec-default@builtin":{
+                    "options":{"allowManagedModsOnly":true}
+                }}}),
+            )
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture_plugin(tmp.path(), "candidate");
+    let commands = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hooks = Arc::new(RwLock::new(HookRegistry::new()));
+    let session: Arc<dyn hooks::mods::ModSessionContext> =
+        Arc::new(ManagedPolicySession(tmp.path().to_path_buf()));
+    hooks
+        .write()
+        .await
+        .attach_mod_background_context(Arc::downgrade(&session));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        commands.clone(),
+        Arc::new(RwLock::new(SkillRegistry::new())),
+        hooks,
+        Arc::new(RwLock::new(OutputStyleRegistry::new())),
+        Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+        Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+        Arc::new(RwLock::new(ToolRegistry::new())),
+    )
+    .with_sec_default_order(Some(-1));
+    let (id, manifest, dir) = plugin::discover_cli_plugin_dirs(&[tmp.path().join("candidate")])
+        .await
+        .remove(0);
+    let error = manager.enable(&id, manifest, dir).await.unwrap_err();
+    assert!(
+        error.to_string().contains("allowManagedModsOnly"),
+        "{error}"
+    );
+    assert!(commands
+        .read()
+        .await
+        .resolve(&"myplugin:hello".into())
+        .is_none());
+    assert!(manager.plugin_state(&id).await.is_none());
+}
+
+#[tokio::test]
+async fn managed_mod_seat_survives_managed_only_but_not_disable_all() {
+    use plugin::manager::ManagedModSeats;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().join("cache/org/guard/1.0.0");
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin/plugin.json"),
+        r#"{"name":"guard","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join("hooks/hooks.json"),
+        r#"{"modules":["./register.js"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join("hooks/register.js"),
+        r#"
+      export function register(on) {
+        on('tool.call', ($, e, next) => next.to(e, 'core'));
+      }
+    "#,
+    )
+    .unwrap();
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    for (managed_enabled, disable_all, expected_loaded) in [
+        (true, false, true),
+        (false, false, false),
+        (true, true, false),
+    ] {
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        let seats = ManagedModSeats {
+            enabled: if managed_enabled {
+                ["guard@org".to_string()].into_iter().collect()
+            } else {
+                Default::default()
+            },
+            prepend: vec!["guard@org".into()],
+            append: Vec::new(),
+        };
+        let manager = PluginManager::new(
+            tmp.path().to_path_buf(),
+            Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials.clone(),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            hook_registry.clone(),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_managed_mod_seats(seats)
+        .with_mod_hook_policy(disable_all, true);
+        let (id, manifest, dir) =
+            plugin::discover_cli_plugin_dirs(std::slice::from_ref(&plugin_dir))
+                .await
+                .remove(0);
+        manager.enable(&id, manifest, dir).await.unwrap();
+        let host = hook_registry.read().await.mod_host();
+        assert_eq!(host.is_some(), expected_loaded);
+        if let Some(host) = host {
+            let result = host
+                .dispatch("tool.call", serde_json::json!({"tool":"Bash"}), |_| async {
+                    Ok(serde_json::json!({"result":"core"}))
+                })
+                .await
+                .unwrap();
+            assert_eq!(result, serde_json::json!({"result":"core"}));
+        }
     }
 }
 
@@ -257,7 +696,7 @@ async fn install_local_path_arm_materializes_and_returns_id() {
     // (namespaced `{plugin}:{name}` per `getCommandNameFromFile`).
     let reg = command_registry.read().await;
     assert!(
-        reg.resolve("myplugin:hello").is_some(),
+        reg.resolve(&"myplugin:hello".into()).is_some(),
         "namespaced command registered via install"
     );
     drop(reg);
@@ -400,6 +839,14 @@ async fn enable_single_agent_plugin(
         })
         .clone();
     drop(catalog);
+    assert_eq!(
+        def.offer_provider,
+        Some(serde_json::json!({
+            "plugin": format!("{plugin}@inline"),
+            "tier": "user"
+        })),
+        "agent offer provenance matches command.describe's installed identity and seat"
+    );
     (raw, def)
 }
 
@@ -558,7 +1005,11 @@ async fn escalating_agent_does_not_suppress_the_plugins_other_components() {
         .expect("an escalating agent must not take the whole plugin load down");
 
     assert!(
-        command_registry.read().await.resolve("mixed:ok").is_some(),
+        command_registry
+            .read()
+            .await
+            .resolve(&"mixed:ok".into())
+            .is_some(),
         "the plugin's valid command must still be registered"
     );
     assert_eq!(
@@ -666,7 +1117,7 @@ async fn failed_precondition_leaves_no_orphan_command_registered() {
         command_registry
             .read()
             .await
-            .resolve("needsconfig:ok")
+            .resolve(&"needsconfig:ok".into())
             .is_none(),
         "a refused plugin must not leave its command registered (all-or-nothing)"
     );
@@ -779,6 +1230,7 @@ impl McpTransport for RoleMcpTransport {
     ) -> Result<ServerCapabilitiesDto, McpError> {
         Ok(ServerCapabilitiesDto {
             tools: true,
+            prompts: true,
             ..ServerCapabilitiesDto::default()
         })
     }
@@ -814,7 +1266,11 @@ impl McpTransport for RoleMcpTransport {
         &self,
         _connection: &McpRawConnection,
     ) -> Result<Vec<McpPromptDto>, McpError> {
-        Ok(Vec::new())
+        Ok(vec![McpPromptDto {
+            name: "draft".into(),
+            description: Some("Draft a message".into()),
+            arguments: Vec::new(),
+        }])
     }
 
     async fn call_tool(
@@ -891,7 +1347,7 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         Arc::new(PosixRuntime::new()),
         credentials,
         Arc::new(StrictPluginOnlyPolicy::empty()),
-        command_registry,
+        command_registry.clone(),
         skill_registry.clone(),
         hook_registry,
         output_style_registry.clone(),
@@ -1095,7 +1551,7 @@ async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
         Arc::new(PosixRuntime::new()),
         credentials,
         Arc::new(StrictPluginOnlyPolicy::empty()),
-        command_registry,
+        command_registry.clone(),
         skill_registry,
         hook_registry,
         output_style_registry,
@@ -1111,6 +1567,17 @@ async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
         .await
         .expect("role plugin should materialize and connect");
     let scoped_name = "plugin:roleplugin:echo";
+    let prompt_name = format!("{scoped_name}:draft");
+    {
+        let commands = command_registry.read().await;
+        let prompt = commands
+            .resolve(&Utf16JsonProjection::from(prompt_name.as_str()))
+            .expect("connected plugin MCP prompt enters the slash catalog");
+        assert_eq!(prompt.description.string_at(""), Some("Draft a message"));
+        let provider = commands.mod_describe_provider(prompt);
+        assert_eq!(provider.string_at("/plugin"), Some("roleplugin@inline"));
+        assert_eq!(provider.string_at("/tier"), Some("user"));
+    }
     let connected = {
         let conns = mcp_registry.connections.read().await;
         let state = conns
@@ -1177,6 +1644,7 @@ async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
                 prompts,
                 ..
             } => McpConnectionState::Cached {
+                server_info: None,
                 config,
                 connection_id,
                 capabilities,
@@ -1204,6 +1672,12 @@ async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
         .find(|tool| tool.name().ends_with("__send"))
         .expect("cached plugin MCP tool should be rebuilt");
     assert_eq!(cached_tool.mcp_role(), Some("comms"));
+    manager.disable(&id).await.expect("disable role plugin");
+    assert!(command_registry
+        .read()
+        .await
+        .resolve(&Utf16JsonProjection::from(prompt_name.as_str()))
+        .is_none());
 }
 
 /// A manifest declaring `workflows` as a single `.js` file with its own
@@ -1556,18 +2030,19 @@ async fn enable_arms_plugin_monitors_through_the_shared_task_registry() {
     {
         let monitors = task_registry.monitors.lock().expect("monitor lock");
         assert_eq!(monitors.len(), 1, "only the always monitor arms at enable");
-        assert_eq!(monitors[0].description, "watch now");
+        assert_eq!(monitors[0].description.string_at(""), Some("watch now"));
+        let expected_command = format!(
+            "export CLAUDE_PLUGIN_ROOT='{}' {lingxi_plugin_root}='{}' CLAUDE_PROJECT_DIR='{}' {lingxi_project_dir}='{}'; echo ${{{lingxi_plugin_root}}}",
+            dir.display(),
+            dir.display(),
+            tmp.path().display(),
+            tmp.path().display(),
+            lingxi_plugin_root = branding::PLUGIN_ROOT_ENV,
+            lingxi_project_dir = branding::PROJECT_DIR_ENV,
+        );
         assert_eq!(
-            monitors[0].command,
-            format!(
-                "export CLAUDE_PLUGIN_ROOT='{}' {lingxi_plugin_root}='{}' CLAUDE_PROJECT_DIR='{}' {lingxi_project_dir}='{}'; echo ${{{lingxi_plugin_root}}}",
-                dir.display(),
-                dir.display(),
-                tmp.path().display(),
-                tmp.path().display(),
-                lingxi_plugin_root = branding::PLUGIN_ROOT_ENV,
-                lingxi_project_dir = branding::PROJECT_DIR_ENV,
-            ),
+            monitors[0].command.string_at(""),
+            Some(expected_command.as_str()),
             "plugin variables are shell-quoted without rewriting plugin syntax"
         );
         assert_eq!(
@@ -1579,17 +2054,23 @@ async fn enable_arms_plugin_monitors_through_the_shared_task_registry() {
     }
 
     assert!(
-        manager.activate_skill_monitors("other").await.is_empty(),
+        manager
+            .activate_skill_monitors(&"other".into())
+            .await
+            .is_empty(),
         "a different skill must not arm an on-skill-invoke monitor"
     );
     assert_eq!(
         manager
-            .activate_skill_monitors("monitor-plugin:deploy")
+            .activate_skill_monitors(&"monitor-plugin:deploy".into())
             .await,
         vec!["monitor-2".to_string()]
     );
     assert!(
-        manager.activate_skill_monitors("deploy").await.is_empty(),
+        manager
+            .activate_skill_monitors(&"deploy".into())
+            .await
+            .is_empty(),
         "the armed-monitor key prevents duplicate activation"
     );
     assert_eq!(
@@ -1635,7 +2116,7 @@ async fn reload_retains_plugin_monitors_for_the_session_and_dedupes_stable_keys(
         .await
         .expect("enable v1");
     assert_eq!(
-        manager.activate_skill_monitors("deploy").await,
+        manager.activate_skill_monitors(&"deploy".into()).await,
         vec!["monitor-2".to_string()],
         "the on-skill monitor arms once"
     );
@@ -1650,7 +2131,10 @@ async fn reload_retains_plugin_monitors_for_the_session_and_dedupes_stable_keys(
         .await
         .expect("enable v2");
     assert!(
-        manager.activate_skill_monitors("deploy").await.is_empty(),
+        manager
+            .activate_skill_monitors(&"deploy".into())
+            .await
+            .is_empty(),
         "reload keeps the stable monitor key armed"
     );
 
@@ -1661,15 +2145,17 @@ async fn reload_retains_plugin_monitors_for_the_session_and_dedupes_stable_keys(
         "reload does not restart session-owned monitors"
     );
     assert!(
-        monitors
-            .iter()
-            .all(|monitor| monitor.command.contains(dir_v1.to_string_lossy().as_ref())),
+        monitors.iter().all(|monitor| monitor
+            .command
+            .string_at("")
+            .is_some_and(|command| command.contains(dir_v1.to_string_lossy().as_ref()))),
         "retained commands remain bound to the original install directory"
     );
     assert!(
-        monitors
-            .iter()
-            .all(|monitor| !monitor.command.contains(dir_v2.to_string_lossy().as_ref())),
+        monitors.iter().all(|monitor| monitor
+            .command
+            .string_at("")
+            .is_some_and(|command| !command.contains(dir_v2.to_string_lossy().as_ref()))),
         "reload does not spawn replacement commands"
     );
 }

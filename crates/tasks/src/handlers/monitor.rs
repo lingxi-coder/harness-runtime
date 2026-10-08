@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use lingxi_core::host::{
     BackgroundTaskHandle, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mobile_linux_api::{ProcessError, ProcessStreamSink};
 
 use std::collections::HashMap;
@@ -50,9 +51,9 @@ const TRUNCATION_SUFFIX: &str = "...(truncated)";
 /// U+2014 EM DASH with one ASCII space either side.
 const TIMEOUT_MARKER: &str = "[Monitor timed out \u{2014} re-arm if needed.]";
 
-/// 2.1.270 `Az()`: bounded Monitor rollout, independently gated from availability.
+/// 2.1.286 `l7()`: bounded Monitor rollout, enabled by default.
 pub fn bounded_monitors_enabled() -> bool {
-    telemetry::flag_bool("tengu_breezy_crescent", false)
+    telemetry::flag_bool("tengu_breezy_crescent", true)
 }
 
 /// 2.1.270 `Vye()`: ten minutes for single-shot print, thirty otherwise.
@@ -72,6 +73,15 @@ pub fn monitor_duration(ms: u64) -> String {
         parts.pop();
     }
     parts.join(" ")
+}
+
+/// Apply Native `TextEncoder` semantics at the OS process-command boundary.
+/// Source monitor input remains a UJP everywhere before this helper.
+fn process_command_text(source: &Utf16JsonProjection) -> String {
+    let units = source
+        .string_units("")
+        .expect("monitor command is a root-string projection");
+    String::from_utf16_lossy(&units)
 }
 
 fn timeout_notice(timeout_ms: u64, events: usize, bounded: bool) -> String {
@@ -277,18 +287,30 @@ impl MonitorStreamSink {
                 // Two separate notifications, housekeeping notice FIRST.
                 if let Some(notice) = notice {
                     self.status_sink
-                        .notify_monitor_event(&self.task_id, &notice, true)
+                        .notify_monitor_event(
+                            &self.task_id,
+                            Utf16JsonProjection::from(notice.as_str()),
+                            true,
+                        )
                         .await;
                 }
                 self.status_sink
-                    .notify_monitor_event(&self.task_id, &event, false)
+                    .notify_monitor_event(
+                        &self.task_id,
+                        Utf16JsonProjection::from(event.as_str()),
+                        false,
+                    )
                     .await;
             }
             // High-volume auto-stop: deliver the stop message to the model FIRST,
             // then cancel — the terminal status becomes Killed (epilogue).
             FlushOutcome::Stop(event) => {
                 self.status_sink
-                    .notify_monitor_event(&self.task_id, &event, false)
+                    .notify_monitor_event(
+                        &self.task_id,
+                        Utf16JsonProjection::from(event.as_str()),
+                        false,
+                    )
                     .await;
                 self.cancel.cancel();
             }
@@ -478,7 +500,11 @@ impl MonitorHandler {
                     // list lives until the end of the statement, i.e. across the
                     // `notify_monitor_event` await, blocking the flush worker.
                     let delivered = sink.batch.lock().await.delivered;
-                    status.notify_monitor_event(&worker_id, &timeout_notice(reg.task.timeout_ms, delivered, bounded), true).await;
+                    status.notify_monitor_event(
+                        &worker_id,
+                        Utf16JsonProjection::from(timeout_notice(reg.task.timeout_ms, delivered, bounded).as_str()),
+                        true,
+                    ).await;
                     None
                 },
                 result = source.http.monitor_websocket(reg.url, reg.protocols) => Some(result),
@@ -492,9 +518,19 @@ impl MonitorHandler {
                             }
                             other => format!("[WebSocket error: {other}]"),
                         };
-                        status.notify_monitor_event(&worker_id, &event, true).await;
                         status
-                            .notify_monitor_event(&worker_id, "[WebSocket closed: 1006]", true)
+                            .notify_monitor_event(
+                                &worker_id,
+                                Utf16JsonProjection::from(event.as_str()),
+                                true,
+                            )
+                            .await;
+                        status
+                            .notify_monitor_event(
+                                &worker_id,
+                                "[WebSocket closed: 1006]".into(),
+                                true,
+                            )
                             .await;
                     }
                     Ok(mut socket) => {
@@ -507,7 +543,11 @@ impl MonitorHandler {
                                     if bounded { sink.flush().await; }
                                     if worker_cancel.is_cancelled() { break; }
                                     let delivered = sink.batch.lock().await.delivered;
-                                    status.notify_monitor_event(&worker_id, &timeout_notice(reg.task.timeout_ms, delivered, bounded), true).await;
+                                    status.notify_monitor_event(
+                                        &worker_id,
+                                        Utf16JsonProjection::from(timeout_notice(reg.task.timeout_ms, delivered, bounded).as_str()),
+                                        true,
+                                    ).await;
                                     break;
                                 },
                                 _ = flush.tick() => sink.flush().await,
@@ -516,7 +556,7 @@ impl MonitorHandler {
                                         let _ = sink.stdout_line(text).await;
                                     },
                                     Some(Ok(MonitorWebSocketFrame::Oversized(size))) => {
-                                        status.notify_monitor_event(&worker_id, &format!("[Dropped {size}-byte frame (exceeds 1048576); closing]"), true).await;
+                                        status.notify_monitor_event(&worker_id, format!("[Dropped {size}-byte frame (exceeds 1048576); closing]").into(), true).await;
                                         break;
                                     },
                                     Some(Ok(MonitorWebSocketFrame::Binary(size))) => {
@@ -525,12 +565,12 @@ impl MonitorHandler {
                                     Some(Ok(MonitorWebSocketFrame::Closed(code, reason))) => {
                                         sink.flush().await;
                                         let reason = if reason.is_empty() { reason } else { format!(" {reason}") };
-                                        status.notify_monitor_event(&worker_id, &format!("[WebSocket closed: {code}{reason}]"), true).await;
+                                        status.notify_monitor_event(&worker_id, format!("[WebSocket closed: {code}{reason}]").into(), true).await;
                                         break;
                                     },
                                     Some(Err(error)) => {
-                                        status.notify_monitor_event(&worker_id, &format!("[WebSocket error: {error}]"), true).await;
-                                        status.notify_monitor_event(&worker_id, "[WebSocket closed: 1006]", true).await;
+                                        status.notify_monitor_event(&worker_id, format!("[WebSocket error: {error}]").into(), true).await;
+                                        status.notify_monitor_event(&worker_id, "[WebSocket closed: 1006]".into(), true).await;
                                         break;
                                     },
                                     None => break,
@@ -593,6 +633,7 @@ impl Task for MonitorHandler {
         }
         let TaskSpawnInput::Monitor {
             command,
+            source_description: _,
             spawn_command,
             timeout,
             cwd,
@@ -626,7 +667,12 @@ impl Task for MonitorHandler {
         // confinement already lives in the string, exactly as it does on the
         // Bash tool's sandboxed path.
         let confined = spawn_command.is_some();
-        let to_spawn = spawn_command.unwrap_or(command);
+        // Native constructs the final shell argv from a JS string with
+        // `TextEncoder`, which replaces lone UTF-16 surrogates with U+FFFD.
+        // Keep the source projection in task state/notifications and perform
+        // this encoding only at the process-command boundary.
+        let command_for_os = process_command_text(&command);
+        let to_spawn = spawn_command.unwrap_or(command_for_os);
         let sandboxed = self.sandbox.bypass_with_audit(
             ProcessCommand {
                 command: "bash".into(),
@@ -746,7 +792,7 @@ impl Task for MonitorHandler {
                 status_sink
                     .notify_monitor_event(
                         &worker_id,
-                        &timeout_notice(timeout_ms, delivered, bounded),
+                        timeout_notice(timeout_ms, delivered, bounded).into(),
                         true,
                     )
                     .await;
@@ -840,6 +886,16 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
+
+    #[test]
+    fn process_command_text_uses_native_text_encoder_surrogate_replacement() {
+        let units = vec![b'a' as u16, 0xd800, b'b' as u16];
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        assert_eq!(process_command_text(&source), "a\u{fffd}b");
+        assert_eq!(source.string_units(""), Some(units));
+    }
 
     // ── Pure token-bucket / suppression / high-volume-stop logic ────────────
 
@@ -1297,8 +1353,16 @@ mod tests {
         async fn set_status(&self, _task_id: &str, status: TaskStatus) {
             self.statuses.lock().unwrap().push(status);
         }
-        async fn notify_monitor_event(&self, _task_id: &str, event: &str, _housekeeping: bool) {
-            self.events.lock().unwrap().push(event.to_string());
+        async fn notify_monitor_event(
+            &self,
+            _task_id: &str,
+            event: Utf16JsonProjection,
+            _housekeeping: bool,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(event.string_at("").unwrap_or_default().to_owned());
         }
     }
     impl RecordingSink {
@@ -1420,6 +1484,7 @@ mod tests {
     fn monitor_input() -> TaskSpawnInput {
         TaskSpawnInput::Monitor {
             command: "echo hi".into(),
+            source_description: "monitor".into(),
             spawn_command: None,
             timeout: None,
             cwd: None,
@@ -1644,7 +1709,7 @@ mod tests {
         }
         handler.spawn(input, ctx).await.unwrap();
         assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
-        assert_eq!(sink.events(), vec![TIMEOUT_MARKER.to_string()]);
+        assert_eq!(sink.events(), vec![timeout_notice(300_000, 0, true)]);
     }
     #[test]
     fn high_volume_stop_requires_more_than_thirty_seconds() {

@@ -1,6 +1,7 @@
 //! Polymorphic task state — one variant per [`TaskType`](crate::id::TaskType).
 
 use crate::id::TaskType;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -40,8 +41,9 @@ pub struct TaskStateBase {
     pub task_type: TaskType,
     /// Current status.
     pub status: TaskStatus,
-    /// Human-readable description (shown in UI).
-    pub description: String,
+    /// Exact task description returned by TaskList and agent facts.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     /// Originating `tool_use_id` if launched from a tool call.
     pub tool_use_id: Option<String>,
     /// Wall-clock start time.
@@ -131,6 +133,46 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    pub(crate) fn handback(&self) -> Option<&lingxi_core::host::handback::HandbackState> {
+        match self {
+            Self::LocalAgent(agent) => agent.handback.as_ref(),
+            Self::InProcessTeammate(agent) => agent.handback.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn handback_slot(
+        &mut self,
+    ) -> Option<&mut Option<lingxi_core::host::handback::HandbackState>> {
+        match self {
+            Self::LocalAgent(agent) => Some(&mut agent.handback),
+            Self::InProcessTeammate(agent) => Some(&mut agent.handback),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn archive_handback(
+        &mut self,
+        previous: lingxi_core::host::handback::HandbackState,
+    ) {
+        if previous.report.is_none() && previous.receipt.is_none() {
+            return;
+        }
+        match self {
+            Self::LocalAgent(agent) => agent.handback_history.push(previous),
+            Self::InProcessTeammate(agent) => agent.handback_history.push(previous),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handback_history(&self) -> &[lingxi_core::host::handback::HandbackState] {
+        match self {
+            Self::LocalAgent(agent) => &agent.handback_history,
+            Self::InProcessTeammate(agent) => &agent.handback_history,
+            _ => &[],
+        }
+    }
+
     /// Whether a completed local-agent turn retains a resumable runner.
     #[must_use]
     pub fn is_parked(&self) -> bool {
@@ -198,6 +240,9 @@ pub struct LocalBashTaskState {
     pub pid: Option<u32>,
     /// Exit code once terminated.
     pub exit_code: Option<i32>,
+    /// Why an automatic lifetime guard stopped this shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_cause: Option<String>,
     /// Directory the command was launched in (claude-code stores `cwd: Q()` on
     /// the `local_bash` record, 2.1.263 `Xne`). `#[serde(default)]` so records
     /// written before the field existed still parse.
@@ -215,6 +260,30 @@ pub struct LocalBashTaskState {
 /// State specific to an in-process agent task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAgentTaskState {
+    /// Trusted plugin source captured at admission, independent of any
+    /// rewritten spawn JSON.
+    #[serde(default)]
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    /// Direct Native list lifecycle facts reported by the runner/task registry.
+    /// Missing fields remain unknown and are never derived from parked/status.
+    #[serde(skip)]
+    pub agent_list_lifecycle: lingxi_core::host::task_registry::AgentListLocalLifecycleFacts,
+    /// Spawn-time description used by the agent-list identity projection.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub spawned_description: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Dynamic report state belongs to the current run, independently of the
+    /// frozen launch request and immutable creator ancestry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<lingxi_core::host::handback::HandbackState>,
+    /// Prior admitted reports remain available after the next run resets its
+    /// allowance. These snapshots contain sanitized text only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handback_history: Vec<lingxi_core::host::handback::HandbackState>,
     /// The turn has completed while the persistent runner remains resumable.
     /// Separate from task status so parked agents are not counted as active work.
     #[serde(default)]
@@ -240,7 +309,8 @@ pub struct LocalAgentTaskState {
     #[serde(default)]
     pub subagent_type: String,
     /// Initial prompt.
-    pub prompt: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
     /// Error message if the agent failed.
     pub error: Option<String>,
     /// Accumulated conversation messages.
@@ -256,8 +326,13 @@ pub struct LocalAgentTaskState {
     /// half of the identity a resume corroborates against the on-disk scoping
     /// record (`session::forked_skill`). `#[serde(default)]` so pre-field rows
     /// still parse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_skill_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub forked_skill_name: Option<Utf16JsonProjection>,
     /// What the run reported when it terminated — final text, usage, and the
     /// kept-worktree coordinates — plus `killed_by` once a stop names its
     /// initiator. Populated by
@@ -287,8 +362,13 @@ pub struct AgentOutcomeState {
     pub effort: Option<String>,
 
     /// Final text response → the notification's `<result>` section.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result: Option<Utf16JsonProjection>,
     /// Run usage → the `<usage>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
@@ -314,11 +394,19 @@ pub struct AgentOutcomeState {
 }
 
 impl AgentOutcomeState {
+    /// Start a fresh turn-set while preserving immutable launch/display data.
+    pub fn reset_run(&mut self) {
+        self.result = None;
+        self.usage = None;
+        self.killed_by = None;
+        self.max_turns_reached = None;
+    }
     /// Merge a terminating run's report in. A `Some` field overwrites; a `None`
     /// leaves the stored value alone, so a later partial report (e.g. a kill
     /// that only carries a worktree) never erases an earlier result.
     pub fn merge(&mut self, incoming: lingxi_core::host::task_registry::AgentTerminalOutcome) {
         let lingxi_core::host::task_registry::AgentTerminalOutcome {
+            handback: _,
             result,
             usage,
             error: _,
@@ -367,6 +455,32 @@ pub struct RemoteAgentTaskState {
 /// State specific to an in-process teammate task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InProcessTeammateTaskState {
+    /// Concrete model route captured from the final admitted SubagentContext.
+    /// Host-only; never persist a provider route as task wire data.
+    #[serde(skip)]
+    pub child_model: Option<String>,
+    /// Explicitly resolved profile for `child_model`, when unambiguous.
+    /// Host-only and omitted from serialized state.
+    #[serde(skip)]
+    pub child_model_profile: Option<String>,
+    /// Trusted plugin source captured at admission, independent of any
+    /// rewritten spawn JSON.
+    #[serde(default)]
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    /// Spawn-time agent type and description, when the caller supplied them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_agent_type: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub spawned_description: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<lingxi_core::host::handback::HandbackState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handback_history: Vec<lingxi_core::host::handback::HandbackState>,
     /// The persistent runner has finished its turn-set and is awaiting work.
     #[serde(default)]
     pub is_idle: bool,
@@ -500,8 +614,13 @@ pub struct MonitorTaskState {
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
-    /// Shell command being monitored.
-    pub command: String,
+    /// Exact source shell command, used by model-facing TaskStop/TaskList data.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub command: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Exact source description repeated in model-facing notifications. The
+    /// shared base retains only the task-row display string.
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub source_description: lingxi_core::types::utf16_json::Utf16JsonProjection,
     /// Exit code once the command terminates.
     pub exit_code: Option<i32>,
     /// Bytes the script wrote to STDOUT over the monitor's life (claude-code
@@ -520,8 +639,13 @@ pub struct MonitorTaskState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTaskState {
     /// Full-result persistence receipt for the terminal notification.
-    #[serde(default)]
-    pub saved_hint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub saved_hint: Option<Utf16JsonProjection>,
 
     /// Shared base fields.
     #[serde(flatten)]
@@ -534,14 +658,26 @@ pub struct McpTaskState {
     /// | `"completed"` | `"cancelled"` | `"failed"`. Defaults to `"working"`.
     pub mcp_status: String,
     /// Latest human-readable status line (`statusMessage`), if any.
-    pub status_message: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub status_message: Option<Utf16JsonProjection>,
     /// The settled call's result text (`resultText`), kept so the terminal
     /// notification can inline it in `<result>` the way claude-code's `F` does.
     /// The spool copy is still written — that is what `TaskOutput` reads — but
     /// a notification cannot go and read a file, so the text has to be here too.
     /// `None` until the call settles, and on a call that failed or was
     /// cancelled (those render from `status_message` instead).
-    pub result_text: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result_text: Option<Utf16JsonProjection>,
 }
 
 /// State specific to a dream task.
@@ -743,7 +879,7 @@ mod taskstate_scope_readback_tripwire {
                 id: "w12345678".to_string(),
                 task_type: TaskType::LocalWorkflow,
                 status: TaskStatus::Paused,
-                description: "fixture".to_string(),
+                description: "fixture".into(),
                 tool_use_id: None,
                 start_time: SystemTime::UNIX_EPOCH,
                 end_time: None,

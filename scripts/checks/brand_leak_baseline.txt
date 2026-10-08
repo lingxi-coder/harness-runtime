@@ -97,8 +97,6 @@ G1	crates/command-api/src/builtins/commit_push_pr.rs	LINGXI
 G1	crates/command-api/src/builtins/commit_push_pr.rs	LingXi
 G1	crates/command-api/src/builtins/custom_commands.rs	\.lingxi
 G1	crates/command-api/src/builtins/doctor.rs	LingXi
-G1	crates/command-api/src/builtins/effort.rs	LINGXI
-G1	crates/command-api/src/builtins/effort.rs	\.lingxi
 G1	crates/command-api/src/builtins/help.rs	\.lingxi
 G1	crates/command-api/src/builtins/init.rs	LINGXI
 G1	crates/command-api/src/builtins/init_verifiers.rs	\.lingxi
@@ -154,8 +152,6 @@ G1	crates/core/src/host/plan_files.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/core/src/host/rooted_fs.rs	\.lingxi
 G1	crates/core/src/host/shell_support.rs	LINGXI
 G1	crates/core/src/host/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/core/src/host/subagent_output_guard.rs	\.claude\.json
-G1	crates/core/src/host/subagent_output_guard.rs	\.lingxi
 G1	crates/core/src/host/subagent_spawn.rs	LINGXI
 G1	crates/core/src/host/traffic_mode.rs	LINGXI
 G1	crates/core/src/host/uds_inbox.rs	LINGXI
@@ -277,7 +273,6 @@ G1	crates/orchestrator/src/api_error_copy.rs	LINGXI
 G1	crates/orchestrator/src/api_error_copy.rs	LingXi
 G1	crates/orchestrator/src/config.rs	\.lingxi
 G1	crates/orchestrator/src/conversation/drivers/mod.rs	LingXi
-G1	crates/orchestrator/src/conversation/drivers/streaming.rs	LINGXI
 G1	crates/orchestrator/src/conversation/hooks.rs	LINGXI
 G1	crates/orchestrator/src/conversation/prompt.rs	LINGXI
 G1	crates/orchestrator/src/conversation/prompt.rs	\.claude(?![A-Za-z0-9_.\-])
@@ -332,11 +327,13 @@ G1	crates/orchestrator/src/turn_loop_test.rs	\.lingxi
 G1	crates/orchestrator/tests/compaction_hooks_test.rs	LINGXI
 G1	crates/orchestrator/tests/config_change_hook_test.rs	\.lingxi
 G1	crates/orchestrator/tests/context_hint_wiring_test.rs	LINGXI
+# Exact current-native fixture paths are converted to the authorized LingXi branding in this test only.
+G1	crates/orchestrator/tests/instructions_loaded_hook_test.rs	CLAUDE\.md
+G1	crates/orchestrator/tests/instructions_loaded_hook_test.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/orchestrator/tests/instructions_loaded_hook_test.rs	LINGXI
 G1	crates/orchestrator/tests/instructions_loaded_hook_test.rs	LingXi
 G1	crates/orchestrator/tests/list_hooks_real.rs	\.lingxi
 G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	LINGXI
-G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	LingXi
 G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	\.lingxi
 G1	crates/orchestrator/tests/mid_turn_input_test.rs	LingXi
 G1	crates/orchestrator/tests/proactive_compaction_test.rs	LINGXI
@@ -732,9 +729,10 @@ G2	crates/llm-runtime/src/auth/anthropic/resolver.rs	CLAUDE_CODE_REMOTE
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_BEDROCK_AUTH
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_FOUNDRY_AUTH
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_VERTEX_AUTH
+G2	crates/llm-runtime/src/model/betas.rs	CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
+G2	crates/llm-runtime/src/model/betas.rs	CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM
 G2	crates/llm-runtime/src/model/betas.rs	CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 G2	crates/llm-runtime/src/model/context_window.rs	CLAUDE_CODE_DISABLE_1M_CONTEXT
-G2	crates/llm-runtime/src/model/retry.rs	CLAUDE_CODE_RETRY_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_BYTE_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_STREAM_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_STREAM_IDLE_TIMEOUT_MS
@@ -846,7 +844,6 @@ G3	crates/command-api/src/builtins/bundled/verify_body.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/verify_skill.rs	.lingxi
 G3	crates/command-api/src/builtins/commit_push_pr.rs	LINGXI.md
 G3	crates/command-api/src/builtins/custom_commands.rs	.lingxi
-G3	crates/command-api/src/builtins/effort.rs	.lingxi
 G3	crates/command-api/src/builtins/help.rs	.lingxi
 G3	crates/command-api/src/builtins/init.rs	LINGXI.md
 G3	crates/command-api/src/builtins/init_verifiers.rs	.lingxi
@@ -876,8 +873,6 @@ G3	crates/core/src/host/live_sessions.rs	LINGXI_CONFIG_DIR
 G3	crates/core/src/host/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
 G3	crates/core/src/host/rooted_fs.rs	.lingxi
 G3	crates/core/src/host/rooted_fs.rs	.lingxi-*
-G3	crates/core/src/host/subagent_output_guard.rs	.lingxi
-G3	crates/core/src/host/subagent_output_guard.rs	.lingxi.json
 G3	crates/core/src/host/worktree.rs	.lingxi
 G3	crates/core/src/settings/merger.rs	LINGXI.md
 G3	crates/core/src/settings/mod.rs	.lingxi
@@ -1215,20 +1210,6 @@ G4	crates/tools/task/src/reminder.rs	LINGXI_TODO_REMINDER_MODE
 G4	crates/tools/task/src/task.rs	LINGXI_ENABLE_TASKS
 G4	crates/tools/ui/src/push_notification.rs	LINGXI_REMOTE
 G4	crates/tools/workflow/src/lib.rs	LINGXI_DISABLE_WORKFLOWS
-G6	crates/branding/src/lib.rs	CONFIG_DIR_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	DOT_DIR not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	ENV_PREFIX not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	GLOBAL_CONFIG_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_MACOS not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_UNIX not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_WINDOWS not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MEMORY_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MEMORY_LOCAL_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_DATA_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_MANIFEST_DIR not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_ROOT_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PRODUCT_NAME not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PROJECT_DIR_ENV not in NAMESPACE_VALUES
 G7	crates/configuration-admin/src/plugin_marketplace.rs	\.claude-plugin
 G7	crates/plugin/src/manager.rs	CLAUDE_PLUGIN_
 G7	crates/plugin/src/manager.rs	CLAUDE_PROJECT_DIR

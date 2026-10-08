@@ -15,7 +15,7 @@
 //!
 //! [`SlashCommandKind::Bundled`]: crate::SlashCommandKind::Bundled
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// The frontmatter-stripped skill body (`$g(SKILL_MD).content.trimStart()`),
 /// verbatim from the 2.1.205 binary with `.claude/` rebranded to `.lingxi/`.
@@ -31,16 +31,20 @@ pub(crate) const VERIFY_DESCRIPTION: &str = "Verify that a code change actually 
 pub struct VerifyPromptFn;
 
 impl BundledPromptFn for VerifyPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         // Reference: `r=[content.trimStart()]; if(e) r.push("## User Request\n\n"+e);
         // r.join("\n\n")`. `content` is pre-`trimStart`ed at build time
         // (`VERIFY_BODY`). A non-empty argument appends the user-request block
         // (joined with the reference's unconditional `\n\n`); an empty one
         // returns the body unchanged (a 1-element join is the element itself).
-        if args.is_empty() {
-            VERIFY_BODY.to_string()
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            VERIFY_BODY.into()
         } else {
-            format!("{VERIFY_BODY}\n\n## User Request\n\n{args}")
+            let prefix = format!("{VERIFY_BODY}\n\n## User Request\n\n");
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -48,6 +52,7 @@ impl BundledPromptFn for VerifyPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_the_frontmatter_stripped_binary_content() {
@@ -64,18 +69,20 @@ mod tests {
     #[test]
     fn build_empty_arg_returns_body_verbatim() {
         // Reference: a 1-element `[content].join("\n\n")` is the element itself.
-        assert_eq!(VerifyPromptFn.build(""), VERIFY_BODY);
+        assert_eq!(
+            VerifyPromptFn.build(&"".into()).string_at(""),
+            Some(VERIFY_BODY)
+        );
     }
 
     #[test]
     fn build_with_arg_appends_user_request_block() {
         // Reference: `[content, "## User Request\n\n"+e].join("\n\n")` — the join
         // inserts `\n\n` regardless of the body's own trailing newline.
-        let out = VerifyPromptFn.build("does the login flow still work?");
-        assert_eq!(
-            out,
-            format!("{VERIFY_BODY}\n\n## User Request\n\ndoes the login flow still work?")
-        );
+        let out = VerifyPromptFn.build(&"does the login flow still work?".into());
+        let expected =
+            format!("{VERIFY_BODY}\n\n## User Request\n\ndoes the login flow still work?");
+        assert_eq!(out.string_at(""), Some(expected.as_str()));
         // Concretely: body ends "…\n", then the join's "\n\n", so three newlines
         // precede the heading.
         assert!(out.contains("don't interpret.\n\n\n## User Request\n\ndoes the login"));

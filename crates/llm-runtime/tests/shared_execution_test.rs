@@ -106,10 +106,13 @@ async fn shared_execution_sends_exact_tool_result_string_without_internal_sideca
             role: "user".into(),
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: "call-1".into(),
-                output: serde_json::Value::Array(
-                    ::lingxi_core::types::js_utf16::tool_result_sidecar(vec![65, 0xd83d, 10]),
-                ),
-                is_error: false,
+                output: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                    &serde_json::Value::Array(::lingxi_core::types::js_utf16::tool_result_sidecar(
+                        vec![65, 0xd83d, 10],
+                    )),
+                )
+                .unwrap(),
+                is_error: Some(false),
                 cache_control: Some(CacheControl::Ephemeral),
                 cache_reference: None,
             }],

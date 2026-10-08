@@ -101,6 +101,12 @@ impl TaskCompletedFirer for OrchestratorTaskCompletedFirer {
 mod tests {
     use super::*;
     use crate::test_support::noop_hook_executor;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    fn source_string(value: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
+            .expect("Rust strings are valid UTF-16 projections")
+    }
 
     #[tokio::test]
     async fn no_matching_hook_is_a_noop_fire() {
@@ -116,8 +122,8 @@ mod tests {
             .fire(TaskCompletedFire {
                 task_id: "t1".into(),
                 status: "completed".into(),
-                task_subject: "ship it".into(),
-                task_description: Some("do the work".into()),
+                task_subject: source_string("ship it"),
+                task_description: Some(source_string("do the work")),
                 teammate_name: None,
                 team_name: None,
             })

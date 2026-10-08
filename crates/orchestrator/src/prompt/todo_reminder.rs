@@ -34,6 +34,7 @@
 //! the counter directly.
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::TodoState;
 
 /// One V2 task surfaced to the `task_reminder`: `(id, status, subject)`,
@@ -45,7 +46,7 @@ pub struct TaskReminderItem {
     /// Lifecycle state.
     pub status: TodoState,
     /// Brief imperative title.
-    pub subject: String,
+    pub subject: Utf16JsonProjection,
 }
 
 /// Supplies the V2 task list for the `task_reminder` body, in list order.

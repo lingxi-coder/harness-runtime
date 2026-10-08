@@ -83,7 +83,7 @@ pub(crate) fn validate_no_null_bytes(
         if value.is_some_and(|v| v.contains('\0')) {
             return Err(ValidationError(format!(
                 "{tool_name} {field} cannot contain null bytes (\\0). Remove the null byte and try again."
-            )));
+            ).into()));
         }
     }
     Ok(())
@@ -106,16 +106,15 @@ pub(crate) fn validate_glob_directory(path: &str, cwd: &Path) -> Result<(), Vali
         Ok(meta) => {
             if !meta.is_dir() {
                 // errorCode 2. Glob ONLY — Grep has no such arm.
-                return Err(ValidationError(format!("Path is not a directory: {path}")));
+                return Err(ValidationError(
+                    format!("Path is not a directory: {path}").into(),
+                ));
             }
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(enoent_message(
-            "Directory does not exist",
-            path,
-            &resolved,
-            &cwd,
-        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
+            enoent_message("Directory does not exist", path, &resolved, &cwd).into(),
+        )),
         // claude-code `throw o`; here we defer to the tool's own path guard.
         Err(_) => Ok(()),
     }
@@ -133,12 +132,9 @@ pub(crate) fn validate_grep_path(path: &str, cwd: &Path) -> Result<(), Validatio
         // No `isDirectory()` check upstream: a file path is accepted and
         // searched directly.
         Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(enoent_message(
-            "Path does not exist",
-            path,
-            &resolved,
-            &cwd,
-        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
+            enoent_message("Path does not exist", path, &resolved, &cwd).into(),
+        )),
         Err(_) => Ok(()),
     }
 }
@@ -249,7 +245,7 @@ mod tests {
             canon_cwd.display()
         );
         // No sibling suggestion for a fresh tmp (its parent has no `no_such_dir`).
-        assert_eq!(err.0, expected);
+        assert_eq!(err.0.string_at("").as_deref(), Some(expected.as_str()));
     }
 
     /// ST-05: Grep's ENOENT arm words the lead differently — `Path does not
@@ -261,10 +257,13 @@ mod tests {
         let err = validate_grep_path("no_such_dir", tmp.path()).unwrap_err();
         let canon_cwd = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
-            err.0,
-            format!(
-                "Path does not exist: no_such_dir. Note: your current working directory is {}.",
-                canon_cwd.display()
+            err.0.string_at("").as_deref(),
+            Some(
+                format!(
+                    "Path does not exist: no_such_dir. Note: your current working directory is {}.",
+                    canon_cwd.display()
+                )
+                .as_str()
             )
         );
     }
@@ -276,8 +275,8 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let err = validate_glob_directory(file.to_str().unwrap(), tmp.path()).unwrap_err();
         assert_eq!(
-            err.0,
-            format!("Path is not a directory: {}", file.display())
+            err.0.string_at("").as_deref(),
+            Some(format!("Path is not a directory: {}", file.display()).as_str())
         );
     }
 
@@ -318,18 +317,18 @@ mod tests {
         let path = path.to_str().unwrap();
         // Both tools carry the same `YDe` suffix, only the lead differs.
         let glob_err = validate_glob_directory(path, &cwd).unwrap_err();
+        let glob_message = glob_err.0.string_at("").unwrap();
         assert!(
-            glob_err.0.contains("Did you mean") && glob_err.0.contains("nope"),
-            "got: {}",
-            glob_err.0
+            glob_message.contains("Did you mean") && glob_message.contains("nope"),
+            "got: {glob_message}"
         );
         let grep_err = validate_grep_path(path, &cwd).unwrap_err();
+        let grep_message = grep_err.0.string_at("").unwrap();
         assert!(
-            grep_err.0.starts_with("Path does not exist:")
-                && grep_err.0.contains("Did you mean")
-                && grep_err.0.contains("nope"),
-            "got: {}",
-            grep_err.0
+            grep_message.starts_with("Path does not exist:")
+                && grep_message.contains("Did you mean")
+                && grep_message.contains("nope"),
+            "got: {grep_message}"
         );
     }
 }

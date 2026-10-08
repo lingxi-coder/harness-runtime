@@ -41,6 +41,7 @@
 //! false-positive divergence. Only PERSISTENT/KEEPALIVE keep an env layer (the
 //! binary's `YIn`/`iKi` genuinely have one).
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -384,19 +385,33 @@ pub fn read_loop_file_at(project_root: &Path, cwd: &Path) -> std::io::Result<Opt
 
 /// `hJr` / `isAutonomousLoopSentinel` (cc_all.txt:504952).
 #[must_use]
-pub fn is_autonomous_loop_sentinel(s: &str) -> bool {
-    s == AUTONOMOUS_LOOP_SENTINEL || s == AUTONOMOUS_LOOP_DYNAMIC_SENTINEL
+fn source_string_equals(value: &Utf16JsonProjection, expected: &str) -> bool {
+    let expected: Vec<u16> = expected.encode_utf16().collect();
+    value
+        .string_units("")
+        .is_some_and(|units| units == expected)
+}
+
+#[cfg(test)]
+fn source_display(value: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&value.string_units("").unwrap_or_default())
+}
+
+pub fn is_autonomous_loop_sentinel(s: &Utf16JsonProjection) -> bool {
+    source_string_equals(s, AUTONOMOUS_LOOP_SENTINEL)
+        || source_string_equals(s, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL)
 }
 
 /// `gJr` / `isLoopFileSentinel` (cc_all.txt:504966).
 #[must_use]
-pub fn is_loop_file_sentinel(s: &str) -> bool {
-    s == LOOP_FILE_SENTINEL || s == LOOP_FILE_DYNAMIC_SENTINEL
+pub fn is_loop_file_sentinel(s: &Utf16JsonProjection) -> bool {
+    source_string_equals(s, LOOP_FILE_SENTINEL)
+        || source_string_equals(s, LOOP_FILE_DYNAMIC_SENTINEL)
 }
 
 /// `Y4d` / `isLoopDefaultSentinel` (cc_all.txt:504966): any of the four.
 #[must_use]
-pub fn is_loop_default_sentinel(s: &str) -> bool {
+pub fn is_loop_default_sentinel(s: &Utf16JsonProjection) -> bool {
     is_autonomous_loop_sentinel(s) || is_loop_file_sentinel(s)
 }
 
@@ -535,7 +550,7 @@ struct LoopRuntimeState {
     /// Preamble and loop.md instructions delivered to this session transcript.
     delivery: DeliveryState,
     /// `Nt.loopTickInFlightPrompt` — prompt of the loop tick being processed.
-    tick_in_flight_prompt: Option<String>,
+    tick_in_flight_prompt: Option<Utf16JsonProjection>,
     /// `Nt.loopConsecutiveKeepalives` — consecutive keepalive count.
     consecutive_keepalives: u32,
     /// The port's stand-in for `Xke()` (is-a-loop-cron-armed): set when the model
@@ -544,7 +559,7 @@ struct LoopRuntimeState {
     /// synchronous per-turn flag is the only reliable "model rescheduled" signal.
     rescheduled_this_turn: bool,
     /// 2.1.263 dynamic-loop records keyed by the wakeup prompt (`PLn`/`dYt`).
-    dynamic_loops: std::collections::HashMap<String, DynamicLoopRecord>,
+    dynamic_loops: std::collections::HashMap<Vec<u16>, DynamicLoopRecord>,
     /// 2.1.263 `OLn()` / `gHt(bool)` — the loop already emitted its terminal
     /// `tengu_loop_ended`; a later `stop: true` is cleanup only.
     loop_ended: bool,
@@ -578,7 +593,11 @@ impl LoopRuntime {
     /// Resolve a scheduled prompt using only this session's delivered instructions.
     /// Mirrors 2.1.270 `se(e, t)`; ordinary prompts pass through byte-for-byte.
     #[must_use]
-    pub fn resolve_loop_default_fire(&self, sentinel: &str, cwd: &Path) -> String {
+    pub fn resolve_loop_default_fire(
+        &self,
+        sentinel: &Utf16JsonProjection,
+        cwd: &Path,
+    ) -> Utf16JsonProjection {
         let mut st = self.state.lock().unwrap();
         resolve_loop_default_fire_with_state(&mut st.delivery, sentinel, cwd)
     }
@@ -586,10 +605,10 @@ impl LoopRuntime {
     /// Resolve with explicit session roots and propagate loop.md read errors.
     pub fn try_resolve_loop_default_fire(
         &self,
-        sentinel: &str,
+        sentinel: &Utf16JsonProjection,
         project_root: &Path,
         cwd: &Path,
-    ) -> std::io::Result<String> {
+    ) -> std::io::Result<Utf16JsonProjection> {
         // Read before taking/mutating delivery state; a failed read must not
         // consume the first-delivery marker.
         let file = if is_loop_file_sentinel(sentinel) {
@@ -601,7 +620,7 @@ impl LoopRuntime {
         Ok(
             resolve_autonomous_loop_fire_with_state(&mut st.delivery, sentinel)
                 .or_else(|| resolve_loop_file_fire_with_file(&mut st.delivery, sentinel, file))
-                .unwrap_or_else(|| sentinel.to_string()),
+                .unwrap_or_else(|| sentinel.clone()),
         )
     }
 
@@ -612,14 +631,14 @@ impl LoopRuntime {
     }
 
     /// Mark the start of a loop tick and clear the prior reschedule marker.
-    pub fn begin_tick(&self, prompt: String) {
+    pub fn begin_tick(&self, prompt: Utf16JsonProjection) {
         self.begin_tick_at(prompt, SystemTime::now());
     }
 
     /// [`Self::begin_tick`] with an explicit start instant (tests, and hosts
     /// with their own clock). Also clears the per-tick fold marks, so a veto or
     /// a `noop` from the previous tick can never settle this one.
-    pub fn begin_tick_at(&self, prompt: String, at: SystemTime) {
+    pub fn begin_tick_at(&self, prompt: Utf16JsonProjection, at: SystemTime) {
         let mut st = self.state.lock().unwrap();
         st.tick_in_flight_prompt = Some(prompt);
         st.rescheduled_this_turn = false;
@@ -702,12 +721,12 @@ impl LoopRuntime {
 
     /// Peek at the current in-flight loop prompt.
     #[must_use]
-    pub fn in_flight_prompt(&self) -> Option<String> {
+    pub fn in_flight_prompt(&self) -> Option<Utf16JsonProjection> {
         self.state.lock().unwrap().tick_in_flight_prompt.clone()
     }
 
     /// Take and clear the current in-flight loop prompt.
-    pub fn take_in_flight_prompt(&self) -> Option<String> {
+    pub fn take_in_flight_prompt(&self) -> Option<Utf16JsonProjection> {
         self.state.lock().unwrap().tick_in_flight_prompt.take()
     }
 
@@ -735,22 +754,17 @@ impl LoopRuntime {
 
     /// 2.1.263 `PLn(prompt)` — the dynamic-loop record for `prompt`, if any.
     #[must_use]
-    pub fn dynamic_loop_record(&self, prompt: &str) -> Option<DynamicLoopRecord> {
-        self.state
-            .lock()
-            .unwrap()
-            .dynamic_loops
-            .get(prompt)
-            .copied()
+    pub fn dynamic_loop_record(&self, prompt: &Utf16JsonProjection) -> Option<DynamicLoopRecord> {
+        let key = prompt.string_units("")?;
+        self.state.lock().unwrap().dynamic_loops.get(&key).copied()
     }
 
     /// 2.1.263 `dYt(prompt, record)` — store the dynamic-loop record for `prompt`.
-    pub fn set_dynamic_loop_record(&self, prompt: &str, record: DynamicLoopRecord) {
-        self.state
-            .lock()
-            .unwrap()
-            .dynamic_loops
-            .insert(prompt.to_string(), record);
+    pub fn set_dynamic_loop_record(&self, prompt: &Utf16JsonProjection, record: DynamicLoopRecord) {
+        let Some(key) = prompt.string_units("") else {
+            return;
+        };
+        self.state.lock().unwrap().dynamic_loops.insert(key, record);
     }
 
     /// 2.1.263 `Ort(prompt)` / `sessionCron.forgetChainStart` — drop the
@@ -758,8 +772,10 @@ impl LoopRuntime {
     /// abort) forget every cancelled wakeup's prompt plus the in-flight tick's,
     /// so a later `/loop` on the same prompt starts a fresh 7-day window instead
     /// of inheriting the stopped loop's `startedAt`.
-    pub fn forget_dynamic_loop(&self, prompt: &str) {
-        self.state.lock().unwrap().dynamic_loops.remove(prompt);
+    pub fn forget_dynamic_loop(&self, prompt: &Utf16JsonProjection) {
+        if let Some(key) = prompt.string_units("") {
+            self.state.lock().unwrap().dynamic_loops.remove(&key);
+        }
     }
 
     /// 2.1.263 `OLn()` — whether the loop already ended (terminal event emitted).
@@ -785,27 +801,33 @@ static LOOP_RUNTIME: std::sync::LazyLock<Mutex<LoopRuntimeState>> =
 
 /// Process-global `PLn(prompt)` (hosts without a session-scoped [`LoopRuntime`]).
 #[must_use]
-pub fn dynamic_loop_record(prompt: &str) -> Option<DynamicLoopRecord> {
+pub fn dynamic_loop_record(prompt: &Utf16JsonProjection) -> Option<DynamicLoopRecord> {
+    let key = prompt.string_units("")?;
     LOOP_RUNTIME
         .lock()
         .unwrap()
         .dynamic_loops
-        .get(prompt)
+        .get(&key)
         .copied()
 }
 
 /// Process-global `dYt(prompt, record)`.
-pub fn set_dynamic_loop_record(prompt: &str, record: DynamicLoopRecord) {
+pub fn set_dynamic_loop_record(prompt: &Utf16JsonProjection, record: DynamicLoopRecord) {
+    let Some(key) = prompt.string_units("") else {
+        return;
+    };
     LOOP_RUNTIME
         .lock()
         .unwrap()
         .dynamic_loops
-        .insert(prompt.to_string(), record);
+        .insert(key, record);
 }
 
 /// Process-global `Ort(prompt)` — see [`LoopRuntime::forget_dynamic_loop`].
-pub fn forget_dynamic_loop(prompt: &str) {
-    LOOP_RUNTIME.lock().unwrap().dynamic_loops.remove(prompt);
+pub fn forget_dynamic_loop(prompt: &Utf16JsonProjection) {
+    if let Some(key) = prompt.string_units("") {
+        LOOP_RUNTIME.lock().unwrap().dynamic_loops.remove(&key);
+    }
 }
 
 /// Process-global `OLn()`.
@@ -836,7 +858,7 @@ pub fn note_loop_invoked() {
 /// Mark the START of a loop-tick turn (binary `onFireTask` `I7e(d.prompt)`):
 /// record the in-flight tick prompt and clear the per-turn reschedule flag. Called
 /// by the bridge drain when it pops a `QueueSource::Cron` command.
-pub fn begin_loop_tick(prompt: String) {
+pub fn begin_loop_tick(prompt: Utf16JsonProjection) {
     let mut st = LOOP_RUNTIME.lock().unwrap();
     st.tick_in_flight_prompt = Some(prompt);
     st.rescheduled_this_turn = false;
@@ -844,13 +866,13 @@ pub fn begin_loop_tick(prompt: String) {
 
 /// `tAt` (cc_all.txt) — peek the in-flight loop-tick prompt (or None).
 #[must_use]
-pub fn loop_tick_in_flight_prompt() -> Option<String> {
+pub fn loop_tick_in_flight_prompt() -> Option<Utf16JsonProjection> {
     LOOP_RUNTIME.lock().unwrap().tick_in_flight_prompt.clone()
 }
 
 /// `I7e(null)` (cc_all.txt) at turn end — take (read+clear) the in-flight prompt.
 /// `Some` iff the just-completed turn was a loop tick.
-pub fn take_loop_tick_in_flight_prompt() -> Option<String> {
+pub fn take_loop_tick_in_flight_prompt() -> Option<Utf16JsonProjection> {
     LOOP_RUNTIME.lock().unwrap().tick_in_flight_prompt.take()
 }
 
@@ -903,36 +925,32 @@ pub static TEST_SERIAL: Mutex<()> = Mutex::new(());
 /// delivery only. Returns `None` for a non-autonomous sentinel or when the gate
 /// is off (passthrough handled by [`resolve_loop_default_fire`]).
 #[must_use]
-pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
+pub fn resolve_autonomous_loop_fire(sentinel: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
     resolve_autonomous_loop_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel)
 }
 
 fn resolve_autonomous_loop_fire_with_state(
     st: &mut DeliveryState,
-    sentinel: &str,
-) -> Option<String> {
+    sentinel: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
     if !is_autonomous_loop_sentinel(sentinel) {
         return None;
     }
     // PARITY: `nKi` calls `pJr()` on EVERY autonomous fire, right after the two
     // gate returns and before computing the tick (cc_all.txt:504952).
     log_autonomous_loop_activation();
-    let tick = if sentinel == AUTONOMOUS_LOOP_DYNAMIC_SENTINEL {
+    let tick = if source_string_equals(sentinel, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL) {
         tick_autonomous_dynamic()
     } else {
         tick_autonomous_cron()
     };
     // PARITY: `if(iFt||Gst!==null)return t;return iFt=!0,`${dJr()}\n${t}``.
     if st.preamble_delivered || st.last_content.is_some() {
-        return Some(tick);
+        return Some(tick.into());
     }
     st.preamble_delivered = true;
     // PARITY 2.1.263: `${v()}\n\n---\n\n${o}`.
-    Some(format!(
-        "{}\n\n---\n\n{}",
-        get_autonomous_loop_preamble(),
-        tick
-    ))
+    Some(format!("{}\n\n---\n\n{}", get_autonomous_loop_preamble(), tick).into())
 }
 
 /// `sKi` / `resolveLoopFileFire` (cc_all.txt:504966): resolves a loop.md sentinel
@@ -942,15 +960,18 @@ fn resolve_autonomous_loop_fire_with_state(
 /// the autonomous preamble + absent-tick (first delivery) or the autonomous cron
 /// tick (subsequent). `cwd` locates loop.md (binary uses process cwd).
 #[must_use]
-pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
+pub fn resolve_loop_file_fire(
+    sentinel: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Option<Utf16JsonProjection> {
     resolve_loop_file_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel, cwd)
 }
 
 fn resolve_loop_file_fire_with_state(
     st: &mut DeliveryState,
-    sentinel: &str,
+    sentinel: &Utf16JsonProjection,
     cwd: &Path,
-) -> Option<String> {
+) -> Option<Utf16JsonProjection> {
     if !is_loop_file_sentinel(sentinel) {
         return None;
     }
@@ -959,13 +980,13 @@ fn resolve_loop_file_fire_with_state(
 
 fn resolve_loop_file_fire_with_file(
     st: &mut DeliveryState,
-    sentinel: &str,
+    sentinel: &Utf16JsonProjection,
     file: Option<LoopFile>,
-) -> Option<String> {
+) -> Option<Utf16JsonProjection> {
     if !is_loop_file_sentinel(sentinel) {
         return None;
     }
-    let dynamic = sentinel == LOOP_FILE_DYNAMIC_SENTINEL;
+    let dynamic = source_string_equals(sentinel, LOOP_FILE_DYNAMIC_SENTINEL);
     if let Some(file) = file {
         // PARITY: `let o=t?V4d():G4d();if(Gst===n.content)return o;Gst=n.content,…`
         let tick = if dynamic {
@@ -974,7 +995,7 @@ fn resolve_loop_file_fire_with_file(
             tick_loopfile_cron()
         };
         if st.last_content.as_deref() == Some(file.content.as_str()) {
-            return Some(tick);
+            return Some(tick.into());
         }
         st.last_content = Some(file.content.clone());
         // PARITY 2.1.263: `# /loop tick — tasks from ${path}\n\n…\n\n---\n\n${content}\n\n---\n\n${tick}`.
@@ -982,7 +1003,7 @@ fn resolve_loop_file_fire_with_file(
             "# /loop tick — tasks from {path}\n\nThe user configured a loop-tasks file. Work through the tasks defined below; these are the instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).\n\n---\n\n{content}\n\n---\n\n{tick}",
             path = file.path.display(),
             content = file.content,
-        ));
+        ).into());
     }
     // PARITY: loop.md ABSENT — `sKi` calls `pJr()` here (only on the absent path,
     // after the `if(n){…}` present-block), then `let r=t?K4d():tKi();
@@ -995,32 +1016,31 @@ fn resolve_loop_file_fire_with_file(
         tick_autonomous_cron()
     };
     if st.last_content.as_deref() == Some(PREAMBLE_SENTINEL) || st.preamble_delivered {
-        return Some(tick);
+        return Some(tick.into());
     }
     st.last_content = Some(PREAMBLE_SENTINEL.to_string());
     st.preamble_delivered = true;
-    Some(format!(
-        "{}\n\n---\n\n{}",
-        get_autonomous_loop_preamble(),
-        tick
-    ))
+    Some(format!("{}\n\n---\n\n{}", get_autonomous_loop_preamble(), tick).into())
 }
 
 /// `J4d` / `resolveLoopDefaultFire` (cc_all.txt:504966):
 /// `nKi(e) ?? sKi(e) ?? e` — try autonomous, then loop.md, else passthrough.
 #[must_use]
-pub fn resolve_loop_default_fire(sentinel: &str, cwd: &Path) -> String {
+pub fn resolve_loop_default_fire(
+    sentinel: &Utf16JsonProjection,
+    cwd: &Path,
+) -> Utf16JsonProjection {
     resolve_loop_default_fire_with_state(&mut DELIVERY.lock().unwrap(), sentinel, cwd)
 }
 
 fn resolve_loop_default_fire_with_state(
     st: &mut DeliveryState,
-    sentinel: &str,
+    sentinel: &Utf16JsonProjection,
     cwd: &Path,
-) -> String {
+) -> Utf16JsonProjection {
     resolve_autonomous_loop_fire_with_state(st, sentinel)
         .or_else(|| resolve_loop_file_fire_with_state(st, sentinel, cwd))
-        .unwrap_or_else(|| sentinel.to_string())
+        .unwrap_or_else(|| sentinel.clone())
 }
 
 #[cfg(test)]
@@ -1167,7 +1187,10 @@ mod fold_tests {
         rt.begin_tick_at("tick".into(), at(1_000));
         rt.mark_noop_reported(true);
         rt.settle_tick(at(1_001), quiet_span());
-        assert_eq!(rt.take_in_flight_prompt().as_deref(), Some("tick"));
+        assert_eq!(
+            rt.take_in_flight_prompt().as_ref().map(source_display),
+            Some("tick".to_string())
+        );
     }
 }
 
@@ -1203,14 +1226,56 @@ mod tests {
     #[test]
     fn sentinel_predicates() {
         let _g = guard();
-        assert!(is_autonomous_loop_sentinel("<<autonomous-loop>>"));
-        assert!(is_autonomous_loop_sentinel("<<autonomous-loop-dynamic>>"));
-        assert!(!is_autonomous_loop_sentinel("<<loop.md>>"));
-        assert!(is_loop_file_sentinel("<<loop.md>>"));
-        assert!(is_loop_file_sentinel("<<loop.md-dynamic>>"));
-        assert!(is_loop_default_sentinel("<<autonomous-loop-dynamic>>"));
-        assert!(is_loop_default_sentinel("<<loop.md>>"));
-        assert!(!is_loop_default_sentinel("5m /foo"));
+        assert!(is_autonomous_loop_sentinel(
+            &AUTONOMOUS_LOOP_SENTINEL.into()
+        ));
+        assert!(is_autonomous_loop_sentinel(
+            &AUTONOMOUS_LOOP_DYNAMIC_SENTINEL.into()
+        ));
+        assert!(!is_autonomous_loop_sentinel(&LOOP_FILE_SENTINEL.into()));
+        assert!(is_loop_file_sentinel(&LOOP_FILE_SENTINEL.into()));
+        assert!(is_loop_file_sentinel(&LOOP_FILE_DYNAMIC_SENTINEL.into()));
+        assert!(is_loop_default_sentinel(
+            &AUTONOMOUS_LOOP_DYNAMIC_SENTINEL.into()
+        ));
+        assert!(is_loop_default_sentinel(&LOOP_FILE_SENTINEL.into()));
+        assert!(!is_loop_default_sentinel(&Utf16JsonProjection::from(
+            "5m /foo"
+        )));
+    }
+
+    #[test]
+    fn dynamic_loop_identity_keeps_lone_surrogate_distinct_from_replacement() {
+        let runtime = LoopRuntime::default();
+        let lone = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let replacement = Utf16JsonProjection::from("�");
+        let lone_record = DynamicLoopRecord {
+            started_at_ms: 10,
+            last_scheduled_for_ms: 20,
+            aged_out: false,
+        };
+        let replacement_record = DynamicLoopRecord {
+            started_at_ms: 30,
+            last_scheduled_for_ms: 40,
+            aged_out: true,
+        };
+
+        runtime.set_dynamic_loop_record(&lone, lone_record);
+        runtime.set_dynamic_loop_record(&replacement, replacement_record);
+        assert_eq!(runtime.dynamic_loop_record(&lone), Some(lone_record));
+        assert_eq!(
+            runtime.dynamic_loop_record(&replacement),
+            Some(replacement_record)
+        );
+        runtime.forget_dynamic_loop(&lone);
+        assert_eq!(runtime.dynamic_loop_record(&lone), None);
+        assert_eq!(
+            runtime.dynamic_loop_record(&replacement),
+            Some(replacement_record)
+        );
+
+        runtime.begin_tick(lone.clone());
+        assert_eq!(runtime.in_flight_prompt(), Some(lone));
     }
 
     // PARITY 2.1.263: the preambles are the bundled markdown files
@@ -1316,13 +1381,14 @@ mod tests {
     #[test]
     fn autonomous_dynamic_first_then_subsequent() {
         let _g = guard();
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
         // First fire: full preamble + dynamic tick.
-        let first = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let first = source_display(&resolve_autonomous_loop_fire(&sentinel).unwrap());
         assert!(first.starts_with("# Autonomous loop check\n"));
         assert!(first.contains("# Autonomous loop tick (dynamic pacing)"));
         assert!(first.contains("set to the literal sentinel `<<autonomous-loop-dynamic>>`"));
         // Subsequent fire: short tick only, no preamble.
-        let second = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let second = source_display(&resolve_autonomous_loop_fire(&sentinel).unwrap());
         assert!(!second.starts_with("# Autonomous loop check"));
         assert!(second.starts_with("# Autonomous loop tick (dynamic pacing)"));
     }
@@ -1330,11 +1396,12 @@ mod tests {
     #[test]
     fn autonomous_cron_tick_says_do_not_call_schedulewakeup() {
         let _g = guard();
-        let out = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_SENTINEL).unwrap();
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_SENTINEL);
+        let out = source_display(&resolve_autonomous_loop_fire(&sentinel).unwrap());
         assert!(out.contains("# Autonomous loop tick\n"));
         assert!(out.contains("do not call ScheduleWakeup from this tick."));
         // Reset state then a subsequent cron fire drops the preamble.
-        let second = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_SENTINEL).unwrap();
+        let second = source_display(&resolve_autonomous_loop_fire(&sentinel).unwrap());
         assert!(second.starts_with("# Autonomous loop tick\n"));
     }
 
@@ -1342,12 +1409,11 @@ mod tests {
     fn non_sentinel_passes_through() {
         let _g = guard();
         let cwd = std::env::temp_dir();
-        assert_eq!(
-            resolve_loop_default_fire("5m /babysit-prs", &cwd),
-            "5m /babysit-prs"
-        );
-        assert!(resolve_autonomous_loop_fire("5m /x").is_none());
-        assert!(resolve_loop_file_fire("5m /x", &cwd).is_none());
+        let prompt = Utf16JsonProjection::from("5m /babysit-prs");
+        assert_eq!(resolve_loop_default_fire(&prompt, &cwd), prompt);
+        let non_sentinel = Utf16JsonProjection::from("5m /x");
+        assert!(resolve_autonomous_loop_fire(&non_sentinel).is_none());
+        assert!(resolve_loop_file_fire(&non_sentinel, &cwd).is_none());
     }
 
     #[test]
@@ -1356,7 +1422,8 @@ mod tests {
         // first delivery is `${preamble}\n\n---\n\n${tick}`.
         let _g = guard();
         let cwd = std::env::temp_dir();
-        let first = resolve_loop_default_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, &cwd);
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
+        let first = source_display(&resolve_loop_default_fire(&sentinel, &cwd));
         assert_ne!(first, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
         let expected_head = format!(
             "{}\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check",
@@ -1368,8 +1435,9 @@ mod tests {
         assert!(first.contains(
             "To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor"
         ));
+        let loop_file_sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
         assert_ne!(
-            resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, &cwd),
+            source_display(&resolve_loop_default_fire(&loop_file_sentinel, &cwd)),
             LOOP_FILE_DYNAMIC_SENTINEL
         );
         // Cron-mode tick: blank line after the heading, no ScheduleWakeup call.
@@ -1383,15 +1451,16 @@ mod tests {
         let _g = guard();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("loop.md"), "- task A\n- task B\n").unwrap();
+        let sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
         // First fire: inlines the full loop.md contents (NO autonomous preamble —
         // the binary's sKi prefixes the preamble only on the loop.md-ABSENT path).
-        let first = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
+        let first = source_display(&resolve_loop_file_fire(&sentinel, tmp.path()).unwrap());
         assert!(!first.contains("# Autonomous loop check"));
         assert!(first.starts_with("# /loop tick — tasks from "));
         assert!(first.contains("(the reminder on later fires refers back to this message).\n\n---\n\n- task A\n- task B\n\n---\n\n# /loop tick — loop.md tasks (dynamic pacing)\n\n"));
         assert!(first.contains("# /loop tick — loop.md tasks (dynamic pacing)"));
         // Second fire, unchanged content: short reminder tick only.
-        let second = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
+        let second = source_display(&resolve_loop_file_fire(&sentinel, tmp.path()).unwrap());
         assert!(!second.contains("# Autonomous loop check"));
         // No "tasks from <path>" inline-block header on the unchanged reminder.
         assert!(!second.contains("# /loop tick — tasks from "));
@@ -1399,7 +1468,7 @@ mod tests {
         assert!(second.starts_with("# /loop tick — loop.md tasks (dynamic pacing)"));
         // Edited content re-inlines.
         std::fs::write(tmp.path().join("loop.md"), "- task C\n").unwrap();
-        let third = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
+        let third = source_display(&resolve_loop_file_fire(&sentinel, tmp.path()).unwrap());
         assert!(third.contains("# /loop tick — tasks from "));
         assert!(third.contains("- task C"));
     }
@@ -1408,12 +1477,13 @@ mod tests {
     fn loop_file_absent_falls_back_to_autonomous() {
         let _g = guard();
         let tmp = tempfile::tempdir().unwrap();
+        let sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
         // No loop.md present: first dynamic fire → preamble + absent-tick.
-        let first = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
+        let first = source_display(&resolve_loop_file_fire(&sentinel, tmp.path()).unwrap());
         assert!(first.starts_with("# Autonomous loop check\n"));
         assert!(first.contains("# /loop tick — loop.md absent (dynamic pacing)"));
         // Subsequent absent fire: short absent-tick, no preamble.
-        let second = resolve_loop_file_fire(LOOP_FILE_DYNAMIC_SENTINEL, tmp.path()).unwrap();
+        let second = source_display(&resolve_loop_file_fire(&sentinel, tmp.path()).unwrap());
         assert!(!second.contains("# Autonomous loop check"));
         assert!(second.starts_with("# /loop tick — loop.md absent (dynamic pacing)"));
     }
@@ -1502,11 +1572,12 @@ mod tests {
     #[test]
     fn reset_clears_delivery_state() {
         let _g = guard();
-        let _ = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
+        let _ = resolve_autonomous_loop_fire(&sentinel);
         // After a fire the preamble is marked delivered.
         reset_autonomous_loop_delivered();
         // Next fire re-emits the preamble.
-        let again = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let again = source_display(&resolve_autonomous_loop_fire(&sentinel).unwrap());
         assert!(again.starts_with("# Autonomous loop check\n"));
     }
     #[test]
@@ -1515,30 +1586,31 @@ mod tests {
         let first = LoopRuntime::default();
         let second = LoopRuntime::default();
         let cwd = tempfile::tempdir().unwrap();
-        let sentinel = AUTONOMOUS_LOOP_DYNAMIC_SENTINEL;
-        let initial = first.resolve_loop_default_fire(sentinel, cwd.path());
-        assert!(initial.starts_with(PREAMBLE_DEFAULT));
+        let sentinel = Utf16JsonProjection::from(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
+        let initial = first.resolve_loop_default_fire(&sentinel, cwd.path());
+        assert!(source_display(&initial).starts_with(PREAMBLE_DEFAULT));
         assert_eq!(
-            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            second.resolve_loop_default_fire(&sentinel, cwd.path()),
             initial
         );
-        let tick = tick_autonomous_dynamic();
-        assert_eq!(first.resolve_loop_default_fire(sentinel, cwd.path()), tick);
+        let tick = Utf16JsonProjection::from(tick_autonomous_dynamic());
+        assert_eq!(first.resolve_loop_default_fire(&sentinel, cwd.path()), tick);
         first.reset_autonomous_loop_delivered();
         assert_eq!(
-            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            first.resolve_loop_default_fire(&sentinel, cwd.path()),
             initial
         );
-        assert_eq!(second.resolve_loop_default_fire(sentinel, cwd.path()), tick);
+        assert_eq!(
+            second.resolve_loop_default_fire(&sentinel, cwd.path()),
+            tick
+        );
         first.reset();
         assert_eq!(
-            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            first.resolve_loop_default_fire(&sentinel, cwd.path()),
             initial
         );
-        assert_eq!(
-            first.resolve_loop_default_fire(" <<autonomous-loop-dynamic>> ", cwd.path()),
-            " <<autonomous-loop-dynamic>> "
-        );
+        let spaced = Utf16JsonProjection::from(" <<autonomous-loop-dynamic>> ");
+        assert_eq!(first.resolve_loop_default_fire(&spaced, cwd.path()), spaced);
     }
 
     #[test]
@@ -1549,31 +1621,31 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let file = cwd.path().join("loop.md");
         std::fs::write(&file, "- isolated task").unwrap();
-        let sentinel = LOOP_FILE_DYNAMIC_SENTINEL;
-        let initial = first.resolve_loop_default_fire(sentinel, cwd.path());
-        assert!(initial.contains("- isolated task"));
+        let sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
+        let initial = first.resolve_loop_default_fire(&sentinel, cwd.path());
+        assert!(source_display(&initial).contains("- isolated task"));
         assert_eq!(
-            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            second.resolve_loop_default_fire(&sentinel, cwd.path()),
             initial
         );
         assert_eq!(
-            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            source_display(&first.resolve_loop_default_fire(&sentinel, cwd.path())),
             tick_loopfile_dynamic()
         );
         std::fs::write(&file, "- edited task").unwrap();
-        let changed = first.resolve_loop_default_fire(sentinel, cwd.path());
-        assert!(changed.contains("- edited task"));
+        let changed = first.resolve_loop_default_fire(&sentinel, cwd.path());
+        assert!(source_display(&changed).contains("- edited task"));
         assert_eq!(
-            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            second.resolve_loop_default_fire(&sentinel, cwd.path()),
             changed
         );
         first.reset();
         assert_eq!(
-            first.resolve_loop_default_fire(sentinel, cwd.path()),
+            first.resolve_loop_default_fire(&sentinel, cwd.path()),
             changed
         );
         assert_eq!(
-            second.resolve_loop_default_fire(sentinel, cwd.path()),
+            source_display(&second.resolve_loop_default_fire(&sentinel, cwd.path())),
             tick_loopfile_dynamic()
         );
     }
@@ -1639,13 +1711,16 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
         std::fs::write(root.path().join(".claude/loop.md"), "root tasks").unwrap();
         let rt = LoopRuntime::default();
+        let sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
         let first = rt
-            .try_resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, root.path(), &cwd)
+            .try_resolve_loop_default_fire(&sentinel, root.path(), &cwd)
             .unwrap();
-        assert!(first.contains("root tasks"));
+        assert!(source_display(&first).contains("root tasks"));
         assert_eq!(
-            rt.try_resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, root.path(), &cwd)
-                .unwrap(),
+            source_display(
+                &rt.try_resolve_loop_default_fire(&sentinel, root.path(), &cwd)
+                    .unwrap(),
+            ),
             tick_loopfile_dynamic()
         );
     }

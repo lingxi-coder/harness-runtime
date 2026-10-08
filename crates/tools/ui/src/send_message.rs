@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use lingxi_core::host::mailbox::{MailboxMessage, MailboxRouterHandle};
 use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
@@ -40,8 +41,10 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -135,13 +138,75 @@ impl SendMessageTool {
 
     /// Boolean that also accepts the string literals `"true"`/`"false"` — a
     /// port of the TS `semanticBoolean()` used for the `approve` field.
-    fn semantic_bool(v: &Value) -> Option<bool> {
-        match v {
-            Value::Bool(b) => Some(*b),
-            Value::String(s) if s == "true" => Some(true),
-            Value::String(s) if s == "false" => Some(false),
+    fn semantic_bool(v: JsonValueView<'_>) -> Option<bool> {
+        v.as_bool().or_else(|| match v.as_str() {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
             _ => None,
+        })
+    }
+
+    fn source_field(input: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+        input.subprojection(&format!("/{key}")).ok()
+    }
+
+    fn source_text(value: &str) -> Utf16JsonProjection {
+        source_text_projection(value)
+    }
+
+    fn source_text_with_value(
+        prefix: &str,
+        value: &Utf16JsonProjection,
+        suffix: &str,
+    ) -> Utf16JsonProjection {
+        let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+        units.extend(value.string_units("").unwrap_or_default());
+        units.extend(suffix.encode_utf16());
+        source_text_projection_units(&units)
+    }
+
+    fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+        Utf16JsonProjection::object(fields).expect("SendMessage result is valid JSON")
+    }
+
+    fn source_result_fields(
+        success: bool,
+        message: String,
+        extras: impl IntoIterator<Item = (String, Utf16JsonProjection)>,
+    ) -> Utf16JsonProjection {
+        Self::source_result_fields_projection(success, Self::source_text(&message), extras)
+    }
+
+    fn source_result_fields_projection(
+        success: bool,
+        message: Utf16JsonProjection,
+        extras: impl IntoIterator<Item = (String, Utf16JsonProjection)>,
+    ) -> Utf16JsonProjection {
+        let mut fields = vec![
+            (
+                "success".to_string(),
+                generated_builtin_result(&json!(success)),
+            ),
+            ("message".to_string(), message),
+        ];
+        fields.extend(extras);
+        Self::source_object(fields)
+    }
+
+    fn string_preview(value: &Utf16JsonProjection) -> Utf16JsonProjection {
+        let Some(units) = value.string_units("") else {
+            return Self::source_text("");
+        };
+        let display = String::from_utf16_lossy(&units);
+        let truncated = truncate_preview(&display, ROUTING_CONTENT_PREVIEW_CHARS);
+        if truncated == display {
+            return value.clone();
         }
+        let prefix = truncated.strip_suffix('\u{2026}').unwrap_or(&truncated);
+        let prefix_units = prefix.encode_utf16().count().min(units.len());
+        let mut preview = units[..prefix_units].to_vec();
+        preview.extend("\u{2026}".encode_utf16());
+        source_text_projection_units(&preview)
     }
 
     /// Parse the `to` field into a [`Recipient`].
@@ -157,11 +222,11 @@ impl SendMessageTool {
     fn parse_recipient(to: &str) -> Result<Recipient, ToolError> {
         let trimmed = to.trim();
         if trimmed.is_empty() {
-            return Err(ToolError::InvalidInput("to must not be empty".into()));
+            return Err(invalid_tool_input("to must not be empty"));
         }
         if trimmed.contains('@') {
-            return Err(ToolError::InvalidInput(
-                "to must be a bare teammate name — there is only one team per session".into(),
+            return Err(invalid_tool_input(
+                "to must be a bare teammate name — there is only one team per session",
             ));
         }
         if trimmed == "*" {
@@ -170,10 +235,8 @@ impl SendMessageTool {
         // Resolve by teammate NAME first, then the explicit session/agent UUID
         // forms. The session ID is the canonical cross-process identity.
         if let Some(session_id) = trimmed.strip_prefix("session:") {
-            let parsed =
-                lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
-                    ToolError::InvalidInput("session address must contain a valid UUID".into())
-                })?;
+            let parsed = lingxi_core::types::SessionId::parse_prefixed(session_id)
+                .ok_or_else(|| invalid_tool_input("session address must contain a valid UUID"))?;
             return Ok(Recipient::Session(parsed.as_uuid().to_string()));
         }
         if !trimmed.contains(':') {
@@ -277,7 +340,7 @@ impl SendMessageTool {
         if ctx.agent_id.is_none() && ctx.agent_name.is_none() {
             return Ok(());
         }
-        Err(ToolError::InvalidInput(format!(
+        Err(invalid_tool_input(format!(
             "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
         )))
     }
@@ -314,7 +377,7 @@ impl SendMessageTool {
             return Ok(());
         };
         if record.killed_by.as_deref() == Some("user") {
-            return Err(ToolError::InvalidInput(
+            return Err(invalid_tool_input(
                 lingxi_core::host::task_registry::stopped_by_user_message(&record.task_id),
             ));
         }
@@ -328,12 +391,13 @@ impl SendMessageTool {
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         target: &str,
-        content: String,
+        content: Utf16JsonProjection,
     ) -> Result<String, ToolError> {
         let message_id = tool_api::util::ids::ulid_or_uuid();
         let msg = MailboxMessage {
             message_id: message_id.clone(),
             content,
+            summary: None,
             timestamp: SystemTime::now(),
             color: if from == TEAM_LEAD_NAME {
                 None
@@ -350,7 +414,12 @@ impl SendMessageTool {
             })
     }
 
-    fn routing(sender: &str, target: &str, summary: Option<&str>, content: Option<&str>) -> Value {
+    fn routing(
+        sender: &str,
+        target: &str,
+        summary: Option<&Utf16JsonProjection>,
+        content: Option<&Utf16JsonProjection>,
+    ) -> Utf16JsonProjection {
         tool_api::send_message_contract::routing(sender, None, target, None, summary, content)
     }
 
@@ -358,9 +427,9 @@ impl SendMessageTool {
         router: &Arc<dyn MailboxRouterHandle>,
         sender: &str,
         target: &str,
-        summary: Option<&str>,
-        content: Option<&str>,
-    ) -> Value {
+        summary: Option<&Utf16JsonProjection>,
+        content: Option<&Utf16JsonProjection>,
+    ) -> Utf16JsonProjection {
         let sender_color = if sender == TEAM_LEAD_NAME {
             None
         } else {
@@ -388,12 +457,12 @@ impl SendMessageTool {
         from: &str,
         recipient: &Recipient,
         to_display: &str,
-        content: &str,
-        summary: Option<&str>,
+        content: &Utf16JsonProjection,
+        summary: Option<&Utf16JsonProjection>,
         sender: &str,
         notify_when_idle: bool,
         task_registry: Option<&Arc<dyn TaskRegistryHandle>>,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         // A teammate name belongs to the current team before it is considered
         // a live-session alias. The router's named-recipient snapshot tells us
         // whether the name is actually owned by the current team; otherwise
@@ -411,14 +480,24 @@ impl SendMessageTool {
                 .into_iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case(target));
             if is_team_recipient {
-                let message_id = Self::deliver(router, from, target, content.to_string()).await?;
-                let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
-                return Ok(json!({
-                    "success": true,
-                    "message": format!("Message sent to {to_display}'s inbox"),
-                    "msg_id": message_id,
-                    "routing": Self::teammate_routing(router, sender, &format!("@{to_display}"), summary, Some(&preview)).await,
-                }));
+                let message_id = Self::deliver(router, from, target, content.clone()).await?;
+                let preview = Self::string_preview(content);
+                let routing = Self::teammate_routing(
+                    router,
+                    sender,
+                    &format!("@{to_display}"),
+                    summary,
+                    Some(&preview),
+                )
+                .await;
+                return Ok(Self::source_result_fields(
+                    true,
+                    format!("Message sent to {to_display}'s inbox"),
+                    [
+                        ("msg_id".to_string(), Self::source_text(&message_id)),
+                        ("routing".to_string(), routing),
+                    ],
+                ));
             }
         }
 
@@ -447,7 +526,7 @@ impl SendMessageTool {
                 .unwrap_or_else(|| from.to_string());
             let from_sid =
                 lingxi_core::host::live_sessions::process_session_id().unwrap_or_default();
-            let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
+            let preview = Self::string_preview(content);
             let message = lingxi_core::host::live_sessions::outbound_peer_message(
                 &from_name, &from_sid, content, summary,
             );
@@ -477,7 +556,7 @@ impl SendMessageTool {
                     &lingxi_core::host::live_sessions::IdleNotificationRequest {
                         from: from_name.clone(),
                         from_session_id: from_sid.clone(),
-                        summary: summary.map(str::to_string),
+                        summary: summary.cloned(),
                     },
                 )
                 .map_err(|e| {
@@ -489,53 +568,56 @@ impl SendMessageTool {
             } else {
                 false
             };
-            return Ok(json!({
-                "success": true,
-                "message": if subscribed {
+            return Ok(Self::source_result_fields(
+                true,
+                if subscribed {
                     Self::idle_subscription_success(to_display)
                 } else {
                     format!("Message sent to {to_display}'s inbox")
                 },
-                "routing": Self::routing(
-                    sender,
-                    &format!("@{to_display}"),
-                    summary,
-                    Some(&preview),
-                ),
-            }));
+                [(
+                    "routing".to_string(),
+                    Self::routing(sender, &format!("@{to_display}"), summary, Some(&preview)),
+                )],
+            ));
         }
         if matches!(recipient, Recipient::Session(_)) {
-            return Err(ToolError::InvalidInput(
-                "SendMessage: no live session with that session id".into(),
+            return Err(invalid_tool_input(
+                "SendMessage: no live session with that session id",
             ));
         }
         if notify_when_idle {
-            return Err(ToolError::InvalidInput(
-                "notify_when_idle is only supported for local live sessions".into(),
+            return Err(invalid_tool_input(
+                "notify_when_idle is only supported for local live sessions",
             ));
         }
         let message_id =
-            Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
-        let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
-        Ok(json!({
-            "success": true,
-            "message": format!("Message sent to {to_display}'s inbox"),
-            "msg_id": message_id,
-            "routing": Self::teammate_routing(
-                router, sender,
-                &format!("@{to_display}"),
-                summary,
-                Some(&preview),
-            ).await,
-        }))
+            Self::deliver(router, from, recipient.route_target(), content.clone()).await?;
+        let preview = Self::string_preview(content);
+        let routing = Self::teammate_routing(
+            router,
+            sender,
+            &format!("@{to_display}"),
+            summary,
+            Some(&preview),
+        )
+        .await;
+        Ok(Self::source_result_fields(
+            true,
+            format!("Message sent to {to_display}'s inbox"),
+            [
+                ("msg_id".to_string(), Self::source_text(&message_id)),
+                ("routing".to_string(), routing),
+            ],
+        ))
     }
 
     async fn handle_idle_subscription_only(
         recipient: &Recipient,
         to_display: &str,
-        summary: Option<&str>,
+        summary: Option<&Utf16JsonProjection>,
         sender: &str,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         let Some((dir, peer)) = lingxi_core::host::live_sessions::process_dir().and_then(|d| {
             let peer = match recipient {
                 Recipient::Session(session_id) => d.find_by_session_id(
@@ -550,8 +632,8 @@ impl SendMessageTool {
             };
             peer.map(|peer| (d, peer))
         }) else {
-            return Err(ToolError::InvalidInput(
-                "notify_when_idle is only supported for local live sessions".into(),
+            return Err(invalid_tool_input(
+                "notify_when_idle is only supported for local live sessions",
             ));
         };
         let from_name =
@@ -562,7 +644,7 @@ impl SendMessageTool {
             &lingxi_core::host::live_sessions::IdleNotificationRequest {
                 from: from_name,
                 from_session_id: from_sid,
-                summary: summary.map(str::to_string),
+                summary: summary.cloned(),
             },
         )
         .map_err(|e| {
@@ -570,25 +652,29 @@ impl SendMessageTool {
                 "SendMessage: failed to register idle notification for live session: {e}"
             ))
         })?;
-        Ok(json!({
-            "success": true,
-            "message": Self::idle_subscription_success(to_display),
-            "routing": Self::routing(sender, &format!("@{to_display}"), summary, None),
-        }))
+        Ok(Self::source_result_fields(
+            true,
+            Self::idle_subscription_success(to_display),
+            [(
+                "routing".to_string(),
+                Self::routing(sender, &format!("@{to_display}"), summary, None),
+            )],
+        ))
     }
 
     /// `handleBroadcast` — fan-out to every live teammate except the sender.
     async fn handle_broadcast(
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
-        content: &str,
-    ) -> Result<Value, ToolError> {
+        content: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
         let recipients = router
             .broadcast(
                 from,
                 MailboxMessage {
                     message_id: tool_api::util::ids::ulid_or_uuid(),
-                    content: content.to_string(),
+                    content: content.clone(),
+                    summary: None,
                     timestamp: SystemTime::now(),
                     color: None,
                 },
@@ -604,11 +690,14 @@ impl SendMessageTool {
                 recipients.join(", ")
             )
         };
-        Ok(json!({
-            "success": true,
-            "message": message,
-            "recipients": recipients,
-        }))
+        Ok(Self::source_result_fields(
+            true,
+            message,
+            [(
+                "recipients".to_string(),
+                generated_builtin_result(&json!(recipients)),
+            )],
+        ))
     }
 
     /// `handleShutdownRequest` — ask a teammate to shut down.
@@ -617,9 +706,9 @@ impl SendMessageTool {
         from: &str,
         recipient: &Recipient,
         to_display: &str,
-        reason: Option<&str>,
+        reason: Option<&Utf16JsonProjection>,
         sender: &str,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         let request_id = Self::generate_request_id("shutdown", to_display);
         let payload = tool_api::send_message_contract::shutdown_request(
             &request_id,
@@ -627,19 +716,15 @@ impl SendMessageTool {
             reason,
             &Self::protocol_timestamp(),
         );
-        Self::deliver(
-            router,
-            from,
-            recipient.route_target(),
-            serde_json::to_string(&payload).unwrap_or_default(),
-        )
-        .await?;
-        Ok(json!({
-            "success": true,
-            "message": format!("Shutdown request sent to {to_display}. Request ID: {request_id}"),
-            "request_id": request_id,
-            "target": to_display,
-        }))
+        Self::deliver(router, from, recipient.route_target(), payload).await?;
+        Ok(Self::source_result_fields(
+            true,
+            format!("Shutdown request sent to {to_display}. Request ID: {request_id}"),
+            [
+                ("request_id".to_string(), Self::source_text(&request_id)),
+                ("target".to_string(), Self::source_text(to_display)),
+            ],
+        ))
     }
 
     /// `handleShutdownApproval` — a teammate approves its own shutdown.
@@ -651,7 +736,7 @@ impl SendMessageTool {
         request_id: &str,
         agent_name: &str,
         ctx: &ToolUseContext,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         let payload = tool_api::send_message_contract::shutdown_approved(
             request_id,
             agent_name,
@@ -659,13 +744,7 @@ impl SendMessageTool {
             None,
             None,
         );
-        Self::deliver(
-            router,
-            from,
-            TEAM_LEAD_NAME,
-            serde_json::to_string(&payload).unwrap_or_default(),
-        )
-        .await?;
+        Self::deliver(router, from, TEAM_LEAD_NAME, payload).await?;
         let task_address = ctx
             .agent_id
             .map(|id| id.to_string())
@@ -684,13 +763,13 @@ impl SendMessageTool {
             .kill_with_reason(&task_address, "parent")
             .await
             .map_err(|e| ToolError::Internal(format!("SendMessage: shutdown failed: {e}")))?;
-        Ok(json!({
-            "success": true,
-            "message": format!(
+        Ok(Self::source_result_fields(
+            true,
+            format!(
                 "Shutdown approved. Sent confirmation to team-lead. Agent {agent_name} is now exiting."
             ),
-            "request_id": request_id,
-        }))
+            [("request_id".to_string(), Self::source_text(request_id))],
+        ))
     }
 
     /// `handleShutdownRejection` — a teammate declines a shutdown request.
@@ -698,27 +777,26 @@ impl SendMessageTool {
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         request_id: &str,
-        reason: &str,
+        reason: &Utf16JsonProjection,
         agent_name: &str,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         let payload = tool_api::send_message_contract::shutdown_rejected(
             request_id,
             agent_name,
             reason,
             &Self::protocol_timestamp(),
         );
-        Self::deliver(
-            router,
-            from,
-            TEAM_LEAD_NAME,
-            serde_json::to_string(&payload).unwrap_or_default(),
-        )
-        .await?;
-        Ok(json!({
-            "success": true,
-            "message": format!("Shutdown rejected. Reason: \"{reason}\". Continuing to work."),
-            "request_id": request_id,
-        }))
+        Self::deliver(router, from, TEAM_LEAD_NAME, payload).await?;
+        let message = Self::source_text_with_value(
+            "Shutdown rejected. Reason: \"",
+            reason,
+            "\". Continuing to work.",
+        );
+        Ok(Self::source_result_fields_projection(
+            true,
+            message,
+            [("request_id".to_string(), Self::source_text(request_id))],
+        ))
     }
 
     /// `handlePlanApproval` — the team lead approves a teammate's plan.
@@ -729,34 +807,25 @@ impl SendMessageTool {
         recipient: &Recipient,
         to_display: &str,
         request_id: &str,
-        feedback: Option<&str>,
+        feedback: Option<&Utf16JsonProjection>,
         ctx: &ToolUseContext,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         Self::require_team_lead(ctx, "approve")?;
-        let mut payload = json!({
-            "type": "plan_approval_response",
-            "requestId": request_id,
-            "approved": true,
-            "timestamp": Self::protocol_timestamp(),
-            "permissionMode": self.approval_permission_mode(),
-        });
-        if let Some(feedback) = feedback {
-            payload["feedback"] = json!(feedback);
-        }
-        Self::deliver(
-            router,
-            from,
-            recipient.route_target(),
-            serde_json::to_string(&payload).unwrap_or_default(),
-        )
-        .await?;
-        Ok(json!({
-            "success": true,
-            "message": format!(
+        let payload = tool_api::send_message_contract::plan_response(
+            request_id,
+            true,
+            feedback,
+            &Self::protocol_timestamp(),
+            Some(self.approval_permission_mode()),
+        );
+        Self::deliver(router, from, recipient.route_target(), payload).await?;
+        Ok(Self::source_result_fields(
+            true,
+            format!(
                 "Plan approved for {to_display}. They will receive the approval and can proceed with implementation."
             ),
-            "request_id": request_id,
-        }))
+            [("request_id".to_string(), Self::source_text(request_id))],
+        ))
     }
 
     /// `handlePlanRejection` — the team lead rejects a teammate's plan.
@@ -767,32 +836,26 @@ impl SendMessageTool {
         recipient: &Recipient,
         to_display: &str,
         request_id: &str,
-        feedback: &str,
+        feedback: &Utf16JsonProjection,
         ctx: &ToolUseContext,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<Utf16JsonProjection, ToolError> {
         Self::require_team_lead(ctx, "reject")?;
-        let payload = json!({
-            "type": "plan_approval_response",
-            "requestId": request_id,
-            "approved": false,
-            "feedback": feedback,
-            "timestamp": Self::protocol_timestamp(),
-        });
-        Self::deliver(
-            router,
-            from,
-            recipient.route_target(),
-            serde_json::to_string(&payload).unwrap_or_default(),
-        )
-        .await?;
-        let feedback_preview = truncate_preview(feedback, ROUTING_CONTENT_PREVIEW_CHARS);
-        Ok(json!({
-            "success": true,
-            "message": format!(
-                "Plan rejected for {to_display} with feedback: \"{feedback_preview}\""
-            ),
-            "request_id": request_id,
-        }))
+        let payload = tool_api::send_message_contract::plan_response(
+            request_id,
+            false,
+            Some(feedback),
+            &Self::protocol_timestamp(),
+            None,
+        );
+        Self::deliver(router, from, recipient.route_target(), payload).await?;
+        let feedback_preview = Self::string_preview(feedback);
+        let prefix = format!("Plan rejected for {to_display} with feedback: \"");
+        let message = Self::source_text_with_value(&prefix, &feedback_preview, "\"");
+        Ok(Self::source_result_fields_projection(
+            true,
+            message,
+            [("request_id".to_string(), Self::source_text(request_id))],
+        ))
     }
 
     async fn emit_started(bus: &Arc<AnalyticsBus>, invocation_id: &str, message_chars: i64) {
@@ -846,20 +909,30 @@ impl Tool for SendMessageTool {
     fn name(&self) -> &str {
         SEND_MESSAGE_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("send messages to agent teammates")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("send messages to agent teammates".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         tool_api::send_message_contract::schema(
             lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             agent_swarms_enabled(),
         )
     }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Ordinary named/background agents can receive messages without teams.
         self.ctx.mailbox_router.is_some()
     }
-    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+    fn coerce_input(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Option<tool_api::tool_trait::CoercedInput> {
         tool_api::send_message_contract::coerce(input)
     }
     fn should_defer(&self) -> bool {
@@ -873,24 +946,31 @@ impl Tool for SendMessageTool {
     fn max_result_size_chars(&self) -> usize {
         MAX_RESULT_SIZE_CHARS
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         // TS `isReadOnly(input)` = `typeof input.message === 'string'`.
-        input.get("message").is_some_and(Value::is_string)
+        input
+            .get_property("message")
+            .and_then(JsonValueView::code_units)
+            .is_some()
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // The TS tool only escalates to `ask` for a cross-machine `bridge:`
         // scheme. This tool exposes teammate and canonical local-session sends,
         // both of which remain local and are allowed here.
@@ -906,7 +986,7 @@ impl Tool for SendMessageTool {
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         tool_api::send_message_contract::validate(
@@ -914,14 +994,14 @@ impl Tool for SendMessageTool {
             agent_swarms_enabled(),
             ctx.agent_id.is_some() || ctx.agent_name.is_some(),
         )
-        .map_err(ValidationError)
+        .map_err(|message| ValidationError(source_text_projection(&message)))
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         tool_api::send_message_contract::prompt(
             lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             agent_swarms_enabled(),
@@ -931,7 +1011,7 @@ impl Tool for SendMessageTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -943,18 +1023,17 @@ impl Tool for SendMessageTool {
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
             if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
-                return Err(ToolError::InvalidInput(
+                return Err(invalid_tool_input(
                     lingxi_core::host::agent_processes::stop_pending_refusal("send messages."),
                 ));
             }
         }
 
-        let input = tool_api::send_message_contract::coerce(&input)
-            .map_or(input.clone(), |coerced| coerced.input);
-        if input.get("to").and_then(Value::as_str) == Some("*") {
-            return Err(ToolError::InvalidInput(
-                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
-                    .into(),
+        let input =
+            tool_api::send_message_contract::coerce(&input).map_or(input, |coerced| coerced.input);
+        if input.string_at("/to") == Some("*") {
+            return Err(invalid_tool_input(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient",
             ));
         }
 
@@ -963,7 +1042,7 @@ impl Tool for SendMessageTool {
             true,
             ctx.agent_id.is_some() || ctx.agent_name.is_some(),
         )
-        .map_err(ToolError::InvalidInput)?;
+        .map_err(invalid_tool_input)?;
 
         // --- Mailbox-seam guard (Rust-port artifact) -------------------------
         // PARITY-GAP: claude-code appends to a file mailbox directly; the Rust
@@ -988,7 +1067,7 @@ impl Tool for SendMessageTool {
         };
 
         // The latest protocol only accepts `to`.
-        let to = match input.get("to").and_then(Value::as_str) {
+        let to = match input.string_at("/to") {
             Some(s) => s.to_string(),
             None => {
                 Self::emit_failed(
@@ -998,7 +1077,7 @@ impl Tool for SendMessageTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput("SendMessage: missing 'to'".into()));
+                return Err(invalid_tool_input("SendMessage: missing 'to'"));
             }
         };
         let recipient = match Self::parse_recipient(&to) {
@@ -1016,21 +1095,20 @@ impl Tool for SendMessageTool {
         };
 
         // --- Parse `message` (plain string or structured object) -------------
-        let message = input.get("message");
-
-        let summary = input
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let message = Self::source_field(&input, "message");
+        let summary =
+            Self::source_field(&input, "summary").filter(|value| value.string_units("").is_some());
         let notify_when_idle = input
-            .get("notify_when_idle")
-            .and_then(Value::as_bool)
+            .get_property("notify_when_idle")
+            .and_then(JsonValueView::as_bool)
             .unwrap_or(false);
         let from = Self::route_from(&ctx);
         let sender = Self::sender_name(&ctx);
 
-        let main_message =
-            to.trim().eq_ignore_ascii_case("main") && message.is_some_and(Value::is_string);
+        let main_message = to.trim().eq_ignore_ascii_case("main")
+            && message
+                .as_ref()
+                .is_some_and(|value| value.string_units("").is_some());
         let self_error = if main_message {
             None
         } else {
@@ -1044,28 +1122,30 @@ impl Tool for SendMessageTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(message));
+            return Err(invalid_tool_input(message));
         }
 
-        let message_chars = match message {
-            None => 0,
-            Some(Value::String(s)) => s.chars().count(),
-            Some(other) => serde_json::to_string(other)
-                .map(|s| s.chars().count())
-                .unwrap_or(0),
-        } as i64;
+        let message_chars = message.as_ref().map_or(0, |value| {
+            value.string_units("").map_or_else(
+                || {
+                    value
+                        .to_json_string()
+                        .unwrap_or_default()
+                        .encode_utf16()
+                        .count()
+                },
+                |units| units.len(),
+            )
+        }) as i64;
         Self::emit_started(&bus, &invocation_id, message_chars).await;
 
-        let data_result: Result<Value, ToolError> = match message {
+        let empty_reason = Self::source_text("");
+        let default_feedback = Self::source_text("Plan needs revision");
+        let data_result: Result<Utf16JsonProjection, ToolError> = match message {
             None => {
                 if notify_when_idle {
-                    Self::handle_idle_subscription_only(
-                        &recipient,
-                        &to,
-                        summary.as_deref(),
-                        &sender,
-                    )
-                    .await
+                    Self::handle_idle_subscription_only(&recipient, &to, summary.as_ref(), &sender)
+                        .await
                 } else {
                     Self::emit_failed(
                         &bus,
@@ -1074,33 +1154,35 @@ impl Tool for SendMessageTool {
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
-                    Err(ToolError::InvalidInput(
-                        "SendMessage: missing 'message'".into(),
+                    Err(invalid_tool_input("SendMessage: missing 'message'"))
+                }
+            }
+            Some(content) if content.string_units("").is_some() && main_message => {
+                if ctx.agent_id.is_none() {
+                    Ok(Self::source_result_fields(
+                        false,
+                        "You are the main conversation — \"main\" addresses you. Send to a named agent instead.".to_string(),
+                        std::iter::empty(),
+                    ))
+                } else {
+                    Self::deliver(&router, &from, "main", content).await?;
+                    Ok(Self::source_result_fields(
+                        true,
+                        "Message queued for the main conversation's next turn.".to_string(),
+                        std::iter::empty(),
                     ))
                 }
             }
-            Some(Value::String(content)) if main_message => {
-                if ctx.agent_id.is_none() {
-                    Ok(
-                        json!({"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}),
-                    )
-                } else {
-                    Self::deliver(&router, &from, "main", content.clone()).await?;
-                    Ok(
-                        json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
-                    )
-                }
-            }
-            Some(Value::String(content)) => match recipient {
-                Recipient::Broadcast => Self::handle_broadcast(&router, &from, content).await,
+            Some(content) if content.string_units("").is_some() => match recipient {
+                Recipient::Broadcast => Self::handle_broadcast(&router, &from, &content).await,
                 _ => {
                     Self::handle_message(
                         &router,
                         &from,
                         &recipient,
                         &to,
-                        content,
-                        summary.as_deref(),
+                        &content,
+                        summary.as_ref(),
                         &sender,
                         notify_when_idle,
                         self.ctx.task_registry.as_ref(),
@@ -1108,7 +1190,12 @@ impl Tool for SendMessageTool {
                     .await
                 }
             },
-            Some(Value::Object(obj)) => {
+            Some(message)
+                if message
+                    .at_pointer("")
+                    .and_then(JsonValueView::object_entries)
+                    .is_some() =>
+            {
                 if matches!(recipient, Recipient::Broadcast) {
                     Self::emit_failed(
                         &bus,
@@ -1117,31 +1204,34 @@ impl Tool for SendMessageTool {
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(
-                        "structured messages cannot be broadcast".into(),
+                    return Err(invalid_tool_input(
+                        "structured messages cannot be broadcast",
                     ));
                 }
                 if matches!(recipient, Recipient::Session(_)) {
-                    return Err(ToolError::InvalidInput(
-                        "structured messages cannot be sent cross-session — only plain text".into(),
+                    return Err(invalid_tool_input(
+                        "structured messages cannot be sent cross-session — only plain text",
                     ));
                 }
-                let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
-                let request_id_in = obj
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let approve = obj
-                    .get("approve")
+                let mtype = message.string_at("/type").unwrap_or("");
+                let request_id_in = message.string_at("/request_id").unwrap_or("").to_string();
+                let approve = message
+                    .get_property("approve")
                     .and_then(Self::semantic_bool)
                     .unwrap_or(false);
-                let reason = obj.get("reason").and_then(Value::as_str);
-                let feedback = obj.get("feedback").and_then(Value::as_str);
+                let reason = Self::source_field(&message, "reason")
+                    .filter(|value| value.string_units("").is_some());
+                let feedback = Self::source_field(&message, "feedback")
+                    .filter(|value| value.string_units("").is_some());
                 match mtype {
                     "shutdown_request" => {
                         Self::handle_shutdown_request(
-                            &router, &from, &recipient, &to, reason, &sender,
+                            &router,
+                            &from,
+                            &recipient,
+                            &to,
+                            reason.as_ref(),
+                            &sender,
                         )
                         .await
                     }
@@ -1160,7 +1250,7 @@ impl Tool for SendMessageTool {
                                 &router,
                                 &from,
                                 &request_id_in,
-                                reason.unwrap_or(""),
+                                reason.as_ref().unwrap_or(&empty_reason),
                                 &sender,
                             )
                             .await
@@ -1174,7 +1264,7 @@ impl Tool for SendMessageTool {
                                 &recipient,
                                 &to,
                                 &request_id_in,
-                                feedback,
+                                feedback.as_ref(),
                                 &ctx,
                             )
                             .await
@@ -1185,7 +1275,7 @@ impl Tool for SendMessageTool {
                                 &recipient,
                                 &to,
                                 &request_id_in,
-                                feedback.unwrap_or("Plan needs revision"),
+                                feedback.as_ref().unwrap_or(&default_feedback),
                                 &ctx,
                             )
                             .await
@@ -1199,8 +1289,8 @@ impl Tool for SendMessageTool {
                             started.elapsed().as_millis() as u64,
                         )
                         .await;
-                        return Err(ToolError::InvalidInput(
-                            "SendMessage: 'message' must be a string or a structured object".into(),
+                        return Err(invalid_tool_input(
+                            "SendMessage: 'message' must be a string or a structured object",
                         ));
                     }
                 }
@@ -1213,8 +1303,8 @@ impl Tool for SendMessageTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "SendMessage: 'message' must be a string or a structured object".into(),
+                return Err(invalid_tool_input(
+                    "SendMessage: 'message' must be a string or a structured object",
                 ));
             }
         };
@@ -1236,14 +1326,17 @@ impl Tool for SendMessageTool {
         Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64).await;
         // The oracle serializes the result object, excluding UI-only fields.
         let mut model_data = data.clone();
-        if let Some(object) = model_data.as_object_mut() {
-            object.remove("display");
-            object.remove("inlineHandback");
-        }
-        let model_content = Some(
-            serde_json::to_string(&model_data)
+        model_data
+            .remove_field("display")
+            .map_err(|error| ToolError::Internal(error.to_string()))?;
+        model_data
+            .remove_field("inlineHandback")
+            .map_err(|error| ToolError::Internal(error.to_string()))?;
+        let model_content = Some(source_text_projection(
+            &model_data
+                .to_json_string()
                 .map_err(|error| ToolError::Internal(error.to_string()))?,
-        );
+        ));
         Ok(ToolCallResult {
             data,
             model_content,
@@ -1251,6 +1344,65 @@ impl Tool for SendMessageTool {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
+        })
+    }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestValidationError(String);
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestToolCallResult {
+    data: Value,
+    model_content: Option<String>,
+}
+
+#[cfg(test)]
+impl SendMessageTool {
+    fn is_read_only(&self, input: &Value) -> bool {
+        Tool::is_read_only(self, &generated_builtin_result(input))
+    }
+
+    async fn validate_input(
+        &self,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<(), TestValidationError> {
+        Tool::validate_input(self, &generated_builtin_result(input), ctx)
+            .await
+            .map_err(|error| {
+                TestValidationError(error.0.string_at("").unwrap_or_default().to_owned())
+            })
+    }
+
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestToolCallResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection is valid JSON"),
+        )
+        .expect("test result is JSON");
+        let model_content = result
+            .model_content
+            .map(|value| value.string_at("").unwrap_or_default().to_string());
+        Ok(TestToolCallResult {
+            data,
+            model_content,
         })
     }
 }
@@ -1286,8 +1438,11 @@ mod tests {
         let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_HARBOR_KITE", "1");
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        let p = tool.prompt(&PromptOptions::default()).await;
+        let prompt = tool.prompt(&PromptOptions::default()).await;
         std::env::remove_var("LINGXI_HARBOR_KITE");
+        let p = prompt
+            .string_at("")
+            .expect("generated prompt is a root string");
 
         assert!(
             p.contains("\n\n## Cross-session\n\nUse `ListAgents` to discover targets."),
@@ -1318,7 +1473,9 @@ mod tests {
     /// observable in tests).
     struct RecordingRouter {
         routed: Mutex<Vec<(String, String, String)>>,
+        routed_source: Mutex<Vec<Utf16JsonProjection>>,
         broadcasted: Mutex<Vec<(String, String)>>,
+        broadcasted_source: Mutex<Vec<Utf16JsonProjection>>,
         colors: Mutex<HashMap<String, String>>,
         routed_colors: Mutex<Vec<Option<String>>>,
     }
@@ -1348,8 +1505,9 @@ mod tests {
                         "running"
                     }
                     .to_string(),
-                    description: "research".to_string(),
+                    description: "research".to_string().into(),
                     killed_by: killed_by.map(str::to_string),
+                    agent_facts: None,
                     ..TaskRecord::default()
                 },
             );
@@ -1395,6 +1553,7 @@ mod tests {
             Ok(TaskRecord {
                 task_id: "t12345678".into(),
                 status: "killed".into(),
+                agent_facts: None,
                 ..Default::default()
             })
         }
@@ -1424,7 +1583,9 @@ mod tests {
         fn new() -> Self {
             Self {
                 routed: Mutex::new(Vec::new()),
+                routed_source: Mutex::new(Vec::new()),
                 broadcasted: Mutex::new(Vec::new()),
+                broadcasted_source: Mutex::new(Vec::new()),
                 colors: Mutex::new(HashMap::new()),
                 routed_colors: Mutex::new(Vec::new()),
             }
@@ -1442,6 +1603,10 @@ mod tests {
             to_agent: &str,
             message: MailboxMessage,
         ) -> Result<RouteAck, MailboxError> {
+            self.routed_source
+                .lock()
+                .unwrap()
+                .push(message.content.clone());
             self.routed_colors
                 .lock()
                 .unwrap()
@@ -1449,7 +1614,11 @@ mod tests {
             self.routed.lock().unwrap().push((
                 from_agent.to_string(),
                 to_agent.to_string(),
-                message.content,
+                message
+                    .content
+                    .string_at("")
+                    .unwrap_or_default()
+                    .to_string(),
             ));
             Ok(RouteAck {
                 claimed_at: SystemTime::now(),
@@ -1462,10 +1631,18 @@ mod tests {
             from_agent: &str,
             message: MailboxMessage,
         ) -> Result<Vec<String>, MailboxError> {
-            self.broadcasted
+            self.broadcasted_source
                 .lock()
                 .unwrap()
-                .push((from_agent.to_string(), message.content));
+                .push(message.content.clone());
+            self.broadcasted.lock().unwrap().push((
+                from_agent.to_string(),
+                message
+                    .content
+                    .string_at("")
+                    .unwrap_or_default()
+                    .to_string(),
+            ));
             Ok(vec!["alpha".to_string(), "beta".to_string()])
         }
     }
@@ -1614,8 +1791,9 @@ mod tests {
             .await
             .expect_err("self-target must reject");
         assert!(
-            err.model_facing_message()
-                .contains("Not sent — 'lead' is this session's own name."),
+            err.model_facing_message().string_at("").is_some_and(
+                |message| message.contains("Not sent — 'lead' is this session's own name.")
+            ),
             "got: {err:?}"
         );
     }
@@ -1670,15 +1848,29 @@ mod tests {
         let delivered = dir.drain_inbox("peer-session").unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(
-            lingxi_core::host::live_sessions::extract_cross_session_inner(&delivered[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(
+                delivered[0].content.string_at("").unwrap()
+            ),
             "check this when free"
         );
-        assert_eq!(delivered[0].summary.as_deref(), Some("later"));
+        assert_eq!(
+            delivered[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
+            Some("later")
+        );
         let queued = dir.drain_idle_subscriptions("peer-session").unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].from, "lead");
         assert_eq!(queued[0].from_session_id, "self-session");
-        assert_eq!(queued[0].summary.as_deref(), Some("later"));
+        assert_eq!(
+            queued[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
+            Some("later")
+        );
     }
 
     /// Mirror of `coordinator::tool_send_message`'s live-socket case, for the
@@ -1745,14 +1937,21 @@ mod tests {
         lingxi_core::host::uds_inbox::stop_process_inbox();
 
         assert_eq!(woken.len(), 1, "an idle peer must be woken: {woken:?}");
-        assert!(woken[0].contains("hello over the socket"), "{woken:?}");
+        assert!(
+            woken[0]
+                .string_at("")
+                .is_some_and(|message| message.contains("hello over the socket")),
+            "{woken:?}"
+        );
         assert_eq!(
             inbox.len(),
             1,
             "the durable copy must be written even when the socket answered"
         );
         assert_eq!(
-            lingxi_core::host::live_sessions::extract_cross_session_inner(&inbox[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(
+                inbox[0].content.string_at("").unwrap()
+            ),
             "hello over the socket"
         );
     }
@@ -1806,7 +2005,9 @@ mod tests {
         let messages = dir.drain_inbox(peer_session_id).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            lingxi_core::host::live_sessions::extract_cross_session_inner(&messages[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(
+                messages[0].content.string_at("").unwrap()
+            ),
             "hello by stable id"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1859,7 +2060,13 @@ mod tests {
         assert!(router.routed.lock().unwrap().is_empty());
         let queued = dir.drain_idle_subscriptions(peer_session_id).unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].summary.as_deref(), Some("ping me"));
+        assert_eq!(
+            queued[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
+            Some("ping me")
+        );
     }
 
     #[tokio::test]
@@ -1876,9 +2083,9 @@ mod tests {
             )
             .await
             .expect_err("team protocol messages must not target a session");
-        assert!(err
-            .model_facing_message()
-            .contains("structured messages cannot be sent cross-session"));
+        assert!(err.model_facing_message().string_at("").is_some_and(
+            |message| message.contains("structured messages cannot be sent cross-session")
+        ));
     }
 
     #[tokio::test]
@@ -2015,7 +2222,8 @@ mod tests {
             .unwrap_err();
         assert!(error
             .model_facing_message()
-            .contains("message must not be empty"));
+            .string_at("")
+            .is_some_and(|message| message.contains("message must not be empty")));
         assert!(router.routed.lock().unwrap().is_empty());
     }
 
@@ -2205,6 +2413,46 @@ mod tests {
         assert_eq!(truncate_preview("👨‍👩‍👧‍👦abc", 4), "👨‍👩‍👧‍👦a…");
     }
 
+    #[test]
+    fn source_preview_retains_exact_utf16_units_in_the_kept_prefix() {
+        let mut units = "a".repeat(48).encode_utf16().collect::<Vec<_>>();
+        units.extend([0xD800]);
+        units.extend("tail text that makes the preview truncate".encode_utf16());
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("source message is valid JSON");
+
+        let preview = SendMessageTool::string_preview(&source);
+        let expected_prefix = units[..49].to_vec();
+        let mut expected = expected_prefix;
+        expected.extend("\u{2026}".encode_utf16());
+        assert_eq!(preview.string_units(""), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn send_message_preserves_unpaired_units_in_delivery_and_preview() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let input = Utf16JsonProjection::object(vec![
+            ("to".into(), source_text_projection("worker")),
+            ("message".into(), source_text_projection_units(&[0xD800])),
+        ])
+        .expect("SendMessage input is valid JSON");
+
+        let result = Tool::call(&tool, input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("source text is delivered");
+
+        assert_eq!(
+            router.routed_source.lock().unwrap()[0].string_units(""),
+            Some(vec![0xD800])
+        );
+        assert_eq!(
+            result.data.string_units("/routing/content"),
+            Some(vec![0xD800])
+        );
+    }
+
     #[tokio::test]
     async fn call_rejects_broadcast_without_delivery() {
         let router = Arc::new(RecordingRouter::new());
@@ -2213,7 +2461,10 @@ mod tests {
             .call(json!({"to":"*","message":"hi"}), fresh_ctx(), fresh_tx())
             .await
             .unwrap_err();
-        assert!(error.model_facing_message().contains("broadcast (to:"));
+        assert!(error
+            .model_facing_message()
+            .string_at("")
+            .is_some_and(|message| message.contains("broadcast (to:")));
         assert!(router.broadcasted.lock().unwrap().is_empty());
     }
 
@@ -2442,9 +2693,11 @@ mod tests {
                 )
                 .await
                 .expect_err("teammate plan decisions must fail closed");
+            let expected = format!("Only the team lead can {action} plans");
             assert!(error
                 .model_facing_message()
-                .contains(&format!("Only the team lead can {action} plans")));
+                .string_at("")
+                .is_some_and(|message| message.contains(&expected)));
             assert!(router.routed.lock().unwrap().is_empty());
         }
     }
@@ -2501,9 +2754,10 @@ mod tests {
             .await
             .expect_err("a user-stopped agent must not silently accept messages");
 
+        let expected = lingxi_core::host::task_registry::stopped_by_user_message("a1b2c3d4e");
         assert_eq!(
-            err.model_facing_message(),
-            lingxi_core::host::task_registry::stopped_by_user_message("a1b2c3d4e")
+            err.model_facing_message().string_at(""),
+            Some(expected.as_str())
         );
         // The refusal is a PRE-flight: nothing may reach the mailbox, because
         // `deliver` returns as soon as the mailbox accepts and the registry's

@@ -22,6 +22,7 @@
 //! still runs, just in this context.
 
 use lingxi_core::host::task_registry::TaskRecord;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use session::forked_skill::ForkedSkillScoping;
 
 /// Whether a forking skill should run in the BACKGROUND (claude `KCo`).
@@ -114,11 +115,11 @@ Do the skill's work directly in this context instead of invoking further skills.
 /// "Live" is not-terminal, which includes `pending` — a fork that has been
 /// admitted but not yet started still owns the skill's slot.
 #[must_use]
-pub fn has_live_fork(tasks: &[TaskRecord], skill_name: &str) -> bool {
+pub fn has_live_fork(tasks: &[TaskRecord], skill_name: &Utf16JsonProjection) -> bool {
     tasks.iter().any(|t| {
         t.task_type == "local_agent"
             && !matches!(t.status.as_str(), "completed" | "failed" | "killed")
-            && t.forked_skill_name.as_deref() == Some(skill_name)
+            && t.forked_skill_name.as_ref() == Some(skill_name)
     })
 }
 
@@ -126,9 +127,9 @@ pub fn has_live_fork(tasks: &[TaskRecord], skill_name: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct ForkLaunchInputs<'a> {
     /// The skill's name — the fork identity.
-    pub skill_name: &'a str,
+    pub skill_name: Utf16JsonProjection,
     /// The display name the fork is attributed to (claude `spawnedBySkill`).
-    pub attribution_name: &'a str,
+    pub attribution_name: Utf16JsonProjection,
     /// The skill's declared effort, when it declared one.
     pub effort: Option<session::forked_skill::Effort>,
     /// Command-deny rules frozen at fork time. An EMPTY list writes no key —
@@ -159,7 +160,7 @@ pub struct ForkLaunchInputs<'a> {
 /// second pass.
 #[must_use]
 pub fn decide_fork_launch(inputs: &ForkLaunchInputs<'_>) -> ForkDecision {
-    if has_live_fork(inputs.tasks, inputs.skill_name) {
+    if has_live_fork(inputs.tasks, &inputs.skill_name) {
         return ForkDecision::Inline(InlineFallback::LiveDuplicate);
     }
     if inputs.depth > inputs.depth_limit {
@@ -180,8 +181,8 @@ pub fn decide_fork_launch(inputs: &ForkLaunchInputs<'_>) -> ForkDecision {
     }
 
     let scoping = ForkedSkillScoping {
-        skill_name: inputs.skill_name.to_string(),
-        attribution_name: inputs.attribution_name.to_string(),
+        skill_name: inputs.skill_name.clone(),
+        attribution_name: inputs.attribution_name.clone(),
         effort: inputs.effort.clone(),
         frozen_command_denies: (!inputs.frozen_command_denies.is_empty())
             .then(|| inputs.frozen_command_denies.clone()),
@@ -203,7 +204,7 @@ pub fn decide_fork_launch(inputs: &ForkLaunchInputs<'_>) -> ForkDecision {
 #[must_use]
 pub fn recheck_after_persist(
     tasks: &[TaskRecord],
-    skill_name: &str,
+    skill_name: &Utf16JsonProjection,
     total_spawns: u64,
     spawn_cap: u64,
 ) -> Option<InlineFallback> {
@@ -225,55 +226,63 @@ pub fn recheck_after_persist(
 /// output.
 #[must_use]
 pub fn fork_result(
-    command_name: &str,
+    command_name: &Utf16JsonProjection,
     agent_id: &str,
     background: bool,
-    result: &str,
-) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("success".into(), serde_json::Value::Bool(true));
-    obj.insert(
-        "commandName".into(),
-        serde_json::Value::String(command_name.to_string()),
-    );
-    obj.insert(
-        "status".into(),
-        serde_json::Value::String("forked".to_string()),
-    );
+    result: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let mut fields = vec![
+        ("success".to_string(), projection_bool(true)),
+        ("commandName".to_string(), command_name.clone()),
+        ("status".to_string(), "forked".into()),
+    ];
     if background {
-        obj.insert("background".into(), serde_json::Value::Bool(true));
+        fields.push(("background".to_string(), projection_bool(true)));
     }
-    obj.insert(
-        "agentId".into(),
-        serde_json::Value::String(agent_id.to_string()),
-    );
-    obj.insert(
-        "result".into(),
-        serde_json::Value::String(result.to_string()),
-    );
-    serde_json::Value::Object(obj)
+    fields.push(("agentId".to_string(), agent_id.into()));
+    fields.push(("result".to_string(), result.clone()));
+    Utf16JsonProjection::object(fields).expect("fork result fields form valid JSON")
 }
 
 /// The subagent's final TEXT (claude `Jc(content, "\n")` — text blocks joined
 /// with `\n`; non-text blocks dropped). A non-array content has no text blocks.
 #[must_use]
-pub fn final_text(content: &serde_json::Value) -> String {
-    let Some(blocks) = content.as_array() else {
-        return String::new();
+pub fn final_text(content: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(blocks) = content.at_pointer("") else {
+        return String::new().into();
     };
-    blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let Some(count) = blocks.array_len() else {
+        return String::new().into();
+    };
+    let mut output = Vec::new();
+    let mut wrote_text = false;
+    for index in 0..count {
+        let Some(block) = blocks.get_index(index) else {
+            continue;
+        };
+        if block.get_property("type").and_then(|value| value.as_str()) != Some("text") {
+            continue;
+        }
+        let Some(text) = block
+            .get_property("text")
+            .and_then(|value| value.code_units())
+        else {
+            continue;
+        };
+        if wrote_text {
+            output.push(u16::from(b'\n'));
+        }
+        output.extend_from_slice(text);
+        wrote_text = true;
+    }
+    source_from_units(output)
 }
 
 /// The background launch's `result` line (claude
 /// `` `Running in the background as @${G.name}` ``).
 #[must_use]
-pub fn running_in_background_line(agent_name: &str) -> String {
-    format!("Running in the background as @{agent_name}")
+pub fn running_in_background_line(agent_name: &str) -> Utf16JsonProjection {
+    format!("Running in the background as @{agent_name}").into()
 }
 
 /// The model-facing `tool_result` text for a forked skill (claude
@@ -282,14 +291,46 @@ pub fn running_in_background_line(agent_name: &str) -> String {
 /// The model never sees the raw result object — the inline path's equivalent is
 /// the one-line `Launching skill: …`, and these are the forked path's two.
 #[must_use]
-pub fn fork_tool_result_text(command_name: &str, background: bool, result: &str) -> String {
+pub fn fork_tool_result_text(
+    command_name: &Utf16JsonProjection,
+    background: bool,
+    result: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
     if background {
-        format!(
-            "Skill \"{command_name}\" launched (forked execution, running in the background).\n\n{result}"
-        )
+        join_source_parts(&[
+            "Skill \"".into(),
+            command_name.clone(),
+            "\" launched (forked execution, running in the background).\n\n".into(),
+            result.clone(),
+        ])
     } else {
-        format!("Skill \"{command_name}\" completed (forked execution).\n\nResult:\n{result}")
+        join_source_parts(&[
+            "Skill \"".into(),
+            command_name.clone(),
+            "\" completed (forked execution).\n\nResult:\n".into(),
+            result.clone(),
+        ])
     }
+}
+
+fn projection_bool(value: bool) -> Utf16JsonProjection {
+    tool_api::tool_trait::generated_builtin_result(&serde_json::Value::Bool(value))
+}
+
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text derives from exact UTF-16 units")
+}
+
+fn join_source_parts(parts: &[Utf16JsonProjection]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for part in parts {
+        units.extend(
+            part.string_units("")
+                .expect("fork text composition uses root strings"),
+        );
+    }
+    source_from_units(units)
 }
 
 /// The synchronous fork's `result` when the subagent produced no final text
@@ -306,8 +347,8 @@ pub fn declares_fork(context: Option<&str>) -> bool {
 /// schema enforces, checked before the launch so an over-long or newline-
 /// bearing skill name never reaches the sidecar.
 #[must_use]
-pub fn is_forkable_skill_name(name: &str) -> bool {
-    session::forked_skill::is_valid_skill_name(name)
+pub fn is_forkable_skill_name(name: &Utf16JsonProjection) -> bool {
+    session::forked_skill::is_valid_skill_name_source(name)
 }
 
 #[cfg(test)]
@@ -321,15 +362,16 @@ mod tests {
             task_id: "a00000001".into(),
             task_type: "local_agent".into(),
             status: status.into(),
-            forked_skill_name: forked.map(str::to_string),
+            forked_skill_name: forked.map(Into::into),
+            agent_facts: None,
             ..Default::default()
         }
     }
 
-    fn inputs<'a>(skill: &'a str, tasks: &'a [TaskRecord]) -> ForkLaunchInputs<'a> {
+    fn inputs<'a>(skill: &str, tasks: &'a [TaskRecord]) -> ForkLaunchInputs<'a> {
         ForkLaunchInputs {
-            skill_name: skill,
-            attribution_name: skill,
+            skill_name: skill.into(),
+            attribution_name: skill.into(),
             effort: None,
             frozen_command_denies: Vec::new(),
             depth: 1,
@@ -370,11 +412,37 @@ mod tests {
     /// every terminal status releases it.
     #[test]
     fn liveness_is_non_terminal_not_merely_running() {
-        assert!(has_live_fork(&[task("pending", Some("s"))], "s"));
-        assert!(has_live_fork(&[task("running", Some("s"))], "s"));
+        assert!(has_live_fork(&[task("pending", Some("s"))], &"s".into()));
+        assert!(has_live_fork(&[task("running", Some("s"))], &"s".into()));
         for done in ["completed", "failed", "killed"] {
-            assert!(!has_live_fork(&[task(done, Some("s"))], "s"), "{done}");
+            assert!(
+                !has_live_fork(&[task(done, Some("s"))], &"s".into()),
+                "{done}"
+            );
         }
+    }
+
+    #[test]
+    fn live_fork_identity_compares_utf16_units_not_lossy_display_text() {
+        let mut units = "skill_".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend("_probe".encode_utf16());
+        let exact = Utf16JsonProjection::root_string("skill_�_probe", units).unwrap();
+        let lossy_lookalike = Utf16JsonProjection::from("skill_�_probe");
+        let task = TaskRecord {
+            task_id: "a00000001".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            forked_skill_name: Some(exact.clone()),
+            agent_facts: None,
+            ..Default::default()
+        };
+
+        assert!(has_live_fork(std::slice::from_ref(&task), &exact));
+        assert!(!has_live_fork(
+            std::slice::from_ref(&task),
+            &lossy_lookalike
+        ));
     }
 
     /// A non-agent task carrying the same name must not block the fork — the
@@ -383,7 +451,7 @@ mod tests {
     fn only_local_agent_tasks_count_as_a_live_fork() {
         let mut t = task("running", Some("s"));
         t.task_type = "local_workflow".into();
-        assert!(!has_live_fork(&[t], "s"));
+        assert!(!has_live_fork(&[t], &"s".into()));
     }
 
     #[test]
@@ -487,50 +555,63 @@ Do the skill's work directly in this context instead of invoking further skills.
     fn the_recheck_catches_a_race_over_the_persist_window() {
         let tasks = vec![task("running", Some("s"))];
         assert_eq!(
-            recheck_after_persist(&tasks, "s", 0, 200),
+            recheck_after_persist(&tasks, &"s".into(), 0, 200),
             Some(InlineFallback::LiveDuplicate)
         );
         assert_eq!(
-            recheck_after_persist(&[], "s", 200, 200),
+            recheck_after_persist(&[], &"s".into(), 200, 200),
             Some(InlineFallback::SpawnCap)
         );
-        assert_eq!(recheck_after_persist(&[], "s", 0, 200), None);
+        assert_eq!(recheck_after_persist(&[], &"s".into(), 0, 200), None);
     }
 
     #[test]
     fn background_result_carries_the_background_flag_and_handle_line() {
         let v = fork_result(
-            "review",
+            &"review".into(),
             "agent-7",
             true,
             &running_in_background_line("rev"),
         );
-        assert_eq!(v["status"], "forked");
-        assert_eq!(v["background"], true);
-        assert_eq!(v["agentId"], "agent-7");
-        assert_eq!(v["result"], "Running in the background as @rev");
+        assert_eq!(v.string_at("/status"), Some("forked"));
+        assert_eq!(
+            v.at_pointer("/background").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(v.string_at("/agentId"), Some("agent-7"));
+        assert_eq!(
+            v.string_at("/result"),
+            Some("Running in the background as @rev")
+        );
     }
 
     /// The synchronous fork omits `background` entirely — claude only spreads
     /// the key on the background return.
     #[test]
     fn synchronous_fork_result_omits_the_background_key() {
-        let v = fork_result("review", "agent-7", false, "the findings");
-        assert_eq!(v["status"], "forked");
-        assert!(v.get("background").is_none());
-        assert_eq!(v["result"], "the findings");
+        let v = fork_result(&"review".into(), "agent-7", false, &"the findings".into());
+        assert_eq!(v.string_at("/status"), Some("forked"));
+        assert!(v.at_pointer("/background").is_none());
+        assert_eq!(v.string_at("/result"), Some("the findings"));
     }
 
     #[test]
     fn tool_result_text_differs_between_the_two_fork_paths() {
         assert_eq!(
-            fork_tool_result_text("review", true, "Running in the background as @rev"),
-            "Skill \"review\" launched (forked execution, running in the background).\n\n\
+            fork_tool_result_text(
+                &"review".into(),
+                true,
+                &"Running in the background as @rev".into(),
+            )
+            .string_at(""),
+            Some(
+                "Skill \"review\" launched (forked execution, running in the background).\n\n\
              Running in the background as @rev"
+            )
         );
         assert_eq!(
-            fork_tool_result_text("review", false, "the findings"),
-            "Skill \"review\" completed (forked execution).\n\nResult:\nthe findings"
+            fork_tool_result_text(&"review".into(), false, &"the findings".into()).string_at(""),
+            Some("Skill \"review\" completed (forked execution).\n\nResult:\nthe findings")
         );
     }
 
@@ -550,8 +631,15 @@ Do the skill's work directly in this context instead of invoking further skills.
 
     #[test]
     fn fork_identity_rejects_names_the_sidecar_could_not_hold() {
-        assert!(is_forkable_skill_name("review"));
-        assert!(!is_forkable_skill_name(&"x".repeat(SKILL_NAME_MAX_LEN + 1)));
-        assert!(!is_forkable_skill_name("a\nb"));
+        assert!(is_forkable_skill_name(&"review".into()));
+        assert!(!is_forkable_skill_name(
+            &"x".repeat(SKILL_NAME_MAX_LEN + 1).into()
+        ));
+        assert!(!is_forkable_skill_name(&"a\nb".into()));
+        let mut units = "skill_".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend("_probe".encode_utf16());
+        let unpaired = Utf16JsonProjection::root_string("skill_�_probe", units).unwrap();
+        assert!(is_forkable_skill_name(&unpaired));
     }
 }

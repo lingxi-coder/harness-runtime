@@ -31,6 +31,25 @@ fn the_three_honoured_fields_can_be_rewritten() {
     assert_eq!(out.cwd.as_deref(), Some("/elsewhere"));
 }
 
+#[test]
+fn spawn_hook_rewrite_preserves_host_caller_provenance() {
+    use lingxi_core::host::task_registry::FieldPresence;
+
+    let provenance = lingxi_core::host::subagent_spawn::AgentSpawnProvenance {
+        hook_caller: FieldPresence::Value(json!("host-plugin")),
+        hook_origin: FieldPresence::Value(json!(["host-plugin", "parent-api"])),
+    };
+    let request = SubagentSpawnRequest {
+        agent_spawn_provenance: provenance.clone(),
+        ..request()
+    };
+    let out = apply_spawn_rewrite(&request, Some(&json!({"agent_type":"reviewer"})))
+        .unwrap()
+        .expect("the type was rewritten");
+
+    assert_eq!(out.agent_spawn_provenance, provenance);
+}
+
 /// ⚠️ `background` is listed by upstream but CANNOT take effect here: its
 /// consumer runs ABOVE the hook. Accepting it would log a rewrite and change
 /// nothing — an advertised capability that silently does not work, which is
@@ -77,7 +96,8 @@ fn a_hook_cannot_rewrite_fields_it_was_not_given() {
     .expect("agent_type changed");
     assert_eq!(out.subagent_type, "reviewer");
     assert_eq!(
-        out.prompt, "do the thing",
+        out.prompt.string_at(""),
+        Some("do the thing"),
         "the prompt is not a rewritable field"
     );
     assert_eq!(

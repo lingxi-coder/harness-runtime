@@ -13,9 +13,10 @@
 //! retry errors into [`PermissionDecision::Deny`].
 #![forbid(unsafe_code)]
 
-use crate::types::ContentBlock;
+use crate::host::McpPermissionCeiling;
+use crate::types::utf16_json::Utf16JsonProjection;
+use crate::types::{ContentBlock, ConversationMessage};
 use async_trait::async_trait;
-use serde_json::Value;
 use std::path::Path;
 
 /// One tool call refused by the permission layer, as reported in the
@@ -36,7 +37,8 @@ pub struct PermissionDenial {
     /// The `tool_use_id` of the refused call.
     pub tool_use_id: String,
     /// The input the model supplied, verbatim.
-    pub tool_input: Value,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub tool_input: Utf16JsonProjection,
 }
 
 /// Receives only time spent waiting on a permission prompt transport.
@@ -105,7 +107,7 @@ pub enum PermissionDecision {
     /// The tool call is rejected.
     Deny {
         /// Reason surfaced to the model as the `tool_result`.
-        reason: String,
+        reason: Utf16JsonProjection,
     },
 }
 
@@ -134,7 +136,7 @@ pub enum NonInteractivePermissionDecision {
     /// text, matching `PermissionResult::Deny::explanation`.
     Deny {
         /// Optional user-facing denial reason.
-        reason: Option<String>,
+        reason: Option<Utf16JsonProjection>,
     },
 }
 
@@ -149,6 +151,10 @@ pub enum NonInteractivePermissionDecision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionCheckContext {
     pub pause_observer: Option<PermissionPauseObserver>,
+    /// Native MCP `mcpInfo.effectiveMaxPermission === "ask"` metadata for the
+    /// current tool check. Only trusted host configuration may populate this;
+    /// it is not inferred from tool identity or request arguments.
+    pub tool_check_ceiling: Option<McpPermissionCeiling>,
     /// Subagent/teammate worker attribution (as in [`PermissionGate::check_with_worker`]).
     pub worker: Option<PromptWorker>,
     /// The assistant message's `tool_use` block id this check is for — the REAL
@@ -162,7 +168,7 @@ pub struct PermissionCheckContext {
     /// rule/mode/subcommandResults/permissionPromptTool, so the common ask
     /// omits it). Populated by the `PolicyPermissionGate` Ask path from the
     /// policy result's [`PermissionDecisionReason`].
-    pub decision_reason: Option<String>,
+    pub decision_reason: Option<Utf16JsonProjection>,
     /// The policy Ask's decision-reason TYPE discriminant, forwarded as the
     /// `decision_reason_type` field of a stdio `can_use_tool` request (claude-code
     /// `decision_reason_type: decisionReason?.type` — `rule`/`mode`/
@@ -228,7 +234,7 @@ pub struct PermissionCheckContext {
     /// Producers populate only suggestions they can derive without widening a
     /// rule (currently the exact matched-Ask-rule session update). Tool-specific
     /// suggestion builders may leave this absent.
-    pub permission_suggestions: Option<Value>,
+    pub permission_suggestions: Option<Utf16JsonProjection>,
     /// The policy Ask's BLOCKED PATH, forwarded as the `blocked_path` field of a
     /// stdio `can_use_tool` request (claude-code `mainPermissionResult.blockedPath`
     /// — the filesystem path a path-scoped ask is gated on). `None` ⇒ the key is
@@ -289,7 +295,7 @@ pub struct PermissionCheckContext {
     /// pre-existing FLAT spellings of the `permission_mode` and `avoid_prompts`
     /// layers; the gate hoists both to the head of this stack before folding, so
     /// a layer here can still override them.
-    pub permission_layers: Vec<Value>,
+    pub permission_layers: Vec<Utf16JsonProjection>,
     /// (Finding 22) `true` only when this dispatch was issued through a
     /// [`crate::host::tool_invoker::ToolInvoker`] the composition root built
     /// EXCLUSIVELY for a background task with no owning interactive turn — as
@@ -316,7 +322,7 @@ pub struct MatchedAskRule {
     /// Canonical tool name stored in the rule.
     pub tool_name: String,
     /// Optional rule-specific content (command/path/domain pattern).
-    pub rule_content: Option<String>,
+    pub rule_content: Option<Utf16JsonProjection>,
 }
 
 /// A transport-neutral description of the Auto action available on a prompt.
@@ -434,7 +440,7 @@ pub enum PermissionOutcome {
     /// the original.
     Allow {
         /// Host/policy-rewritten tool input, or `None` to keep the original.
-        updated_input: Option<Value>,
+        updated_input: Option<Utf16JsonProjection>,
         /// The host's `updatedPermissions` payload from a `can_use_tool` ALLOW
         /// response — the RAW wire array of permission-rule updates the host wants
         /// applied + persisted (claude-code `applyPermissionUpdates` +
@@ -443,11 +449,12 @@ pub enum PermissionOutcome {
         /// `permissionUpdateSchema` discriminated union (`addRules`,
         /// `replaceRules`, `removeRules`, `setMode`, and directory updates are
         /// supported). EMPTY for every gate but
-        /// `StdioControlPermissionGate`. The value is a raw `serde_json::Value`
-        /// (not the typed `permission::PermissionUpdate`) because this crate sits
-        /// BELOW `lingxi-permission` in the dependency graph and cannot name that
-        /// type — the permission-aware consumer parses + applies it.
-        permission_updates: Vec<Value>,
+        /// `StdioControlPermissionGate`. Each update stays an exact flat JSON
+        /// projection because this crate sits BELOW `lingxi-permission` and
+        /// cannot name its typed update model; the permission-aware consumer
+        /// validates the projection before converting fields to typed rules or
+        /// OS paths.
+        permission_updates: Vec<Utf16JsonProjection>,
         /// Optional host classification for telemetry attribution.
         decision_classification: Option<ToolDecisionClassification>,
     },
@@ -455,13 +462,50 @@ pub enum PermissionOutcome {
     /// to Auto mode. This never carries/persists an AllowAlways rule.
     AllowAuto {
         /// Host/policy-rewritten tool input, or `None` to keep the original.
-        updated_input: Option<Value>,
+        updated_input: Option<Utf16JsonProjection>,
     },
     /// Rejected, with the reason surfaced to the model as the `tool_result`.
     Deny {
         /// Reason surfaced to the model.
-        reason: String,
+        reason: Utf16JsonProjection,
     },
+}
+
+/// Trusted tool metadata selecting classifier-only permission composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassifierOnlyPolicy {
+    /// How a reviewed report is handled when the classifier blocks it.
+    pub on_block: ClassifierOnlyOnBlock,
+}
+
+/// A classifier-only tool cannot obtain a human prompt fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifierOnlyOnBlock {
+    /// Reject a blocked action.
+    Deny,
+    /// Admit a report with its invocation-local warning or availability note.
+    Flag,
+}
+
+/// Immutable classifier input captured from the dispatching child.
+///
+/// These values come from the runner and trusted tool implementation. The
+/// report's model-supplied JSON cannot select a transcript or invent approval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassifierOnlyReviewRequest {
+    /// The child's actual conversation, never the main session's history.
+    pub transcript: Vec<ConversationMessage>,
+    /// The tool's native classifier action serialization.
+    pub action: String,
+}
+
+/// Permission and report review bound to this single invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassifierOnlyOutcome {
+    /// Whether this invocation may execute.
+    pub permission: PermissionOutcome,
+    /// The actual classifier result; absent when review did not run.
+    pub review: Option<super::handback::ReportReview>,
 }
 
 /// What produced a [`PermissionGate`] decision — lets the turn loop fire the
@@ -504,7 +548,7 @@ pub enum PermissionResolution {
     /// Rejected, with the rendered deny reason and its source.
     Deny {
         /// Reason surfaced to the model as the `tool_result`.
-        reason: String,
+        reason: Utf16JsonProjection,
         /// Where the denial came from (gates the `PermissionDenied` hook).
         source: PermissionDecisionSource,
         /// Raw `SettingSource` token of the matched deny RULE, mirroring
@@ -521,7 +565,7 @@ pub enum PermissionResolution {
         /// GATE-SYSMSG-01: the `oin(decisionReason)`-filtered reason TEXT (only
         /// the free-text reason kinds surface it). Pre-computed alongside
         /// [`Self::Deny::decision_reason_type`]; `None` otherwise.
-        decision_reason: Option<String>,
+        decision_reason: Option<Utf16JsonProjection>,
         /// `true` when the underlying `permissionDecision.behavior === 'ask'`
         /// (a rejection that came from an ASK prompt the user declined), vs a
         /// rule/mode `deny`. claude-code only appends the rejection's
@@ -553,8 +597,286 @@ pub enum PermissionResolution {
         /// Discriminant sent as `decision_reason_type`.
         decision_reason_type: Option<String>,
         /// Free-text reason sent as `decision_reason`.
-        decision_reason: Option<String>,
+        decision_reason: Option<Utf16JsonProjection>,
     },
+}
+
+/// Declarative permission answer for a Mod `$.tool.check` query. A query does
+/// not execute a tool, run PreToolUse, consult an LLM classifier, or prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModToolCheckVerdict {
+    pub decision: ModToolCheckDecision,
+    pub reason: Option<Utf16JsonProjection>,
+    pub rule: Option<Utf16JsonProjection>,
+}
+
+/// Live Read-policy state needed by Native's changed-file reminder gate.
+/// These are policy facts, not a prompt result or a generic tool-check verdict.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadPathPolicyFacts {
+    /// `nor(context)`: a Read deny can change whether a path-set pass is needed.
+    pub read_deny_rules_active: bool,
+    /// Native `ToolPermissionContext.restricted`.
+    pub restricted: bool,
+    /// Native `blockReadsOutsideWorkingDirectories`.
+    pub block_reads_outside_working_directories: bool,
+}
+
+impl ReadPathPolicyFacts {
+    /// Native `sy(context)` predicate controlling changed-file path expansion.
+    #[must_use]
+    pub const fn requires_path_recheck(self) -> bool {
+        self.read_deny_rules_active
+            || self.restricted
+            || self.block_reads_outside_working_directories
+    }
+}
+
+/// One Native Read-path policy predicate for a spelling already present in the
+/// changed-file path Set. `Unavailable` is distinct from `NoMatch`: a real
+/// policy can be active while lacking the roots needed to evaluate a path
+/// rule or working-directory hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReadPathPolicyMatch {
+    /// The current policy snapshot evaluated the predicate and found no match.
+    #[default]
+    NoMatch,
+    /// The current policy snapshot evaluated the predicate and found a match.
+    Match,
+    /// A required policy input is absent for this real policy snapshot.
+    Unavailable,
+}
+
+/// Results of Native's independent Read-deny and held-outside checks for one
+/// spelling already present in its changed-file path Set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadPathPolicyCheck {
+    pub denied_by_read_rule: ReadPathPolicyMatch,
+    pub held_outside: ReadPathPolicyMatch,
+}
+
+/// Immutable view of the live policy used by one changed-file reminder pass.
+/// A `PolicyPermissionGate` returns a snapshot of its current overlay; a
+/// transport-only gate uses [`NoPolicyReadPathSnapshot`] explicitly.
+pub trait ReadPathPolicySnapshot: Send + Sync {
+    fn facts(&self) -> ReadPathPolicyFacts;
+    fn check_path(&self, path: &Path) -> ReadPathPolicyCheck;
+}
+
+/// Explicit inactive facts for a permission transport with no policy layer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoPolicyReadPathSnapshot;
+
+impl ReadPathPolicySnapshot for NoPolicyReadPathSnapshot {
+    fn facts(&self) -> ReadPathPolicyFacts {
+        ReadPathPolicyFacts::default()
+    }
+
+    fn check_path(&self, _path: &Path) -> ReadPathPolicyCheck {
+        ReadPathPolicyCheck::default()
+    }
+}
+
+/// Complete policy result captured at the Mod `tool.check` boundary.
+///
+/// `core` is below `permission` in the crate graph, so this transport-neutral
+/// representation is the typed seam for carrying the exact policy result
+/// across that boundary. It intentionally preserves the nested reason tree and
+/// optional fields instead of collapsing the result to the Mod DTO. The
+/// permission crate converts it back to its native `PermissionResult` before
+/// applying execution-phase classification after the Mod hook returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionToolCheckEvaluation {
+    pub result: PermissionToolCheckResult,
+    pub effective_mode: PermissionToolCheckMode,
+    pub verdict: ModToolCheckVerdict,
+    /// Trusted host ceiling projected by Native `tool.check`; currently only
+    /// the explicit organization `ask` ceiling is exposed on that surface.
+    pub ceiling: Option<McpPermissionCeiling>,
+}
+
+/// The captured result of the mode-less permission recheck for a PreToolUse
+/// approval, paired with its execution-facing resolution. `evaluation` is
+/// present only when a rule or safety result actually objected; a clean hook
+/// allow carries `None`, matching Native's hook result passed as the Mod core.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookAllowModCoreEvaluation {
+    pub resolution: PermissionResolution,
+    pub evaluation: Option<PermissionToolCheckEvaluation>,
+}
+
+/// Permission modes needed to finish a captured ToolCheck result after Mod.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckMode {
+    Default,
+    Plan,
+    AcceptEdits,
+    BypassPermissions,
+    DontAsk,
+    Bubble,
+    Auto,
+}
+
+/// Typed, lossless bridge representation of permission::PermissionResult.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionToolCheckResult {
+    Allow {
+        reason: PermissionToolCheckReason,
+        updated_input: Option<Utf16JsonProjection>,
+        update_destination: Option<PermissionToolCheckUpdateDestination>,
+        metadata: PermissionToolCheckMetadata,
+    },
+    Deny {
+        reason: PermissionToolCheckReason,
+        explanation: Option<Utf16JsonProjection>,
+        metadata: PermissionToolCheckMetadata,
+    },
+    Ask {
+        reason: PermissionToolCheckReason,
+        prompt: PermissionToolCheckPrompt,
+        pending_classifier_check: Option<PermissionToolCheckPendingClassifier>,
+        metadata: PermissionToolCheckMetadata,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionToolCheckReason {
+    MatchedRule {
+        rule: PermissionToolCheckRule,
+    },
+    PermissionMode {
+        mode: PermissionToolCheckMode,
+    },
+    SubcommandResults {
+        /// Ordered in the same order as the native insertion-ordered Map.
+        reasons: Vec<(Utf16JsonProjection, Box<PermissionToolCheckResult>)>,
+    },
+    PermissionPromptTool {
+        tool_name: String,
+    },
+    ClassifierApproved {
+        classifier: PermissionToolCheckClassifier,
+        score: f64,
+    },
+    ClassifierRejected {
+        classifier: PermissionToolCheckClassifier,
+        score: f64,
+        reason: Utf16JsonProjection,
+    },
+    HookOverride {
+        hook_id: String,
+        source: Option<String>,
+        reason: Option<Utf16JsonProjection>,
+    },
+    AsyncAgent {
+        reason: Utf16JsonProjection,
+    },
+    SandboxOverride {
+        reason: PermissionToolCheckSandboxOverride,
+    },
+    WorkingDirectory {
+        reason: Utf16JsonProjection,
+    },
+    SafetyCheck {
+        reason: Utf16JsonProjection,
+        classifier_approvable: bool,
+        circuit_breaker: Option<PermissionToolCheckCircuitBreaker>,
+    },
+    Other {
+        reason: Utf16JsonProjection,
+    },
+    DenialLimitExceeded,
+    AutoModeFallback,
+    BypassPermissions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionToolCheckRule {
+    pub tool_name: String,
+    pub rule_content: Option<Utf16JsonProjection>,
+    pub behavior: PermissionToolCheckBehavior,
+    pub source: PermissionToolCheckRuleSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckBehavior {
+    Allow,
+    Deny,
+    Ask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckRuleSource {
+    UserSettings,
+    ProjectSettings,
+    LocalSettings,
+    ManagedPolicy,
+    FlagSettings,
+    CliArg,
+    Command,
+    Session,
+    ToolsNarrowing,
+    McpServerPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionToolCheckMetadata {
+    pub matched_rules: Vec<Utf16JsonProjection>,
+    pub permission_suggestions: Option<Utf16JsonProjection>,
+    pub blocked_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionToolCheckPrompt {
+    pub title: String,
+    pub message: Utf16JsonProjection,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionToolCheckPendingClassifier {
+    pub classifier: PermissionToolCheckClassifier,
+    pub request_id: crate::types::RequestId,
+    pub started_at: std::time::SystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckClassifier {
+    Yolo,
+    Bash,
+    Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckSandboxOverride {
+    ExcludedCommand,
+    DangerouslyDisableSandbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckCircuitBreaker {
+    BackgroundOperator,
+    DangerousRemoval,
+    IsolatePeerMachines,
+    OutsideReadsBlocked,
+    RestrictedMode,
+    SuspiciousWindowsPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionToolCheckUpdateDestination {
+    UserSettings,
+    ProjectSettings,
+    LocalSettings,
+    Session,
+    CliArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModToolCheckDecision {
+    Allow,
+    Ask,
+    Deny,
 }
 
 /// The workspace-wide authorization gate consulted before every tool dispatch.
@@ -571,7 +893,7 @@ pub enum HandoffReview {
     /// work is still delivered, carrying the classifier's own reason.
     Flagged {
         /// The classifier's human-readable reason, interpolated into the copy.
-        reason: String,
+        reason: Utf16JsonProjection,
     },
     /// `kind: "refused"` — an upstream safety filter refused to perform the
     /// review. Not a verdict on the work; it reacts to the subagent's own
@@ -594,8 +916,101 @@ pub trait PermissionGate: Send + Sync {
     /// permission classifiers. All error paths are folded into
     /// [`PermissionDecision::Deny`] — the caller never has to handle an
     /// error tier.
-    async fn check(&self, name: &str, input: &Value) -> PermissionDecision;
+    async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision;
 
+    /// Review a classifier-only tool through a dedicated, prompt-free path.
+    ///
+    /// Dispatch must select this before saved rules, hook allows and safe-tool
+    /// shortcuts can authorize the action. The default fails closed because a
+    /// prompt-only or no-op gate has no classifier verdict to provide.
+    async fn check_classifier_only_with_context_or_abort(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+        ctx: &PermissionCheckContext,
+        policy: ClassifierOnlyPolicy,
+        request: &ClassifierOnlyReviewRequest,
+    ) -> Result<ClassifierOnlyOutcome, PermissionAbort> {
+        let _ = (input, ctx, policy, request);
+        Ok(ClassifierOnlyOutcome {
+            permission: PermissionOutcome::Deny {
+                reason: format!(
+                    "Only the auto-mode classifier can allow {name}: no classifier review is available"
+                )
+                .into(),
+            },
+            review: None,
+        })
+    }
+
+    /// Inspect the live declarative policy without a prompt or classifier.
+    /// `None` means this gate has no policy inspection surface; callers must
+    /// not substitute [`Self::check`] because it may prompt or classify.
+    async fn check_mod_query(
+        &self,
+        _name: &str,
+        _input: &Utf16JsonProjection,
+        _ctx: &PermissionCheckContext,
+    ) -> Option<PermissionToolCheckEvaluation> {
+        None
+    }
+
+    /// Apply the execution-stage policy to the exact typed result captured by
+    /// [`Self::check_mod_query`], after the Mod hook has returned. A policy gate
+    /// must not re-authorize here: this stage adds execution-only behavior such
+    /// as the `dontAsk` clamp and Auto classifier, while retaining the same
+    /// result/rule snapshot that produced the Mod DTO.
+    async fn resolve_tool_check_execution(
+        &self,
+        name: &str,
+        _input: &Utf16JsonProjection,
+        _ctx: &PermissionCheckContext,
+        evaluation: &PermissionToolCheckEvaluation,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        Ok(match evaluation.verdict.decision {
+            ModToolCheckDecision::Allow => PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false,
+            },
+            ModToolCheckDecision::Ask => PermissionResolution::AskWithContext {
+                decision_reason_type: None,
+                decision_reason: evaluation.verdict.reason.clone(),
+            },
+            ModToolCheckDecision::Deny => {
+                PermissionResolution::Deny {
+                    reason: evaluation.verdict.reason.clone().unwrap_or_else(|| {
+                        format!("Permission to use {name} has been denied.").into()
+                    }),
+                    source: PermissionDecisionSource::Rule,
+                    rule_source: None,
+                    decision_reason_type: Some("rule".into()),
+                    decision_reason: None,
+                    behavior_ask: false,
+                    content_blocks: Vec::new(),
+                }
+            }
+        })
+    }
+
+    /// Surface a captured policy Ask through the prompt transport after its
+    /// execution-stage decision has remained Ask. Implementations that own the
+    /// captured result use it directly so decision-reason, suggestions, blocked
+    /// path, and updated-input presence are not lost to a second authorization.
+    async fn ask_tool_check_via_transport(
+        &self,
+        name: &str,
+        _input: &Utf16JsonProjection,
+        _ctx: &PermissionCheckContext,
+        _evaluation: &PermissionToolCheckEvaluation,
+        _resolution: &PermissionResolution,
+    ) -> PermissionOutcome {
+        PermissionOutcome::Deny {
+            reason: format!(
+                "Permission to use {name} cannot be prompted from the captured ToolCheck result"
+            )
+            .into(),
+        }
+    }
     /// Resolve a tool call synchronously and without prompting, after injecting
     /// transient allow rules such as a prompt command's frontmatter
     /// `allowed-tools`. This is the live-policy seam used by embedded `!cmd``
@@ -609,7 +1024,7 @@ pub trait PermissionGate: Send + Sync {
     fn check_noninteractive_with_allow_rules(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         transient_allow_rules: &[String],
     ) -> Option<NonInteractivePermissionDecision> {
         let _ = (name, input, transient_allow_rules);
@@ -642,7 +1057,7 @@ pub trait PermissionGate: Send + Sync {
     ///
     /// Default: a no-op, for gates that are only prompt transports.
     /// `PolicyPermissionGate` overrides it.
-    fn set_command_input_denies(&self, specs: &[String], union: bool) {
+    fn set_command_input_denies(&self, specs: &[Utf16JsonProjection], union: bool) {
         let _ = (specs, union);
     }
 
@@ -656,6 +1071,14 @@ pub trait PermissionGate: Send + Sync {
     fn read_deny_exclude_globs(&self, cwd: &Path) -> Option<Vec<String>> {
         let _ = cwd;
         None
+    }
+
+    /// Current policy view used by Native's changed-file Read recheck. The
+    /// default is for transport-only gates with no policy layer; a gate that
+    /// owns rules or filesystem restrictions must override it. This is an
+    /// explicit inactive view, not an inferred permission decision.
+    fn read_path_policy_snapshot(&self) -> std::sync::Arc<dyn ReadPathPolicySnapshot> {
+        std::sync::Arc::new(NoPolicyReadPathSnapshot)
     }
 
     /// Like [`Self::check`], but carrying the identity of the SUBAGENT/teammate
@@ -674,7 +1097,7 @@ pub trait PermissionGate: Send + Sync {
     async fn check_with_worker(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         let _ = worker;
@@ -708,7 +1131,7 @@ pub trait PermissionGate: Send + Sync {
     async fn ask_via_transport(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         self.check_with_context(name, input, ctx).await
@@ -728,7 +1151,7 @@ pub trait PermissionGate: Send + Sync {
     async fn check_with_context(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         match self
@@ -756,8 +1179,9 @@ pub trait PermissionGate: Send + Sync {
         plan: &str,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        self.check_with_context("ExitPlanMode", &serde_json::json!({ "plan": plan }), ctx)
-            .await
+        let input = Utf16JsonProjection::object(vec![("plan".into(), plan.into())])
+            .expect("a plan string is valid source JSON");
+        self.check_with_context("ExitPlanMode", &input, ctx).await
     }
 
     /// Review a finished subagent's work before its parent reads it — the port
@@ -774,7 +1198,7 @@ pub trait PermissionGate: Send + Sync {
     async fn review_subagent_handoff(
         &self,
         transcript: Option<&Path>,
-        final_text: &str,
+        final_text: &Utf16JsonProjection,
     ) -> Option<HandoffReview> {
         let _ = (transcript, final_text);
         None
@@ -790,7 +1214,7 @@ pub trait PermissionGate: Send + Sync {
     async fn check_with_context_or_abort(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionOutcome, PermissionAbort> {
         Ok(self.check_with_context(name, input, ctx).await)
@@ -801,12 +1225,12 @@ pub trait PermissionGate: Send + Sync {
     /// The default is a no-op for prompt-only transports. A rule-evaluating
     /// gate overrides this so normal and orphaned permission responses update
     /// the same live context.
-    fn apply_permission_updates(&self, _updates: &[Value]) {}
+    fn apply_permission_updates(&self, _updates: &[Utf16JsonProjection]) {}
 
     /// Persist permission updates through the transport that owns the settings
     /// roots. This is separate from live application because an outer policy
     /// gate owns the former while its inner stdio transport owns the latter.
-    async fn persist_permission_updates(&self, _updates: &[Value]) {}
+    async fn persist_permission_updates(&self, _updates: &[Utf16JsonProjection]) {}
 
     /// Enable or disable permission persistence for this prompt transport.
     /// Managed policy calls this with `false` when only centrally managed rules
@@ -817,7 +1241,7 @@ pub trait PermissionGate: Send + Sync {
     /// gates override this using their existing path/mutation provenance so the
     /// turn loop can suppress persistent "allow always" approvals. The default
     /// is false for prompt-only transports and preserves the frozen trait ABI.
-    fn is_restricted_protected_mutation(&self, name: &str, input: &Value) -> bool {
+    fn is_restricted_protected_mutation(&self, name: &str, input: &Utf16JsonProjection) -> bool {
         let _ = (name, input);
         false
     }
@@ -844,99 +1268,46 @@ pub trait PermissionGate: Send + Sync {
         name: &str,
         ctx: &PermissionCheckContext,
         decision_reason_type: Option<&str>,
-        decision_reason: Option<&str>,
-        message: &str,
+        decision_reason: Option<&Utf16JsonProjection>,
+        message: &Utf16JsonProjection,
     ) {
         let _ = (name, ctx, decision_reason_type, decision_reason, message);
     }
 
-    /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
-    /// already returned `allow` (`HookDecision::Approve`).
-    ///
-    /// claude-code's `resolveHookPermissionDecision`: a hook `allow` skips the
-    /// interactive PROMPT but still applies rule-based deny/ask
-    /// (`checkRuleBasedPermissions`) — a hook cannot override an explicit deny
-    /// rule. The default impl treats a hook `allow` as a wholesale bypass
-    /// ([`PermissionDecision::Allow`]), which is correct for gates that carry no
-    /// rule layer (the interactive / no-op / adapter prompt transports — they
-    /// have nothing to deny). A rule-evaluating gate (the `PolicyPermissionGate`)
-    /// OVERRIDES this to keep enforcing deny rules while skipping the prompt.
-    ///
-    /// Additive DEFAULTED method (frozen-trait safe): every existing impl keeps
-    /// the prior wholesale-bypass behavior unless it opts in.
-    async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        let _ = (name, input);
-        PermissionDecision::Allow
-    }
-
-    /// [`Self::check_after_hook_allow`] carrying the dispatch [`PermissionCheckContext`].
-    ///
-    /// When a hook `allow` is overridden by an ask rule/safety check, the oracle's
-    /// `lin` re-enters the FULL permission pipeline WITH the real `toolUseId` and
-    /// rule metadata (`o(t,c,n,i,s)`), so the resulting stdio `can_use_tool`
-    /// request is byte-faithful (correlatable id + `decision_reason`). The
-    /// no-context [`Self::check_after_hook_allow`] instead reached the inner
-    /// transport with a default context (a random id, no reason). This method
-    /// threads the context so a rule-evaluating gate can delegate that ask via
-    /// [`Self::check_with_context`]. Additive DEFAULTED (frozen-trait safe):
-    /// defaults to the context-less method.
-    async fn check_after_hook_allow_ctx(
+    /// Inspect the rule/safety result that a PreToolUse `allow` would feed to
+    /// the permission pipeline, without opening its prompt. A Mod's real
+    /// `tool.check` wraps this decision before any interactive resolution.
+    async fn resolve_after_hook_allow_mod_core(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
-    ) -> PermissionDecision {
-        let _ = ctx;
-        self.check_after_hook_allow(name, input).await
-    }
-
-    /// Rich-outcome variant of [`Self::check_after_hook_allow_ctx`].
-    ///
-    /// A rule-evaluating gate may need to re-enter an interactive permission
-    /// transport after a hook allow. If that transport rewrites the tool input,
-    /// the rewrite must reach the dispatcher just like it does on the ordinary
-    /// permission path. The default preserves the frozen trait behavior by
-    /// projecting the existing two-valued decision into an outcome without a
-    /// rewrite.
-    async fn check_after_hook_allow_outcome_ctx(
-        &self,
-        name: &str,
-        input: &Value,
-        ctx: &PermissionCheckContext,
-    ) -> PermissionOutcome {
-        match self.check_after_hook_allow_ctx(name, input, ctx).await {
-            PermissionDecision::Allow => PermissionOutcome::Allow {
-                updated_input: None,
-                permission_updates: Vec::new(),
-                decision_classification: None,
+    ) -> Result<HookAllowModCoreEvaluation, PermissionAbort> {
+        let _ = (name, input, ctx);
+        // A transport-only gate has no policy owner to recheck. Its native
+        // hook-allow core is nevertheless a real clean Allow, not an absent
+        // result that lets dispatch bypass an installed Mod `tool.check`.
+        Ok(HookAllowModCoreEvaluation {
+            resolution: PermissionResolution::Allow {
+                rule_source: None,
+                classifier_approved: false,
             },
-            PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
-        }
+            evaluation: None,
+        })
     }
 
-    /// The PERMISSION-REQUEST-hook twin of [`Self::check_after_hook_allow`].
-    ///
-    /// claude-code has TWO hook-allow resolvers and they differ in what an
-    /// ask-rule does:
-    ///
-    /// * `lin` (PreToolUse) re-checks the rules and, on an `ask`, hands the call
-    ///   to the FULL permission pipeline — i.e. it PROMPTS
-    ///   ([`Self::check_after_hook_allow`]).
-    /// * `Fxy`/`epr` (the headless PermissionRequest rescue) re-checks only when
-    ///   the hook supplied `updatedInput` (or the tool requires user
-    ///   interaction) and converts an `ask` into a **hard deny** — that agent has
-    ///   no prompt available, and the hook already consumed the one chance to
-    ///   resolve it.
-    ///
-    /// Additive DEFAULTED method (frozen-trait safe): the default delegates to
-    /// [`Self::check_after_hook_allow`], preserving prior behavior for gates that
-    /// carry no rule layer.
+    /// Resolve a PermissionRequest hook allow with updatedInput or a required
+    /// interaction. Rule-evaluating gates override this to recheck the rewritten
+    /// input and preserve the native hard-deny-on-Ask behavior. A prompt-only
+    /// transport has no rule layer to recheck, so its current default is clean
+    /// Allow.
     async fn check_after_hook_allow_rewritten(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
     ) -> PermissionDecision {
-        self.check_after_hook_allow(name, input).await
+        let _ = (name, input);
+        PermissionDecision::Allow
     }
 
     /// `Fxy`'s STANDING PermissionRequest-hook `allow` — the arm where the hook
@@ -945,16 +1316,21 @@ pub trait PermissionGate: Send + Sync {
     /// ?.())` is false and the allow returns UNCHECKED
     /// (`return {behavior:"allow", updatedInput:l, decisionReason:{type:"hook",…}}`).
     ///
-    /// Unlike [`Self::check_after_hook_allow`] (`lin`, PreToolUse) and
+    /// Unlike the captured PreToolUse core path
+    /// ([`Self::resolve_after_hook_allow_mod_core`]) and
     /// [`Self::check_after_hook_allow_rewritten`] (`Fxy` WITH a re-check), this
     /// runs NO rule/mode verdict at all: an ordinary ask rule — the very reason
     /// the gate resolved `Ask` and fired the PermissionRequest hook — must not be
     /// re-evaluated, or the headless rescue is defeated in its primary use case.
     /// A rule-evaluating gate still records its per-allow auto-mode bookkeeping.
     ///
-    /// Additive DEFAULTED method (frozen-trait safe): the default is a wholesale
-    /// [`PermissionDecision::Allow`], correct for gates with no rule layer.
-    async fn honour_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
+    /// The default is a wholesale [`PermissionDecision::Allow`], correct for
+    /// gates with no rule layer.
+    async fn honour_hook_allow(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+    ) -> PermissionDecision {
         let _ = (name, input);
         PermissionDecision::Allow
     }
@@ -977,10 +1353,12 @@ pub trait PermissionGate: Send + Sync {
     /// rule-evaluating `PolicyPermissionGate` OVERRIDES this to authorize under
     /// [`crate`]'s `PermissionMode::Plan` via `authorize_with_mode`.
     ///
-    /// Additive DEFAULTED method (frozen-trait safe): every existing impl keeps
-    /// the prior behavior unless it opts in. Mirrors
-    /// [`Self::check_after_hook_allow`].
-    async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
+    /// The default delegates to [`Self::check`].
+    async fn check_in_plan_mode(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+    ) -> PermissionDecision {
         self.check(name, input).await
     }
 
@@ -996,7 +1374,7 @@ pub trait PermissionGate: Send + Sync {
     async fn resolve_detailed_in_plan_mode_or_abort(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionResolution, PermissionAbort> {
         let _ = ctx;
@@ -1036,7 +1414,11 @@ pub trait PermissionGate: Send + Sync {
     /// never the turn loop's gate directly; they sit behind the policy gate, so
     /// the default's `check` call never triggers a prompt for the real gate
     /// types.) Additive DEFAULTED (frozen-trait safe).
-    async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
+    async fn resolve_detailed(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+    ) -> PermissionResolution {
         match self.check(name, input).await {
             PermissionDecision::Allow => PermissionResolution::Allow {
                 rule_source: None,
@@ -1066,7 +1448,7 @@ pub trait PermissionGate: Send + Sync {
     async fn resolve_detailed_or_abort(
         &self,
         name: &str,
-        input: &Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionResolution, PermissionAbort> {
         let _ = ctx;

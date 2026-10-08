@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use command_api::{BundledPromptFn, CommandRegistry, CommandSource, SlashCommandKind};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 const LOADED_FROM: &str = "mobile-device-skills";
 
@@ -53,13 +54,26 @@ const SKILLS: &[DeviceSkill] = &[
 struct DevicePrompt(String);
 
 impl BundledPromptFn for DevicePrompt {
-    fn build(&self, args: &str) -> String {
-        if args.trim().is_empty() {
-            self.0.clone()
-        } else {
-            format!("{}\n\n## User Request\n\n{args}", self.0)
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+        let args = args
+            .string_units("")
+            .expect("device skill arguments are text");
+        if args
+            .iter()
+            .all(|unit| char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace))
+        {
+            return self.0.clone().into();
         }
+        let mut units = self.0.encode_utf16().collect::<Vec<_>>();
+        units.extend("\n\n## User Request\n\n".encode_utf16());
+        units.extend(args);
+        source_from_units(units)
     }
+}
+
+fn source_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("device skill source text")
 }
 
 /// Keep the shared introduction and only the supported tool sections.
@@ -114,12 +128,7 @@ pub(crate) fn register_mobile_device_skills(
             CommandSource::Bundled,
         );
         let mut command = command_api::build_skill_command(&parsed, CommandSource::Bundled);
-        let SlashCommandKind::Markdown {
-            frontmatter,
-            prompt_template,
-            ..
-        } = command.kind
-        else {
+        let SlashCommandKind::Markdown { frontmatter, .. } = command.kind else {
             unreachable!("embedded device skill is a Markdown prompt")
         };
         let workflows = available
@@ -127,11 +136,16 @@ pub(crate) fn register_mobile_device_skills(
             .map(|(_, description)| *description)
             .collect::<Vec<_>>()
             .join("; ");
-        command.description = format!("{} Available workflows: {workflows}.", command.description);
+        let mut description = command
+            .description
+            .string_units("")
+            .expect("device skill description");
+        description.extend(format!(" Available workflows: {workflows}.").encode_utf16());
+        command.description = source_from_units(description);
         command.kind = SlashCommandKind::Bundled {
             frontmatter,
             prompt_fn: Some(Arc::new(DevicePrompt(supported_sections(
-                &prompt_template,
+                &parsed.content,
                 available_tool_names,
             )))),
         };
@@ -148,6 +162,18 @@ mod tests {
     use session::jsonl::SessionMode;
     use tokio::sync::RwLock;
     use tool_skill::skill::SkillLoader;
+
+    #[test]
+    fn device_prompt_preserves_non_scalar_user_request_units() {
+        let prompt = DevicePrompt("Instructions".into());
+        let args = Utf16JsonProjection::parse(r#""\ud800 request""#).unwrap();
+        let output = prompt.build(&args);
+        let mut expected = "Instructions\n\n## User Request\n\n"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend(args.string_units("").unwrap());
+        assert_eq!(output.string_units(""), Some(expected));
+    }
 
     const ALL_TOOLS: &[&str] = &[
         "camera",
@@ -176,9 +202,12 @@ mod tests {
         for mode in [SessionMode::Chat, SessionMode::Code] {
             let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
             let mut names = loader.list_names().await;
-            names.sort();
+            names.sort_by_key(|name| name.string_units("").unwrap());
             assert_eq!(
-                names,
+                names
+                    .iter()
+                    .map(|name| name.string_at("").unwrap())
+                    .collect::<Vec<_>>(),
                 ["mobile-device", "mobile-media", "mobile-personal-context"]
             );
             for name in names {
@@ -190,11 +219,13 @@ mod tests {
                 assert!(descriptor.context.is_none());
                 assert!(descriptor.shell.is_none());
                 let prompt = descriptor.dynamic_body.unwrap();
-                let body = prompt.build("");
+                let body = prompt.build(&"".into()).string_at("").unwrap().to_owned();
                 assert!(body.starts_with("# "));
                 assert!(body.contains("No Local App"));
                 assert!(prompt
-                    .build("Read my device")
+                    .build(&"Read my device".into())
+                    .string_at("")
+                    .unwrap()
                     .ends_with("## User Request\n\nRead my device"));
             }
         }
@@ -211,20 +242,36 @@ mod tests {
             &mut *registry.write().await,
             &tool_names(&["clipboard", "contacts"]),
         );
-        assert!(loader.load("mobile-media").await.unwrap().is_none());
-        let device = loader.load("mobile-device").await.unwrap().unwrap();
-        let body = device.dynamic_body.unwrap().build("");
-        assert!(device.description.contains("clipboard"));
-        assert!(!device.description.contains("URL"));
+        assert!(loader.load(&"mobile-media".into()).await.unwrap().is_none());
+        let device = loader.load(&"mobile-device".into()).await.unwrap().unwrap();
+        let body = device
+            .dynamic_body
+            .unwrap()
+            .build(&"".into())
+            .string_at("")
+            .unwrap()
+            .to_owned();
+        assert!(device
+            .description
+            .string_at("")
+            .unwrap()
+            .contains("clipboard"));
+        assert!(!device.description.string_at("").unwrap().contains("URL"));
         assert!(body.contains("## clipboard\n"));
         assert!(!body.contains("## open_url\n"));
         assert!(!body.contains("## notification\n"));
         let personal = loader
-            .load("mobile-personal-context")
+            .load(&"mobile-personal-context".into())
             .await
             .unwrap()
             .unwrap();
-        let body = personal.dynamic_body.unwrap().build("");
+        let body = personal
+            .dynamic_body
+            .unwrap()
+            .build(&"".into())
+            .string_at("")
+            .unwrap()
+            .to_owned();
         assert!(body.contains("## contacts\n"));
         assert!(!body.contains("## calendar\n"));
         assert!(!body.contains("## location\n"));
@@ -243,11 +290,11 @@ mod tests {
         let loader =
             MobileDiskSkillLoader::for_mode(Arc::new(RwLock::new(registry)), SessionMode::Chat);
         let loaded = loader
-            .resolve_and_load("mobile-personal-context", "general-purpose", None)
+            .resolve_and_load("mobile-personal-context", "general-purpose", None, None)
             .await
             .unwrap()
             .unwrap();
-        let [ContentBlock::Text { text }] = loaded.content.as_slice() else {
+        let [ContentBlock::Text { text, .. }] = loaded.content.as_slice() else {
             panic!("device skill should preload one instruction block");
         };
         assert!(text.contains("## calendar\n"));

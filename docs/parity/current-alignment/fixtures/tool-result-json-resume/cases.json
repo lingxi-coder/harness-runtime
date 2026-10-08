@@ -1,0 +1,16 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "session_id": "00000000-0000-4000-8000-000000002947",
+  "initial_prompt": "Create the fixed Native JSON resume seed.",
+  "resume_prompt": "Continue this fixed session and report the result.",
+  "tool_use_id": "toolu_native_json_resume_fixture",
+  "tool_use_name": "Bash",
+  "tool_input": { "command": "true" },
+  "json_key": "x",
+  "value_prefix_character": "a",
+  "value_prefix_units": 49993,
+  "boundary_character": "😀",
+  "middle_text": "TA",
+  "tail_character": "😀"
+}

@@ -7,6 +7,88 @@ mod tests {
 
     use super::*;
 
+    fn assert_source_text(source: &crate::source::Source, pointer: &str, expected: &str) {
+        assert_eq!(
+            source.string_units(pointer),
+            Some(expected.encode_utf16().collect()),
+            "unexpected source string at {pointer}"
+        );
+    }
+
+    fn assert_source_root_text(source: &crate::source::Source, expected: &str) {
+        assert_source_text(source, "", expected);
+    }
+
+    fn assert_source_number(source: &crate::source::Source, pointer: &str, expected: f64) {
+        assert_eq!(source.number_at(pointer), Some(expected), "at {pointer}");
+    }
+
+    fn validate_generated_output(
+        _source_schema: &crate::source::Source,
+        output: &Value,
+    ) -> Result<(), String> {
+        parse_web_fetch_output(&crate::source::generated(output.clone()))
+            .map(|_| ())
+            .map_err(|error| {
+                error
+                    .model_facing_message()
+                    .string_at("")
+                    .unwrap_or("invalid WebFetch output")
+                    .to_owned()
+            })
+    }
+
+    #[test]
+    fn mod_replacement_validates_web_fetch_output_shape() {
+        let valid = json!({
+            "bytes":12,"code":200,"codeText":"OK","result":"fetched text",
+            "durationMs":4,"url":"https://example.com/",
+            "artifactRead":{"slug":"artifact","seeded":false}
+        });
+        assert!(validate_generated_output(&OUTPUT_SCHEMA, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["artifactRead"]["seeded"] = json!(true);
+        assert!(validate_generated_output(&OUTPUT_SCHEMA, &invalid).is_err());
+    }
+
+    #[test]
+    fn output_parser_preserves_nested_utf16_and_strips_unknown_fields() {
+        let result_units = [b'f' as u16, 0xd800, b'x' as u16];
+        let slug_units = [b'a' as u16, 0xdfff, b'b' as u16];
+        let mut artifact = crate::source::generated(json!({
+            "slug": "placeholder",
+            "seeded": false,
+            "futureArtifactField": "drop"
+        }));
+        artifact
+            .set_field("slug", crate::source::text(slug_units.to_vec()))
+            .unwrap();
+        let mut output = crate::source::generated(json!({
+            "bytes": 3,
+            "code": 200,
+            "codeText": "OK",
+            "result": "placeholder",
+            "durationMs": 1,
+            "url": "https://example.com/",
+            "discarded": "drop"
+        }));
+        output
+            .set_field("result", crate::source::text(result_units.to_vec()))
+            .unwrap();
+        output.set_field("artifactRead", artifact).unwrap();
+
+        let parsed = parse_web_fetch_output(&output).expect("valid source-shaped output");
+        assert_eq!(parsed.string_units("/result"), Some(result_units.to_vec()));
+        assert_eq!(
+            parsed.string_units("/artifactRead/slug"),
+            Some(slug_units.to_vec())
+        );
+        assert!(parsed.at_pointer("/discarded").is_none());
+        assert!(parsed
+            .at_pointer("/artifactRead/futureArtifactField")
+            .is_none());
+    }
+
     #[test]
     fn accepts_https_url() {
         let u = validate_url("https://example.com/path").expect("https must be allowed");
@@ -294,21 +376,49 @@ Status: 301 Moved Permanently\n\
 To complete your request, I need to fetch content from the redirected URL. Please use WebFetch again with these parameters:\n\
 - url: \"https://other.example/landing\"\n\
 - prompt: \"summarize this\"";
+        let prompt: crate::source::Source = "summarize this".into();
         let got = format_redirect_message(
             "https://orig.example/page",
             "https://other.example/landing",
             301,
-            "summarize this",
+            &prompt,
         );
-        assert_eq!(got, expected);
+        assert_eq!(
+            got.string_units(""),
+            Some(expected.encode_utf16().collect())
+        );
     }
 
     #[test]
     fn format_redirect_message_uses_found_for_unknown_code() {
-        let got = format_redirect_message("https://a/", "https://b/", 302, "");
-        assert!(got.contains("Status: 302 Found"));
-        assert!(got.contains("- prompt: \"\""));
-        assert!(got.contains("- url: \"https://b/\""));
+        let prompt: crate::source::Source = "".into();
+        let got = format_redirect_message("https://a/", "https://b/", 302, &prompt);
+        let text = got.string_at("").unwrap();
+        assert!(text.contains("Status: 302 Found"));
+        assert!(text.contains("- prompt: \"\""));
+        assert!(text.contains("- url: \"https://b/\""));
+    }
+
+    #[test]
+    fn format_redirect_message_preserves_unpaired_prompt_units() {
+        let prompt_units = vec![b'p' as u16, 0xd800, b'x' as u16];
+        let prompt = crate::source::text(prompt_units.clone());
+        let got = format_redirect_message("https://a/", "https://b/", 302, &prompt);
+        let prefix = "REDIRECT DETECTED: The URL redirects to a different host.\n\
+\n\
+Original URL: https://a/\n\
+Redirect URL: https://b/\n\
+Status: 302 Found\n\
+\n\
+To complete your request, I need to fetch content from the redirected URL. Please use WebFetch again with these parameters:\n\
+- url: \"https://b/\"\n\
+- prompt: \"";
+        let expected = prefix
+            .encode_utf16()
+            .chain(prompt_units)
+            .chain("\"".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(got.string_units(""), Some(expected));
     }
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
@@ -384,6 +494,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             include_examples: false,
             model: Some("claude-opus-4-8".into()),
             model_profile: None,
+            ..Default::default()
         };
 
         // Gate OFF (default): no exception in either variant.
@@ -435,6 +546,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 include_examples: false,
                 model: Some("claude-opus-4-8".into()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -470,18 +582,19 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let result = tool
             .call(
-                json!({ "url": "https://http500.example/x" }),
+                generated(json!({ "url": "https://http500.example/x" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("500 must be Ok(result), not Err");
-        assert_eq!(result.data["code"], 500);
-        assert_eq!(result.data["codeText"], "Internal Server Error");
-        assert_eq!(result.data["bytes"], 0);
-        assert_eq!(
-            result.data["result"].as_str().unwrap(),
-            format_http_error_message(500, None)
+        assert_source_number(&result.data, "/code", 500 as f64);
+        assert_source_text(&result.data, "/codeText", "Internal Server Error");
+        assert_source_number(&result.data, "/bytes", 0 as f64);
+        assert_source_text(
+            &result.data,
+            "/result",
+            &format_http_error_message(500, None),
         );
         // The tool call COMPLETED (returned a result), so `completed` fires and
         // `failed` does not.
@@ -510,17 +623,18 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let result = tool
             .call(
-                json!({ "url": "https://ratelimited.example/x" }),
+                generated(json!({ "url": "https://ratelimited.example/x" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("429 must be Ok(result)");
-        assert_eq!(result.data["code"], 429);
-        assert_eq!(result.data["codeText"], "Too Many Requests");
-        assert_eq!(
-            result.data["result"].as_str().unwrap(),
-            format_http_error_message(429, Some("30"))
+        assert_source_number(&result.data, "/code", 429 as f64);
+        assert_source_text(&result.data, "/codeText", "Too Many Requests");
+        assert_source_text(
+            &result.data,
+            "/result",
+            &format_http_error_message(429, Some("30")),
         );
     }
 
@@ -535,7 +649,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let _ = tool
             .call(
-                json!({ "url": "https://noretry.example/" }),
+                generated(json!({ "url": "https://noretry.example/" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -562,7 +676,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "https://doesnotexist.invalid/" }),
+                generated(json!({ "url": "https://doesnotexist.invalid/" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -570,7 +684,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("DNS failure must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(msg, "WebFetch: cannot resolve doesnotexist.invalid");
+                assert_source_root_text(&msg, "WebFetch: cannot resolve doesnotexist.invalid");
             }
             other => panic!("expected Transport, got {other:?}"),
         }
@@ -593,20 +707,23 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // parallel test (which would skip the fetch).
         let res = tool
             .call(
-                json!({ "url": "https://happy.example/happy-path" }),
+                generated(json!({ "url": "https://happy.example/happy-path" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok response");
-        assert_eq!(res.data["code"], 200);
-        assert_eq!(res.data["result"], "hello world");
+        assert_source_number(&res.data, "/code", 200 as f64);
+        assert_source_text(&res.data, "/result", "hello world");
         // claude-code result schema: codeText (reason phrase) + durationMs present,
         // and NO LingXi-internal `truncated` field.
-        assert_eq!(res.data["codeText"], "OK");
-        assert!(res.data["durationMs"].is_u64(), "durationMs present");
+        assert_source_text(&res.data, "/codeText", "OK");
         assert!(
-            res.data.get("truncated").is_none(),
+            res.data.number_at("/durationMs").is_some(),
+            "durationMs present"
+        );
+        assert!(
+            res.data.at_pointer("/truncated").is_none(),
             "no `truncated` field (claude-code parity)"
         );
         let events = sink.events().await;
@@ -627,7 +744,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // fetch (which would leave `received_requests()` empty).
         let _ = tool
             .call(
-                json!({ "url": "https://useragent.example/user-agent" }),
+                generated(json!({ "url": "https://useragent.example/user-agent" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -663,7 +780,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "file:///etc/passwd" }),
+                generated(json!({ "url": "file:///etc/passwd" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -747,14 +864,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // Caller passes an http:// URL; the network request must target https://.
         let res = tool
             .call(
-                json!({ "url": "http://upgrade.example/page" }),
+                generated(json!({ "url": "http://upgrade.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok response");
         // Output echoes the ORIGINAL (un-upgraded) URL.
-        assert_eq!(res.data["url"], "http://upgrade.example/page");
+        assert_source_text(&res.data, "/url", "http://upgrade.example/page");
         // reqs[0] = the preflight (against the UPGRADED host); reqs[1] = the fetch.
         let reqs = http.received_requests();
         assert_eq!(reqs.len(), 2);
@@ -781,18 +898,18 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let url = json!({ "url": "https://cache-hit.example/doc" });
 
         let first = tool
-            .call(url.clone(), fresh_ctx(), fresh_tx())
+            .call(generated(url.clone()), fresh_ctx(), fresh_tx())
             .await
             .expect("first fetch ok");
-        assert_eq!(first.data["result"], "cached body");
+        assert_source_text(&first.data, "/result", "cached body");
 
         let second = tool
-            .call(url, fresh_ctx(), fresh_tx())
+            .call(generated(url), fresh_ctx(), fresh_tx())
             .await
             .expect("second fetch ok (from cache)");
-        assert_eq!(second.data["result"], "cached body");
-        assert_eq!(second.data["code"], 200);
-        assert_eq!(second.data["bytes"], "cached body".len());
+        assert_source_text(&second.data, "/result", "cached body");
+        assert_source_number(&second.data, "/code", 200 as f64);
+        assert_source_number(&second.data, "/bytes", "cached body".len() as f64);
 
         // First call: preflight + fetch. Second call: cache hit, zero requests.
         assert_eq!(
@@ -816,7 +933,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // First fetch under http:// — stored under the original (http) key.
         let _ = tool
             .call(
-                json!({ "url": "http://key.example/p" }),
+                generated(json!({ "url": "http://key.example/p" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -825,7 +942,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // Re-fetching the same original http:// URL is a URL-cache hit.
         let _ = tool
             .call(
-                json!({ "url": "http://key.example/p" }),
+                generated(json!({ "url": "http://key.example/p" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -851,7 +968,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let _ = tool
             .call(
-                json!({ "url": "https://distinct.example/a" }),
+                generated(json!({ "url": "https://distinct.example/a" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -859,7 +976,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect("a ok");
         let _ = tool
             .call(
-                json!({ "url": "https://distinct.example/b" }),
+                generated(json!({ "url": "https://distinct.example/b" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -884,8 +1001,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         http.enqueue(ok_response(500, "boom"));
         let tool = WebFetchTool::new(ctx);
         let url = json!({ "url": "https://err.example/x" });
-        let _ = tool.call(url.clone(), fresh_ctx(), fresh_tx()).await;
-        let _ = tool.call(url, fresh_ctx(), fresh_tx()).await;
+        let _ = tool
+            .call(generated(url.clone()), fresh_ctx(), fresh_tx())
+            .await;
+        let _ = tool.call(generated(url), fresh_ctx(), fresh_tx()).await;
         // preflight (1, cached after) + two un-cached 500 fetches (2) = 3.
         assert_eq!(
             http.received_requests().len(),
@@ -909,7 +1028,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "https://blocked-host.example/page" }),
+                generated(json!({ "url": "https://blocked-host.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -917,7 +1036,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("blocked domain must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(msg, "LingXi is unable to fetch from blocked-host.example");
+                assert_source_root_text(
+                    &msg,
+                    "LingXi is unable to fetch from blocked-host.example",
+                );
             }
             other => panic!("expected Transport, got {other:?}"),
         }
@@ -940,7 +1062,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "https://check-failed-503.example/page" }),
+                generated(json!({ "url": "https://check-failed-503.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -948,11 +1070,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("non-200 preflight must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(
-                    msg,
+                assert_source_root_text(
+                    &msg,
                     "Unable to verify if domain check-failed-503.example is safe to fetch. \
                      This may be due to network restrictions or enterprise security policies \
-                     blocking claude.ai."
+                     blocking claude.ai.",
                 );
             }
             other => panic!("expected Transport, got {other:?}"),
@@ -974,7 +1096,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "https://check-failed-net.example/page" }),
+                generated(json!({ "url": "https://check-failed-net.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -982,11 +1104,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("preflight transport error must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(
-                    msg,
+                assert_source_root_text(
+                    &msg,
                     "Unable to verify if domain check-failed-net.example is safe to fetch. \
                      This may be due to network restrictions or enterprise security policies \
-                     blocking claude.ai."
+                     blocking claude.ai.",
                 );
             }
             other => panic!("expected Transport, got {other:?}"),
@@ -1010,7 +1132,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let _ = tool
             .call(
-                json!({ "url": "https://cached-host.example/one" }),
+                generated(json!({ "url": "https://cached-host.example/one" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1018,7 +1140,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect("one ok");
         let _ = tool
             .call(
-                json!({ "url": "https://cached-host.example/two" }),
+                generated(json!({ "url": "https://cached-host.example/two" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1056,7 +1178,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://skip-preflight.example/page" }),
+                generated(json!({ "url": "https://skip-preflight.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1064,7 +1186,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
 
         let res = res.expect("fetch must proceed when preflight skipped");
-        assert_eq!(res.data["result"], "no preflight here");
+        assert_source_text(&res.data, "/result", "no preflight here");
         let reqs = http.received_requests();
         // Exactly one request — the fetch — and NO domain_info preflight.
         assert_eq!(reqs.len(), 1);
@@ -1093,14 +1215,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://ctx-skip-preflight.example/page" }),
+                generated(json!({ "url": "https://ctx-skip-preflight.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("fetch must proceed when the ctx setting skips preflight");
 
-        assert_eq!(res.data["result"], "no preflight here");
+        assert_source_text(&res.data, "/result", "no preflight here");
         let reqs = http.received_requests();
         // Exactly one request — the fetch — and NO domain_info preflight.
         assert_eq!(reqs.len(), 1);
@@ -1127,14 +1249,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://run-preflight.example/page" }),
+                generated(json!({ "url": "https://run-preflight.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("fetch must proceed after an allowed preflight");
 
-        assert_eq!(res.data["result"], "fetched after preflight");
+        assert_source_text(&res.data, "/result", "fetched after preflight");
         let reqs = http.received_requests();
         // preflight (1) + fetch (1) = 2; the first request is the domain_info GET.
         assert_eq!(reqs.len(), 2);
@@ -1250,7 +1372,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://orig.example/page", "prompt": "summarize this" }),
+                generated(
+                    json!({ "url": "https://orig.example/page", "prompt": "summarize this" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1258,9 +1382,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("cross-host redirect must return Ok with the notice");
 
-        assert_eq!(res.data["code"], 301);
-        assert_eq!(res.data["codeText"], "Moved Permanently");
-        let content = res.data["result"].as_str().unwrap();
+        assert_source_number(&res.data, "/code", 301 as f64);
+        assert_source_text(&res.data, "/codeText", "Moved Permanently");
+        let content = res.data.string_at("/result").unwrap();
         assert!(
             content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
             "unexpected content: {content}"
@@ -1307,7 +1431,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://follow.example/start" }),
+                generated(json!({ "url": "https://follow.example/start" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1315,8 +1439,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("permitted redirect must be followed to the final body");
 
-        assert_eq!(res.data["code"], 200);
-        assert_eq!(res.data["result"], "final body");
+        assert_source_number(&res.data, "/code", 200 as f64);
+        assert_source_text(&res.data, "/result", "final body");
         // Two `request_no_follow` calls (start + final), zero plain `request`.
         assert_eq!(
             http.no_follow_calls
@@ -1347,7 +1471,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://orig.example/page", "prompt": "do x" }),
+                generated(json!({ "url": "https://orig.example/page", "prompt": "do x" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1355,9 +1479,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("303 must be detected as a redirect and return Ok with the notice");
 
-        assert_eq!(res.data["code"], 303);
-        assert_eq!(res.data["codeText"], "See Other");
-        let content = res.data["result"].as_str().unwrap();
+        assert_source_number(&res.data, "/code", 303 as f64);
+        assert_source_text(&res.data, "/codeText", "See Other");
+        let content = res.data.string_at("/result").unwrap();
         assert!(
             content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
             "303 should produce the redirect notice, got: {content}"
@@ -1388,18 +1512,18 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://noloc.example/page" }),
+                generated(json!({ "url": "https://noloc.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("redirect-without-Location must be Ok(http_error result), not Err");
 
-        assert_eq!(res.data["code"], 301);
-        assert_eq!(res.data["codeText"], "Moved Permanently");
-        assert_eq!(res.data["bytes"], 0);
+        assert_source_number(&res.data, "/code", 301 as f64);
+        assert_source_text(&res.data, "/codeText", "Moved Permanently");
+        assert_source_number(&res.data, "/bytes", 0 as f64);
         assert_eq!(
-            res.data["result"].as_str().unwrap(),
+            res.data.string_at("/result").unwrap(),
             format_http_error_message(301, None)
         );
     }
@@ -1412,7 +1536,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
         pub(super) struct CapturingSideQuery {
             pub(super) captured: std::sync::Mutex<Option<String>>,
-            pub(super) reply: String,
+            pub(super) reply: crate::source::Source,
         }
         #[async_trait]
         impl SideQueryClient for CapturingSideQuery {
@@ -1474,7 +1598,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
         struct CountingSideQuery {
             calls: AtomicUsize,
-            reply: String,
+            reply: crate::source::Source,
         }
 
         #[async_trait]
@@ -1527,16 +1651,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             // invokes the existing apply model exactly once.
             let ordinary = tool
                 .call(
-                    json!({
+                    generated(json!({
                         "url": "https://policy-boundary-ordinary.example/doc",
                         "prompt": "summarize"
-                    }),
+                    })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ordinary fetch succeeds");
-            assert_eq!(ordinary.data["result"], "SHOULD-NOT-RUN");
+            assert_source_text(&ordinary.data, "/result", "SHOULD-NOT-RUN");
             assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
 
             // The execution policy comes from the trusted host context. Model
@@ -1552,32 +1676,37 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 "tool_execution_policy": "ordinary"
             });
             let fusion_miss = tool
-                .call(fusion_input.take(), fusion_ctx.clone(), fresh_tx())
+                .call(
+                    generated(fusion_input.take()),
+                    fusion_ctx.clone(),
+                    fresh_tx(),
+                )
                 .await
                 .expect("Fusion cache miss succeeds");
-            assert_eq!(fusion_miss.data["result"], "# Deterministic\n\nBody");
-            assert_eq!(fusion_miss.data["source"], "network");
-            assert!(fusion_miss.data["fetched_at_ms"].is_u64());
+            assert_source_text(&fusion_miss.data, "/result", "# Deterministic\n\nBody");
+            assert_source_text(&fusion_miss.data, "/source", "network");
+            assert!(fusion_miss.data.number_at("/fetched_at_ms").is_some());
             assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
 
             let fusion_hit = tool
                 .call(
-                    json!({
+                    generated(json!({
                         "url": "https://policy-boundary-fusion.example/doc",
                         "prompt": "summarize",
                         "name": "ordinary",
                         "query_source": "WebFetchApply",
                         "tool_execution_policy": "ordinary"
-                    }),
+                    })),
                     fusion_ctx,
                     fresh_tx(),
                 )
                 .await
                 .expect("Fusion cache hit succeeds");
-            assert_eq!(fusion_hit.data["result"], "# Deterministic\n\nBody");
-            assert_eq!(fusion_hit.data["source"], "cache");
+            assert_source_text(&fusion_hit.data, "/result", "# Deterministic\n\nBody");
+            assert_source_text(&fusion_hit.data, "/source", "cache");
             assert_eq!(
-                fusion_hit.data["fetched_at_ms"], fusion_miss.data["fetched_at_ms"],
+                fusion_hit.data.number_at("/fetched_at_ms"),
+                fusion_miss.data.number_at("/fetched_at_ms"),
                 "cache hits preserve the original network fetch timestamp"
             );
             assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
@@ -1590,25 +1719,29 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         fn fusion_result_cap_preserves_unicode_escaping_and_provenance() {
             let body = format!("{} 😀 \\\"\n", "文".repeat(80_000));
             let data = cap_fusion_result_data(
-                json!({
+                generated(json!({
                     "bytes": body.len(),
                     "code": 200,
                     "codeText": "OK",
                     "result": body,
                     "durationMs": 1,
                     "url": "https://cap.example/doc"
-                }),
+                })),
                 FetchSource::Network,
                 123,
             );
             let data = data.expect("bounded Fusion result");
             let serialized = serde_json::to_vec(&data).expect("valid JSON");
             assert!(serialized.len() <= FUSION_WEBFETCH_RESULT_MAX_BYTES);
-            assert_eq!(data["truncated"], true);
-            assert_eq!(data["source"], "network");
-            assert_eq!(data["fetched_at_ms"], 123);
-            assert!(data["result"]
-                .as_str()
+            assert_eq!(
+                data.at_pointer("/truncated")
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
+            assert_source_text(&data, "/source", "network");
+            assert_source_number(&data, "/fetched_at_ms", 123.0);
+            assert!(data
+                .string_at("/result")
                 .expect("result string")
                 .ends_with(FUSION_WEBFETCH_TRUNCATION_SUFFIX));
         }
@@ -1618,14 +1751,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let oversized_url =
                 "https://example.com/".to_string() + &"x".repeat(FUSION_WEBFETCH_RESULT_MAX_BYTES);
             let err = cap_fusion_result_data(
-                json!({
+                generated(json!({
                     "bytes": 0,
                     "code": 200,
                     "codeText": "OK",
                     "result": "small",
                     "durationMs": 1,
                     "url": oversized_url
-                }),
+                })),
                 FetchSource::Network,
                 123,
             )
@@ -1653,18 +1786,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
             let url = json!({ "url": "https://cachehit-apply.example/x", "prompt": "summarize" });
             let first = tool
-                .call(url.clone(), fresh_ctx(), fresh_tx())
+                .call(generated(url.clone()), fresh_ctx(), fresh_tx())
                 .await
                 .expect("first ok");
-            assert_eq!(first.data["result"], "APPLIED");
+            assert_source_text(&first.data, "/result", "APPLIED");
             let second = tool
-                .call(url, fresh_ctx(), fresh_tx())
+                .call(generated(url), fresh_ctx(), fresh_tx())
                 .await
                 .expect("second ok");
-            assert_eq!(
-                second.data["result"], "APPLIED",
-                "cache hit must still run the apply step"
-            );
+            assert_source_text(&second.data, "/result", "APPLIED");
             let seen = capture.captured.lock().unwrap().clone().unwrap();
             assert!(seen.contains("# Doc"));
             assert_eq!(
@@ -1699,16 +1829,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             // NOTE: no "prompt" key in the input.
             let res = tool
                 .call(
-                    json!({ "url": "https://noprompt.example/x" }),
+                    generated(json!({ "url": "https://noprompt.example/x" })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(
-                res.data["result"], "APPLIED",
-                "apply must run with no prompt (#89)"
-            );
+            assert_source_text(&res.data, "/result", "APPLIED");
         }
 
         // PARITY (#89): the RAW fast-path is taken ONLY when the URL is
@@ -1735,16 +1862,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
             let res = tool
                 .call(
-                    json!({ "url": "https://docs.python.org/3/library/os.html", "prompt": "p" }),
+                    generated(json!({ "url": "https://docs.python.org/3/library/os.html", "prompt": "p" })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(
-                res.data["result"], "# Raw markdown",
-                "preapproved+md+under-cap → raw"
-            );
+            assert_source_text(&res.data, "/result", "# Raw markdown");
             assert!(
                 capture.captured.lock().unwrap().is_none(),
                 "apply model must NOT be called on the raw fast-path"
@@ -1774,16 +1898,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
             let res = tool
                 .call(
-                    json!({ "url": "https://docs.python.org/big", "prompt": "p" }),
+                    generated(json!({ "url": "https://docs.python.org/big", "prompt": "p" })),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(
-                res.data["result"], "APPLIED-OVER-CAP",
-                "over-cap md → apply, not raw"
-            );
+            assert_source_text(&res.data, "/result", "APPLIED-OVER-CAP");
         }
 
         // PARITY (#89): a NON-preapproved text/markdown body under the cap still
@@ -1808,16 +1929,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
             let res = tool
                 .call(
-                    json!({ "url": "https://random-not-preapproved.example/x", "prompt": "p" }),
+                    generated(
+                        json!({ "url": "https://random-not-preapproved.example/x", "prompt": "p" }),
+                    ),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(
-                res.data["result"], "APPLIED-NONPRE",
-                "non-preapproved md → apply"
-            );
+            assert_source_text(&res.data, "/result", "APPLIED-NONPRE");
         }
 
         #[tokio::test]
@@ -1836,13 +1956,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(EmptySideQuery));
             let res = tool
                 .call(
-                    json!({ "url": "https://empty-apply.example/x", "prompt": "summarize" }),
+                    generated(
+                        json!({ "url": "https://empty-apply.example/x", "prompt": "summarize" }),
+                    ),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(res.data["result"], "# Fallback");
+            assert_source_text(&res.data, "/result", "# Fallback");
         }
 
         #[tokio::test]
@@ -1862,13 +1984,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(FailingSideQuery));
             let res = tool
                 .call(
-                    json!({ "url": "https://failed-apply.example/x", "prompt": "summarize" }),
+                    generated(
+                        json!({ "url": "https://failed-apply.example/x", "prompt": "summarize" }),
+                    ),
                     fresh_ctx(),
                     fresh_tx(),
                 )
                 .await
                 .expect("ok");
-            assert_eq!(res.data["result"], "# Recovered");
+            assert_source_text(&res.data, "/result", "# Recovered");
         }
     }
 
@@ -1887,20 +2011,21 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             body: "<h1>Title</h1><p>Body text</p>".into(),
             body_bytes: Vec::new(),
         }));
+        let reply_units = vec![b'A' as u16, 0xd800, b'Z' as u16];
         let capture = std::sync::Arc::new(markdown_apply::CapturingSideQuery {
             captured: std::sync::Mutex::new(None),
-            reply: "MODEL SUMMARY".into(),
+            reply: crate::source::text(reply_units.clone()),
         });
         let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
         let res = tool
             .call(
-                json!({ "url": "https://apply.example/x", "prompt": "summarize" }),
+                generated(json!({ "url": "https://apply.example/x", "prompt": "summarize" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["result"], "MODEL SUMMARY");
+        assert_eq!(res.data.string_units("/result"), Some(reply_units));
         let seen = capture.captured.lock().unwrap().clone().unwrap();
         assert!(
             seen.contains("# Title"),
@@ -1928,13 +2053,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://nomarkdown.example/x", "prompt": "q" }),
+                generated(json!({ "url": "https://nomarkdown.example/x", "prompt": "q" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["result"], "# Hi");
+        assert_source_text(&res.data, "/result", "# Hi");
     }
 
     #[test]
@@ -2004,18 +2129,19 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://full-body.example/big" }),
+                generated(json!({ "url": "https://full-body.example/big" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let content = res.data["result"].as_str().unwrap();
+        let content = res.data.string_at("/result").unwrap();
         // FULL body, NOT truncated, NO suffix.
         assert_eq!(content.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN + 5000);
         assert!(!content.ends_with(WEBFETCH_TRUNCATION_SUFFIX));
         // The cache also holds the FULL body.
-        let cached = crate::cache::cache_get("https://full-body.example/big").expect("cached");
+        let cache_key: crate::source::Source = "https://full-body.example/big".into();
+        let cached = crate::cache::cache_get(&cache_key).expect("cached");
         assert_eq!(
             cached.content.chars().count(),
             WEBFETCH_MAX_MARKDOWN_LEN + 5000
@@ -2044,13 +2170,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://binary.example/file.pdf" }),
+                generated(json!({ "url": "https://binary.example/file.pdf" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let content = res.data["result"].as_str().unwrap();
+        let content = res.data.string_at("/result").unwrap();
         // Raw body, then the binary footer.
         assert!(content.starts_with(body));
         assert!(
@@ -2122,16 +2248,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://binary.example/raw.pdf" }),
+                generated(json!({ "url": "https://binary.example/raw.pdf" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
         // The reported byte count is the RAW wire length (arraybuffer byteLength).
-        assert_eq!(res.data["bytes"], raw.len());
+        assert_source_number(&res.data, "/bytes", raw.len() as f64);
         // The footer shows the raw byte size.
-        let content = res.data["result"].as_str().unwrap();
+        let content = res.data.string_at("/result").unwrap();
         assert!(
             content.contains(&format!(
                 "\n\n[Binary content (application/pdf, {}) also saved to ",
@@ -2176,13 +2302,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let res = tool
             .call(
-                json!({ "url": "https://text.example/page" }),
+                generated(json!({ "url": "https://text.example/page" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let content = res.data["result"].as_str().unwrap();
+        let content = res.data.string_at("/result").unwrap();
         assert!(!content.contains("[Binary content"), "no footer for text/*");
         assert!(
             !tmp.path().join(".lingxi").join("tool-results").exists(),

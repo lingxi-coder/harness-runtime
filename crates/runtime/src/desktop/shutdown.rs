@@ -189,6 +189,19 @@ impl DesktopSessionLifecycle {
                 .errors
                 .push("watchers did not drain within the shutdown budget".into());
         }
+        // The REPL may have fired this with its precise reason already.
+        // Headless and bridge hosts reach this shared barrier directly.
+        let _ = tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.orchestrator
+                .mod_ui_detach_all(orchestrator::mod_surface_roster::ModSurfaceDetachReason::End),
+        )
+        .await;
+        let _ = tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.orchestrator.fire_session_end("other"),
+        )
+        .await;
         if let Some(scheduler) = self.cron_scheduler.as_ref() {
             match tokio::time::timeout_at(
                 stage(std::time::Duration::from_secs(2)),

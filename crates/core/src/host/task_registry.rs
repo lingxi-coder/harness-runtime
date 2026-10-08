@@ -4,9 +4,150 @@
 //!
 //! Concrete impl lives in `lingxi-tasks`. Tests inject an in-memory mock.
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod raw_json_projection_vec_serde {
+    use super::Utf16JsonProjection;
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::value::RawValue;
+
+    pub fn serialize<S>(values: &[Utf16JsonProjection], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+        for value in values {
+            sequence.serialize_element(&RawProjection(value))?;
+        }
+        sequence.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<Box<RawValue>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|raw| Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom))
+            .collect()
+    }
+
+    struct RawProjection<'a>(&'a Utf16JsonProjection);
+
+    impl Serialize for RawProjection<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            crate::types::utf16_json::raw_json_serde::serialize(self.0, serializer)
+        }
+    }
+}
+
+/// Presence of a JavaScript-origin field when lowering host state for native
+/// agent APIs. `Option<T>` cannot distinguish a missing property from an
+/// explicitly present JSON `null`, and the native output spreads preserve that
+/// distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FieldPresence<T> {
+    /// The source object did not have the property.
+    #[default]
+    Missing,
+    /// The property existed and contained JSON `null`.
+    Null,
+    /// The property existed and contained a non-null value.
+    Value(T),
+}
+
+/// Host-only source facts consumed by the 2.1.289 `$.agent.list` reducer.
+/// This deliberately lives beside `TaskRecord` so the normal TaskList DTO and
+/// wire representation remain unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentTaskFacts {
+    /// Position in the insertion-ordered task registry snapshot (`Object.values`).
+    pub source_order: usize,
+    /// Stable loop identity for agent rows, when the host has one.
+    pub stable_agent_id: FieldPresence<String>,
+    /// Teammate address, independent of the stable loop identity.
+    pub teammate_id: FieldPresence<serde_json::Value>,
+    /// Direct resumable identity fact. Missing remains distinct from null.
+    pub resumable_agent_id: FieldPresence<String>,
+    /// The source task row's description property, including null/missing.
+    pub row_description: FieldPresence<Utf16JsonProjection>,
+    /// Spawn-time description, distinct from the live task row description.
+    pub spawned_description: FieldPresence<Utf16JsonProjection>,
+    /// Resolved agent type when the spawn producer has one.
+    pub agent_type: FieldPresence<String>,
+    /// Direct parent agent identity, not plugin provenance.
+    pub parent_id: FieldPresence<serde_json::Value>,
+    /// Plugin caller identity (`hookCaller`) for this spawn.
+    pub spawned_by: FieldPresence<serde_json::Value>,
+    /// Hook-origin chain retained for provenance diagnostics; Native list does
+    /// not expose this field.
+    pub hook_origin: FieldPresence<serde_json::Value>,
+    /// Display name supplied by the task identity/name registry.
+    pub name: FieldPresence<serde_json::Value>,
+    /// Team name attached to the persistent teammate identity.
+    pub team_name: FieldPresence<String>,
+    /// Concrete model selected for an in-process teammate at admission. This
+    /// is host-only route authority for follow-up Agent projections and is
+    /// deliberately absent from the public task/list wire.
+    pub child_model: FieldPresence<String>,
+    /// Provider profile selected for the teammate's model route, when the
+    /// host resolved one without ambiguity. Also host-only.
+    pub child_model_profile: FieldPresence<String>,
+    /// Direct idle and plan-review state for persistent teammates.
+    pub is_idle: FieldPresence<bool>,
+    pub awaiting_plan_approval: FieldPresence<bool>,
+    /// Native local-agent status inputs. Missing means the producer has no
+    /// equivalent fact; it must not be inferred from `is_parked` or eviction.
+    pub finalizing: FieldPresence<bool>,
+    pub keepalive_reasons: FieldPresence<Vec<String>>,
+    /// Agent identity attached to activity rows used by Native `GTe`.
+    pub activity_agent_id: FieldPresence<String>,
+    /// Whether a background-shell row is active for the agent-list activity
+    /// predicate. Other task kinds leave this missing.
+    pub is_backgrounded: FieldPresence<bool>,
+    /// Exact team-membership `isActive` fact. Missing when no membership
+    /// producer is wired; never synthesized from task status.
+    pub team_member_active: FieldPresence<bool>,
+}
+
+/// Live source facts used by Native `PAt` for a local Agent row. Each field
+/// begins `Missing` and changes only when its real producer reports a value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentListLocalLifecycleFacts {
+    pub is_idle: FieldPresence<bool>,
+    pub finalizing: FieldPresence<bool>,
+    pub keepalive_reasons: FieldPresence<Vec<String>>,
+}
+
+impl AgentListLocalLifecycleFacts {
+    /// Native local-Agent creation initializes `isIdle` to false and creates
+    /// an empty `keepaliveReasons` Set. `finalizing` stays missing until the
+    /// completion transition producer sets it.
+    #[must_use]
+    pub fn initialized_local_agent() -> Self {
+        Self {
+            is_idle: FieldPresence::Value(false),
+            keepalive_reasons: FieldPresence::Value(Vec::new()),
+            ..Self::default()
+        }
+    }
+}
+
+/// One exact local-Agent lifecycle fact update. The runner and task registry
+/// have different authoritative sources, so updates are independent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentListLocalFactUpdate {
+    IsIdle(bool),
+    Finalizing(bool),
+    KeepaliveReason { reason: String, active: bool },
+}
 
 /// Input to [`TaskRegistryHandle::create`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,7 +159,8 @@ pub struct TaskCreateInput {
     /// tenth, `auto_mode_scan` (prefix `e`), tracks environment reconnaissance.
     pub task_type: String,
     /// Human-readable description shown in UI listings.
-    pub description: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
 }
 
 /// Registration input for a backgrounded MCP tool call (claude-code 2.1.212
@@ -42,12 +184,14 @@ pub struct McpTaskRegistration {
 }
 
 /// Launch input for a background stdout event monitor.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MonitorRegistration {
     /// Shell command whose stdout lines become events.
-    pub command: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub command: Utf16JsonProjection,
     /// Human-readable description repeated in notifications.
-    pub description: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     /// Effective timeout in milliseconds. `0` means session-persistent.
     pub timeout_ms: u64,
     /// Whether the monitor lives until TaskStop/session teardown.
@@ -75,6 +219,27 @@ pub struct MonitorRegistration {
     pub creator_agent_id: Option<crate::types::AgentId>,
 }
 
+impl Default for MonitorRegistration {
+    fn default() -> Self {
+        let empty_string = || {
+            Utf16JsonProjection::root_string(String::new(), Vec::new())
+                .expect("empty monitor text is a valid source string")
+        };
+        Self {
+            command: empty_string(),
+            description: empty_string(),
+            timeout_ms: 0,
+            persistent: false,
+            cwd: None,
+            spawn_command: None,
+            tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        }
+    }
+}
+
 /// Passive WebSocket event monitor registration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebSocketMonitorRegistration {
@@ -96,13 +261,14 @@ pub struct WebSocketMonitorRegistration {
 /// `<task-notification>`. The port mints the identity through the registry
 /// (which owns the id space and the output directory) and then hands it to the
 /// process runner.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackgroundBashRegistration {
     /// The command as the model wrote it; stored verbatim on the record.
     pub command: String,
     /// Human-readable description used in the completion summary
     /// (`Background command "{description}" completed (exit code N)`).
-    pub description: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     /// Originating tool-use id, surfaced as the notification's `<tool-use-id>`.
     pub tool_use_id: Option<String>,
     /// Working directory the command was launched in.
@@ -111,6 +277,19 @@ pub struct BackgroundBashRegistration {
     /// as the record's `agentId` and uses it to decide who a completion belongs
     /// to; a `None` here means the main session owns the task.
     pub creator_agent_id: Option<crate::types::AgentId>,
+}
+
+impl Default for BackgroundBashRegistration {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            description: Utf16JsonProjection::root_string(String::new(), Vec::new())
+                .expect("empty background-bash description is a valid source string"),
+            tool_use_id: None,
+            cwd: None,
+            creator_agent_id: None,
+        }
+    }
 }
 
 /// The identity the registry minted for a background shell command.
@@ -138,7 +317,8 @@ pub struct TaskNotFoundRosters {
     pub running_teammates: Vec<String>,
     /// `JFe` — running backgrounded `local_agent` rows that are NOT in the
     /// agent-name registry, rendered `{id} ({description})` or a bare id.
-    pub background_agents: Vec<String>,
+    #[serde(with = "raw_json_projection_vec_serde")]
+    pub background_agents: Vec<Utf16JsonProjection>,
 }
 
 /// Registry identity and output path for an allocated foreground agent.
@@ -153,18 +333,37 @@ pub struct ForegroundAgentHandle {
 pub struct ForegroundAgentRegistration {
     pub agent_id: crate::types::AgentId,
     pub agent_type: String,
-    pub prompt: String,
-    pub description: String,
+    pub prompt: Utf16JsonProjection,
+    pub description: Utf16JsonProjection,
     pub tool_use_id: Option<String>,
     pub creator_agent_id: Option<crate::types::AgentId>,
     pub creator_teammate_name: Option<String>,
     pub creator_team_name: Option<String>,
+    /// Trusted plugin provenance captured before the spawn hook can rewrite
+    /// its JSON input. This is internal lifecycle state, not model input.
+    pub agent_spawn_provenance: crate::host::subagent_spawn::AgentSpawnProvenance,
 }
 
-/// Delivers an intentional message to a retained externally driven agent.
+/// Delivers an intentional root-string source projection to a retained
+/// externally driven agent.
 #[async_trait]
 pub trait TaskMessageReceiver: Send + Sync {
-    async fn send(&self, message: String) -> Result<(), TaskRegistryError>;
+    async fn send(
+        &self,
+        message: crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), TaskRegistryError>;
+
+    /// Accept a trusted peer envelope into the recipient-owned queue. An
+    /// implementation must retain its origin and stable message identity.
+    /// String receivers cannot acquire human resume authority for peer output.
+    async fn send_peer(
+        &self,
+        _envelope: crate::host::handback::HandbackEnvelope,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "typed peer delivery is unavailable for this receiver".into(),
+        ))
+    }
 }
 
 /// Moves a still-running FOREGROUND task to the background on request.
@@ -218,7 +417,7 @@ pub enum TaskStopResolution {
 }
 
 /// One task as surfaced to the tool layer.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskRecord {
     /// Running shell inherited from an acknowledged host handoff.
     #[serde(default)]
@@ -265,8 +464,12 @@ pub struct TaskRecord {
     pub task_type: String,
     /// Status wire string.
     pub status: String,
-    /// Human-readable description.
-    pub description: String,
+    /// Exact source description; TaskList/TaskStop expose it to the model.
+    #[serde(
+        default = "empty_task_record_description",
+        with = "crate::types::utf16_json::raw_json_serde"
+    )]
+    pub description: Utf16JsonProjection,
     /// Wall-clock start as Unix epoch milliseconds, when known. This feeds
     /// the `subagentStatusLine.tasks[].startTime` payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,8 +479,13 @@ pub struct TaskRecord {
     /// `TaskStop` tool surfaces this in preference to `description` for
     /// `local_bash`, mirroring claude-code `stopTask.ts:97`
     /// (`isLocalShellTask(task) ? task.command : task.description`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub command: Option<Utf16JsonProjection>,
     /// `local_agent` only: the agent's type label, surfaced as the
     /// `background_tasks[].agent_type` field of a `Stop` / `SubagentStop` hook
     /// payload (claude-code `Lic`'s `r.agent_type = n.agentType`). `None` for
@@ -362,8 +570,13 @@ pub struct TaskRecord {
     /// guard — a skill already running as a live fork does not fork again — and
     /// is the task-record half of the identity a resume corroborates against
     /// the on-disk scoping record. Additive default `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_skill_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub forked_skill_name: Option<Utf16JsonProjection>,
     /// `local_agent` only: whether the agent is currently backgrounded, used by
     /// the `Stop` / `SubagentStop` `background_tasks` filter (claude-code `wA`:
     /// drop a task when `"isBackgrounded" in e && e.isBackgrounded === false`).
@@ -388,6 +601,52 @@ pub struct TaskRecord {
     /// its first `FusionProgress` event lands. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Source facts for Native `$.agent.list`, kept off the public TaskList
+    /// wire. The reducer needs these to distinguish missing versus explicit
+    /// null and to preserve registry order and spawn provenance.
+    #[serde(skip)]
+    pub agent_facts: Option<AgentTaskFacts>,
+}
+
+fn empty_task_record_description() -> Utf16JsonProjection {
+    Utf16JsonProjection::from("")
+}
+
+impl Default for TaskRecord {
+    fn default() -> Self {
+        Self {
+            is_adopted: false,
+            caller: None,
+            completed_agent_visible: false,
+            notified: false,
+            model: None,
+            effort: None,
+            is_observer: false,
+            teammate_agent_id: None,
+            teammate_name: None,
+            kind: None,
+            is_parked: false,
+            is_idle: false,
+            awaiting_plan_approval: false,
+            task_id: String::new(),
+            task_type: String::new(),
+            status: String::new(),
+            description: empty_task_record_description(),
+            started_at_ms: None,
+            command: None,
+            agent_type: None,
+            owner_agent_id: None,
+            killed_by: None,
+            server: None,
+            tool: None,
+            name: None,
+            forked_skill_name: None,
+            is_backgrounded: None,
+            error: None,
+            stage: None,
+            agent_facts: None,
+        }
+    }
 }
 
 /// A `local_workflow` run projected for the interactive `/workflows` picker
@@ -460,10 +719,21 @@ pub struct WorkflowRecord {
 /// a killed run with a worktree but no result — is safe.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTerminalOutcome {
+    /// Current reporting state. The lifecycle owner archives previous runs
+    /// separately and resets this state when it issues a fresh run token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<crate::host::handback::HandbackState>,
     /// The agent's final text response → the `<result>` section (claude
     /// `finalMessage`, `wc(content,"\n")` — text blocks joined with `\n`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    /// It is a root-string projection so lone UTF-16 units survive the
+    /// runner-to-task handoff and ordinary JSON string serialization.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result: Option<Utf16JsonProjection>,
     /// Run usage → the `<usage>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentRunUsage>,
@@ -517,8 +787,13 @@ pub struct AgentRunUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowTerminalOutcome {
     /// The script's serialized return value, if it returned one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result: Option<Utf16JsonProjection>,
     /// Non-fatal `parallel()` / `pipeline()` diagnostics.
     #[serde(default)]
     pub failures: Vec<String>,
@@ -561,7 +836,7 @@ pub struct WorkflowTerminalOutcome {
 /// `enqueueAgentNotification`). Each field maps to a tag the renderer emits;
 /// fields that a given task type does not carry stay `None` and the renderer
 /// omits the corresponding clause/tag.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskNotification {
     /// Recipient agent; None denotes the main session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -575,8 +850,12 @@ pub struct TaskNotification {
     /// Terminal status wire string — one of `completed` / `failed` / `killed`
     /// → `<status>` and the human-readable summary verb.
     pub status: String,
-    /// Human-readable description → interpolated into `<summary>`.
-    pub description: String,
+    /// Exact source description → interpolated into `<summary>`.
+    #[serde(
+        default = "empty_task_notification_description",
+        with = "crate::types::utf16_json::raw_json_serde"
+    )]
+    pub description: Utf16JsonProjection,
     /// Originating `tool_use_id`, if the task was launched from a tool call →
     /// the optional `<tool-use-id>` line. `None` ⇒ the line is omitted.
     pub tool_use_id: Option<String>,
@@ -599,7 +878,13 @@ pub struct TaskNotification {
     pub error: Option<String>,
     /// `local_agent`: final text response; `monitor_ws` while running: batched
     /// stdout event. Both render in an escaped `<result>` section.
-    pub result: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result: Option<Utf16JsonProjection>,
     /// `local_agent` only: run usage → the optional `<usage>` section.
     /// `None` ⇒ omitted (claude-code's `i ? <usage>… : ''`).
     pub usage: Option<AgentRunUsage>,
@@ -694,6 +979,49 @@ pub struct TaskNotification {
     pub egress_profiles: Vec<String>,
 }
 
+fn empty_task_notification_description() -> Utf16JsonProjection {
+    Utf16JsonProjection::from("")
+}
+
+impl Default for TaskNotification {
+    fn default() -> Self {
+        Self {
+            recipient_agent_id: None,
+            task_id: String::new(),
+            task_type: String::new(),
+            status: String::new(),
+            description: empty_task_notification_description(),
+            tool_use_id: None,
+            output_path: None,
+            exit_code: None,
+            stdout_bytes: None,
+            error: None,
+            result: None,
+            usage: None,
+            killed_by: None,
+            worktree_path: None,
+            worktree_branch: None,
+            monitor_housekeeping: false,
+            mcp: None,
+            max_turns_reached: None,
+            workflow_failures: Vec::new(),
+            workflow_agent_count: None,
+            workflow_total_tokens: None,
+            workflow_total_tool_calls: None,
+            workflow_duration_ms: None,
+            workflow_script_path: None,
+            workflow_run_id: None,
+            workflow_args: None,
+            workflow_transcript_dir: None,
+            workflow_agents_done: None,
+            workflow_agents_error: None,
+            workflow_agents_skipped: None,
+            workflow_agents_empty_result: None,
+            egress_profiles: Vec::new(),
+        }
+    }
+}
+
 /// One chunk of a task's accumulated stdout/stderr spool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskOutputChunk {
@@ -725,13 +1053,25 @@ pub struct TaskOutputChunk {
     pub error: Option<String>,
     /// Agent-task initial prompt. Mirrors the TS `TaskOutput.prompt`
     /// (`agentTask.prompt`); only populated for `local_agent` tasks.
-    pub prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub prompt: Option<Utf16JsonProjection>,
     /// Clean final answer extracted from the agent's last assistant message
     /// (the `text` content blocks joined by `\n`). Mirrors the TS
     /// `cleanResult = extractTextContent(agentTask.result.content, '\n')`; only
     /// populated for `local_agent` tasks. `TaskOutputTool` prefers this over the
-    /// raw on-disk transcript for the model-facing `<output>`.
-    pub result: Option<String>,
+    /// raw on-disk transcript for the model-facing `<output>`. It remains a raw
+    /// JSON string projection so exact source UTF-16 units survive this DTO.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub result: Option<Utf16JsonProjection>,
     /// Absolute on-disk path of the task's spool file, when the registry can
     /// resolve it. Mirrors the path `getTaskOutputPath(taskId)` returns in
     /// claude-code (`<projectTempDir>/<sessionId>/tasks/<taskId>.output`).
@@ -748,6 +1088,55 @@ pub struct TaskOutputChunk {
     pub mcp: Option<McpTaskOutputMeta>,
 }
 
+/// Result of waiting for an Agent tool's asynchronous launch to settle. This
+/// follows Native `UOt`: once the launched local-agent row is observed, its
+/// notification is claimed while waiting; a wait interrupted after launch
+/// restores notification eligibility and returns the observed task id so the
+/// caller can watch the still-running agent settle in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTerminalSnapshot {
+    /// Registry identity matching Native's local-agent task row.
+    pub task_id: String,
+    /// `pae` output: the last non-empty assistant transcript text, extracted
+    /// from the task's messages rather than its spool/result envelope.
+    pub native_transcript_text: Utf16JsonProjection,
+    /// The task's direct failure text, if it is a string.
+    pub error: Option<Utf16JsonProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTerminalWaitOutcome {
+    /// The agent produced its completed result.
+    Completed(AgentTerminalSnapshot),
+    /// The agent ended with a failure.
+    Failed(AgentTerminalSnapshot),
+    /// The agent was stopped before completing.
+    Killed(AgentTerminalSnapshot),
+    /// Waiting ended before a terminal result. `observed_task_id` is present
+    /// only after a matching local-agent row was seen; that case has reset
+    /// `notified` and may be followed by [`TaskRegistryHandle::wait_for_agent_settled`].
+    Interrupted {
+        reason: AgentTerminalWaitReason,
+        observed_task_id: Option<String>,
+    },
+    /// The observed row disappeared before a terminal result. A transcript
+    /// snapshot is included when the registry can still read its last answer.
+    Evicted {
+        native_transcript_text: Option<Utf16JsonProjection>,
+    },
+}
+
+/// Why an Agent terminal wait returned before the task ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTerminalWaitReason {
+    /// The caller's AbortSignal / cancellation token fired.
+    Aborted,
+    /// No matching task row appeared before the startup budget elapsed.
+    StartupTimeout,
+    /// A matching running row did not reach a terminal state before the wait budget elapsed.
+    SettleTimeout,
+}
+
 /// The `mcp_task` half of [`TaskNotification`] — see its `mcp` field.
 ///
 /// Claude-code passes these to `F` (`src_184372091.js` @12876) at the enqueue
@@ -756,8 +1145,13 @@ pub struct TaskOutputChunk {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpTaskNotificationMeta {
     /// Receipt explaining where the complete result was saved, or why it was not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub saved_hint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub saved_hint: Option<Utf16JsonProjection>,
 
     /// `serverName` — the left half of the `(server/tool)` clause.
     pub server_name: String,
@@ -771,7 +1165,13 @@ pub struct McpTaskNotificationMeta {
     pub mcp_status: String,
     /// `statusMessage` — the detail line a failed or cancelled call carries.
     /// `None` selects the "cancelled by the server" wording.
-    pub status_message: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub status_message: Option<Utf16JsonProjection>,
 }
 
 /// The `mcp_task` half of [`TaskOutputChunk`] — see its `mcp` field.
@@ -785,7 +1185,13 @@ pub struct McpTaskOutputMeta {
     /// once the task was killed). Underscores render as spaces.
     pub mcp_status: String,
     /// `statusMessage` → the optional `status message: …` line.
-    pub status_message: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub status_message: Option<Utf16JsonProjection>,
     /// `(endTime ?? now) - startTime` → the `elapsed: …` line. Computed at the
     /// registry, which owns both timestamps.
     pub elapsed_ms: u64,
@@ -829,18 +1235,105 @@ pub enum TaskRegistryError {
 /// CRUD surface used by the 6 `Task*` tools.
 #[async_trait]
 pub trait TaskRegistryHandle: Send + Sync {
+    /// The active main conversation binding used to mint a report run before
+    /// starting its model. A late report retains this binding unchanged.
+    async fn handback_scope(&self) -> Option<crate::host::handback::HandbackSessionScope> {
+        None
+    }
+
+    async fn begin_handback_run(
+        &self,
+        _input: crate::host::handback::BeginHandbackRun,
+    ) -> Result<crate::host::handback::HandbackRunToken, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "handback admission is unavailable".into(),
+        ))
+    }
+
+    async fn handback_state(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+    ) -> Option<crate::host::handback::HandbackState> {
+        None
+    }
+
+    async fn handback_state_for_agent(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Option<crate::host::handback::HandbackState> {
+        None
+    }
+
+    /// Archived sanitized reports for durable parked-agent storage, never a
+    /// source of live report authority or model instructions.
+    async fn handback_history_for_agent(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Vec<crate::host::handback::HandbackState> {
+        Vec::new()
+    }
+
+    /// Snapshot a recipient-owned durable queue without claiming consumption.
+    async fn pending_handback_reports_for(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Vec<crate::host::handback::HandbackEnvelope> {
+        Vec::new()
+    }
+
+    /// Remove only the exact receipt after its typed transcript row persisted.
+    async fn acknowledge_handback_consumption(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _receipt: &crate::host::handback::HandbackReceipt,
+    ) -> bool {
+        false
+    }
+
+    async fn try_deliver_handback(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+        _report: crate::host::handback::PreparedHandbackReport,
+    ) -> crate::host::handback::HandbackAdmissionOutcome {
+        crate::host::handback::HandbackAdmissionOutcome::Rejected
+    }
+
+    /// Claim one enforcement reminder. No reminder is claimed after admission,
+    /// contract disablement, or the native three-bounce cap.
+    async fn next_handback_bounce(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+    ) -> Option<u8> {
+        None
+    }
+
+    async fn set_handback_disposition(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+        _disposition: crate::host::handback::HandbackDisposition,
+    ) {
+    }
+
+    /// Query retained owned work without parking or mutating its owner.
+    async fn agent_waiting_on_owned_work(&self, _agent_id: crate::types::AgentId) -> bool {
+        false
+    }
+
     /// Trusted host input only. Model tools must keep using their guarded message path.
     async fn send_human_task_message(
         &self,
         _task_id: &str,
-        _message: &str,
+        _message: &Utf16JsonProjection,
     ) -> Result<(), TaskRegistryError> {
         Err(TaskRegistryError::Internal(
             "human task messages unavailable".into(),
         ))
     }
     /// Runtime boundary drain; the registry checks current stop epochs.
-    async fn take_human_task_messages_for(&self, _agent_id: crate::types::AgentId) -> Vec<String> {
+    async fn take_human_task_messages_for(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Vec<Utf16JsonProjection> {
         Vec::new()
     }
     /// Last startup check for a trusted stopped-agent restoration.
@@ -944,6 +1437,73 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Look up a task by id.
     async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError>;
 
+    /// Wait for the local-agent task identified by the exact raw launch string
+    /// returned by Agent. Implementations match the actual `agentId` producer
+    /// (without parsing or normalizing the wire string), subscribe before the
+    /// initial snapshot, and follow Native's 150 ms polling order. `Some`
+    /// applies independently while waiting for the row to appear and after it
+    /// runs; `None` waits until cancellation or a terminal task state.
+    async fn wait_for_agent_terminal(
+        &self,
+        _raw_agent_id: &str,
+        _cancel: tokio_util::sync::CancellationToken,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<AgentTerminalWaitOutcome, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent terminal wait unavailable".into(),
+        ))
+    }
+
+    /// Observe a launched task after a timeout/abort without cancelling it.
+    /// Resolves when that exact row is removed or reaches one of Native's
+    /// terminal statuses (`completed`, `failed`, `killed`).
+    async fn wait_for_agent_settled(&self, _task_id: &str) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent settle watch unavailable".into(),
+        ))
+    }
+
+    /// Replace the task's typed conversation snapshot with the runner's
+    /// terminally settled history. This is host-only state used to reproduce
+    /// Native transcript extraction for `$.tool.call(Agent)`; it is never
+    /// projected through TaskList/TaskOutput.
+    async fn replace_agent_transcript_messages(
+        &self,
+        _task_id: &str,
+        _messages: Vec<crate::types::ConversationMessage>,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent transcript snapshot storage unavailable".into(),
+        ))
+    }
+
+    /// Record a live Native `$.agent.list` local-Agent fact by its exact
+    /// identity. Implementations must not infer any sibling fact from this
+    /// update, parked state, or terminal status.
+    async fn update_agent_list_local_fact(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _update: AgentListLocalFactUpdate,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "local agent list lifecycle facts are unavailable".into(),
+        ))
+    }
+
+    /// Update the coordinator's exact teammate membership row after a real
+    /// query-entry or stop/failure boundary. The implementation resolves the
+    /// identity from its registered teammate row; callers cannot supply a
+    /// guessed display address or infer activity from task status.
+    async fn set_team_member_active(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _active: bool,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "team member activity is unavailable".into(),
+        ))
+    }
+
     /// Agent identities whose live OS process groups belong to this task loop.
     async fn process_owners_for_task(&self, id: &str) -> Vec<String> {
         match self.get(id).await {
@@ -985,20 +1545,27 @@ pub trait TaskRegistryHandle: Send + Sync {
         Ok(records
             .into_iter()
             .filter(|r| r.task_type == "local_workflow")
-            .map(|r| WorkflowRecord {
-                task_id: r.task_id,
-                run_id: None,
-                name: r.name.unwrap_or_else(|| r.description.clone()),
-                status: r.status,
-                description: r.description,
-                current_step: 0,
-                started_at_ms: None,
-                ended_at_ms: None,
-                script: None,
-                script_path: None,
-                args: None,
-                agent_count: 0,
-                total_tokens: 0,
+            .map(|r| {
+                // WorkflowRecord feeds the human-facing workflow picker, not
+                // the TaskList/TaskStop model DTOs. Keep its legacy String
+                // fields as an explicit display boundary while the canonical
+                // task description remains a Source projection above.
+                let description = r.description.string_at("").unwrap_or_default().to_owned();
+                WorkflowRecord {
+                    task_id: r.task_id,
+                    run_id: None,
+                    name: r.name.unwrap_or_else(|| description.clone()),
+                    status: r.status,
+                    description,
+                    current_step: 0,
+                    started_at_ms: None,
+                    ended_at_ms: None,
+                    script: None,
+                    script_path: None,
+                    args: None,
+                    agent_count: 0,
+                    total_tokens: 0,
+                }
             })
             .collect())
     }
@@ -1093,7 +1660,13 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// script wrote — claude-code's `GM(…, {isHousekeeping:!0})`. It suppresses
     /// the per-event push-notification hint, which only makes sense for real
     /// output.
-    async fn notify_monitor_event(&self, _id: &str, _event: &str, _housekeeping: bool) {}
+    async fn notify_monitor_event(
+        &self,
+        _id: &str,
+        _event: Utf16JsonProjection,
+        _housekeeping: bool,
+    ) {
+    }
 
     /// Stop the background agent work that Claude Code tears down when the
     /// session reaches `--max-budget-usd`.
@@ -1187,7 +1760,7 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn settle_mcp_task(
         &self,
         id: &str,
-        result_text: &str,
+        result_text: &Utf16JsonProjection,
         failed: bool,
     ) -> Result<bool, TaskRegistryError> {
         let _ = (id, result_text, failed);
@@ -1199,9 +1772,9 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn settle_mcp_task_with_hint(
         &self,
         id: &str,
-        text: &str,
+        text: &Utf16JsonProjection,
         failed: bool,
-        _saved_hint: Option<&str>,
+        _saved_hint: Option<&Utf16JsonProjection>,
     ) -> Result<bool, TaskRegistryError> {
         self.settle_mcp_task(id, text, failed).await
     }
@@ -1458,7 +2031,7 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Session-scoped SDK lifecycle events, emitted at each task mutation.
     fn subscribe_task_lifecycle(
         &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>> {
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Utf16JsonProjection>> {
         None
     }
 
@@ -1481,6 +2054,15 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// The native supervisor is the sole terminal-output writer for this ID.
     async fn mark_shell_supervised(&self, _id: &str) {}
+
+    /// A background lifetime deadline killed the shell; retain the stop cause.
+    async fn settle_background_bash_deadline(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        self.settle_background_bash(id, exit_code, true).await
+    }
 
     async fn settle_background_bash(
         &self,
@@ -1518,17 +2100,6 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// defaulted-method idiom).
     async fn set_exit_code(&self, _id: &str, _exit_code: i32) -> Result<(), TaskRegistryError> {
         Ok(())
-    }
-
-    /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
-    /// task — the read side of which is surfaced (without eviction) by
-    /// [`take_pending_task_notifications`]. Called via the task status sink's
-    /// `notify_rest` each time a backgrounded agent parks after a turn-set.
-    /// `result` is the agent's final-text response and `usage` its run usage —
-    /// both surfaced as the optional `<result>` / `<usage>` notification sections
-    /// (the binary `enqueueAgentNotification` always passes them when a result
-    /// exists). Default no-op so existing mock handles compile unchanged.
-    async fn mark_rested(&self, _id: &str, _result: Option<String>, _usage: Option<AgentRunUsage>) {
     }
 
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,
@@ -1715,8 +2286,270 @@ mod tests {
     }
 
     #[test]
+    fn workflow_terminal_outcome_result_serde_preserves_exact_utf16_units() {
+        let units = vec![u16::from(b'R'), 0xDFFF, u16::from(b'S')];
+        let result =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("fixture is a valid root-string projection");
+        let outcome = WorkflowTerminalOutcome {
+            result: Some(result),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_string(&outcome).expect("outcome serializes as JSON");
+        assert!(encoded.contains(r#""result":"R\udfffS""#), "{encoded}");
+        let decoded: WorkflowTerminalOutcome =
+            serde_json::from_str(&encoded).expect("raw source result deserializes");
+        assert_eq!(
+            decoded
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(units)
+        );
+    }
+
+    #[test]
+    fn task_and_background_bash_descriptions_preserve_exact_source_units() {
+        let task_units = vec![u16::from(b'T'), 0xD800, u16::from(b'K')];
+        let task_description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&task_units),
+            task_units.clone(),
+        )
+        .expect("fixture is a valid root-string projection");
+        let task = TaskCreateInput {
+            task_type: "local_bash".into(),
+            description: task_description,
+        };
+        let task_json = serde_json::to_string(&task).expect("task input serializes");
+        assert!(
+            task_json.contains(r#""description":"T\ud800K""#),
+            "{task_json}"
+        );
+        let decoded_task: TaskCreateInput =
+            serde_json::from_str(&task_json).expect("task description deserializes");
+        assert_eq!(decoded_task.description.string_units(""), Some(task_units));
+
+        let bash_units = vec![u16::from(b'B'), 0xDFFF, u16::from(b'S')];
+        let bash_description = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&bash_units),
+            bash_units.clone(),
+        )
+        .expect("fixture is a valid root-string projection");
+        let registration = BackgroundBashRegistration {
+            command: "echo done".into(),
+            description: bash_description,
+            ..Default::default()
+        };
+        let registration_json =
+            serde_json::to_string(&registration).expect("registration serializes");
+        assert!(
+            registration_json.contains(r#""description":"B\udfffS""#),
+            "{registration_json}"
+        );
+        let decoded_registration: BackgroundBashRegistration =
+            serde_json::from_str(&registration_json).expect("registration deserializes");
+        assert_eq!(
+            decoded_registration.description.string_units(""),
+            Some(bash_units)
+        );
+
+        let roster_units = vec![u16::from(b'R'), 0xD800, u16::from(b'W')];
+        let rosters = TaskNotFoundRosters {
+            background_agents: vec![Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&roster_units),
+                roster_units.clone(),
+            )
+            .expect("fixture is a valid root-string projection")],
+            ..Default::default()
+        };
+        let rosters_json = serde_json::to_string(&rosters).expect("rosters serialize");
+        assert!(
+            rosters_json.contains(r#""background_agents":["R\ud800W"]"#),
+            "{rosters_json}"
+        );
+        let decoded_rosters: TaskNotFoundRosters =
+            serde_json::from_str(&rosters_json).expect("roster source text deserializes");
+        assert_eq!(
+            decoded_rosters.background_agents[0].string_units(""),
+            Some(roster_units)
+        );
+    }
+
+    #[test]
+    fn task_output_chunk_result_serde_preserves_exact_utf16_units() {
+        let units = vec![u16::from(b'A'), 0xD800, u16::from(b'Z')];
+        let prompt_units = vec![u16::from(b'P'), 0xDFFF];
+        let result =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("fixture is a valid root-string projection");
+        let prompt = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&prompt_units),
+            prompt_units.clone(),
+        )
+        .expect("fixture is a valid root-string projection");
+        let chunk = TaskOutputChunk {
+            result: Some(result),
+            prompt: Some(prompt),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_string(&chunk).expect("chunk serializes as JSON");
+        assert!(encoded.contains(r#""result":"A\ud800Z""#), "{encoded}");
+        assert!(encoded.contains(r#""prompt":"P\udfff""#), "{encoded}");
+        let decoded: TaskOutputChunk =
+            serde_json::from_str(&encoded).expect("raw source result deserializes");
+        assert_eq!(
+            decoded
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(units)
+        );
+        assert_eq!(
+            decoded
+                .prompt
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(prompt_units)
+        );
+
+        let default_json = serde_json::to_value(TaskOutputChunk::default()).unwrap();
+        assert!(default_json["prompt"].is_null());
+        let mut missing_prompt = default_json;
+        missing_prompt.as_object_mut().unwrap().remove("prompt");
+        let decoded: TaskOutputChunk = serde_json::from_value(missing_prompt).unwrap();
+        assert!(decoded.prompt.is_none());
+    }
+
+    #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn TaskRegistryHandle>> = None;
+    }
+
+    #[test]
+    fn monitor_registration_serde_preserves_exact_command_and_description_units() {
+        let command_units = vec![
+            0xD800,
+            u16::from(b'e'),
+            u16::from(b'c'),
+            u16::from(b'h'),
+            u16::from(b'o'),
+        ];
+        let description_units = vec![u16::from(b'n'), 0xDFFF];
+        let registration = MonitorRegistration {
+            command: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&command_units),
+                command_units.clone(),
+            )
+            .expect("command is valid source text"),
+            description: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&description_units),
+                description_units.clone(),
+            )
+            .expect("description is valid source text"),
+            ..MonitorRegistration::default()
+        };
+        let serialized = serde_json::to_string(&registration).expect("registration serializes");
+        let decoded: MonitorRegistration =
+            serde_json::from_str(&serialized).expect("registration source strings deserialize");
+
+        assert_eq!(decoded.command.string_units(""), Some(command_units));
+        assert_eq!(
+            decoded.description.string_units(""),
+            Some(description_units)
+        );
+    }
+
+    #[test]
+    fn task_records_and_notifications_serde_preserve_exact_model_text_units() {
+        let description_units = vec![u16::from(b'd'), 0xD800, u16::from(b'!')];
+        let command_units = vec![u16::from(b'e'), 0xDFFF, u16::from(b'c')];
+        let forked_skill_units = vec![u16::from(b's'), 0xD800, u16::from(b'k')];
+        let result_units = vec![u16::from(b'o'), 0xD800, u16::from(b'k')];
+        let source = |units: &[u16]| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+                .expect("fixture is a valid root-string projection")
+        };
+
+        let record = TaskRecord {
+            description: source(&description_units),
+            command: Some(source(&command_units)),
+            forked_skill_name: Some(source(&forked_skill_units)),
+            ..Default::default()
+        };
+        let record_wire = serde_json::to_string(&record).expect("record serializes as raw text");
+        assert!(
+            record_wire.contains(r#""forked_skill_name":"s\ud800k""#),
+            "{record_wire}"
+        );
+        let decoded_record: TaskRecord =
+            serde_json::from_str(&record_wire).expect("record raw text deserializes");
+        assert_eq!(
+            decoded_record.description.string_units(""),
+            Some(description_units.clone())
+        );
+        assert_eq!(
+            decoded_record
+                .command
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(command_units)
+        );
+        assert_eq!(
+            decoded_record
+                .forked_skill_name
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(forked_skill_units)
+        );
+
+        let notification = TaskNotification {
+            description: source(&description_units),
+            result: Some(source(&result_units)),
+            ..Default::default()
+        };
+        let notification_wire =
+            serde_json::to_string(&notification).expect("notification serializes as raw text");
+        let decoded_notification: TaskNotification =
+            serde_json::from_str(&notification_wire).expect("notification raw text deserializes");
+        assert_eq!(
+            decoded_notification.description.string_units(""),
+            Some(description_units)
+        );
+        assert_eq!(
+            decoded_notification
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(result_units)
+        );
+    }
+
+    #[test]
+    fn agent_terminal_outcome_serde_preserves_exact_result_units() {
+        let result_units = vec![u16::from(b'o'), 0xD800, u16::from(b'k')];
+        let result = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&result_units),
+            result_units.clone(),
+        )
+        .expect("fixture is a valid root-string projection");
+        let outcome = AgentTerminalOutcome {
+            result: Some(result),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_string(&outcome).expect("outcome serializes as JSON");
+        assert!(encoded.contains(r#""result":"o\ud800k""#), "{encoded}");
+        let decoded: AgentTerminalOutcome =
+            serde_json::from_str(&encoded).expect("outcome source string deserializes");
+        assert_eq!(
+            decoded
+                .result
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some(result_units)
+        );
     }
 
     /// Fixed roster of running tasks, one of each `task_type` the ceiling
@@ -1777,8 +2610,25 @@ mod tests {
             task_type: task_type.into(),
             status: "running".into(),
             description: "d".into(),
+            agent_facts: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn agent_task_facts_do_not_enter_the_task_record_wire() {
+        let mut record = running("a1", "local_agent");
+        record.agent_facts = Some(AgentTaskFacts {
+            source_order: 7,
+            stable_agent_id: FieldPresence::Value("agent:stable".into()),
+            spawned_by: FieldPresence::Null,
+            ..AgentTaskFacts::default()
+        });
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value.get("agent_facts").is_none());
+        let decoded: TaskRecord = serde_json::from_value(value).unwrap();
+        assert!(decoded.agent_facts.is_none());
     }
 
     #[tokio::test]

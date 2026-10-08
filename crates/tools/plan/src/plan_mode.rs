@@ -41,11 +41,12 @@ use telemetry::tengu::tool::{
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
 };
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
 
@@ -229,8 +230,7 @@ const EXIT_PLAN_APPROVED_HEADING_EDITED: &str = "Approved Plan (edited by user)"
 /// Model-facing approval text emitted by `ExitPlanMode` in an agent context —
 /// byte-faithful port of the `isAgent` branch of
 /// `mapToolResultToToolResultBlockParam` (`ExitPlanModeV2Tool.ts:452-459`).
-const EXIT_PLAN_APPROVED_AGENT_MSG: &str =
-    "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"";
+const EXIT_PLAN_APPROVED_AGENT_MSG: &str = "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"";
 
 /// Model-facing approval text when the plan is empty — byte-faithful port of the
 /// empty-plan branch (`ExitPlanModeV2Tool.ts:461-468`).
@@ -242,13 +242,11 @@ const EXIT_PLAN_APPROVED_EMPTY_MSG: &str =
 /// follow it are [`EXIT_PLAN_SAVED_TO_PREFIX`] / [`EXIT_PLAN_REFER_BACK_LINE`],
 /// and the echoed plan section comes LAST, after the optional
 /// [`EXIT_PLAN_TEAMMATE_SUFFIX`].
-const EXIT_PLAN_APPROVED_PREFIX: &str =
-    "User has approved your plan. You can now start coding. Start with updating your todo list if applicable";
+const EXIT_PLAN_APPROVED_PREFIX: &str = "User has approved your plan. You can now start coding. Start with updating your todo list if applicable";
 
 /// Locked rejection string for calling `ExitPlanMode` outside plan mode —
 /// byte-faithful to `validateInput` (`ExitPlanModeV2Tool.ts:212-216`).
-const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str =
-    "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation.";
+const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str = "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation.";
 
 /// A missing permission gate is never an approval. Hosts that cannot wire an
 /// enforcing gate must fail closed instead of allowing `ExitPlanMode` to
@@ -261,12 +259,12 @@ pub const ENTER_TOOL_NAME: &str = "EnterPlanMode";
 /// Canonical tool name in the registry for `ExitPlanModeTool`.
 pub const EXIT_TOOL_NAME: &str = "ExitPlanMode";
 
-static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static EMPTY_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {},
         "additionalProperties": false
-    })
+    }))
 });
 
 /// `ExitPlanMode` input schema — port of 2.1.206 `Btd`
@@ -284,8 +282,8 @@ static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 // `non_std_lazy_statics` lint) from erroring on the allow below under `-D warnings`,
 // while newer clippy still honors the allow.
 #[allow(unknown_lints, clippy::non_std_lazy_statics)]
-static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static EXIT_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "allowedPrompts": {
@@ -310,14 +308,14 @@ static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             }
         },
         "additionalProperties": true
-    })
+    }))
 });
 
 /// `F8o` (2.1.266 `src_162329786.js` @3902505) — `EnterPlanMode`'s output
 /// schema, `c({message: s().describe(…)})`.
 #[allow(unknown_lints, clippy::non_std_lazy_statics)]
-static ENTER_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static ENTER_OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "message": {
@@ -327,7 +325,7 @@ static ENTER_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         },
         "required": ["message"],
         "additionalProperties": true
-    })
+    }))
 });
 
 /// `a4o` (2.1.266 `src_162329786.js` @3511807) — `ExitPlanMode`'s output schema.
@@ -335,8 +333,8 @@ static ENTER_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// Upstream's `c(...)` is a non-strict zod object, so unknown keys pass — which
 /// is what lets LingXi's `model_content` transport key ride along.
 #[allow(unknown_lints, clippy::non_std_lazy_statics)]
-static EXIT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static EXIT_OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "plan": {
@@ -367,7 +365,7 @@ static EXIT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         },
         "required": ["plan", "isAgent"],
         "additionalProperties": true
-    })
+    }))
 });
 
 fn fresh_invocation_id() -> String {
@@ -428,13 +426,20 @@ impl Tool for EnterPlanModeTool {
         ENTER_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("switch to plan mode to design an approach before coding")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("switch to plan mode to design an approach before coding".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &EMPTY_INPUT_SCHEMA
     }
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&ENTER_OUTPUT_SCHEMA)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -443,20 +448,24 @@ impl Tool for EnterPlanModeTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "EnterPlanMode toggles a session flag only".into(),
@@ -468,17 +477,17 @@ impl Tool for EnterPlanModeTool {
     }
 
     /// 2.1.266 `d3t.description()` (`src_162329786.js` @3902685).
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Requests permission to enter plan mode for complex tasks requiring exploration and design"
             .into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         ENTER_PLAN_MODE_TOOL_PROMPT.into()
     }
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -529,12 +538,15 @@ impl Tool for EnterPlanModeTool {
             // shape JSON-dumped to the model, since `instructions` is not in the
             // `tool_result_to_model_text` fallback chain). Plan mode is entered via
             // the session lock above — the marker/plan_mode flags were vestigial.
-            data: json!({ "message": ENTER_PLAN_MODE_INSTRUCTIONS }),
-            model_content: Some(ENTER_PLAN_MODE_INSTRUCTIONS.to_string()),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &json!({ "message": ENTER_PLAN_MODE_INSTRUCTIONS }),
+            ),
+            model_content: Some(ENTER_PLAN_MODE_INSTRUCTIONS.into()),
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -589,13 +601,20 @@ impl Tool for ExitPlanModeTool {
         EXIT_TOOL_NAME
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
-    fn search_hint(&self) -> Option<&str> {
-        Some("present plan for approval and start coding (plan mode only)")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("present plan for approval and start coding (plan mode only)".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &EXIT_INPUT_SCHEMA
     }
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&EXIT_OUTPUT_SCHEMA)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -604,20 +623,24 @@ impl Tool for ExitPlanModeTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ExitPlanMode toggles a session flag only".into(),
@@ -629,10 +652,10 @@ impl Tool for ExitPlanModeTool {
     }
 
     /// 2.1.266 `t6.description()` (`src_162329786.js` @3512544).
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Prompts the user to exit plan mode and start coding".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         // Full multi-section tool prompt (TS `ExitPlanModeV2Tool.ts:154-156`
         // returning `EXIT_PLAN_MODE_V2_TOOL_PROMPT`), not a one-line stub.
         EXIT_PLAN_MODE_V2_TOOL_PROMPT.into()
@@ -640,7 +663,7 @@ impl Tool for ExitPlanModeTool {
 
     async fn call(
         &self,
-        mut input: Value,
+        mut input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -662,13 +685,11 @@ impl Tool for ExitPlanModeTool {
                         started_at.elapsed().as_millis() as u64,
                     )
                     .await;
-                    return Err(ToolError::InvalidInput(message));
+                    return Err(ToolError::InvalidInput(message.into()));
                 }
             };
-            let model_content = data
-                .as_object_mut()
-                .and_then(|object| object.remove("model_content"))
-                .and_then(|value| value.as_str().map(str::to_owned));
+            let model_content = data.subprojection("/model_content").ok();
+            let _ = data.remove_field("model_content");
             self.emit_completed(&invocation_id, started_at.elapsed().as_millis() as u64)
                 .await;
             return Ok(ToolCallResult {
@@ -724,8 +745,7 @@ impl Tool for ExitPlanModeTool {
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok());
         let plan_for_approval = input
-            .get("plan")
-            .and_then(Value::as_str)
+            .string_at("/plan")
             .map(str::to_owned)
             .or_else(|| plan_on_disk.clone());
         let plan = plan_for_approval.as_deref().unwrap_or_default();
@@ -758,7 +778,10 @@ impl Tool for ExitPlanModeTool {
         // `planWasEdited` is precisely "an inline plan was present at call time"
         // (`I !== void 0`). An inline plan is persisted to the plan file first
         // (`Ykn`), so the echoed plan and the file on disk cannot disagree.
-        let injected_plan = input.get("plan").and_then(Value::as_str).map(str::to_owned);
+        let injected_plan_source = input.subprojection("/plan").ok();
+        let injected_plan = injected_plan_source
+            .as_ref()
+            .and_then(|source| source.string_at("").map(str::to_owned));
         if let (Some(text), Some(path)) = (injected_plan.as_deref(), plan_file.as_ref()) {
             if let Some(parent) = path.parent() {
                 if let Err(error) = std::fs::create_dir_all(parent) {
@@ -769,7 +792,12 @@ impl Tool for ExitPlanModeTool {
                 tracing::error!(%error, path = %path.display(), "failed to persist plan");
             }
         }
-        let plan_text = injected_plan.clone().or(plan_on_disk);
+        let plan_text_source = injected_plan_source
+            .clone()
+            .or_else(|| plan_on_disk.as_deref().map(Utf16JsonProjection::from));
+        let plan_text = plan_text_source
+            .as_ref()
+            .and_then(|source| source.string_at("").map(str::to_owned));
 
         {
             let mut guard = session.lock().await;
@@ -805,11 +833,11 @@ impl Tool for ExitPlanModeTool {
         // the model. Branch order matches upstream: awaiting-leader (handled in
         // the teammate path above) → agent context → empty plan → approved plan.
         let model_content = if is_agent {
-            EXIT_PLAN_APPROVED_AGENT_MSG.to_string()
+            Utf16JsonProjection::from(EXIT_PLAN_APPROVED_AGENT_MSG)
         } else {
             let plan_body = plan_text.as_deref().unwrap_or("");
             if plan_body.trim().is_empty() {
-                EXIT_PLAN_APPROVED_EMPTY_MSG.to_string()
+                Utf16JsonProjection::from(EXIT_PLAN_APPROVED_EMPTY_MSG)
             } else {
                 let heading = if plan_was_edited {
                     EXIT_PLAN_APPROVED_HEADING_EDITED
@@ -825,28 +853,54 @@ impl Tool for ExitPlanModeTool {
                     ),
                     None => String::new(),
                 };
-                format!(
-                    "{EXIT_PLAN_APPROVED_PREFIX}{saved_to}{EXIT_PLAN_TEAMMATE_SUFFIX}\n\n## {heading}:\n{plan_body}"
-                )
+                let prefix = format!(
+                    "{EXIT_PLAN_APPROVED_PREFIX}{saved_to}{EXIT_PLAN_TEAMMATE_SUFFIX}\n\n## {heading}:\n"
+                );
+                let mut units: Vec<u16> = prefix.encode_utf16().collect();
+                units.extend(
+                    plan_text_source
+                        .as_ref()
+                        .and_then(|source| source.string_units(""))
+                        .unwrap_or_default(),
+                );
+                tool_api::tool_trait::source_text_projection_units(&units)
             }
         };
 
         Ok(ToolCallResult {
-            data: json!({
-                "plan": plan_text,
-                "isAgent": is_agent,
-                "filePath": file_path,
-                "hasTaskTool": true,
-                "planWasEdited": plan_was_edited,
-                // Model-facing string preferred by the orchestrator over a JSON
-                // dump of `data` (TS prose parity, EXITPLAN.1).
-                "model_content": model_content,
-            }),
+            data: Utf16JsonProjection::object(vec![
+                (
+                    "plan".to_string(),
+                    plan_text_source.unwrap_or_else(|| {
+                        tool_api::tool_trait::generated_builtin_result(&Value::Null)
+                    }),
+                ),
+                (
+                    "isAgent".to_string(),
+                    tool_api::tool_trait::generated_builtin_result(&json!(is_agent)),
+                ),
+                (
+                    "filePath".to_string(),
+                    tool_api::tool_trait::generated_builtin_result(&json!(file_path)),
+                ),
+                (
+                    "hasTaskTool".to_string(),
+                    tool_api::tool_trait::generated_builtin_result(&json!(true)),
+                ),
+                (
+                    "planWasEdited".to_string(),
+                    tool_api::tool_trait::generated_builtin_result(&json!(plan_was_edited)),
+                ),
+                // Model-facing prose remains the exact UTF-16 source.
+                ("model_content".to_string(), model_content),
+            ])
+            .expect("ExitPlanMode result is a valid JSON object"),
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -854,6 +908,7 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{AgentId, SessionId};
     use lingxi_core::SessionState;
     use std::sync::Arc;
@@ -861,6 +916,19 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+    fn source(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test value is valid JSON")
+    }
+
+    fn as_value(source: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&source.to_json_string().expect("test source serializes"))
+            .expect("test source is valid JSON")
+    }
+
+    fn model_content(content: Option<&Utf16JsonProjection>) -> Option<String> {
+        content.and_then(|content| content.string_at("").map(str::to_owned))
+    }
 
     struct ScriptedExitGate {
         seen: Arc<
@@ -879,7 +947,7 @@ mod tests {
         async fn check(
             &self,
             _name: &str,
-            _input: &Value,
+            _input: &Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
@@ -934,20 +1002,20 @@ mod tests {
         let tool = EnterPlanModeTool::new(bctx);
         assert!(!session.lock().await.plan_mode);
         let res = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect("enter must succeed on fresh session");
         // binary EnterPlanModeTool result = {message}; the model reads it via the
         // model_content channel. The marker/plan_mode flags are gone (plan mode is
         // entered via the session lock, asserted below).
-        assert_eq!(res.data["message"], ENTER_PLAN_MODE_INSTRUCTIONS);
-        assert!(res.data.get("marker").is_none());
-        assert!(res.data.get("plan_mode").is_none());
+        assert_eq!(as_value(&res.data)["message"], ENTER_PLAN_MODE_INSTRUCTIONS);
+        assert!(as_value(&res.data).get("marker").is_none());
+        assert!(as_value(&res.data).get("plan_mode").is_none());
         assert_eq!(
-            res.model_content.as_deref(),
+            model_content(res.model_content.as_ref()).as_deref(),
             Some(ENTER_PLAN_MODE_INSTRUCTIONS)
         );
-        let instructions = res.data["message"].as_str().unwrap();
+        let instructions = res.data.string_at("/message").unwrap();
         assert!(instructions.starts_with("Entered plan mode."));
         assert!(instructions
             .contains("6. When ready, use ExitPlanMode to present your plan for approval"));
@@ -965,7 +1033,7 @@ mod tests {
         use_ctx.agent_id = Some(AgentId::new());
         let tool = EnterPlanModeTool::new(bctx);
         let err = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect_err("enter in agent context must fail");
         assert_eq!(
@@ -984,11 +1052,11 @@ mod tests {
         let (bctx, sink, _session, use_ctx) = make_ctx();
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterPlanModeTool::new(bctx);
-        tool.call(json!({}), use_ctx.clone(), fresh_tx())
+        tool.call(source(json!({})), use_ctx.clone(), fresh_tx())
             .await
             .expect("first enter must succeed");
         let err = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect_err("second enter must fail");
         assert_eq!(
@@ -1006,21 +1074,24 @@ mod tests {
         session.lock().await.plan_mode = true; // pre-arm
         let tool = ExitPlanModeTool::new(bctx);
         let res = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect("exit must succeed when in plan mode");
         // 2.1.266 output shape: no marker, no `plan_mode` — `{plan, isAgent,
         // filePath, hasTaskTool, planWasEdited}`.
-        assert!(res.data.get("marker").is_none());
-        assert!(res.data.get("plan_mode").is_none());
+        assert!(as_value(&res.data).get("marker").is_none());
+        assert!(as_value(&res.data).get("plan_mode").is_none());
         // No plan file and no inline plan → null plan, isAgent false.
-        assert_eq!(res.data["plan"], Value::Null);
-        assert_eq!(res.data["isAgent"], false);
-        assert_eq!(res.data["planWasEdited"], false);
+        assert_eq!(as_value(&res.data)["plan"], Value::Null);
+        assert_eq!(as_value(&res.data)["isAgent"], false);
+        assert_eq!(as_value(&res.data)["planWasEdited"], false);
         // Empty-plan branch (TS `ExitPlanModeV2Tool.ts:461-468`).
-        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_EMPTY_MSG);
         assert_eq!(
-            res.data["model_content"],
+            as_value(&res.data)["model_content"],
+            EXIT_PLAN_APPROVED_EMPTY_MSG
+        );
+        assert_eq!(
+            as_value(&res.data)["model_content"],
             "User has approved exiting plan mode. You can now proceed."
         );
         assert!(!session.lock().await.plan_mode);
@@ -1057,18 +1128,21 @@ mod tests {
 
         let tool = ExitPlanModeTool::new(bctx);
         let res = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect("exit must succeed");
 
-        assert_eq!(res.data["plan"], "## Context\nShip the port.");
-        assert_eq!(res.data["filePath"], plan_path.to_string_lossy().as_ref());
-        assert_eq!(res.data["planWasEdited"], false);
+        assert_eq!(as_value(&res.data)["plan"], "## Context\nShip the port.");
+        assert_eq!(
+            as_value(&res.data)["filePath"],
+            plan_path.to_string_lossy().as_ref()
+        );
+        assert_eq!(as_value(&res.data)["planWasEdited"], false);
         let expected = format!(
             "User has approved your plan. You can now start coding. Start with updating your todo list if applicable\n\nYour plan has been saved to: {}\nYou can refer back to it if needed during implementation.\n\nIf this plan can be broken down into multiple independent tasks, consider spawning named teammates with the Agent tool (pass a `name`) to parallelize the work.\n\n## Approved Plan:\n## Context\nShip the port.",
             plan_path.to_string_lossy()
         );
-        assert_eq!(res.data["model_content"], expected);
+        assert_eq!(as_value(&res.data)["model_content"], expected);
         std::fs::remove_dir_all(&plans_dir).ok();
     }
 
@@ -1101,18 +1175,18 @@ mod tests {
 
         let tool = ExitPlanModeTool::new(bctx);
         let res = tool
-            .call(json!({"plan": "fresh plan"}), use_ctx, fresh_tx())
+            .call(source(json!({"plan": "fresh plan"})), use_ctx, fresh_tx())
             .await
             .expect("exit must succeed");
 
-        assert_eq!(res.data["plan"], "fresh plan");
-        assert_eq!(res.data["planWasEdited"], true);
+        assert_eq!(as_value(&res.data)["plan"], "fresh plan");
+        assert_eq!(as_value(&res.data)["planWasEdited"], true);
         assert_eq!(
             std::fs::read_to_string(&plan_path).expect("plan file"),
             "fresh plan",
             "an inline plan is persisted to the plan file"
         );
-        assert!(res.data["model_content"]
+        assert!(as_value(&res.data)["model_content"]
             .as_str()
             .expect("model content")
             .ends_with("## Approved Plan (edited by user):\nfresh plan"));
@@ -1128,13 +1202,13 @@ mod tests {
         let tool = ExitPlanModeTool::new(bctx);
 
         let error = tool
-            .call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+            .call(source(json!({ "plan": "1. Ship it" })), use_ctx, fresh_tx())
             .await
             .expect_err("ExitPlanMode must deny when no permission gate is wired");
         assert!(matches!(
             error,
             ToolError::PermissionDenied(message)
-                if message == EXIT_PLAN_MODE_PERMISSION_GATE_UNAVAILABLE_MSG
+                if message.string_at("") == Some(EXIT_PLAN_MODE_PERMISSION_GATE_UNAVAILABLE_MSG)
         ));
         assert!(session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
@@ -1156,20 +1230,22 @@ mod tests {
         let tool = ExitPlanModeTool::new(bctx);
 
         let error = tool
-            .call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+            .call(source(json!({ "plan": "1. Ship it" })), use_ctx, fresh_tx())
             .await
             .expect_err("headless ExitPlanMode must deny without a prompt");
         assert!(matches!(
             error,
             ToolError::PermissionDenied(message)
-                if message.starts_with("Permission to use ExitPlanMode has been denied.")
+                if message
+                    .string_at("")
+                    .is_some_and(|reason| reason.starts_with("Permission to use ExitPlanMode has been denied."))
         ));
         assert!(session.lock().await.plan_mode);
     }
 
     #[test]
     fn exit_input_schema_accepts_allowed_prompts() {
-        let schema = &*EXIT_INPUT_SCHEMA;
+        let schema = as_value(&EXIT_INPUT_SCHEMA);
         let props = &schema["properties"]["allowedPrompts"];
         assert_eq!(props["type"], "array");
         let item = &props["items"];
@@ -1186,25 +1262,25 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         session.lock().await.plan_mode = true; // pre-arm
         let tool = ExitPlanModeTool::new(bctx);
-        let input = json!({
+        let input = source(json!({
             "allowedPrompts": [{ "tool": "Bash", "prompt": "run tests" }],
             "plan": "Step 1. Do the thing.",
-        });
+        }));
         let res = tool
             .call(input, use_ctx, fresh_tx())
             .await
             .expect("exit must succeed with allowedPrompts");
         // `allowedPrompts` is accepted (deprecated passthrough) but is NOT part
         // of the 2.1.266 OUTPUT shape, so it is not echoed back.
-        assert!(res.data.get("allowedPrompts").is_none());
+        assert!(as_value(&res.data).get("allowedPrompts").is_none());
         // An inline plan still wins over the (absent) plan file.
-        assert_eq!(res.data["plan"], "Step 1. Do the thing.");
-        assert_eq!(res.data["isAgent"], false);
-        assert_eq!(res.data["planWasEdited"], true);
+        assert_eq!(as_value(&res.data)["plan"], "Step 1. Do the thing.");
+        assert_eq!(as_value(&res.data)["isAgent"], false);
+        assert_eq!(as_value(&res.data)["planWasEdited"], true);
         // No plan-file identity was published here, so the saved-to pair is
         // dropped rather than inventing a path; the rest is the 2.1.266 text.
         assert_eq!(
-            res.data["model_content"],
+            as_value(&res.data)["model_content"],
             "User has approved your plan. You can now start coding. Start with updating your todo list if applicable\n\nIf this plan can be broken down into multiple independent tasks, consider spawning named teammates with the Agent tool (pass a `name`) to parallelize the work.\n\n## Approved Plan (edited by user):\nStep 1. Do the thing."
         );
         assert!(!session.lock().await.plan_mode);
@@ -1218,15 +1294,18 @@ mod tests {
         use_ctx.agent_id = Some(AgentId::new());
         let tool = ExitPlanModeTool::new(bctx);
         let res = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect("exit must succeed in agent context");
-        assert_eq!(res.data["isAgent"], true);
-        assert_eq!(res.data["plan"], Value::Null);
+        assert_eq!(as_value(&res.data)["isAgent"], true);
+        assert_eq!(as_value(&res.data)["plan"], Value::Null);
         // Agent branch wins over plan state (TS `ExitPlanModeV2Tool.ts:452-459`).
-        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_AGENT_MSG);
         assert_eq!(
-            res.data["model_content"],
+            as_value(&res.data)["model_content"],
+            EXIT_PLAN_APPROVED_AGENT_MSG
+        );
+        assert_eq!(
+            as_value(&res.data)["model_content"],
             "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\""
         );
     }
@@ -1237,7 +1316,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = ExitPlanModeTool::new(bctx);
         let err = tool
-            .call(json!({}), use_ctx, fresh_tx())
+            .call(source(json!({})), use_ctx, fresh_tx())
             .await
             .expect_err("exit on fresh session must fail");
         // Out-of-plan-mode rejection now matches TS `validateInput`
@@ -1263,8 +1342,10 @@ mod tests {
                 include_examples: true,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
+        let prompt = prompt.string_at("").expect("tool prompt is a root string");
         // Verbatim port of `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (prompt.ts:6-29).
         assert_eq!(prompt, EXIT_PLAN_MODE_V2_TOOL_PROMPT);
         // Multi-section, not the old one-line stub.
@@ -1308,10 +1389,13 @@ mod tests {
         session.lock().await.plan_mode = true; // pre-arm
         let tool = ExitPlanModeTool::new(bctx);
         let res = tool
-            .call(json!({ "plan": "   \n\t " }), use_ctx, fresh_tx())
+            .call(source(json!({ "plan": "   \n\t " })), use_ctx, fresh_tx())
             .await
             .expect("exit must succeed with whitespace plan");
-        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_EMPTY_MSG);
+        assert_eq!(
+            as_value(&res.data)["model_content"],
+            EXIT_PLAN_APPROVED_EMPTY_MSG
+        );
     }
 
     #[tokio::test]
@@ -1327,7 +1411,7 @@ mod tests {
             },
         }));
         let tool = ExitPlanModeTool::new(bctx);
-        tool.call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+        tool.call(source(json!({ "plan": "1. Ship it" })), use_ctx, fresh_tx())
             .await
             .expect("approved auto response exits plan mode");
         assert!(!session.lock().await.plan_mode);
@@ -1345,24 +1429,31 @@ mod tests {
         bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
             seen: Arc::new(StdMutex::new(Vec::new())),
             outcome: lingxi_core::host::permission_gate::PermissionOutcome::Deny {
-                reason: "user denied".to_string(),
+                reason: "user denied".into(),
             },
         }));
         let tool = ExitPlanModeTool::new(bctx);
         let error = tool
-            .call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+            .call(source(json!({ "plan": "1. Ship it" })), use_ctx, fresh_tx())
             .await
             .expect_err("denied approval must not exit plan mode");
-        assert!(matches!(error, ToolError::PermissionDenied(message) if message == "user denied"));
+        assert!(
+            matches!(error, ToolError::PermissionDenied(message) if message.string_at("") == Some("user denied"))
+        );
         assert!(session.lock().await.plan_mode);
     }
     struct RegisteredReviewRequester;
     #[async_trait]
     impl lingxi_core::host::teammate_plan::TeammatePlanRequester for RegisteredReviewRequester {
-        async fn submit(&self, _: Value) -> Result<Value, String> {
-            Ok(
-                json!({"awaitingLeaderApproval":true,"requestId":"review-1","model_content":"Your plan has been submitted to the team lead for approval."}),
-            )
+        async fn submit(
+            &self,
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+            Ok(source(json!({
+                "awaitingLeaderApproval": true,
+                "requestId": "review-1",
+                "model_content": "Your plan has been submitted to the team lead for approval."
+            })))
         }
     }
     #[tokio::test]
@@ -1377,13 +1468,16 @@ mod tests {
         let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(RegisteredReviewRequester);
         lingxi_core::host::teammate_plan::register(id, &requester);
-        let result = tool.call(json!({}), context, fresh_tx()).await.unwrap();
+        let result = tool
+            .call(source(json!({})), context, fresh_tx())
+            .await
+            .unwrap();
         assert_eq!(
-            result.model_content.as_deref(),
+            model_content(result.model_content.as_ref()).as_deref(),
             Some("Your plan has been submitted to the team lead for approval.")
         );
-        assert_eq!(result.data["awaitingLeaderApproval"], true);
-        assert!(result.data.get("model_content").is_none());
+        assert_eq!(as_value(&result.data)["awaitingLeaderApproval"], true);
+        assert!(as_value(&result.data).get("model_content").is_none());
         assert!(
             session.lock().await.plan_mode,
             "teammate review must not change leader session mode"
@@ -1402,7 +1496,7 @@ mod tests {
         async fn check(
             &self,
             _: &str,
-            _: &Value,
+            _: &Utf16JsonProjection,
         ) -> lingxi_core::host::permission_gate::PermissionDecision {
             lingxi_core::host::permission_gate::PermissionDecision::Deny {
                 reason: "No unattended permission approval".into(),
@@ -1416,11 +1510,18 @@ mod tests {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
-        async fn submit(&self, _: Value) -> Result<Value, String> {
-            let plan = std::fs::read_to_string(&self.0).map_err(|error| error.to_string())?;
-            Ok(
-                json!({"plan":plan,"awaitingLeaderApproval":true,"requestId":"disk-review-1","model_content":"Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."}),
-            )
+        async fn submit(
+            &self,
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+            let plan = std::fs::read_to_string(&self.0)
+                .map_err(|error| Utf16JsonProjection::from(error.to_string()))?;
+            Ok(source(json!({
+                "plan": plan,
+                "awaitingLeaderApproval": true,
+                "requestId": "disk-review-1",
+                "model_content": "Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."
+            })))
         }
     }
     struct PlanDiskWrite;
@@ -1429,8 +1530,15 @@ mod tests {
         fn name(&self) -> &str {
             "Write"
         }
-        fn input_schema(&self) -> &Value {
+        fn input_schema(&self) -> &Utf16JsonProjection {
             &EXIT_INPUT_SCHEMA
+        }
+        fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+            ToolInputRepairMetadata::Known {
+                schema: ToolInputRepairSchema::Advertised,
+                schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
@@ -1438,13 +1546,17 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1000
         }
-        fn is_concurrency_safe(&self, _: &Value) -> bool {
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
             false
         }
-        fn is_read_only(&self, _: &Value) -> bool {
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
             false
         }
-        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        async fn check_permissions(
+            &self,
+            _: &Utf16JsonProjection,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
             PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
                     reason: "test filesystem write".into(),
@@ -1454,24 +1566,24 @@ mod tests {
                 metadata: PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
             String::new()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            Utf16JsonProjection::from("")
         }
         async fn call(
             &self,
-            input: Value,
+            input: Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             std::fs::write(
-                input["file_path"].as_str().unwrap(),
-                input["content"].as_str().unwrap(),
+                input.string_at("/file_path").unwrap(),
+                input.string_at("/content").unwrap(),
             )
             .unwrap();
-            Ok(ToolCallResult::from_data(json!({"written":true})))
+            Ok(ToolCallResult::from_data(source(json!({"written":true}))))
         }
     }
     #[tokio::test]
@@ -1499,9 +1611,13 @@ mod tests {
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
         let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             parent_agent_id: Some(id),
+            native_query_depth: None,
             origin_session_id: None,
             agent_name: Some("planner".into()),
             team_name: Some("team".into()),
@@ -1515,6 +1631,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: Some("plan".into()),
             request_source: None,
             frozen_command_denies: vec![],
@@ -1522,7 +1643,7 @@ mod tests {
         invoker
             .invoke(
                 "Write",
-                json!({"file_path":path,"content":"Inspect, test, implement"}),
+                source(json!({"file_path":path,"content":"Inspect, test, implement"})),
                 context(),
             )
             .await
@@ -1530,19 +1651,24 @@ mod tests {
         assert!(invoker
             .invoke(
                 "Write",
-                json!({"file_path":root.join("other.md"),"content":"no"}),
+                source(json!({"file_path":root.join("other.md"),"content":"no"})),
                 context()
             )
             .await
             .is_err());
         let result = invoker
-            .invoke_detailed("ExitPlanMode", json!({}), context(), None)
+            .invoke_detailed("ExitPlanMode", source(json!({})), context(), None)
             .await
             .unwrap();
-        assert_eq!(result.data["plan"], "Inspect, test, implement");
-        assert_eq!(result.data["awaitingLeaderApproval"], true);
-        assert!(result.data.get("model_content").is_none());
-        assert_eq!(result.model_content.as_deref(), Some("Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."));
+        assert_eq!(as_value(&result.data)["plan"], "Inspect, test, implement");
+        assert_eq!(as_value(&result.data)["awaitingLeaderApproval"], true);
+        assert!(as_value(&result.data).get("model_content").is_none());
+        assert_eq!(
+            model_content(result.model_content.as_ref()).as_deref(),
+            Some(
+                "Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."
+            )
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -94,13 +94,28 @@ impl Codec {
             .inner
             .encode_request(client::EncodeRequest::new(&input), &context)
             .map_err(error)?;
-        let mut result = ProviderRequest::post_json(
-            output.url,
-            serde_json::from_slice(&output.body).map_err(invalid)?,
-        );
+        let body_source =
+            std::str::from_utf8(&output.body).map_err(|error| LlmError::InvalidRequest {
+                message: format!("encoded provider request body is not UTF-8: {error}"),
+            })?;
+        let body_json =
+            lingxi_llm_client::protocol::JsonPayload::parse(body_source).map_err(|error| {
+                LlmError::InvalidRequest {
+                    message: format!("encoded provider request body is invalid JSON: {error}"),
+                }
+            })?;
+        let mut result = ProviderRequest::post_json(output.url, body_json);
         result.method = output.method;
+        result.json_encoding =
+            lingxi_llm_client::exact_json::JsonEncoding::for_protocol(self.profile.protocol);
         result.headers = output.headers.into_iter().collect();
-        result.json_string_overrides = req.execution.message_json_string_overrides.clone();
+        result.json_string_overrides = lingxi_llm_client::exact_json::map_message_text_overrides(
+            &req.input,
+            self.profile.protocol,
+            &result.body_json,
+            &req.execution.message_json_string_overrides,
+        )
+        .map_err(error)?;
         Ok(result)
     }
 }
@@ -183,8 +198,9 @@ impl AnthropicMessagesCodec {
                 .err()
                 .unwrap_or(LlmError::ProviderInternal));
         }
-        response.body_json["input_tokens"]
-            .as_u64()
+        response
+            .body_json
+            .unsigned_integer_at("/input_tokens")
             .ok_or_else(|| invalid("token count response has no numeric input_tokens"))
     }
 }
@@ -277,7 +293,11 @@ impl FixtureCodec for Codec {
             inner: self
                 .inner
                 .stream_decoder(&self.context("", client::RequestMode::Stream)),
-            projection: Decoder::projection(self.profile.protocol, Value::Null),
+            projection: Decoder::projection(
+                self.profile.protocol,
+                wire::JsonPayload::parse("null").expect("null is valid JSON"),
+            )
+            .expect("empty stream metadata is valid"),
         })
     }
 }
@@ -290,7 +310,8 @@ impl FixtureDecoder for FixtureStream {
         )
     }
     fn set_provider_metadata(&mut self, metadata: Value) {
-        self.projection.metadata = metadata;
+        self.projection.metadata = wire::JsonPayload::from_generated_value(&metadata)
+            .expect("test stream metadata is valid JSON");
     }
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<HistoryEvent>, LlmError> {
         let bytes = if self.projection.family == wire::ProtocolFamily::BedrockClaude {
@@ -331,6 +352,7 @@ impl HistoryFixture {
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
+                citations: None,
             }],
         });
         self

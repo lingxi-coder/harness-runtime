@@ -1,4 +1,5 @@
 use lingxi_core::host::CredentialStoragePolicy;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::{QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK};
 use permission::gate::PermissionGate;
 #[cfg(windows)]
@@ -303,6 +304,8 @@ pub struct DesktopConfig {
     /// Explicit trust decision from the host for this workspace. `None` keeps
     /// CLI trust resolution; `Some(false)` must override any persisted grant.
     pub host_workspace_trusted: Option<bool>,
+    /// The live client surface attached to this session, if one is known.
+    pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -435,12 +438,12 @@ pub struct DesktopConfig {
     /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
     /// `build()`. `None` (the default) = no cap.
     pub max_budget_usd: Option<f64>,
-    /// CLI `--json-schema <schema>`: when set, `build()` forces structured
-    /// output — it registers a `StructuredOutput` tool whose `input_schema` is
-    /// this schema, forces `tool_choice` to it, and surfaces a capture slot on
-    /// [`DesktopRuntime`] for the print path to validate + retry. `None` (the
-    /// default) leaves every turn unconstrained (byte-identical to before).
-    pub json_schema: Option<serde_json::Value>,
+    /// CLI `--json-schema <schema>`: when set, `build()` compiles this exact
+    /// source projection with Native Draft-07 semantics before registering the
+    /// forced `StructuredOutput` tool. The runtime validates tool input before
+    /// capture; the print path emits a captured result or retries if no result
+    /// was captured. `None` leaves turns unconstrained.
+    pub json_schema: Option<Utf16JsonProjection>,
     /// Host-injected base permission gate (the INTERACTIVE prompt transport).
     /// When `Some`, `build()` uses it as the base gate instead of the
     /// `NoOpPermissionGate`/`DenyOnAskGate`/`AdapterPermissionGate` it would
@@ -511,12 +514,12 @@ pub struct DesktopConfig {
     /// default memory-hierarchy prompt entirely (`OrchestratorConfig.system_prompt_override`).
     /// `None` (the default) keeps the assembled LINGXI.md hierarchy prompt
     /// (byte-identical to before this field was added).
-    pub system_prompt_override: Option<String>,
+    pub system_prompt_override: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// CLI `--append-system-prompt <prompt>` / `--append-system-prompt-file <file>`:
     /// text to append to the assembled system prompt for the session. When `Some`,
     /// appended after the memory-hierarchy prompt (or after `system_prompt_override`
     /// when both are set). `None` (the default) keeps the assembled prompt unchanged.
-    pub append_system_prompt: Option<String>,
+    pub append_system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// CLI `--session-id <uuid>`: use this specific session ID for the
     /// conversation instead of minting a fresh one. `Some` ⟶ the boot-canonical
     /// MAIN session id is parsed from this string (a bare UUID, validated by the
@@ -538,6 +541,10 @@ pub struct DesktopConfig {
     /// loader (which share the registry `Arc`) observe zero commands/skills.
     /// `false` (the default) keeps the full command set.
     pub disable_slash_commands: bool,
+    /// Optional host-owned names the model may load through `Skill`. `None`
+    /// offers all eligible skills; an empty list offers none. Also inherited by
+    /// subagents through the shared session command catalog.
+    pub session_skill_allowlist: Option<Vec<String>>,
     /// CLI `--add-dir <directories...>` (claude-code "Additional directories to
     /// allow tool access to"). Unioned into the permission policy's
     /// working-directory set exactly like a settings-tier
@@ -890,6 +897,7 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.enable_automation_scheduler,
             )
             .field("host_workspace_trusted", &self.host_workspace_trusted)
+            .field("mod_render_surface", &self.mod_render_surface)
             .field(
                 "api_base",
                 &if self.api_base.is_empty() {
@@ -1039,6 +1047,7 @@ impl Default for DesktopConfig {
             build_info: command_api::builtins::BuildInfo::default(),
             enable_automation_scheduler: true,
             host_workspace_trusted: None,
+            mod_render_surface: None,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             // Production reads the real keychain; only isolated hosts opt out.
@@ -1085,6 +1094,7 @@ impl Default for DesktopConfig {
             session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
+            session_skill_allowlist: None,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             // Default: no `--strict-mcp-config` (ambient MCP configs load).

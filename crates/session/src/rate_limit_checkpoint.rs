@@ -90,6 +90,7 @@
 //!   [`CheckpointTrigger`] so wiring an emitter later needs no new vocabulary.
 
 use lingxi_core::session::{TodoItem, TodoState};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -297,18 +298,6 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// Control / bidi / zero-width characters `Zsl` collapses to a single space.
-///
-/// The oracle class, written out in escapes:
-/// `[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+`
-/// — note the `+`: a RUN collapses to ONE space, not one space per character.
-static TODO_LINE_UNSAFE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"[\x00-\x1F\x7F-\x9F\x{061C}\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2066}-\x{2069}\x{FEFF}]+",
-    )
-    .expect("static todo-line sanitiser regex")
-});
-
 /// `Zsl(e)` (@292197365) — make one todo safe to paste into a markdown list.
 ///
 /// ```js
@@ -320,17 +309,53 @@ static TODO_LINE_UNSAFE: Lazy<Regex> = Lazy::new(|| {
 /// can never forge a second list item; the length test is on the ALREADY
 /// sanitised text, in UTF-16 code units.
 #[must_use]
-pub fn sanitize_todo_line(text: &str) -> String {
-    let collapsed = TODO_LINE_UNSAFE.replace_all(text, " ").into_owned();
-    // `wo(t,b6f)` slices to 500 UTF-16 units (dropping a trailing lone high
-    // surrogate) and does NOT trim; only then is the ellipsis appended.
-    // Bound in its own statement so the borrow ends before the `None` arm
-    // moves `collapsed` out.
-    let truncated = truncate_utf16_units(&collapsed, TODO_LINE_MAX_UTF16);
-    match truncated {
-        Some(head) => format!("{head}\u{2026}"),
-        None => collapsed,
+pub fn sanitize_todo_line(text: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let source = text
+        .string_units("")
+        .expect("TodoItem text is a source JSON string");
+    let mut collapsed = Vec::with_capacity(source.len());
+    let mut in_unsafe_run = false;
+    for unit in source {
+        if is_unsafe_todo_unit(unit) {
+            if !in_unsafe_run {
+                collapsed.push(0x0020);
+                in_unsafe_run = true;
+            }
+        } else {
+            collapsed.push(unit);
+            in_unsafe_run = false;
+        }
     }
+
+    // `wo(t,b6f)` slices the already-sanitized JavaScript string by UTF-16
+    // units, dropping a trailing high surrogate at the cutoff. Keep the
+    // unpaired units in the source projection; only the eventual UTF-8 file
+    // sink applies Node/TextEncoder replacement semantics.
+    if let Some(mut head) = truncate_utf16_units(&collapsed, TODO_LINE_MAX_UTF16) {
+        head.push(0x2026);
+        source_string_projection(head)
+    } else {
+        source_string_projection(collapsed)
+    }
+}
+
+fn is_unsafe_todo_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0000..=0x001f
+            | 0x007f..=0x009f
+            | 0x061c
+            | 0x200b..=0x200f
+            | 0x2028..=0x202e
+            | 0x2066..=0x2069
+            | 0xfeff
+    )
+}
+
+fn source_string_projection(units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("a display string derived from UTF-16 units is consistent")
 }
 
 /// `wo(e,t)` (@281366731) — the head of `text`, at most `max_units` UTF-16 code
@@ -344,24 +369,24 @@ pub fn sanitize_todo_line(text: &str) -> String {
 ///
 /// The surrogate test is why this cannot be a `char` count: JS slices UTF-16
 /// units, so a cut that lands between the halves of a non-BMP character drops
-/// the orphaned high surrogate rather than emitting a lone one. (`cTu` is a
-/// UTF-16 round-trip, a no-op on the well-formed result — and unrepresentable
-/// in Rust, where a `String` cannot hold a lone surrogate anyway.)
-fn truncate_utf16_units(text: &str, max_units: usize) -> Option<String> {
-    let units: Vec<u16> = text.encode_utf16().collect();
+/// the orphaned high surrogate rather than emitting a lone one. Other
+/// unpaired source units remain representable in the projection and are not
+/// discarded just because Rust `String` cannot hold them.
+fn truncate_utf16_units(units: &[u16], max_units: usize) -> Option<Vec<u16>> {
     if units.len() <= max_units {
         return None;
     }
-    let mut head = &units[..max_units];
+    let mut head = units[..max_units].to_vec();
     if let Some(&last) = head.last() {
         if (0xD800..=0xDBFF).contains(&last) {
-            head = &head[..head.len() - 1];
+            head.pop();
         }
     }
-    Some(String::from_utf16_lossy(head))
+    Some(head)
 }
 
-/// Render `RESUME.md` — `K4v` (@292206132), line for line.
+/// Render `RESUME.md` — `K4v` (@292206132), line for line, retaining source
+/// UTF-16 in the generated document until its filesystem encoding boundary.
 ///
 /// ```js
 /// let t=["# Claude Code — resume checkpoint","",`Session: ${e.sessionId}`,
@@ -386,82 +411,125 @@ fn truncate_utf16_units(text: &str, max_units: usize) -> Option<String> {
 ///   no `## What's next` heading at all.
 /// * The `- [>] …    ← current step` marker is separated by FOUR spaces.
 #[must_use]
-pub fn render_resume_md(doc: &ResumeDoc<'_>) -> String {
+pub fn render_resume_md(doc: &ResumeDoc<'_>) -> Utf16JsonProjection {
     let product = branding::PRODUCT_NAME;
-    let mut lines: Vec<String> = vec![
-        format!("# {product} \u{2014} resume checkpoint"),
-        String::new(),
-        format!("Session: {}", doc.session_id),
-        format!("Written: {}", doc.written_iso),
-        format!("Trigger: {}", doc.trigger.label()),
-        format!("Ref with your in-progress files: {}", doc.ref_name),
-        String::new(),
-        "## To resume".to_string(),
-        String::new(),
-        format!("    lingxi --resume {}", doc.session_id),
-        String::new(),
-        format!("(or open {product} in this directory and run /resume)"),
-        String::new(),
-        "## Plan (from TodoWrite state)".to_string(),
-        String::new(),
+    let mut lines: Vec<Vec<u16>> = vec![
+        utf16_line(&format!("# {product} \u{2014} resume checkpoint")),
+        utf16_line(""),
+        utf16_line(&format!("Session: {}", doc.session_id)),
+        utf16_line(&format!("Written: {}", doc.written_iso)),
+        utf16_line(&format!("Trigger: {}", doc.trigger.label())),
+        utf16_line(&format!(
+            "Ref with your in-progress files: {}",
+            doc.ref_name
+        )),
+        utf16_line(""),
+        utf16_line("## To resume"),
+        utf16_line(""),
+        utf16_line(&format!("    lingxi --resume {}", doc.session_id)),
+        utf16_line(""),
+        utf16_line(&format!(
+            "(or open {product} in this directory and run /resume)"
+        )),
+        utf16_line(""),
+        utf16_line("## Plan (from TodoWrite state)"),
+        utf16_line(""),
     ];
 
     if doc.todos.is_empty() {
-        lines.push(
-            "No task list was active; see transcript via the resume command above.".to_string(),
-        );
+        lines.push(utf16_line(
+            "No task list was active; see transcript via the resume command above.",
+        ));
     } else {
         // `r` — the first PENDING content; `n` — the first IN-PROGRESS
         // activeForm. Both are `??=`, i.e. first-wins, and both hold the
         // SANITISED text (the oracle assigns from the sanitised local).
-        let mut first_pending: Option<String> = None;
-        let mut first_in_progress: Option<String> = None;
+        let mut first_pending: Option<Utf16JsonProjection> = None;
+        let mut first_in_progress: Option<Utf16JsonProjection> = None;
         for todo in doc.todos {
             match todo.status {
                 TodoState::Completed => {
-                    lines.push(format!("- [x] {}", sanitize_todo_line(&todo.content)));
+                    let content = sanitize_todo_line(&todo.content);
+                    lines.push(source_line("- [x] ", &content, ""));
                 }
                 TodoState::InProgress => {
                     let active = sanitize_todo_line(&todo.active_form);
-                    lines.push(format!("- [>] {active}    \u{2190} current step"));
+                    lines.push(source_line("- [>] ", &active, "    \u{2190} current step"));
                     if first_in_progress.is_none() {
                         first_in_progress = Some(active);
                     }
                 }
                 TodoState::Pending => {
                     let content = sanitize_todo_line(&todo.content);
-                    lines.push(format!("- [ ] {content}"));
+                    lines.push(source_line("- [ ] ", &content, ""));
                     if first_pending.is_none() {
                         first_pending = Some(content);
                     }
                 }
             }
         }
-        lines.push(String::new());
-        lines.push("## What's next".to_string());
-        lines.push(String::new());
+        lines.push(utf16_line(""));
+        lines.push(utf16_line("## What's next"));
+        lines.push(utf16_line(""));
         lines.push(match (first_pending, first_in_progress) {
-            (Some(pending), _) => pending,
-            (None, Some(active)) => format!("finish: {active}"),
-            (None, None) => "All tasks completed.".to_string(),
+            (Some(pending), _) => source_line("", &pending, ""),
+            (None, Some(active)) => source_line("finish: ", &active, ""),
+            (None, None) => utf16_line("All tasks completed."),
         });
     }
 
     lines.extend([
-        String::new(),
-        "---".to_string(),
-        String::new(),
-        "Don't want these changes? Resume this session (above), then run".to_string(),
-        "`/rewind` to roll back the turn's tool edits (bash-made changes".to_string(),
-        format!(
+        utf16_line(""),
+        utf16_line("---"),
+        utf16_line(""),
+        utf16_line("Don't want these changes? Resume this session (above), then run"),
+        utf16_line("`/rewind` to roll back the turn's tool edits (bash-made changes"),
+        utf16_line(&format!(
             "excluded). {} holds a full snapshot until this session's",
             doc.ref_name
-        ),
-        "next checkpoint, or for up to ~2 weeks.".to_string(),
-        String::new(),
+        )),
+        utf16_line("next checkpoint, or for up to ~2 weeks."),
+        utf16_line(""),
     ]);
 
-    lines.join("\n")
+    join_resume_lines(lines)
+}
+
+fn utf16_line(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+fn source_line(prefix: &str, source: &Utf16JsonProjection, suffix: &str) -> Vec<u16> {
+    let mut line = prefix.encode_utf16().collect::<Vec<_>>();
+    line.extend(
+        source
+            .string_units("")
+            .expect("sanitized todo is a source JSON string"),
+    );
+    line.extend(suffix.encode_utf16());
+    line
+}
+
+fn join_resume_lines(lines: Vec<Vec<u16>>) -> Utf16JsonProjection {
+    let capacity = lines.iter().map(Vec::len).sum::<usize>() + lines.len().saturating_sub(1);
+    let mut units = Vec::with_capacity(capacity);
+    for (index, line) in lines.into_iter().enumerate() {
+        if index != 0 {
+            units.push(b'\n' as u16);
+        }
+        units.extend(line);
+    }
+    source_string_projection(units)
+}
+
+/// Encode one generated checkpoint body as Node's filesystem string sink does:
+/// valid UTF-16 pairs become their scalar UTF-8 encoding, while unmatched
+/// surrogates become U+FFFD. The source projection remains exact until here.
+fn encode_resume_body_for_filesystem(body: &Utf16JsonProjection) -> Vec<u8> {
+    let units = body
+        .string_units("")
+        .expect("render_resume_md returns a source JSON string");
+    String::from_utf16_lossy(&units).into_bytes()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1165,6 +1233,7 @@ fn build_checkpoint_commit(
         todos: request.todos,
         written_iso: &now_iso(),
     });
+    let document_bytes = encode_resume_body_for_filesystem(&document);
 
     // The document is written to the WORKING TREE as well as hashed into the
     // commit, so a user who never resumes still finds the instructions.
@@ -1179,7 +1248,7 @@ fn build_checkpoint_commit(
             if lstat(&resume_path).is_some_and(|m| m.file_type().is_symlink()) {
                 return Err(());
             }
-            std::fs::write(&resume_path, &document).map_err(|_| ())
+            std::fs::write(&resume_path, &document_bytes).map_err(|_| ())
         });
     if wrote.is_err() {
         return skipped(Skip::ResumeWriteRefused);
@@ -1189,7 +1258,7 @@ fn build_checkpoint_commit(
         root,
         env,
         &["hash-object", "-w", "--stdin"],
-        Some(document.into_bytes()),
+        Some(document_bytes),
     )
     .filter(|o| o.ok)
     .map(|o| o.text())
@@ -1492,10 +1561,46 @@ mod tests {
     fn todo(content: &str, status: TodoState, active_form: &str) -> TodoItem {
         TodoItem {
             id: String::new(),
-            content: content.to_string(),
+            content: content.into(),
             status,
-            active_form: active_form.to_string(),
+            active_form: active_form.into(),
         }
+    }
+
+    fn render_text(doc: &ResumeDoc<'_>) -> String {
+        render_resume_md(doc)
+            .string_at("")
+            .expect("fixture document contains only well-formed UTF-16")
+            .to_owned()
+    }
+
+    fn sanitize_text(text: &str) -> String {
+        sanitize_todo_line(&Utf16JsonProjection::from(text))
+            .string_at("")
+            .expect("fixture todo contains only well-formed UTF-16")
+            .to_owned()
+    }
+
+    fn source_string(units: Vec<u16>) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("display is derived from the exact UTF-16 source")
+    }
+
+    fn contains_units(haystack: &[u16], needle: &[u16]) -> bool {
+        !needle.is_empty()
+            && haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+    }
+
+    fn count_units(haystack: &[u16], needle: &[u16]) -> usize {
+        if needle.is_empty() {
+            return 0;
+        }
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
     }
 
     fn doc(todos: &[TodoItem], trigger: CheckpointTrigger) -> ResumeDoc<'_> {
@@ -1543,7 +1648,7 @@ mod tests {
     /// documented rebrands — note there is NO `## What's next` section.
     #[test]
     fn empty_todo_list_document_is_byte_exact() {
-        let rendered = render_resume_md(&doc(&[], CheckpointTrigger::NearLimit));
+        let rendered = render_text(&doc(&[], CheckpointTrigger::NearLimit));
         assert_eq!(
             rendered,
             "# LingXi \u{2014} resume checkpoint\n\
@@ -1590,7 +1695,7 @@ mod tests {
             todo("Wire the trigger", TodoState::Pending, ""),
             todo("Write the report", TodoState::Pending, ""),
         ];
-        let rendered = render_resume_md(&doc(&todos, CheckpointTrigger::RateLimited));
+        let rendered = render_text(&doc(&todos, CheckpointTrigger::RateLimited));
         assert!(rendered.contains("Trigger: rate-limited\n"));
         assert!(
             rendered.contains(
@@ -1617,14 +1722,14 @@ mod tests {
             todo("Done", TodoState::Completed, "Doing"),
             todo("Porting", TodoState::InProgress, "Porting the executor"),
         ];
-        let rendered = render_resume_md(&doc(&in_progress, CheckpointTrigger::NearLimit));
+        let rendered = render_text(&doc(&in_progress, CheckpointTrigger::NearLimit));
         assert!(
             rendered.contains("\n\n## What's next\n\nfinish: Porting the executor\n"),
             "{rendered}"
         );
 
         let all_done = [todo("Done", TodoState::Completed, "Doing")];
-        let rendered = render_resume_md(&doc(&all_done, CheckpointTrigger::NearLimit));
+        let rendered = render_text(&doc(&all_done, CheckpointTrigger::NearLimit));
         assert!(
             rendered.contains("\n\n## What's next\n\nAll tasks completed.\n"),
             "{rendered}"
@@ -1636,21 +1741,21 @@ mod tests {
     #[test]
     fn sanitiser_collapses_runs_and_keeps_a_todo_on_one_line() {
         assert_eq!(
-            sanitize_todo_line("line one\n\n- [x] forged\ttail"),
+            sanitize_text("line one\n\n- [x] forged\ttail"),
             "line one - [x] forged tail"
         );
         // U+202E RIGHT-TO-LEFT OVERRIDE and U+200B ZERO WIDTH SPACE are in the
         // class; U+2066..U+2069 (the isolates) too.
         assert_eq!(
-            sanitize_todo_line("a\u{202e}\u{200b}\u{2069}b"),
+            sanitize_text("a\u{202e}\u{200b}\u{2069}b"),
             "a b",
             "an adjacent run is one space, not three"
         );
         // Ordinary text is untouched, including non-ASCII.
-        assert_eq!(sanitize_todo_line("端到端 · ok"), "端到端 · ok");
+        assert_eq!(sanitize_text("端到端 · ok"), "端到端 · ok");
 
         let todos = [todo("x\ny", TodoState::Pending, "")];
-        let rendered = render_resume_md(&doc(&todos, CheckpointTrigger::NearLimit));
+        let rendered = render_text(&doc(&todos, CheckpointTrigger::NearLimit));
         assert!(rendered.contains("- [ ] x y\n"), "{rendered}");
     }
 
@@ -1659,27 +1764,134 @@ mod tests {
     #[test]
     fn sanitiser_truncates_at_500_utf16_units_with_an_ellipsis() {
         let exactly = "a".repeat(TODO_LINE_MAX_UTF16);
-        assert_eq!(
-            sanitize_todo_line(&exactly),
-            exactly,
-            "the cap is exclusive"
-        );
+        assert_eq!(sanitize_text(&exactly), exactly, "the cap is exclusive");
 
         let over = "a".repeat(TODO_LINE_MAX_UTF16 + 1);
-        let cut = sanitize_todo_line(&over);
+        let cut = sanitize_text(&over);
         assert_eq!(cut.chars().count(), TODO_LINE_MAX_UTF16 + 1);
         assert!(cut.ends_with('\u{2026}'));
         assert_eq!(&cut[..TODO_LINE_MAX_UTF16], exactly);
 
         // A non-BMP char is TWO UTF-16 units: 250 of them exactly fill the cap.
         let emoji = "\u{1f600}".repeat(TODO_LINE_MAX_UTF16 / 2);
-        assert_eq!(sanitize_todo_line(&emoji), emoji);
+        assert_eq!(sanitize_text(&emoji), emoji);
         let emoji_over = format!("{emoji}\u{1f600}");
-        let cut = sanitize_todo_line(&emoji_over);
+        let cut = sanitize_text(&emoji_over);
         assert_eq!(
             cut,
             format!("{emoji}\u{2026}"),
             "a surrogate pair is never split in half"
+        );
+    }
+
+    #[test]
+    fn todo_source_units_survive_sanitizing_rendering_and_file_encoding_boundary() {
+        let content = source_string(vec![
+            b'a' as u16,
+            0xd800,
+            b'b' as u16,
+            0x202e,
+            0x200b,
+            b'c' as u16,
+        ]);
+        let active_form = source_string(vec![b'q' as u16, 0xdc00, b'\n' as u16, b'z' as u16]);
+        let todos = [
+            TodoItem {
+                id: String::new(),
+                content: content.clone(),
+                status: TodoState::Pending,
+                active_form: Utf16JsonProjection::from("unused"),
+            },
+            TodoItem {
+                id: String::new(),
+                content: Utf16JsonProjection::from("unused"),
+                status: TodoState::InProgress,
+                active_form,
+            },
+        ];
+
+        let sanitized_content = sanitize_todo_line(&content);
+        let sanitized_active = sanitize_todo_line(&todos[1].active_form);
+        assert_eq!(
+            sanitized_content.string_units(""),
+            Some(vec![
+                b'a' as u16,
+                0xd800,
+                b'b' as u16,
+                b' ' as u16,
+                b'c' as u16
+            ])
+        );
+        assert_eq!(
+            sanitized_active.string_units(""),
+            Some(vec![b'q' as u16, 0xdc00, b' ' as u16, b'z' as u16])
+        );
+
+        let body = render_resume_md(&doc(&todos, CheckpointTrigger::NearLimit));
+        let body_units = body.string_units("").unwrap();
+        let mut pending_line = "- [ ] ".encode_utf16().collect::<Vec<_>>();
+        pending_line.extend(sanitized_content.string_units("").unwrap());
+        let mut active_line = "- [>] ".encode_utf16().collect::<Vec<_>>();
+        active_line.extend(sanitized_active.string_units("").unwrap());
+        active_line.extend("    \u{2190} current step".encode_utf16());
+        assert_eq!(
+            count_units(&body_units, &pending_line),
+            2,
+            "pending text is reused in the list and the What's next body"
+        );
+        assert!(contains_units(&body_units, &active_line));
+
+        let utf8_file = String::from_utf8(encode_resume_body_for_filesystem(&body)).unwrap();
+        assert!(utf8_file.contains("- [ ] a�b c"));
+        assert!(utf8_file.contains("- [>] q� z    \u{2190} current step"));
+    }
+
+    #[test]
+    fn todo_truncation_drops_only_a_cutoff_high_surrogate() {
+        let mut units = vec![b'a' as u16; TODO_LINE_MAX_UTF16 - 1];
+        units.extend([0xd800, b'z' as u16]);
+        let sanitized = sanitize_todo_line(&source_string(units));
+        let result = sanitized.string_units("").unwrap();
+        assert_eq!(result.len(), TODO_LINE_MAX_UTF16);
+        assert_eq!(result.last(), Some(&0x2026));
+        assert!(!result.contains(&0xd800));
+    }
+
+    #[test]
+    fn detached_checkpoint_request_keeps_todo_units_without_display_roundtrip() {
+        let content = source_string(vec![b'a' as u16, 0xd800, b'b' as u16]);
+        let active_form = source_string(vec![b'x' as u16, 0xdc00, b'y' as u16]);
+        let expected_content = content.string_units("").unwrap();
+        let expected_active_form = active_form.string_units("").unwrap();
+        let owned = OwnedCheckpointRequest {
+            session_id: "abcd1234-5678-4abc-9def-000000000000".into(),
+            trigger: CheckpointTrigger::RateLimited,
+            todos: vec![TodoItem {
+                id: "source-todo".into(),
+                content,
+                status: TodoState::InProgress,
+                active_form,
+            }],
+            cwd: std::path::PathBuf::from("."),
+            gates: CheckpointGates::default(),
+        };
+
+        assert_eq!(
+            owned.todos[0].content.string_units(""),
+            Some(expected_content.clone())
+        );
+        assert_eq!(
+            owned.todos[0].active_form.string_units(""),
+            Some(expected_active_form.clone())
+        );
+        let borrowed = owned.borrowed();
+        assert_eq!(
+            borrowed.todos[0].content.string_units(""),
+            Some(expected_content)
+        );
+        assert_eq!(
+            borrowed.todos[0].active_form.string_units(""),
+            Some(expected_active_form)
         );
     }
 

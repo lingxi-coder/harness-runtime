@@ -1,0 +1,15 @@
+<tool_use_error>tool.call step resolved Glob with a result that does not match its output shape: [
+  {
+    "expected": "number",
+    "code": "invalid_type",
+    "received": "NaN",
+    "path": [
+      "durationMs"
+    ],
+    "message": "Invalid input: expected number, received NaN"
+  }
+]</tool_use_error>
+
+<system-reminder>
+<total_tokens>14999994 tokens left</total_tokens>
+</system-reminder>

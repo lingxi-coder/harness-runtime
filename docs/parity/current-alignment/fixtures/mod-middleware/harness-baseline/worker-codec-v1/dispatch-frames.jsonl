@@ -1,0 +1,11 @@
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":3,"kind":"next","callId":1,"input":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"rewrite"}},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":3,"kind":"progress"},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":3,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"uuid":"rewrite"},"allHookedBuiltin":false},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":4,"kind":"progress"},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":4,"kind":"result","result":{"uuid":"direct","message":{"type":"user","content":[{"type":"text","text":"native-direct-return"}]}},"allHookedBuiltin":false},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":5,"kind":"next","callId":2,"input":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"cancel"}},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":5,"kind":"progress"},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":5,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"cancel"},"allHookedBuiltin":false},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":6,"kind":"next","callId":3,"input":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"throw"}},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":6,"kind":"progress"},"numberBits":[]}
+{"protocol":"lingxi.mods.ipc","version":1,"message":{"id":6,"kind":"result","result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"throw"},"allHookedBuiltin":false},"numberBits":[]}

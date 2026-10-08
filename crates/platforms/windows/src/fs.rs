@@ -173,6 +173,54 @@ impl FileSystem for WindowsFileSystem {
         lingxi_core::host::rooted_fs::append_file(root, relative, content)
     }
 
+    async fn write_new_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        use std::io::Write;
+        let mut file =
+            lingxi_core::host::rooted_fs::open_create_new_file_pinned(root, relative, None)?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        file.flush().map_err(|error| FsError::Io(error.to_string()))
+    }
+
+    async fn validate_file_rooted_single_link(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::validate_file_single_link(root, relative)
+    }
+
+    async fn append_file_rooted_durable(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::append_file_durable(root, relative, content)
+    }
+
+    async fn sync_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::sync_file_no_follow(root, relative)
+    }
+
+    async fn truncate_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+        length: u64,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::truncate_file_pinned(root, relative, length, None)
+    }
+
     async fn append_file_rooted_no_follow_pinned(
         &self,
         root: &Path,

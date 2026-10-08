@@ -15,6 +15,25 @@ pub use api::{
 };
 pub mod models;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod effort_settings;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod fast_settings;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod skill_prompt;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod parked_agent_restore;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod main_report_waker;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod instruction_identity;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod model_resolution;
+
 #[cfg(feature = "collaboration")]
 pub use coordinator;
 
@@ -32,6 +51,10 @@ pub use desktop::build_harness;
 /// Existing mobile product assembly, usable without UniFFI.
 #[cfg(feature = "mobile")]
 pub mod mobile;
+
+/// Host-owned Bun/Ajv service for source-preserving JSON Schema validation.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod json_schema_validator;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

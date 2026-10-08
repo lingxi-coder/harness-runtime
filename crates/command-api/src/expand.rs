@@ -6,7 +6,7 @@
 //! substitution applies only to MCP/skill commands, not the `.lingxi/commands`
 //! files this loader produces). The order of operations is:
 //!
-//! 1. [`crate::substitute_arguments_faithful`] over the markdown body with the
+//! 1. [`crate::substitute_arguments_source`] over the markdown body with the
 //!    raw argument string, `append_if_no_placeholder = true`, and the command's
 //!    declared `argument_names`.
 //! 2. Replace every literal `${LINGXI_SESSION_ID}` with the session id (TS
@@ -24,6 +24,7 @@ use crate::parser::ParsedSlashCommand;
 use crate::shell_expansion::{
     execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Context for [`expand_markdown_command`]. Carries the session id (for the
 /// `${LINGXI_SESSION_ID}` token) and the injected shell-expansion dependencies.
@@ -70,7 +71,7 @@ pub async fn expand_markdown_command(
     cmd: &SlashCommand,
     args: &ParsedSlashCommand,
     ctx: &ExpandCtx<'_>,
-) -> Result<String, ExpandError> {
+) -> Result<Utf16JsonProjection, ExpandError> {
     let (SlashCommandKind::Markdown {
         frontmatter,
         prompt_template,
@@ -82,34 +83,72 @@ pub async fn expand_markdown_command(
         ..
     }) = &cmd.kind
     else {
-        return Err(ExpandError::NotMarkdown(cmd.name.clone()));
+        return Err(ExpandError::NotMarkdown(
+            cmd.name.string_at("").unwrap_or_default().to_owned(),
+        ));
     };
 
     // (1) Argument substitution over the body. TS passes the raw arguments
     // string (`args` from the dispatch line), `appendIfNoPlaceholder = true`,
     // and the command's declared argument names.
-    let mut content = crate::substitute_arguments_faithful(
+    let argument_names = frontmatter
+        .argument_names
+        .iter()
+        .map(|name| Utf16JsonProjection::from(name.as_str()))
+        .collect::<Vec<_>>();
+    let mut content = crate::argument_substitution::substitute_arguments_source(
         prompt_template,
-        Some(&args.raw_args),
+        &args.raw_args,
         true,
-        &frontmatter.argument_names,
+        &argument_names,
     )?;
 
     // (2) ${LINGXI_SESSION_ID} -> session id (global literal replace).
-    if content.contains(SESSION_ID_TOKEN) {
-        content = content.replace(SESSION_ID_TOKEN, ctx.session_id);
+    let content_units = content.string_units("").unwrap_or_default();
+    let token_units = SESSION_ID_TOKEN.encode_utf16().collect::<Vec<_>>();
+    if content_units
+        .windows(token_units.len())
+        .any(|window| window == token_units)
+    {
+        let replaced = replace_units(
+            &content_units,
+            &token_units,
+            &ctx.session_id.encode_utf16().collect::<Vec<_>>(),
+        );
+        content = projection_from_units(replaced);
     }
 
-    // (3) Embedded shell-command execution, routed through the frontmatter shell.
-    content = execute_shell_commands_in_prompt(
-        &content,
-        ctx.shell,
-        &format!("/{}", cmd.name),
-        frontmatter.shell,
-    )
-    .await?;
+    // The shell parser scans the source projection directly. Non-shell spans
+    // retain their exact UTF-16 units; only extracted commands cross the
+    // injected process runner's host boundary.
+    content =
+        execute_shell_commands_in_prompt(&content, ctx.shell, &cmd.name, frontmatter.shell).await?;
 
     Ok(content)
+}
+
+fn replace_units(source: &[u16], needle: &[u16], replacement: &[u16]) -> Vec<u16> {
+    if needle.is_empty() {
+        return source.to_vec();
+    }
+    let mut output = Vec::with_capacity(source.len());
+    let mut cursor = 0;
+    while cursor < source.len() {
+        if source[cursor..].starts_with(needle) {
+            output.extend_from_slice(replacement);
+            cursor += needle.len();
+        } else {
+            output.push(source[cursor]);
+            cursor += 1;
+        }
+    }
+    output
+}
+
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
 }
 
 #[cfg(test)]
@@ -124,18 +163,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     struct EchoRunner {
-        calls: Mutex<Vec<String>>,
+        calls: Mutex<Vec<Utf16JsonProjection>>,
     }
     #[async_trait::async_trait]
     impl ShellRunner for EchoRunner {
         async fn run(
             &self,
-            command: &str,
+            command: &Utf16JsonProjection,
             _shell: Option<FrontmatterShell>,
         ) -> Result<ShellOut, ShellRunError> {
-            self.calls.lock().unwrap().push(command.to_string());
+            self.calls.lock().unwrap().push(command.clone());
             Ok(ShellOut {
-                stdout: format!("OUT[{command}]"),
+                stdout: format!("OUT[{}]", command.string_at("").unwrap_or_default()),
                 stderr: String::new(),
                 interrupted: false,
             })
@@ -144,15 +183,19 @@ mod tests {
 
     struct AllowAll;
     impl ShellPermissionGate for AllowAll {
-        fn check(&self, _c: &str, _s: Option<FrontmatterShell>) -> ShellPermissionDecision {
+        fn check(
+            &self,
+            _c: &Utf16JsonProjection,
+            _s: Option<FrontmatterShell>,
+        ) -> ShellPermissionDecision {
             ShellPermissionDecision::Allow
         }
     }
 
     fn markdown_cmd(name: &str, body: &str, argument_names: Vec<String>) -> SlashCommand {
         SlashCommand {
-            name: name.to_string(),
-            description: String::new(),
+            name: name.into(),
+            description: String::new().into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from(format!("/x/{name}.md")),
@@ -160,7 +203,7 @@ mod tests {
                     argument_names,
                     ..CommandFrontmatter::default()
                 },
-                prompt_template: body.to_string(),
+                prompt_template: body.into(),
             },
             ..SlashCommand::default()
         }
@@ -185,14 +228,14 @@ mod tests {
         // literal "Hello $1" is the 1-based reading, but the faithful Batch-1
         // semantics make `$0` the first token (see `end_to_end_hello_world_via_index`).
         let cmd = markdown_cmd("foo", "Hello $ARGUMENTS", vec![]);
-        let parsed = parse_slash_command("/foo world").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("sess-123", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(out.string_at(""), Some("Hello world"));
     }
 
     #[tokio::test]
@@ -200,14 +243,14 @@ mod tests {
         // Faithful index semantics: `$0` is the first positional token. body
         // "Hello $0" + "/foo world" -> "Hello world".
         let cmd = markdown_cmd("foo", "Hello $0", vec![]);
-        let parsed = parse_slash_command("/foo world").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("sess-123", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(out.string_at(""), Some("Hello world"));
     }
 
     #[tokio::test]
@@ -215,14 +258,14 @@ mod tests {
         // Documenting the faithful `$1 == index 1` behaviour: with two args, $1
         // selects the second. body "Hello $1" + "/foo first world" -> "Hello world".
         let cmd = markdown_cmd("foo", "Hello $1", vec![]);
-        let parsed = parse_slash_command("/foo first world").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo first world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("sess-123", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(out.string_at(""), Some("Hello world"));
     }
 
     #[tokio::test]
@@ -240,48 +283,48 @@ mod tests {
             &file,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
-        assert_eq!(cmd.name, "foo");
-        let parsed = parse_slash_command("/foo world").unwrap();
+        assert_eq!(cmd.name.string_at(""), Some("foo"));
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("s", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(out.string_at(""), Some("Hello world"));
     }
 
     #[tokio::test]
     async fn end_to_end_named_first_arg() {
         // body "Hello $name" + frontmatter arguments: [name] + args "world".
         let cmd = markdown_cmd("foo", "Hello $name", vec!["name".to_string()]);
-        let parsed = parse_slash_command("/foo world").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("sess-1", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "Hello world");
+        assert_eq!(out.string_at(""), Some("Hello world"));
     }
 
     #[tokio::test]
     async fn session_id_substituted() {
         let cmd = markdown_cmd("foo", "session=${LINGXI_SESSION_ID}", vec![]);
-        let parsed = parse_slash_command("/foo").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
         let sc = shell_ctx(runner);
         let ctx = make_ctx("the-session", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "session=the-session");
+        assert_eq!(out.string_at(""), Some("session=the-session"));
     }
 
     #[tokio::test]
     async fn shell_commands_executed_after_substitution() {
         let cmd = markdown_cmd("foo", "before !`echo $ARGUMENTS` after", vec![]);
-        let parsed = parse_slash_command("/foo hi").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo hi")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
@@ -291,8 +334,11 @@ mod tests {
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
         // $ARGUMENTS -> "hi" first, THEN the shell command runs on the substituted
         // text, so the runner sees `echo hi`.
-        assert_eq!(out, "before OUT[echo hi] after");
-        assert_eq!(*runner.calls.lock().unwrap(), vec!["echo hi".to_string()]);
+        assert_eq!(out.string_at(""), Some("before OUT[echo hi] after"));
+        assert_eq!(
+            runner.calls.lock().unwrap()[0].string_at(""),
+            Some("echo hi")
+        );
     }
 
     #[tokio::test]
@@ -300,7 +346,7 @@ mod tests {
         // ${LINGXI_SESSION_ID} is replaced before shell execution, so the shell
         // command body can reference it.
         let cmd = markdown_cmd("foo", "!`echo ${LINGXI_SESSION_ID}`", vec![]);
-        let parsed = parse_slash_command("/foo").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
@@ -308,8 +354,51 @@ mod tests {
         let sc = shell_ctx(runner_dyn);
         let ctx = make_ctx("XYZ", &sc);
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
-        assert_eq!(out, "OUT[echo XYZ]");
-        assert_eq!(*runner.calls.lock().unwrap(), vec!["echo XYZ".to_string()]);
+        assert_eq!(out.string_at(""), Some("OUT[echo XYZ]"));
+        assert_eq!(
+            runner.calls.lock().unwrap()[0].string_at(""),
+            Some("echo XYZ")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_expansion_retains_source_outside_and_inside_command() {
+        let cmd = markdown_cmd("foo", "$ARGUMENTS", vec![]);
+        let raw_units = [
+            "/foo ".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " !`echo ".encode_utf16().collect(),
+            vec![0xdfff],
+            "` ".encode_utf16().collect(),
+            vec![0xd800],
+        ]
+        .concat();
+        let raw = Utf16JsonProjection::root_string(String::from_utf16_lossy(&raw_units), raw_units)
+            .unwrap();
+        let parsed = parse_slash_command(&raw).unwrap();
+        let runner = Arc::new(EchoRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let sc = shell_ctx(runner.clone());
+        let ctx = make_ctx("s", &sc);
+
+        let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
+
+        assert_eq!(
+            runner.calls.lock().unwrap()[0].string_units(""),
+            Some(["echo ".encode_utf16().collect::<Vec<_>>(), vec![0xdfff]].concat())
+        );
+        assert_eq!(
+            out.string_units(""),
+            Some(
+                [
+                    vec![0xd800],
+                    " OUT[echo �] ".encode_utf16().collect(),
+                    vec![0xd800],
+                ]
+                .concat()
+            )
+        );
     }
 
     #[tokio::test]
@@ -318,7 +407,7 @@ mod tests {
         // (`a[b` -> unterminated character class) aborts expansion with an
         // error, mirroring the TS `new RegExp(...)` SyntaxError throw.
         let cmd = markdown_cmd("foo", "Hello $a[b", vec!["a[b".to_string()]);
-        let parsed = parse_slash_command("/foo world").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/foo world")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });
@@ -333,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn non_markdown_command_errors() {
         let cmd = SlashCommand {
-            name: "help".to_string(),
+            name: "help".into(),
             description: String::new(),
             source: CommandSource::Builtin,
             kind: SlashCommandKind::Builtin {
@@ -341,7 +430,7 @@ mod tests {
             },
             ..SlashCommand::default()
         };
-        let parsed = parse_slash_command("/help").unwrap();
+        let parsed = parse_slash_command(&Utf16JsonProjection::from("/help")).unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
         });

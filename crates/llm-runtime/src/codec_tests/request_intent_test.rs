@@ -1,3 +1,4 @@
+use super::json_payload;
 use crate::upstream::codec_fixtures::HistoryFixture;
 use crate::upstream::codec_fixtures::{
     AnthropicMessagesCodec, FixtureCodec, GeminiCodec, OpenAiChatCodec,
@@ -33,7 +34,10 @@ fn anthropic_encodes_stream_true() {
 
     let provider_request = anthropic_codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["stream"], true);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["stream"],
+        true
+    );
 }
 
 #[test]
@@ -43,7 +47,10 @@ fn openai_encodes_stream_true() {
 
     let provider_request = openai_codec().encode_request(&request).unwrap();
 
-    assert_eq!(provider_request.body_json["stream"], true);
+    assert_eq!(
+        super::json_payload_value(&provider_request.body_json)["stream"],
+        true
+    );
 }
 
 #[test]
@@ -63,7 +70,7 @@ fn openai_encodes_response_format_variants() {
             lingxi_llm_client::protocol::OutputFormat::JsonSchema {
                 name: "response".into(),
                 strict: true,
-                schema: schema.clone(),
+                schema: json_payload(schema.clone()),
             },
             serde_json::json!({"type": "json_schema", "json_schema": {"name": "response", "strict": true, "schema": schema}}),
         ),
@@ -75,7 +82,10 @@ fn openai_encodes_response_format_variants() {
 
         let provider_request = openai_codec().encode_request(&request).unwrap();
 
-        assert_eq!(provider_request.body_json["response_format"], expected);
+        assert_eq!(
+            super::json_payload_value(&provider_request.body_json)["response_format"],
+            expected
+        );
     }
 }
 
@@ -93,7 +103,7 @@ fn gemini_encodes_response_format_requests() {
             lingxi_llm_client::protocol::OutputFormat::JsonSchema {
                 name: "response".into(),
                 strict: true,
-                schema: schema.clone(),
+                schema: json_payload(schema.clone()),
             },
             serde_json::json!({"text": {"mimeType": "application/json", "schema": schema}}),
         ),
@@ -105,7 +115,7 @@ fn gemini_encodes_response_format_requests() {
 
         let encoded = gemini_codec().encode_request(&request).unwrap();
         assert_eq!(
-            encoded.body_json["generationConfig"]["responseFormat"],
+            super::json_payload_value(&encoded.body_json)["generationConfig"]["responseFormat"],
             expected
         );
     }
@@ -128,7 +138,7 @@ fn openai_rejects_response_schemas_that_are_not_valid_for_strict_output() {
             lingxi_llm_client::protocol::OutputFormat::JsonSchema {
                 name: "response".into(),
                 strict: true,
-                schema,
+                schema: json_payload(schema),
             };
         assert!(matches!(
             openai_codec().encode_request(&request),
@@ -156,14 +166,17 @@ fn openai_encodes_tool_choice_variants() {
         request.request.set_tool_choice(Some(tool_choice));
         request.tools = vec![ToolDeclaration {
             name: "Read".to_string(),
-            description: "d".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            description: "d".into(),
+            input_schema: json_payload(serde_json::json!({"type": "object"})),
             ..Default::default()
         }];
 
         let provider_request = openai_codec().encode_request(&request).unwrap();
 
-        assert_eq!(provider_request.body_json["tool_choice"], expected);
+        assert_eq!(
+            super::json_payload_value(&provider_request.body_json)["tool_choice"],
+            expected
+        );
     }
 }
 
@@ -184,13 +197,15 @@ fn gemini_encodes_tool_choice_variants() {
         request.request.set_tool_choice(Some(tool_choice));
         request.tools = vec![ToolDeclaration {
             name: "Read".to_string(),
-            description: "d".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            description: "d".into(),
+            input_schema: json_payload(serde_json::json!({"type": "object"})),
             ..Default::default()
         }];
 
         let provider_request = gemini_codec().encode_request(&request).unwrap();
-        assert!(provider_request.body_json.get("toolConfig").is_some());
+        assert!(super::json_payload_value(&provider_request.body_json)
+            .get("toolConfig")
+            .is_some());
     }
 }
 
@@ -209,7 +224,7 @@ fn openai_skips_reasoning_blocks_instead_of_rejecting() {
     let encoded = openai_codec()
         .encode_request(&request)
         .expect("reasoning block skipped");
-    assert!(!encoded.body_json.to_string().contains("thought"));
+    assert!(!encoded.body_json.as_json_source().contains("thought"));
 }
 
 #[test]
@@ -246,11 +261,11 @@ fn gemini_preserves_reasoning_content() {
     );
     let encoded = gemini_codec().encode_request(&request).unwrap();
     assert_eq!(
-        encoded.body_json["contents"][0]["parts"][0]["thought"],
+        super::json_payload_value(&encoded.body_json)["contents"][0]["parts"][0]["thought"],
         true
     );
     assert_eq!(
-        encoded.body_json["contents"][0]["parts"][0]["text"],
+        super::json_payload_value(&encoded.body_json)["contents"][0]["parts"][0]["text"],
         "thought"
     );
 }

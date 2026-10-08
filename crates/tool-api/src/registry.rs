@@ -1,13 +1,15 @@
 //! `ToolRegistry` — partitioned, dynamic registry of `Tool` implementations.
 //!
 //! The registry holds builtin tools (statically registered at startup) plus
-//! three dynamic partitions:
+//! four dynamic partitions:
 //!
 //! - **MCP**: tools sourced from MCP server connections, keyed by
 //!   [`McpConnectionId`] so a disconnect can drop them en masse.
 //! - **LSP**: tools sourced from Language-Server-Protocol bridges.
 //! - **Plugin**: tools sourced from host plugins, keyed by [`PluginId`]
 //!   so an unloaded plugin can drop its tools.
+//! - **Mod**: runtime-registered tools owned by a session plugin, kept apart
+//!   from MCP catalog snapshots so reconnects cannot erase them.
 //!
 //! Each lookup checks all partitions. The wire / prompt order is parity-fixed
 //! by [`available_tools`](ToolRegistry::available_tools): builtins sorted by
@@ -19,8 +21,9 @@
 
 use crate::defer::DeferralState;
 use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
-use crate::tool_trait::{Tool, ToolStaticContext};
+use crate::tool_trait::{BashPrecommitSkills, Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{McpConnectionId, PluginId};
 use std::sync::{Arc, RwLock};
 
@@ -42,7 +45,7 @@ pub const RESTRICTED_DEFAULT_BUILTIN_DENY: &[&str] = &[
 ///
 /// Cloning is not supported; share via `Arc<ToolRegistry>` instead.
 ///
-/// The MCP and plugin partitions are insertion-ordered `Vec`s of `(key, tools)`
+/// The MCP, Mod, and plugin partitions are insertion-ordered `Vec`s of `(key, tools)`
 /// entries (rather than a `HashMap`) so iteration order is deterministic; the
 /// dedup/sort that produces the wire order is applied in [`Self::available_tools`].
 pub struct ToolRegistry {
@@ -52,6 +55,9 @@ pub struct ToolRegistry {
     // `Arc<ToolRegistry>` can replace one server's tools without rebuilding the
     // immutable builtin/LSP/plugin partitions.
     mcp_tools: RwLock<Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>>,
+    // Runtime Mod tools are session-owned. MCP catalog rebuilds must not erase
+    // them while a registered Mod is still loaded.
+    mod_tools: RwLock<Vec<(String, Vec<Arc<dyn Tool>>)>>,
     lsp_tools: Vec<Arc<dyn Tool>>,
     plugin_tools: Vec<(PluginId, Vec<Arc<dyn Tool>>)>,
     /// Shared Tool Search deferral state (mode + loaded-set). Disabled by
@@ -76,7 +82,16 @@ pub struct ToolRegistry {
     /// is already shared as an `Arc`, and because the Tool Search refreshers
     /// take `&self`.
     main_loop_model: RwLock<Option<String>>,
+    /// The owning session's live skill catalog projection, also used by child tools.
+    bash_precommit_skills_provider: RwLock<Option<BashPrecommitSkillsProvider>>,
+    bash_precommit_session_generation: std::sync::atomic::AtomicU64,
 }
+
+type BashPrecommitSkillsProvider = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = BashPrecommitSkills> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Debug)]
 struct BuiltinToolFilter {
@@ -101,6 +116,7 @@ impl ToolRegistry {
         Self {
             builtin: Vec::new(),
             mcp_tools: RwLock::new(Vec::new()),
+            mod_tools: RwLock::new(Vec::new()),
             lsp_tools: Vec::new(),
             plugin_tools: Vec::new(),
             deferral: Arc::new(DeferralState::disabled()),
@@ -108,7 +124,47 @@ impl ToolRegistry {
             builtin_filter: None,
             session_allowlist: None,
             main_loop_model: RwLock::new(None),
+            bash_precommit_skills_provider: RwLock::new(None),
+            bash_precommit_session_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Share a live skill projection with subagents using this registry.
+    pub fn set_bash_precommit_skills_provider<F, Fut>(&self, provider: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = BashPrecommitSkills> + Send + 'static,
+    {
+        *self
+            .bash_precommit_skills_provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(move || Box::pin(provider())));
+    }
+
+    /// Read the session's skill suggestions without holding a registry lock across await.
+    pub async fn bash_precommit_skills(&self) -> BashPrecommitSkills {
+        let provider = self
+            .bash_precommit_skills_provider
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match provider {
+            Some(provider) => provider().await,
+            None => BashPrecommitSkills::default(),
+        }
+    }
+
+    /// Identify the current conversation activation for memoized Bash guidance.
+    pub fn bash_precommit_session_generation(&self) -> u64 {
+        self.bash_precommit_session_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Start a fresh guidance latch when the registry is reused for another session.
+    pub fn reset_bash_precommit_prompt_session(&self) {
+        self.bash_precommit_session_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Install the restricted-session built-in filter. Values are flattened by
@@ -158,6 +214,19 @@ impl ToolRegistry {
         self.session_allowlist.is_none() && self.session_allows(name)
     }
 
+    /// Whether an explicit empty tool selection disables Mod registration.
+    #[must_use]
+    pub fn mod_registration_disabled(&self) -> bool {
+        self.builtin_filter
+            .as_ref()
+            .and_then(|filter| filter.explicit_allowlist.as_ref())
+            .is_some_and(std::collections::HashSet::is_empty)
+            || self
+                .session_allowlist
+                .as_ref()
+                .is_some_and(std::collections::HashSet::is_empty)
+    }
+
     fn builtin_allowed(&self, name: &str) -> bool {
         self.session_allows(name)
             && self
@@ -205,8 +274,8 @@ impl ToolRegistry {
             })
             .map(|t| ToolSearchEntry {
                 name: t.name().to_string(),
-                description: String::new(),
-                search_hint: t.search_hint().map(str::to_string),
+                description: Utf16JsonProjection::from(""),
+                search_hint: t.search_hint(),
             })
             .collect();
         self.tool_search_view.set_entries(entries);
@@ -215,15 +284,13 @@ impl ToolRegistry {
     /// Refresh the deferred search view and fill descriptions from the complete
     /// pre-filter wire schema list. This keeps ToolSearch keyword scoring on the
     /// same long-form descriptions the model would receive after discovery.
-    pub fn refresh_tool_search_view_from_wire(&self, wire: &[serde_json::Value]) {
-        let descriptions: std::collections::HashMap<&str, &str> = wire
+    pub fn refresh_tool_search_view_from_wire(
+        &self,
+        wire: &[lingxi_core::host::SourceToolWireDefinition],
+    ) {
+        let descriptions: std::collections::HashMap<&str, &Utf16JsonProjection> = wire
             .iter()
-            .filter_map(|entry| {
-                Some((
-                    entry.get("name")?.as_str()?,
-                    entry.get("description")?.as_str()?,
-                ))
-            })
+            .map(|entry| (entry.name.as_str(), &entry.description))
             .collect();
         let ctx = ToolStaticContext::default();
         let entries = self
@@ -237,10 +304,9 @@ impl ToolRegistry {
                 name: tool.name().to_string(),
                 description: descriptions
                     .get(tool.name())
-                    .copied()
-                    .unwrap_or_default()
-                    .to_string(),
-                search_hint: tool.search_hint().map(str::to_string),
+                    .map(|description| (*description).clone())
+                    .unwrap_or_else(|| Utf16JsonProjection::from("")),
+                search_hint: tool.search_hint(),
             })
             .collect();
         self.tool_search_view.set_entries(entries);
@@ -317,13 +383,25 @@ impl ToolRegistry {
             .collect();
         builtins.sort_by(|a, b| locale_cmp(a.name(), b.name()));
 
-        // Dynamic partition: MCP + LSP + plugin, locale-sorted by name.
+        // Dynamic partition: MCP + Mod + LSP + plugin, locale-sorted by name.
         let mut dynamic: Vec<Arc<dyn Tool>> = Vec::new();
         let mcp_tools = self
             .mcp_tools
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_id, ts) in mcp_tools.iter() {
+            dynamic.extend(
+                ts.iter()
+                    .filter(|tool| self.session_allows_dynamic(tool.name()))
+                    .cloned(),
+            );
+        }
+        for (_plugin, ts) in self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             dynamic.extend(
                 ts.iter()
                     .filter(|tool| self.session_allows_dynamic(tool.name()))
@@ -384,6 +462,16 @@ impl ToolRegistry {
                 return Some(tool.clone());
             }
         }
+        if let Some(tool) = self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .find(|tool| tool.name() == name || tool.aliases().contains(&name))
+        {
+            return Some(tool.clone());
+        }
         self.lsp_tools
             .iter()
             .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
@@ -415,6 +503,19 @@ impl ToolRegistry {
             {
                 return Some(tool.clone());
             }
+        }
+        if let Some(tool) = self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .find(|tool| {
+                self.session_allows_dynamic(tool.name())
+                    && (tool.name() == name || tool.aliases().contains(&name))
+            })
+        {
+            return Some(tool.clone());
         }
         self.lsp_tools
             .iter()
@@ -458,6 +559,60 @@ impl ToolRegistry {
             .mcp_tools
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+        self.refresh_tool_search_view();
+    }
+
+    /// Insert or replace one live tool owned by a Mod.
+    pub fn register_mod_tool(&self, plugin: &str, tool: Arc<dyn Tool>) {
+        let mut mods = self
+            .mod_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tools = if let Some((_, tools)) = mods.iter_mut().find(|(name, _)| name == plugin) {
+            tools
+        } else {
+            mods.push((plugin.to_owned(), Vec::new()));
+            &mut mods.last_mut().expect("just inserted").1
+        };
+        if let Some(existing) = tools
+            .iter_mut()
+            .find(|existing| existing.name() == tool.name())
+        {
+            *existing = tool;
+        } else {
+            tools.push(tool);
+        }
+        drop(mods);
+        self.refresh_tool_search_view();
+    }
+
+    /// Check whether a full tool name is already owned by this Mod.
+    #[must_use]
+    pub fn has_mod_tool(&self, plugin: &str, name: &str) -> bool {
+        self.mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(owner, tools)| owner == plugin && tools.iter().any(|tool| tool.name() == name))
+    }
+
+    /// The owning Mod of a runtime-registered tool, for `tool.describe`'s
+    /// provider identity. MCP catalog refreshes cannot change this partition.
+    pub fn mod_tool_owner(&self, name: &str) -> Option<String> {
+        self.mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(_, tools)| tools.iter().any(|tool| tool.name() == name))
+            .map(|(owner, _)| owner.clone())
+    }
+
+    /// Remove every live tool owned by a Mod on unload.
+    pub fn unregister_mod_tools(&self, plugin: &str) {
+        self.mod_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(name, _)| name != plugin);
         self.refresh_tool_search_view();
     }
 
@@ -507,6 +662,15 @@ impl ToolRegistry {
                 .map(|t| t.name().to_string()),
         );
         names.extend(
+            self.mod_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .flat_map(|(_, tools)| tools.iter())
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
+                .map(|tool| tool.name().to_string()),
+        );
+        names.extend(
             self.lsp_tools
                 .iter()
                 .filter(|tool| self.session_allows_dynamic(tool.name()))
@@ -538,9 +702,33 @@ mod tests {
     };
     use crate::ToolUseContext;
     use async_trait::async_trait;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use permission::result::PermissionMetadata;
     use permission::{PermissionDecisionReason, PermissionResult};
-    use serde_json::json;
+    use serde_json::Value;
+
+    fn source_fixture(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("bounded JSON test fixture")
+    }
+
+    fn source_schema_fixture(value: Value) -> Utf16JsonProjection {
+        crate::tool_trait::generated_builtin_schema(&value)
+    }
+
+    macro_rules! json {
+        ($($tokens:tt)*) => {
+            source_fixture(serde_json::json!($($tokens)*))
+        };
+    }
+
+    fn builtin_input_repair_metadata() -> crate::tool_trait::ToolInputRepairMetadata {
+        use crate::tool_trait::{ToolInputRepairSchema, ToolInputSchemaProvenance};
+        crate::tool_trait::ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
 
     struct DummyTool;
 
@@ -549,10 +737,15 @@ mod tests {
         fn name(&self) -> &str {
             "Dummy"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| {
+                    source_schema_fixture(serde_json::json!({"type": "object"}))
+                });
             &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            builtin_input_repair_metadata()
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -560,15 +753,15 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> PermissionResult {
             PermissionResult::Allow {
@@ -582,17 +775,17 @@ mod tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "Dummy".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -603,6 +796,7 @@ mod tests {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -633,10 +827,15 @@ mod tests {
         fn name(&self) -> &str {
             self.0
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| {
+                    source_schema_fixture(serde_json::json!({"type": "object"}))
+                });
             &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            builtin_input_repair_metadata()
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -644,15 +843,15 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> PermissionResult {
             PermissionResult::Allow {
@@ -666,17 +865,17 @@ mod tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             self.0.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -687,6 +886,7 @@ mod tests {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -818,7 +1018,7 @@ mod tests {
     struct DeferNamedTool {
         name: &'static str,
         defer: bool,
-        hint: Option<&'static str>,
+        hint: Option<Utf16JsonProjection>,
     }
 
     #[async_trait]
@@ -826,16 +1026,21 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn search_hint(&self) -> Option<&str> {
-            self.hint
+        fn search_hint(&self) -> Option<Utf16JsonProjection> {
+            self.hint.clone()
         }
         fn should_defer(&self) -> bool {
             self.defer
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| {
+                    source_schema_fixture(serde_json::json!({"type": "object"}))
+                });
             &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            builtin_input_repair_metadata()
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -843,15 +1048,15 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
             true
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> PermissionResult {
             PermissionResult::Allow {
@@ -865,17 +1070,17 @@ mod tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             self.name.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            String::new()
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -886,6 +1091,7 @@ mod tests {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -919,7 +1125,7 @@ mod tests {
         r.register_builtin(Arc::new(DeferNamedTool {
             name: "Task",
             defer: true,
-            hint: Some("run a subagent"),
+            hint: Some("run a subagent".into()),
         }));
         r.set_deferral(Arc::new(crate::defer::DeferralState::new(
             crate::defer::ToolSearchMode::Enabled,
@@ -935,7 +1141,38 @@ mod tests {
         assert_eq!(names, vec!["Task".to_string()], "only should_defer tools");
         // The searchHint is carried through for scoring.
         let entry = r.tool_search_view().entries().into_iter().next().unwrap();
-        assert_eq!(entry.search_hint.as_deref(), Some("run a subagent"));
+        assert_eq!(
+            entry
+                .search_hint
+                .as_ref()
+                .and_then(|hint| hint.string_at("")),
+            Some("run a subagent")
+        );
+    }
+
+    #[test]
+    fn tool_search_view_preserves_exact_hint_utf16_units() {
+        let mut r = ToolRegistry::new();
+        let hint =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&[0xD800]), vec![0xD800])
+                .expect("search hint is a valid source string");
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Task",
+            defer: true,
+            hint: Some(hint),
+        }));
+        r.set_deferral(Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        )));
+
+        r.refresh_tool_search_view();
+
+        let entry = r.tool_search_view().entries().pop().expect("deferred tool");
+        assert_eq!(
+            entry.search_hint.and_then(|hint| hint.string_units("")),
+            Some(vec![0xD800])
+        );
     }
 
     /// An MCP tool registered after boot (before the refresh) appears in the
@@ -1069,5 +1306,19 @@ mod tests {
         assert!(r.find_by_name("ListMcpResourcesTool").is_some());
         assert!(r.find_by_name("ReadMcpResourceTool").is_some());
         assert!(r.find_by_name("ReadMcpResourceDirTool").is_some());
+    }
+
+    #[test]
+    fn mod_tool_survives_mcp_catalog_rebuild_until_owner_unloads() {
+        let registry = ToolRegistry::new();
+        registry.register_mod_tool("example", Arc::new(NamedTool("mcp__example__run")));
+        registry.replace_mcp_tools(Vec::new());
+        assert!(registry.find_by_name("mcp__example__run").is_some());
+        registry.unregister_mod_tools("example");
+        assert!(registry.find_by_name("mcp__example__run").is_none());
+
+        let mut empty = ToolRegistry::new();
+        empty.set_restricted_builtin_filter(Some(&[]));
+        assert!(empty.mod_registration_disabled());
     }
 }

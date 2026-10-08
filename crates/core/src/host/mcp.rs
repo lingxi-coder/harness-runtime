@@ -7,12 +7,12 @@
 //!
 //! See spec §7 (MCP) and D17 (Runtime boundary).
 
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::McpConnectionId;
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
 use thiserror::Error;
@@ -326,6 +326,119 @@ pub struct McpNegotiatedProtocol {
     pub version: String,
 }
 
+/// Server-owned metadata retained from a completed MCP handshake.
+/// This is distinct from the host's configured server identity and permissions.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerMetadataDto {
+    /// Complete declared capabilities, including protocol-specific nested data.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub raw_capabilities: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Implementation information advertised by the server.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub server_info: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Optional server instructions supplied to the model.
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub instructions: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Complete modern discovery result, when negotiation used `server/discover`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub discovery: Option<crate::types::utf16_json::Utf16JsonProjection>,
+}
+
+/// Current elicitation capability wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpElicitationMode {
+    /// Current explicit bare capability; the MCP schema permits form requests.
+    Bare,
+    /// Both current form and URL elicitation requests are supported.
+    FormAndUrl,
+}
+
+impl McpElicitationMode {
+    /// Exact capability object used on the current MCP wire.
+    #[must_use]
+    pub fn wire(self) -> crate::types::utf16_json::Utf16JsonProjection {
+        match self {
+            Self::Bare => crate::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty elicitation capability is valid JSON"),
+            Self::FormAndUrl => {
+                crate::types::utf16_json::Utf16JsonProjection::parse(r#"{"form":{},"url":{}}"#)
+                    .expect("generated elicitation capability is valid JSON")
+            }
+        }
+    }
+}
+
+/// Frozen capability choices for both current protocol families on one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpElicitationCapabilities {
+    /// Initialize uses per-server eligibility and the explicit bare config.
+    pub legacy: McpElicitationMode,
+    /// Modern discovery and request metadata use the current URL feature gate.
+    pub modern: McpElicitationMode,
+}
+
+impl Default for McpElicitationCapabilities {
+    fn default() -> Self {
+        Self {
+            legacy: McpElicitationMode::FormAndUrl,
+            modern: McpElicitationMode::FormAndUrl,
+        }
+    }
+}
+
+impl McpElicitationCapabilities {
+    /// Default for direct transport calls without an engine config producer.
+    #[must_use]
+    pub fn for_transport(kind: McpTransportKind) -> Self {
+        let mut capabilities = Self::default();
+        if !matches!(
+            kind,
+            McpTransportKind::Stdio
+                | McpTransportKind::Sse
+                | McpTransportKind::Http
+                | McpTransportKind::WebSocket
+        ) {
+            capabilities.legacy = McpElicitationMode::Bare;
+        }
+        capabilities
+    }
+}
+
+/// Closed capability projection; does not advertise absent host task or sampling producers.
+#[must_use]
+pub fn mcp_client_capabilities(
+    elicitation: McpElicitationMode,
+) -> crate::types::utf16_json::Utf16JsonProjection {
+    let source = crate::types::utf16_json::Utf16JsonProjection::parse(
+        r#"{"roots":{"listChanged":true},"elicitation":{}}"#,
+    )
+    .expect("generated client capabilities are valid JSON");
+    let mut capabilities = source;
+    capabilities
+        .replace_pointer_projection("/elicitation", elicitation.wire())
+        .expect("capabilities contain the generated elicitation object");
+    capabilities
+}
+
 /// Options passed to a transport's combined handshake operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpConnectOptions {
@@ -337,6 +450,8 @@ pub struct McpConnectOptions {
     /// means no modern probe is requested; transports must still clamp this
     /// value against the remaining total deadline when it is present.
     pub probe_timeout_ms: Option<u64>,
+    /// Capability authority frozen by the current config/host at connect ingress.
+    pub elicitation: McpElicitationCapabilities,
 }
 
 impl Default for McpConnectOptions {
@@ -345,6 +460,7 @@ impl Default for McpConnectOptions {
             expected_era: None,
             deadline_ms: 100_000,
             probe_timeout_ms: None,
+            elicitation: McpElicitationCapabilities::default(),
         }
     }
 }
@@ -387,7 +503,143 @@ impl<T: McpTransport + ?Sized> Drop for ConnectCleanupGuard<'_, T> {
 ///
 /// Mirrors the JSON-RPC capability object — booleans indicate whether the
 /// server exposes the corresponding feature category.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+fn empty_source_json_object() -> crate::types::utf16_json::Utf16JsonProjection {
+    crate::types::utf16_json::Utf16JsonProjection::parse("{}")
+        .expect("empty source JSON object is valid")
+}
+
+fn is_empty_slice<T>(value: &&[T]) -> bool {
+    value.is_empty()
+}
+
+fn deserialize_optional_mcp_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::types::utf16_json::Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let projection = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    let root = projection
+        .at_pointer("")
+        .expect("a parsed projection always has a root");
+    if root.is_null() {
+        Ok(None)
+    } else if root.code_units().is_some() {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom("expected a string or null"))
+    }
+}
+
+fn serialize_optional_mcp_string<S>(
+    value: &Option<crate::types::utf16_json::Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if let Some(projection) = value {
+        if projection.string_units("").is_none() {
+            return Err(serde::ser::Error::custom(
+                "MCP text value must be a root-string projection",
+            ));
+        }
+    }
+    crate::types::utf16_json::raw_json_serde::serialize_option(value, serializer)
+}
+
+fn deserialize_required_mcp_string<'de, D>(
+    deserializer: D,
+) -> Result<crate::types::utf16_json::Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let projection = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if projection.string_units("").is_some() {
+        Ok(projection)
+    } else {
+        Err(serde::de::Error::custom(
+            "MCP text value must be a JSON string",
+        ))
+    }
+}
+
+fn serialize_required_mcp_string<S>(
+    value: &crate::types::utf16_json::Utf16JsonProjection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if value.string_units("").is_none() {
+        return Err(serde::ser::Error::custom(
+            "MCP text value must be a root-string projection",
+        ));
+    }
+    crate::types::utf16_json::raw_json_serde::serialize(value, serializer)
+}
+
+fn source_object_without_fields(
+    source: &crate::types::utf16_json::Utf16JsonProjection,
+    known_fields: &[&str],
+) -> Result<
+    crate::types::utf16_json::Utf16JsonProjection,
+    crate::types::utf16_json::Utf16JsonProjectionError,
+> {
+    let entries = source
+        .object_entries()
+        .ok_or(crate::types::utf16_json::Utf16JsonProjectionError::ExpectedObject)?;
+    let mut fields = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if known_fields
+            .iter()
+            .any(|known| known.encode_utf16().eq(entry.code_units.iter().copied()))
+        {
+            continue;
+        }
+        let value = source.subprojection_property_units(entry.code_units)?;
+        fields.push((entry.code_units.to_vec(), value));
+    }
+    crate::types::utf16_json::Utf16JsonProjection::object_units(fields)
+}
+
+fn merge_source_object_fields(
+    known: &crate::types::utf16_json::Utf16JsonProjection,
+    extra: &crate::types::utf16_json::Utf16JsonProjection,
+    known_fields: &[&str],
+) -> Result<
+    crate::types::utf16_json::Utf16JsonProjection,
+    crate::types::utf16_json::Utf16JsonProjectionError,
+> {
+    let known_entries = known
+        .object_entries()
+        .ok_or(crate::types::utf16_json::Utf16JsonProjectionError::ExpectedObject)?;
+    let extra_entries = extra
+        .object_entries()
+        .ok_or(crate::types::utf16_json::Utf16JsonProjectionError::ExpectedObject)?;
+    let mut fields = Vec::with_capacity(known_entries.len() + extra_entries.len());
+    for entry in known_entries {
+        fields.push((
+            entry.code_units.to_vec(),
+            known.subprojection_property_units(entry.code_units)?,
+        ));
+    }
+    for entry in extra_entries {
+        if known_fields
+            .iter()
+            .any(|known| known.encode_utf16().eq(entry.code_units.iter().copied()))
+        {
+            continue;
+        }
+        fields.push((
+            entry.code_units.to_vec(),
+            extra.subprojection_property_units(entry.code_units)?,
+        ));
+    }
+    crate::types::utf16_json::Utf16JsonProjection::object_units(fields)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // mirrors the MCP wire spec exactly
 pub struct ServerCapabilitiesDto {
     /// Server exposes one or more tools.
@@ -405,13 +657,35 @@ pub struct ServerCapabilitiesDto {
     #[serde(default)]
     pub directory_read: bool,
     /// Vendor-specific or experimental capability flags.
-    pub experimental: std::collections::HashMap<String, Value>,
+    #[serde(
+        default = "empty_source_json_object",
+        with = "crate::types::utf16_json::raw_json_serde"
+    )]
+    pub experimental: crate::types::utf16_json::Utf16JsonProjection,
     /// Complete MCP extension map returned by `initialize`.
     ///
     /// `directory_read` remains as a derived compatibility convenience; this
     /// field preserves extension evidence needed by discovery-cache gates.
-    #[serde(default)]
-    pub extensions: std::collections::HashMap<String, Value>,
+    #[serde(
+        default = "empty_source_json_object",
+        with = "crate::types::utf16_json::raw_json_serde"
+    )]
+    pub extensions: crate::types::utf16_json::Utf16JsonProjection,
+}
+
+impl Default for ServerCapabilitiesDto {
+    fn default() -> Self {
+        let empty = empty_source_json_object();
+        Self {
+            tools: false,
+            resources: false,
+            prompts: false,
+            logging: false,
+            directory_read: false,
+            experimental: empty.clone(),
+            extensions: empty,
+        }
+    }
 }
 
 /// Per-tool permission policy declared by an MCP server/config producer.
@@ -487,47 +761,220 @@ impl McpPermissionCeiling {
 }
 
 /// Standard MCP icon descriptor for a tool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpIconDto {
-    /// Verified icon source URI.
-    pub src: String,
+    /// Verified icon source URI, retained as exact source text.
+    pub src: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional MIME type for the icon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     /// Declared size labels.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sizes: Vec<String>,
     /// Optional theme discriminator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// Unrecognized extension members preserved across transport/cache hops.
-    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
-    pub extra: indexmap::IndexMap<String, Value>,
+    /// Unrecognized extension members preserved as an exact source object
+    /// across transport/cache hops.
+    pub extra: crate::types::utf16_json::Utf16JsonProjection,
 }
 
 /// Optional MCP tool annotations.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolAnnotationsDto {
-    /// Optional user-facing title override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    /// Optional user-facing title override, retained as exact source text.
+    pub title: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Whether the tool is host-proven read-only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_hint: Option<bool>,
     /// Whether the tool may be destructive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destructive_hint: Option<bool>,
     /// Whether the host can prove the tool is idempotent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent_hint: Option<bool>,
     /// Whether the tool touches the outside world.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_world_hint: Option<bool>,
-    /// Unrecognized annotation hints preserved across transport/cache hops.
-    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
-    pub extra: indexmap::IndexMap<String, Value>,
+    /// Unrecognized annotation hints preserved as an exact source object
+    /// across transport/cache hops.
+    pub extra: crate::types::utf16_json::Utf16JsonProjection,
+}
+
+impl Default for McpToolAnnotationsDto {
+    fn default() -> Self {
+        Self {
+            title: None,
+            read_only_hint: None,
+            destructive_hint: None,
+            idempotent_hint: None,
+            open_world_hint: None,
+            extra: empty_source_json_object(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpIconKnownDto {
+    #[serde(deserialize_with = "deserialize_required_mcp_string")]
+    src: crate::types::utf16_json::Utf16JsonProjection,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    sizes: Vec<String>,
+    #[serde(default)]
+    theme: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpIconWireDto<'a> {
+    #[serde(serialize_with = "serialize_required_mcp_string")]
+    src: crate::types::utf16_json::Utf16JsonProjection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_empty_slice")]
+    sizes: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    theme: Option<&'a str>,
+}
+
+impl Serialize for McpIconDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        const KNOWN_FIELDS: &[&str] = &["src", "mimeType", "sizes", "theme"];
+        let known_json = serde_json::to_string(&McpIconWireDto {
+            src: self.src.clone(),
+            mime_type: self.mime_type.as_deref(),
+            sizes: &self.sizes,
+            theme: self.theme.as_deref(),
+        })
+        .map_err(serde::ser::Error::custom)?;
+        let known = crate::types::utf16_json::Utf16JsonProjection::parse(&known_json)
+            .map_err(serde::ser::Error::custom)?;
+        let source = merge_source_object_fields(&known, &self.extra, KNOWN_FIELDS)
+            .map_err(serde::ser::Error::custom)?;
+        crate::types::utf16_json::raw_json_serde::serialize(&source, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpIconDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const KNOWN_FIELDS: &[&str] = &["src", "mimeType", "sizes", "theme"];
+        let source = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let known_source = source
+            .pick_object_fields(KNOWN_FIELDS)
+            .map_err(serde::de::Error::custom)?;
+        let known_json = known_source
+            .to_json_string()
+            .map_err(serde::de::Error::custom)?;
+        let known: McpIconKnownDto =
+            serde_json::from_str(&known_json).map_err(serde::de::Error::custom)?;
+        let extra = source_object_without_fields(&source, KNOWN_FIELDS)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            src: known.src,
+            mime_type: known.mime_type,
+            sizes: known.sizes,
+            theme: known.theme,
+            extra,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpToolAnnotationsKnownDto {
+    #[serde(default, deserialize_with = "deserialize_optional_mcp_string")]
+    title: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    #[serde(default)]
+    read_only_hint: Option<bool>,
+    #[serde(default)]
+    destructive_hint: Option<bool>,
+    #[serde(default)]
+    idempotent_hint: Option<bool>,
+    #[serde(default)]
+    open_world_hint: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpToolAnnotationsWireDto {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_mcp_string"
+    )]
+    title: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_only_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destructive_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotent_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_world_hint: Option<bool>,
+}
+
+impl Serialize for McpToolAnnotationsDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        const KNOWN_FIELDS: &[&str] = &[
+            "title",
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ];
+        let known_json = serde_json::to_string(&McpToolAnnotationsWireDto {
+            title: self.title.clone(),
+            read_only_hint: self.read_only_hint,
+            destructive_hint: self.destructive_hint,
+            idempotent_hint: self.idempotent_hint,
+            open_world_hint: self.open_world_hint,
+        })
+        .map_err(serde::ser::Error::custom)?;
+        let known = crate::types::utf16_json::Utf16JsonProjection::parse(&known_json)
+            .map_err(serde::ser::Error::custom)?;
+        let source = merge_source_object_fields(&known, &self.extra, KNOWN_FIELDS)
+            .map_err(serde::ser::Error::custom)?;
+        crate::types::utf16_json::raw_json_serde::serialize(&source, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpToolAnnotationsDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const KNOWN_FIELDS: &[&str] = &[
+            "title",
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ];
+        let source = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let known_source = source
+            .pick_object_fields(KNOWN_FIELDS)
+            .map_err(serde::de::Error::custom)?;
+        let known_json = known_source
+            .to_json_string()
+            .map_err(serde::de::Error::custom)?;
+        let known: McpToolAnnotationsKnownDto =
+            serde_json::from_str(&known_json).map_err(serde::de::Error::custom)?;
+        let extra = source_object_without_fields(&source, KNOWN_FIELDS)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            title: known.title,
+            read_only_hint: known.read_only_hint,
+            destructive_hint: known.destructive_hint,
+            idempotent_hint: known.idempotent_hint,
+            open_world_hint: known.open_world_hint,
+            extra,
+        })
+    }
 }
 
 /// MCP task-support declaration for one tool.
@@ -557,17 +1004,33 @@ pub struct McpToolExecutionDto {
 pub struct McpToolDefinitionDto {
     /// Raw tool name exposed by the server.
     pub name: String,
-    /// Optional user-facing title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Optional user-facing description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Input JSON Schema.
-    pub input_schema: Value,
+    /// Optional user-facing title, retained as exact source text.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub title: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Optional user-facing description retained as its exact JSON source.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub description: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Input JSON Schema preserved directly from the server's raw JSON.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub input_schema: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional structured output JSON Schema.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub output_schema: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Optional derived annotations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<McpToolAnnotationsDto>,
@@ -577,15 +1040,24 @@ pub struct McpToolDefinitionDto {
     /// Optional icon list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub icons: Vec<McpIconDto>,
-    /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    /// Opaque vendor metadata preserved directly from the server's raw JSON.
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 impl McpToolDefinitionDto {
     /// Construct a minimal wire `Tool` definition.
     #[must_use]
-    pub fn new(name: impl Into<String>, input_schema: Value) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        input_schema: crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Self {
         Self {
             name: name.into(),
             title: None,
@@ -597,6 +1069,12 @@ impl McpToolDefinitionDto {
             icons: Vec::new(),
             meta: None,
         }
+    }
+
+    /// Exact source schema from the MCP definition.
+    #[must_use]
+    pub const fn input_schema(&self) -> &crate::types::utf16_json::Utf16JsonProjection {
+        &self.input_schema
     }
 }
 
@@ -629,22 +1107,38 @@ pub struct McpToolDto {
     pub server_name: String,
     /// Tool name as exposed by the server.
     pub tool_name: String,
-    /// Human-readable description shown to the model.
-    pub description: String,
-    /// JSON-Schema for the tool's input.
-    pub input_schema: Value,
+    /// Root JSON string description shown to the model, retained as source.
+    #[serde(
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize",
+        deserialize_with = "deserialize_mcp_tool_description"
+    )]
+    pub description: crate::types::utf16_json::Utf16JsonProjection,
+    /// JSON-Schema for the tool's input, retained as raw source JSON.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub input_schema: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional JSON-Schema for the tool's structured output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub output_schema: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Optional standardized tool annotations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<McpToolAnnotationsDto>,
     /// Optional icon list preserved from the upstream definition.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub icons: Vec<McpIconDto>,
-    /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    /// Opaque vendor metadata preserved as raw source JSON.
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Engine-side fully-qualified identifier (`mcp__<server>__<tool>`).
     pub full_name: String,
     /// Retrieval prefilter hint from `tool._meta['anthropic/searchHint']`
@@ -652,8 +1146,13 @@ pub struct McpToolDto {
     /// did not set `_meta`. Forwarded from [`mcp::client::ToolMeta`] per
     /// `client.ts:1777-1778`. Used by tool-search ranking to prefer tools
     /// whose `searchHint` matches the current task description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_hint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub search_hint: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Force-include flag from `tool._meta['anthropic/alwaysLoad']`. When
     /// `true`, the tool is included in the agent prompt regardless of whether
     /// the `searchHint` matches. Forwarded from `client.ts:1779-1780`.
@@ -673,6 +1172,22 @@ pub struct McpToolDto {
     pub requires_user_interaction: bool,
 }
 
+fn deserialize_mcp_tool_description<'de, D>(
+    deserializer: D,
+) -> Result<crate::types::utf16_json::Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let description = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if description.string_units("").is_some() {
+        Ok(description)
+    } else {
+        Err(serde::de::Error::custom(
+            "MCP tool description must be a JSON string",
+        ))
+    }
+}
+
 impl McpToolDto {
     /// Raw upstream tool name.
     #[must_use]
@@ -682,14 +1197,20 @@ impl McpToolDto {
 
     /// Model-facing tool description.
     #[must_use]
-    pub fn description(&self) -> &str {
+    pub fn description(&self) -> &crate::types::utf16_json::Utf16JsonProjection {
         &self.description
     }
 
     /// Input JSON Schema advertised for the tool.
     #[must_use]
-    pub const fn input_schema(&self) -> &Value {
+    pub const fn input_schema(&self) -> &crate::types::utf16_json::Utf16JsonProjection {
         &self.input_schema
+    }
+
+    /// Exact source output schema from the MCP definition, when supplied.
+    #[must_use]
+    pub const fn output_schema(&self) -> Option<&crate::types::utf16_json::Utf16JsonProjection> {
+        self.output_schema.as_ref()
     }
 
     /// Whether every invocation requires fresh user interaction.
@@ -709,18 +1230,37 @@ fn is_false(b: &bool) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceDto {
     /// Resource URI.
-    pub uri: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub uri: crate::types::utf16_json::Utf16JsonProjection,
     /// Human-readable name.
-    pub name: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub name: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub description: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Optional content type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    /// Opaque vendor metadata retained as raw source JSON.
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// One parameterized resource template advertised by an MCP server
@@ -738,31 +1278,64 @@ pub struct McpResourceDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceTemplateDto {
     /// RFC 6570 URI template, e.g. `"file:///{path}"`.
-    #[serde(rename = "uriTemplate")]
-    pub uri_template: String,
+    #[serde(
+        rename = "uriTemplate",
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub uri_template: crate::types::utf16_json::Utf16JsonProjection,
     /// Human-readable name.
-    pub name: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub name: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub description: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Optional content type.
     #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    /// Optional resource annotations preserved as arbitrary JSON.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Value>,
-    /// Opaque vendor metadata preserved from the wire.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    /// Optional resource annotations preserved as raw source JSON.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub annotations: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Opaque vendor metadata retained from the raw source.
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// One prompt advertised by an MCP server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptDto {
     /// Prompt name as exposed by the server.
-    pub name: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub name: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional human-readable description.
-    pub description: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub description: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Named arguments accepted by `prompts/get`, in server-declared order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<McpPromptArgumentDto>,
@@ -772,10 +1345,19 @@ pub struct McpPromptDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptArgumentDto {
     /// Wire argument name sent to `prompts/get`.
-    pub name: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub name: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub description: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Whether the server requires this argument.
     #[serde(default)]
     pub required: bool,
@@ -789,24 +1371,43 @@ pub struct McpPromptArgumentDto {
 /// `services/mcp/client.ts` and forwards them onto the surfaced `ToolResult`).
 /// Both are carried here verbatim (no transformation) and default to `None`
 /// when the server omits them, so non-claude-code servers decode cleanly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolResultDto {
-    /// JSON content returned by the tool.
-    pub content: Value,
+    /// JSON content returned by the tool, kept as raw source JSON.
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub content: crate::types::utf16_json::Utf16JsonProjection,
     /// True when the server flagged the result as an error.
     pub is_error: bool,
-    /// Server-supplied `_meta` block (arbitrary JSON object), passed through
-    /// byte-for-byte. `None` when the wire result omits `_meta`.
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none", default)]
-    pub meta: Option<Value>,
-    /// Server-supplied `structuredContent` (arbitrary JSON), passed through
-    /// byte-for-byte. `None` when the wire result omits `structuredContent`.
+    /// Server-supplied `_meta` block retained as raw source JSON.
+    #[serde(
+        rename = "_meta",
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Server-supplied `structuredContent` retained as raw source JSON.
     #[serde(
         rename = "structuredContent",
         skip_serializing_if = "Option::is_none",
-        default
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
     )]
-    pub structured_content: Option<Value>,
+    pub structured_content: Option<crate::types::utf16_json::Utf16JsonProjection>,
+}
+
+impl Default for McpToolResultDto {
+    fn default() -> Self {
+        Self {
+            content: crate::types::utf16_json::Utf16JsonProjection::parse("null")
+                .expect("null is valid JSON"),
+            is_error: false,
+            meta: None,
+            structured_content: None,
+        }
+    }
 }
 
 /// Arbitrary notification pushed by a server (logging, progress, etc).
@@ -815,36 +1416,53 @@ pub struct McpNotificationDto {
     /// JSON-RPC method.
     pub method: String,
     /// Method-specific parameters.
-    pub params: Value,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub params: crate::types::utf16_json::Utf16JsonProjection,
 }
 
 /// Server-initiated elicitation request (asks the host to gather user input).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitRequestDto {
     /// Server-supplied request parameters.
-    pub params: Value,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub params: crate::types::utf16_json::Utf16JsonProjection,
 }
 
 /// Reply to an [`ElicitRequestDto`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitResultDto {
     /// User-supplied data being returned to the server.
-    pub data: Value,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub data: crate::types::utf16_json::Utf16JsonProjection,
 }
 
 /// Contents read from an MCP resource.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResourceContentDto {
     /// Echoed URI.
-    pub uri: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub uri: crate::types::utf16_json::Utf16JsonProjection,
     /// Resource body (text-encoded; binaries are base64).
-    pub content: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub content: crate::types::utf16_json::Utf16JsonProjection,
     /// Optional content type for the returned body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// One element of a `resources/read` `contents[]` array, preserving the full
@@ -865,17 +1483,32 @@ pub struct McpResourceContentDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpResourceContentsRich {
     /// Echoed resource URI for this content block.
-    pub uri: String,
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub uri: crate::types::utf16_json::Utf16JsonProjection,
     /// MIME type as advertised by the server (absent on the wire → `None`).
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none", default)]
     pub mime_type: Option<String>,
-    /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none", default)]
-    pub meta: Option<Value>,
+    /// Opaque vendor metadata retained as raw source JSON.
+    #[serde(
+        rename = "_meta",
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Text content of the block (text blocks; also the human-readable
     /// "saved to disk" message for persisted blobs).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub text: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        serialize_with = "serialize_optional_mcp_string",
+        deserialize_with = "deserialize_optional_mcp_string"
+    )]
+    pub text: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Filesystem path a decoded binary blob was persisted to, if any.
     #[serde(
         rename = "blobSavedTo",
@@ -967,6 +1600,11 @@ pub trait McpTransport: Send + Sync {
     /// declared capabilities.
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError>;
 
+    /// Metadata for this live connection, captured by initialize or discovery.
+    fn server_metadata(&self, _id: McpConnectionId) -> Option<McpServerMetadataDto> {
+        None
+    }
+
     /// Enumerate all tools exposed by the server.
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError>;
 
@@ -999,14 +1637,14 @@ pub trait McpTransport: Send + Sync {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: crate::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError>;
 
-    /// Read the contents of a resource by URI.
+    /// Read the contents of a resource by its exact source URI.
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &crate::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError>;
 
     /// Read the FULL multi-content `contents[]` array of a resource, preserving
@@ -1025,7 +1663,7 @@ pub trait McpTransport: Send + Sync {
     async fn read_resource_rich(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &crate::types::utf16_json::Utf16JsonProjection,
         _output_dir: &std::path::Path,
     ) -> Result<Vec<McpResourceContentsRich>, McpError> {
         let single = self.read_resource(conn, uri).await?;
@@ -1070,40 +1708,51 @@ pub trait McpTransport: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpIconDto, McpResourceContentDto, McpResourceContentsRich, McpResourceDto,
-        McpResourceTemplateDto, McpToolAnnotationsDto, McpToolDto, McpTransportSpec,
+        McpIconDto, McpPromptDto, McpResourceContentDto, McpResourceContentsRich, McpResourceDto,
+        McpResourceTemplateDto, McpServerMetadataDto, McpToolAnnotationsDto, McpToolDefinitionDto,
+        McpToolDto, McpToolResultDto, McpTransportSpec,
     };
+    use crate::types::utf16_json::Utf16JsonProjection;
     use serde_json::json;
+
+    fn project(input: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(input).expect("valid source JSON fixture")
+    }
+
+    fn project_utf16(input: &[u16]) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse_utf16_json(input).expect("valid UTF-16 source JSON fixture")
+    }
 
     #[test]
     fn mcp_tool_dto_preserves_optional_metadata_fields() {
         let value = serde_json::to_value(McpToolDto {
             server_name: "local_app_habits".to_string(),
             tool_name: "save_habit".to_string(),
-            description: "Save one habit entry.".to_string(),
-            input_schema: json!({"type":"object"}),
-            output_schema: Some(json!({"type":"object","properties":{"ok":{"type":"boolean"}}})),
+            description: project(r#""Save one habit entry.""#),
+            input_schema: project(r#"{"type":"object"}"#),
+            output_schema: Some(project(
+                r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#,
+            )),
             annotations: Some(McpToolAnnotationsDto {
-                title: Some("Save habit".to_string()),
+                title: Some("Save habit".into()),
                 read_only_hint: Some(false),
                 destructive_hint: Some(false),
                 idempotent_hint: Some(true),
                 open_world_hint: Some(false),
-                extra: indexmap::IndexMap::from([(
-                    "vendor/riskTier".to_string(),
-                    json!("reviewed"),
-                )]),
+                extra: project(r#"{"vendor/riskTier":"reviewed"}"#),
             }),
             icons: vec![McpIconDto {
-                src: "https://example.invalid/icon.svg".to_string(),
+                src: "https://example.invalid/icon.svg".into(),
                 mime_type: Some("image/svg+xml".to_string()),
                 sizes: vec!["64x64".to_string()],
                 theme: None,
-                extra: indexmap::IndexMap::from([("vendor/accent".to_string(), json!("blue"))]),
+                extra: project(r#"{"vendor/accent":"blue"}"#),
             }],
-            meta: Some(json!({"openai/outputTemplate":"ui://local-app/habits/widget.html"})),
+            meta: Some(project(
+                r#"{"openai/outputTemplate":"ui://local-app/habits/widget.html"}"#,
+            )),
             full_name: "mcp__local_app_habits__save_habit".to_string(),
-            search_hint: Some("habit tracker".to_string()),
+            search_hint: Some(project(r#""habit tracker""#)),
             always_load: Some(true),
             requires_user_interaction: false,
         })
@@ -1121,13 +1770,421 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_description_and_search_hint_keep_exact_source_strings() {
+        let tool: McpToolDto = serde_json::from_str(
+            r#"{"server_name":"s","tool_name":"t","description":"\ud800","input_schema":{},"full_name":"mcp__s__t","search_hint":"\udfff"}"#,
+        )
+        .expect("source tool description and search hint");
+        assert_eq!(tool.description().string_units(""), Some(vec![0xd800]));
+        assert_eq!(
+            tool.search_hint
+                .as_ref()
+                .and_then(|hint| hint.string_units("")),
+            Some(vec![0xdfff])
+        );
+        let encoded = serde_json::to_string(&tool).expect("serialize source tool");
+        assert!(encoded.contains("\"description\":\"\\ud800\""));
+        assert!(encoded.contains("\"search_hint\":\"\\udfff\""));
+
+        let absent: McpToolDefinitionDto =
+            serde_json::from_str(r#"{"name":"no-description","inputSchema":{}}"#).unwrap();
+        let explicit_null: McpToolDefinitionDto = serde_json::from_str(
+            r#"{"name":"null-description","description":null,"inputSchema":{}}"#,
+        )
+        .unwrap();
+        assert!(absent.description.is_none());
+        assert!(explicit_null
+            .description
+            .as_ref()
+            .and_then(|value| value.at_pointer(""))
+            .is_some_and(|value| value.is_null()));
+    }
+
+    #[test]
+    fn mcp_source_tool_and_result_dtos_preserve_lone_surrogates_and_nulls() {
+        let definition: McpToolDefinitionDto = serde_json::from_str(
+            r#"{"name":"source","title":"\udfff","description":"\ud800","inputSchema":{"description":"\ud800"},"outputSchema":null,"_meta":{"opaque":"\udfff"}}"#,
+        )
+        .expect("raw source tool definition");
+        assert_eq!(
+            definition
+                .title
+                .as_ref()
+                .and_then(|title| title.string_units("")),
+            Some(vec![0xdfff])
+        );
+        assert_eq!(
+            definition
+                .description
+                .as_ref()
+                .and_then(|description| description.string_units("")),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            definition.input_schema.string_units("/description"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            definition
+                .output_schema
+                .as_ref()
+                .and_then(|schema| schema.at_pointer(""))
+                .map(|value| value.is_null()),
+            Some(true)
+        );
+        assert_eq!(
+            definition
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.string_units("/opaque")),
+            Some(vec![0xdfff])
+        );
+        let definition_json =
+            serde_json::to_string(&definition).expect("serialize source definition");
+        assert!(definition_json.contains(r#""title":"\udfff""#));
+        let definition_round_trip: McpToolDefinitionDto =
+            serde_json::from_str(&definition_json).expect("round-trip source definition");
+        assert_eq!(definition_round_trip.title, definition.title);
+
+        let result: McpToolResultDto = serde_json::from_str(
+            r#"{"content":{"text":"\ud800"},"is_error":true,"_meta":null,"structuredContent":{"value":"\udfff"}}"#,
+        )
+        .expect("raw source tool result");
+        assert_eq!(result.content.string_units("/text"), Some(vec![0xd800]));
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.at_pointer(""))
+                .map(|value| value.is_null()),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|content| content.string_units("/value")),
+            Some(vec![0xdfff])
+        );
+
+        let serialized = serde_json::to_string(&result).expect("serialize source result");
+        let round_trip: McpToolResultDto =
+            serde_json::from_str(&serialized).expect("round-trip raw source result");
+        assert_eq!(round_trip.content.string_units("/text"), Some(vec![0xd800]));
+        assert_eq!(
+            round_trip
+                .structured_content
+                .as_ref()
+                .and_then(|content| content.string_units("/value")),
+            Some(vec![0xdfff])
+        );
+    }
+
+    #[test]
+    fn mcp_capabilities_and_notifications_preserve_exact_source_json() {
+        let mut extension_units: Vec<u16> = "{\"".encode_utf16().collect();
+        extension_units.push(0xd800);
+        extension_units.extend("\":{\"opaque\":\"".encode_utf16());
+        extension_units.push(0xdfff);
+        extension_units.extend("\"}}".encode_utf16());
+        let mut capabilities = super::ServerCapabilitiesDto::default();
+        capabilities.extensions = project_utf16(&extension_units);
+
+        let encoded = serde_json::to_string(&capabilities).expect("serialize capabilities");
+        let decoded: super::ServerCapabilitiesDto =
+            serde_json::from_str(&encoded).expect("deserialize capabilities");
+        let entry = decoded
+            .extensions
+            .object_entries()
+            .expect("extension source object")
+            .into_iter()
+            .next()
+            .expect("extension entry");
+        assert_eq!(entry.code_units, &[0xd800]);
+        assert_eq!(
+            decoded
+                .extensions
+                .subprojection_property_units(&[0xd800])
+                .unwrap()
+                .string_units("/opaque"),
+            Some(vec![0xdfff])
+        );
+
+        let mut params_units: Vec<u16> = "{\"x\":\"".encode_utf16().collect();
+        params_units.push(0xd800);
+        params_units.extend("\"}".encode_utf16());
+        let notification = super::McpNotificationDto {
+            method: "notifications/message".into(),
+            params: project_utf16(&params_units),
+        };
+        let encoded = serde_json::to_string(&notification).expect("serialize notification");
+        let decoded: super::McpNotificationDto =
+            serde_json::from_str(&encoded).expect("deserialize notification");
+        assert_eq!(decoded.params.string_units("/x"), Some(vec![0xd800]));
+    }
+
+    #[test]
+    fn mcp_instructions_descriptions_and_resource_text_preserve_exact_units() {
+        let metadata: McpServerMetadataDto = serde_json::from_str(r#"{"instructions":"\ud800"}"#)
+            .expect("server instructions with lone surrogate");
+        assert_eq!(
+            metadata
+                .instructions
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some(vec![0xd800])
+        );
+        let metadata_json = serde_json::to_string(&metadata).expect("serialize metadata");
+        assert!(metadata_json.contains(r#""instructions":"\ud800""#));
+
+        let resource: McpResourceDto = serde_json::from_str(
+            r#"{"uri":"resource://exact","name":"resource","description":"left\ud800right"}"#,
+        )
+        .expect("resource description with lone surrogate");
+        assert_eq!(
+            resource
+                .description
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some(vec![
+                b'l' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b't' as u16,
+                0xd800,
+                b'r' as u16,
+                b'i' as u16,
+                b'g' as u16,
+                b'h' as u16,
+                b't' as u16,
+            ])
+        );
+        let resource_json = serde_json::to_string(&resource).expect("serialize resource");
+        let resource_round_trip: McpResourceDto =
+            serde_json::from_str(&resource_json).expect("round-trip resource");
+        assert_eq!(resource_round_trip.description, resource.description);
+
+        let template: McpResourceTemplateDto = serde_json::from_str(
+            r#"{"uriTemplate":"file:///{path}","name":"file","description":"\ud800"}"#,
+        )
+        .expect("resource-template description with lone surrogate");
+        assert_eq!(
+            template
+                .description
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some(vec![0xd800])
+        );
+
+        let prompt: McpPromptDto = serde_json::from_str(
+            r#"{"name":"prompt","description":"\udfff","arguments":[{"name":"arg","description":"\ud800","required":true}]}"#,
+        )
+        .expect("prompt and argument descriptions with lone surrogates");
+        assert_eq!(
+            prompt.name.string_units(""),
+            Some("prompt".encode_utf16().collect())
+        );
+        assert_eq!(
+            prompt
+                .description
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some(vec![0xdfff])
+        );
+        assert_eq!(
+            prompt.arguments[0]
+                .description
+                .as_ref()
+                .and_then(|text| text.string_units("")),
+            Some(vec![0xd800])
+        );
+        assert_eq!(
+            prompt.arguments[0].name.string_units(""),
+            Some("arg".encode_utf16().collect())
+        );
+
+        let content: McpResourceContentDto =
+            serde_json::from_str(r#"{"uri":"resource://exact","content":"\ud800"}"#)
+                .expect("resource text content with lone surrogate");
+        assert_eq!(content.content.string_units(""), Some(vec![0xd800]));
+        let content_json = serde_json::to_string(&content).expect("serialize resource content");
+        assert!(content_json.contains(r#""content":"\ud800""#));
+        let content_round_trip: McpResourceContentDto =
+            serde_json::from_str(&content_json).expect("round-trip resource content");
+        assert_eq!(content_round_trip.content, content.content);
+        assert!(serde_json::from_str::<McpResourceContentDto>(
+            r#"{"uri":"resource://exact","content":17}"#
+        )
+        .is_err());
+        let rich: McpResourceContentsRich =
+            serde_json::from_str(r#"{"uri":"resource://exact","text":"\udfff"}"#)
+                .expect("rich resource text with lone surrogate");
+        assert_eq!(
+            rich.text.as_ref().and_then(|text| text.string_units("")),
+            Some(vec![0xdfff])
+        );
+
+        let null_text: McpResourceDto = serde_json::from_str(
+            r#"{"uri":"resource://exact","name":"resource","description":null}"#,
+        )
+        .expect("null description remains absent");
+        assert!(null_text.description.is_none());
+        assert!(serde_json::from_str::<McpResourceDto>(
+            r#"{"uri":"resource://exact","name":"resource","description":17}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_icon_and_annotation_extras_keep_exact_keys_and_nested_values() {
+        let annotations: McpToolAnnotationsDto = serde_json::from_str(
+            r#"{"title":"\ud800","readOnlyHint":true,"vendor-\ud800":{"nested":"\udfff"},"__proto__":{"safe":true}}"#,
+        )
+        .expect("annotations with source extras");
+        assert_eq!(
+            annotations
+                .title
+                .as_ref()
+                .and_then(|title| title.string_units("")),
+            Some(vec![0xd800])
+        );
+        let annotation_key = "vendor-".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+        assert_eq!(
+            annotations
+                .extra
+                .subprojection_property_units(&annotation_key)
+                .expect("exact annotation key")
+                .string_units("/nested"),
+            Some(vec![0xdfff])
+        );
+        let encoded = serde_json::to_string(&annotations).expect("serialize annotations");
+        assert!(!encoded.contains("\"nodes\""));
+        assert!(encoded.contains(r#""title":"\ud800""#));
+        assert!(encoded.contains(r#""readOnlyHint":true"#));
+        assert!(encoded.contains(r#""vendor-\ud800":{"nested":"\udfff"}"#));
+        assert!(encoded.contains(r#""__proto__":{"safe":true}"#));
+        let round_trip: McpToolAnnotationsDto =
+            serde_json::from_str(&encoded).expect("round-trip annotation extras");
+        assert_eq!(round_trip.extra, annotations.extra);
+
+        let icon: McpIconDto = serde_json::from_str(
+            r#"{"src":"https://example.invalid/icon-\ud800.svg","vendor-\udfff":{"text":"\ud800"}}"#,
+        )
+        .expect("icon with source extra");
+        assert_eq!(
+            icon.src.string_units(""),
+            Some(
+                "https://example.invalid/icon-"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(".svg".encode_utf16())
+                    .collect()
+            )
+        );
+        let icon_key = "vendor-".encode_utf16().chain([0xdfff]).collect::<Vec<_>>();
+        assert_eq!(
+            icon.extra
+                .subprojection_property_units(&icon_key)
+                .expect("exact icon key")
+                .string_units("/text"),
+            Some(vec![0xd800])
+        );
+        let encoded = serde_json::to_string(&icon).expect("serialize icon");
+        assert!(!encoded.contains("\"nodes\""));
+        assert!(encoded.contains(r#""src":"https://example.invalid/icon-\ud800.svg""#));
+        assert!(encoded.contains(r#""vendor-\udfff":{"text":"\ud800"}"#));
+        let round_trip: McpIconDto =
+            serde_json::from_str(&encoded).expect("round-trip icon extras");
+        assert_eq!(round_trip.extra, icon.extra);
+    }
+
+    #[test]
+    fn mcp_resource_and_prompt_routing_text_preserve_exact_units() {
+        let resource: McpResourceDto = serde_json::from_str(
+            r#"{"uri":"resource://x/\ud800","name":"name\udfff","description":"desc"}"#,
+        )
+        .expect("resource identifiers with lone surrogates");
+        assert_eq!(
+            resource.uri.string_units(""),
+            Some("resource://x/".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            resource.name.string_units(""),
+            Some("name".encode_utf16().chain([0xdfff]).collect())
+        );
+        let resource_json = serde_json::to_string(&resource).expect("serialize source resource");
+        assert!(resource_json.contains(r#""uri":"resource://x/\ud800""#));
+        assert!(resource_json.contains(r#""name":"name\udfff""#));
+        let resource_round_trip: McpResourceDto =
+            serde_json::from_str(&resource_json).expect("round-trip resource identity");
+        assert_eq!(resource_round_trip.uri, resource.uri);
+        assert_eq!(resource_round_trip.name, resource.name);
+
+        let template: McpResourceTemplateDto =
+            serde_json::from_str(r#"{"uriTemplate":"file:///\ud800/{x}","name":"template\udfff"}"#)
+                .expect("resource template identifiers with lone surrogates");
+        assert_eq!(
+            template.uri_template.string_units(""),
+            Some(
+                "file:///"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain("/{x}".encode_utf16())
+                    .collect()
+            )
+        );
+        assert_eq!(
+            template.name.string_units(""),
+            Some("template".encode_utf16().chain([0xdfff]).collect())
+        );
+
+        let prompt: McpPromptDto = serde_json::from_str(
+            r#"{"name":"prompt\ud800","arguments":[{"name":"arg\udfff","required":true}]}"#,
+        )
+        .expect("prompt routing names with lone surrogates");
+        assert_eq!(
+            prompt.name.string_units(""),
+            Some("prompt".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            prompt.arguments[0].name.string_units(""),
+            Some("arg".encode_utf16().chain([0xdfff]).collect())
+        );
+        let prompt_json = serde_json::to_string(&prompt).expect("serialize source prompt");
+        assert!(prompt_json.contains(r#""name":"prompt\ud800""#));
+        assert!(prompt_json.contains(r#""name":"arg\udfff""#));
+        let prompt_round_trip: McpPromptDto =
+            serde_json::from_str(&prompt_json).expect("round-trip prompt names");
+        assert_eq!(prompt_round_trip.name, prompt.name);
+        assert_eq!(
+            prompt_round_trip.arguments[0].name,
+            prompt.arguments[0].name
+        );
+
+        let content: McpResourceContentDto =
+            serde_json::from_str(r#"{"uri":"resource://read/\ud800","content":"body\udfff"}"#)
+                .expect("read URI with lone surrogate");
+        assert_eq!(
+            content.uri.string_units(""),
+            Some("resource://read/".encode_utf16().chain([0xd800]).collect())
+        );
+        let rich: McpResourceContentsRich =
+            serde_json::from_str(r#"{"uri":"resource://rich/\udfff","text":"body"}"#)
+                .expect("rich read URI with lone surrogate");
+        assert_eq!(
+            rich.uri.string_units(""),
+            Some("resource://rich/".encode_utf16().chain([0xdfff]).collect())
+        );
+    }
+
+    #[test]
     fn mcp_resource_dtos_preserve_description_mime_and_meta() {
         let resource = serde_json::to_value(McpResourceDto {
-            uri: "ui://local-app/habits/widget.html".to_string(),
-            name: "Habits widget".to_string(),
-            description: Some("Interactive MCP App widget".to_string()),
+            uri: "ui://local-app/habits/widget.html".into(),
+            name: "Habits widget".into(),
+            description: Some("Interactive MCP App widget".into()),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
-            meta: Some(json!({"openai/widgetPrefersBorder":true})),
+            meta: Some(project(r#"{"openai/widgetPrefersBorder":true}"#)),
         })
         .expect("serialize resource dto");
         assert_eq!(resource["description"], "Interactive MCP App widget");
@@ -1135,22 +2192,22 @@ mod tests {
         assert_eq!(resource["_meta"]["openai/widgetPrefersBorder"], true);
 
         let template = serde_json::to_value(McpResourceTemplateDto {
-            uri_template: "file:///{path}".to_string(),
-            name: "Workspace file".to_string(),
-            description: Some("One workspace file".to_string()),
+            uri_template: "file:///{path}".into(),
+            name: "Workspace file".into(),
+            description: Some("One workspace file".into()),
             mime_type: Some("text/plain".to_string()),
-            annotations: Some(json!({"audience":["assistant"],"vendor/rank":7})),
-            meta: Some(json!({"vendor/template":"opaque"})),
+            annotations: Some(project(r#"{"audience":["assistant"],"vendor/rank":7}"#)),
+            meta: Some(project(r#"{"vendor/template":"opaque"}"#)),
         })
         .expect("serialize resource template dto");
         assert_eq!(template["annotations"]["vendor/rank"], 7);
         assert_eq!(template["_meta"]["vendor/template"], "opaque");
 
         let content = serde_json::to_value(McpResourceContentDto {
-            uri: "ui://local-app/habits/widget.html".to_string(),
-            content: "<!doctype html>".to_string(),
+            uri: "ui://local-app/habits/widget.html".into(),
+            content: "<!doctype html>".into(),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
-            meta: Some(json!({"openai/widgetDescription":"Habits widget"})),
+            meta: Some(project(r#"{"openai/widgetDescription":"Habits widget"}"#)),
         })
         .expect("serialize resource content dto");
         assert_eq!(content["mime_type"], "text/html;profile=mcp-app");
@@ -1160,10 +2217,10 @@ mod tests {
         );
 
         let rich = serde_json::to_value(McpResourceContentsRich {
-            uri: "ui://local-app/habits/widget.html".to_string(),
+            uri: "ui://local-app/habits/widget.html".into(),
             mime_type: Some("text/html;profile=mcp-app".to_string()),
-            meta: Some(json!({"openai/widgetCSP":{"connect_domains":[]}})),
-            text: Some("<!doctype html>".to_string()),
+            meta: Some(project(r#"{"openai/widgetCSP":{"connect_domains":[]}}"#)),
+            text: Some("<!doctype html>".into()),
             blob_saved_to: None,
         })
         .expect("serialize rich resource dto");
@@ -1207,11 +2264,11 @@ pub enum McpError {
     #[error("transport {0:?} not supported on this platform")]
     UnsupportedTransport(McpTransportKind),
     /// Underlying transport (TCP / stdio / etc.) failed.
-    #[error("connection failed: {0}")]
-    Connection(String),
+    #[error("connection failed: {}", .0.string_at("").unwrap_or_default())]
+    Connection(Utf16JsonProjection),
     /// MCP `initialize` handshake failed or returned an invalid response.
-    #[error("handshake failed: {0}")]
-    Handshake(String),
+    #[error("handshake failed: {}", .0.string_at("").unwrap_or_default())]
+    Handshake(Utf16JsonProjection),
     /// Remote HTTP response metadata retained for authentication recovery.
     #[error(
         "HTTP {status}{detail}",
@@ -1227,8 +2284,8 @@ pub enum McpError {
         www_authenticate: Option<String>,
     },
     /// OAuth handshake aborted or returned an error.
-    #[error("oauth flow failed: {0}")]
-    OAuth(String),
+    #[error("oauth flow failed: {}", .0.string_at("").unwrap_or_default())]
+    OAuth(Utf16JsonProjection),
     /// Server does not advertise the requested tool.
     #[error("tool not found: {0}")]
     ToolNotFound(String),
@@ -1246,7 +2303,25 @@ pub enum McpError {
         /// Timeout budget in whole seconds.
         secs: u64,
     },
+    /// Native modern result-driver failure, with its SDK code and data.
+    #[error(transparent)]
+    Result(super::mcp_result::McpSdkError),
     /// Catch-all for unexpected failures.
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("internal error: {}", .0.string_at("").unwrap_or_default())]
+    Internal(Utf16JsonProjection),
+}
+
+impl McpError {
+    /// Return source text carried by free-form transport failures without
+    /// lowering its UTF-16 units through the display formatter.
+    #[must_use]
+    pub fn source_diagnostic(&self) -> Option<Utf16JsonProjection> {
+        match self {
+            Self::Connection(message)
+            | Self::Handshake(message)
+            | Self::OAuth(message)
+            | Self::Internal(message) => Some(message.clone()),
+            _ => None,
+        }
+    }
 }

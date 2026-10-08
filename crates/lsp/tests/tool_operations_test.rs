@@ -6,6 +6,7 @@
 
 use jsonrpc::Connection;
 use lingxi_core::host::LspServerConfig;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp::client::LspClient;
 use lsp::tool_operations::{
     document_symbol, find_references, go_to_definition, go_to_implementation, hover,
@@ -43,6 +44,29 @@ async fn read_one_frame(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Val
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body).await.expect("read body");
     serde_json::from_slice(&body).expect("parse json")
+}
+
+async fn read_one_raw_frame(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    let mut header = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        reader.read_exact(&mut byte).await.expect("read header");
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_str = std::str::from_utf8(&header).expect("utf8 header");
+    let len: usize = header_str
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .expect("content-length present")
+        .trim()
+        .parse()
+        .expect("parse length");
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).await.expect("read body");
+    String::from_utf8(body).expect("JSON frame bytes are UTF-8")
 }
 
 async fn write_frame(writer: &mut (impl tokio::io::AsyncWrite + Unpin), val: &Value) {
@@ -166,7 +190,7 @@ async fn hover_sends_did_open_then_hover_with_zero_based_position() {
         .await
         .expect("hover ok");
     assert_eq!(result.operation, LspOperation::Hover);
-    assert!(result.raw["contents"].is_string());
+    assert!(result.raw.string_units("/contents").is_some());
 
     peer.await.expect("peer ok");
     // Tracker now knows the file was opened on rust-analyzer.
@@ -644,11 +668,40 @@ async fn workspace_symbol_skips_did_open_gate() {
         .await;
     });
 
-    let res = workspace_symbol(&client, Some("fn ".to_string()))
+    let res = workspace_symbol(&client, Some("fn ".into()))
         .await
         .expect("workspace symbol ok");
     assert_eq!(res.operation, LspOperation::WorkspaceSymbol);
     assert!(res.file_uri.is_empty());
+    peer.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_symbol_preserves_unpaired_query_units_on_wire() {
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = Arc::new(LspClient::new(
+        "rust-analyzer".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    ));
+    let peer = tokio::spawn(async move {
+        let raw = read_one_raw_frame(&mut peer_io).await;
+        let request = Utf16JsonProjection::parse(&raw).expect("request source JSON");
+        assert_eq!(request.string_units("/params/query"), Some(vec![0xd800]));
+        let id = request.number_at("/id").expect("numeric request id") as i64;
+        write_frame(&mut peer_io, &json!({"jsonrpc":"2.0","id":id,"result":[]})).await;
+    });
+    let query = Utf16JsonProjection::parse(r#""\ud800""#).expect("exact source query");
+    let result = workspace_symbol(&client, Some(query))
+        .await
+        .expect("workspace result");
+    assert_eq!(
+        result
+            .raw
+            .at_pointer("")
+            .and_then(|value| value.array_len()),
+        Some(0)
+    );
     peer.await.expect("peer ok");
 }
 
@@ -741,7 +794,10 @@ async fn incoming_outgoing_short_circuit_when_no_prepare_items() {
                 .await
                 .unwrap()
         };
-        assert!(res.raw.is_array() && res.raw.as_array().unwrap().is_empty());
+        assert_eq!(
+            res.raw.at_pointer("").and_then(|value| value.array_len()),
+            Some(0)
+        );
         peer.await.expect("peer ok");
     }
 }

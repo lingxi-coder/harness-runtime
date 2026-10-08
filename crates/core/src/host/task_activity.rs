@@ -55,6 +55,7 @@ mod tests {
                         task_type: kind.into(),
                         status: status.into(),
                         is_idle: idle,
+                        agent_facts: None,
                         ..Default::default()
                     };
                     let live = ["pending", "running", "paused"].contains(&status);

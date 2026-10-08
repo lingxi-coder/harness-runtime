@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
-use serde_json::Value;
 
 /// Stub LSP transport.
 #[derive(Default)]
@@ -37,8 +37,8 @@ impl LspTransport for PosixLsp {
         &self,
         _conn: &LspRawConnection,
         _method: &str,
-        _params: Value,
-    ) -> Result<Value, LspError> {
+        _params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         Err(LspError::Unavailable)
     }
 
@@ -46,7 +46,7 @@ impl LspTransport for PosixLsp {
         &self,
         _conn: &LspRawConnection,
         _method: &str,
-        _params: Value,
+        _params: Utf16JsonProjection,
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }

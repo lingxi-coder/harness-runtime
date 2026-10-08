@@ -135,11 +135,18 @@ impl BuiltinCommandHandler for OutputStyleHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         let Some(listing) = self.handle.output_styles().await else {
             return CommandResult::Done {
-                display: Some("Output styles are not available in this session.".to_string()),
+                display: Some(
+                    ("Output styles are not available in this session.".to_string()).into(),
+                ),
             };
         };
 
-        let raw = args.raw_args.trim();
+        let Some(raw_args) = args.raw_args_utf8() else {
+            return CommandResult::Done {
+                display: Some("Output style argument must be valid Unicode text.".into()),
+            };
+        };
+        let raw = raw_args.trim();
         let lowered = raw.to_ascii_lowercase();
         let chosen = if raw.is_empty() {
             None
@@ -164,37 +171,40 @@ impl BuiltinCommandHandler for OutputStyleHandler {
                     .map(|(name, _)| name.as_str())
                     .collect();
                 return CommandResult::Done {
-                    display: Some(format!(
-                        "Unknown output style \"{raw}\". Available styles: {}",
-                        names.join(", ")
-                    )),
+                    display: Some(
+                        (format!(
+                            "Unknown output style \"{raw}\". Available styles: {}",
+                            names.join(", ")
+                        ))
+                        .into(),
+                    ),
                 };
             }
             return CommandResult::Done {
-                display: Some(render_listing(&listing)),
+                display: Some((render_listing(&listing)).into()),
             };
         };
 
         if chosen == listing.current {
             return CommandResult::Done {
-                display: Some(format!("Output style is already {chosen}")),
+                display: Some((format!("Output style is already {chosen}")).into()),
             };
         }
 
         if let Err(error) = self.handle.set_output_style(&chosen).await {
             return CommandResult::Done {
-                display: Some(format!("Could not switch output style: {error}")),
+                display: Some((format!("Could not switch output style: {error}")).into()),
             };
         }
         if self.persistence == Persistence::LocalSettingsUnderCwd {
             if let Some(failure) = persist_choice(&chosen) {
                 return CommandResult::Done {
-                    display: Some(failure),
+                    display: Some((failure).into()),
                 };
             }
         }
         CommandResult::Done {
-            display: Some(format!("Output style set to {chosen}")),
+            display: Some((format!("Output style set to {chosen}")).into()),
         }
     }
 
@@ -234,9 +244,9 @@ mod tests {
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "output-style".to_string(),
-            raw_args: raw.to_string(),
-            positional_args: raw.split_whitespace().map(str::to_string).collect(),
+            name: "output-style".into(),
+            raw_args: raw.into(),
+            positional_args: raw.split_whitespace().map(Into::into).collect(),
         }
     }
 

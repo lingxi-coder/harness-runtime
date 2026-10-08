@@ -1,11 +1,13 @@
 //! Shell metadata transferred alongside an authenticated native supervisor.
+use crate::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellTaskHandoff {
     pub task_id: String,
     pub command: String,
-    pub description: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub description: Utf16JsonProjection,
     #[serde(default)]
     pub tool_use_id: Option<String>,
     #[serde(default)]

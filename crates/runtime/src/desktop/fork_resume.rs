@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lingxi_core::host::fork_resume_gate::ForkResumeGate;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Resolves whether a skill name still names a FORK-CAPABLE skill.
 ///
@@ -25,7 +26,7 @@ use lingxi_core::host::fork_resume_gate::ForkResumeGate;
 #[async_trait]
 pub trait ForkCapableSkills: Send + Sync {
     /// Whether `skill_name` currently resolves to a fork-capable skill.
-    async fn is_fork_capable(&self, skill_name: &str) -> bool;
+    async fn is_fork_capable(&self, skill_name: &Utf16JsonProjection) -> bool;
 }
 
 /// A [`ForkCapableSkills`] backed by the live [`CommandRegistry`], bound AFTER
@@ -59,7 +60,7 @@ impl RegistryForkCapableSkills {
 
 #[async_trait]
 impl ForkCapableSkills for RegistryForkCapableSkills {
-    async fn is_fork_capable(&self, skill_name: &str) -> bool {
+    async fn is_fork_capable(&self, skill_name: &Utf16JsonProjection) -> bool {
         let Some(registry) = self.registry.get() else {
             return false;
         };
@@ -94,7 +95,7 @@ impl ForkResumeGate for DesktopForkResumeGate {
     async fn check_resume(
         &self,
         agent_id: lingxi_core::types::AgentId,
-        task_forked_skill_name: Option<&str>,
+        task_forked_skill_name: Option<&Utf16JsonProjection>,
     ) -> Result<(), String> {
         let jsonl = session::forked_skill::agent_transcript_path(
             &self.subagents_dir,
@@ -118,7 +119,7 @@ impl ForkResumeGate for DesktopForkResumeGate {
             &label,
             &status,
             task_forked_skill_name,
-            witness.as_deref(),
+            witness.as_ref(),
         )
         .map_err(|r| r.message)?;
 
@@ -142,7 +143,7 @@ mod tests {
     struct Skills(bool);
     #[async_trait]
     impl ForkCapableSkills for Skills {
-        async fn is_fork_capable(&self, _skill_name: &str) -> bool {
+        async fn is_fork_capable(&self, _skill_name: &Utf16JsonProjection) -> bool {
             self.0
         }
     }
@@ -185,7 +186,7 @@ mod tests {
         .await
         .unwrap();
         assert!(gate(dir.path(), true)
-            .check_resume(id, Some("review"))
+            .check_resume(id, Some(&"review".into()))
             .await
             .is_ok());
     }
@@ -206,7 +207,7 @@ mod tests {
             .unwrap();
 
         let err = gate(dir.path(), true)
-            .check_resume(id, Some("review"))
+            .check_resume(id, Some(&"review".into()))
             .await
             .unwrap_err();
         assert!(
@@ -228,7 +229,7 @@ mod tests {
         .await
         .unwrap();
         let err = gate(dir.path(), true)
-            .check_resume(id, Some("deploy"))
+            .check_resume(id, Some(&"deploy".into()))
             .await
             .unwrap_err();
         assert!(err.contains("does not match its task record"), "{err}");
@@ -247,7 +248,7 @@ mod tests {
         .await
         .unwrap();
         let err = gate(dir.path(), false)
-            .check_resume(id, Some("review"))
+            .check_resume(id, Some(&"review".into()))
             .await
             .unwrap_err();
         assert!(

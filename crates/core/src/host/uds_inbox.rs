@@ -15,12 +15,49 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// The queue insertion called by `session.receive`'s first `next(e)`. Its
+/// result is true only when the inbound policy actually accepted the message.
+pub type PeerQueueCommit = Arc<dyn Fn(Utf16JsonProjection) -> bool + Send + Sync>;
+
+#[async_trait::async_trait]
+pub trait PeerReceiveGate: Send + Sync {
+    /// Return false only when this gate belongs to a different session
+    /// generation; a consumed delivery still counts as handled.
+    async fn receive(
+        &self,
+        destination_session_id: &str,
+        text: &Utf16JsonProjection,
+        commit: PeerQueueCommit,
+    ) -> bool;
+}
+
+/// Installed before a listener is advertised, then filled when its owning
+/// Orchestrator is ready. This closes the bridge startup window without
+/// letting a different session generation screen an earlier delivery.
+#[derive(Default)]
+pub struct PeerReceiveGateSlot(Mutex<Option<Arc<dyn PeerReceiveGate>>>);
+
+impl PeerReceiveGateSlot {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, gate: Arc<dyn PeerReceiveGate>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(gate);
+    }
+
+    fn get(&self) -> Option<Arc<dyn PeerReceiveGate>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 use crate::host::live_sessions::{
-    extract_cross_session_inner, inbound_decision, parse_from_name, parse_wrap_attr,
-    peer_message_reminder, process_live_dir, process_name, process_permission_class,
-    process_session_id, sessions_root, wrap_cross_session_message_with_mode, InboundPolicy,
-    PeerMessage,
+    extract_cross_session_inner_source, inbound_decision, process_live_dir, process_name,
+    process_permission_class, process_session_id, sessions_root,
+    wrap_cross_session_message_with_mode_source, InboundPolicy, PeerMessage,
 };
+use crate::types::utf16_json::Utf16JsonProjection;
 
 const MSG_V: u32 = 1;
 const MAX_LINE: usize = 1_048_576;
@@ -59,6 +96,8 @@ struct InboxState {
     /// Set after a hot remount. Legacy unscoped UDS payloads are then refused
     /// so a sender paused after resolving A cannot enter newly mounted B.
     require_session_fence: bool,
+    receive_gate: Option<Arc<PeerReceiveGateSlot>>,
+    tokio_handle: Option<tokio::runtime::Handle>,
     stop: AtomicBool,
 }
 
@@ -74,6 +113,8 @@ impl InboxState {
             child_token: Mutex::new(None),
             bound_session_id,
             require_session_fence,
+            receive_gate: None,
+            tokio_handle: None,
             stop: AtomicBool::new(false),
         }
     }
@@ -324,7 +365,8 @@ pub struct UdsUserMessage {
     /// `"user"`.
     pub role: String,
     /// Already-wrapped `<cross-session-message>` body.
-    pub content: String,
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub content: Utf16JsonProjection,
 }
 
 /// Build the send payload.
@@ -333,9 +375,9 @@ pub fn user_payload(
     from_name: &str,
     from_sid: &str,
     from_addr: &str,
-    body: &str,
+    body: &Utf16JsonProjection,
 ) -> UdsUserPayload {
-    let content = wrap_cross_session_message_with_mode(
+    let content = wrap_cross_session_message_with_mode_source(
         from_name,
         from_sid,
         Some(from_name),
@@ -370,22 +412,21 @@ pub fn send_uds(path: &Path, payload: &UdsUserPayload) -> io::Result<()> {
     if payload.to_session_id.is_none() {
         payload.to_session_id = peer.and_then(|peer| peer.session_id);
     }
-    send_uds_raw(
-        path,
-        token.as_deref(),
-        &serde_json::to_value(payload).map_err(io::Error::other)?,
-    )
+    let payload_json = serde_json::to_string(&payload).map_err(io::Error::other)?;
+    send_uds_json(path, token.as_deref(), &payload_json)
 }
 
-/// Low-level line send: optional `{type:auth,token}` then JSON `\n`.
-pub fn send_uds_raw(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::Result<()> {
+/// Low-level line send for a typed source payload. Serializing directly avoids
+/// materializing `RawValue` members through `serde_json::Value`, which cannot
+/// represent lone UTF-16 surrogates in message content.
+fn send_uds_json(path: &Path, auth_token: Option<&str>, payload_json: &str) -> io::Result<()> {
     #[cfg(unix)]
     {
-        send_uds_unix(path, auth_token, payload)
+        send_uds_unix_json(path, auth_token, payload_json)
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, auth_token, payload);
+        let _ = (path, auth_token, payload_json);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "UDS inbox is not available on this platform",
@@ -393,8 +434,18 @@ pub fn send_uds_raw(path: &Path, auth_token: Option<&str>, payload: &Value) -> i
     }
 }
 
+/// Low-level compatibility send for an already-generated JSON value.
+/// Authentication and framing share the same line writer as source payloads.
+pub fn send_uds_raw(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::Result<()> {
+    send_uds_json(path, auth_token, &payload.to_string())
+}
+
 #[cfg(unix)]
-fn send_uds_unix(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::Result<()> {
+fn send_uds_unix_json(
+    path: &Path,
+    auth_token: Option<&str>,
+    payload_json: &str,
+) -> io::Result<()> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(path)?;
     stream.set_write_timeout(Some(SEND_TIMEOUT))?;
@@ -403,7 +454,7 @@ fn send_uds_unix(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::
         let auth = json!({"type":"auth","token":token});
         writeln!(stream, "{auth}")?;
     }
-    writeln!(stream, "{payload}")?;
+    writeln!(stream, "{payload_json}")?;
     stream.flush()?;
     if cfg!(target_os = "macos") {
         std::thread::sleep(MACOS_LINGER);
@@ -416,7 +467,7 @@ fn send_uds_unix(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::
 pub fn start_process_inbox(path: impl Into<PathBuf>) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        start_process_inbox_unix(path.into(), process_session_id(), false)
+        start_process_inbox_unix(path.into(), process_session_id(), false, None)
     }
     #[cfg(not(unix))]
     {
@@ -437,11 +488,32 @@ pub fn start_process_inbox_for_session(
 ) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false)
+        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false, None)
     }
     #[cfg(not(unix))]
     {
         let _ = (path, session_id);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
+/// Bind a generation whose inbound peer deliveries must reach a Mod gate
+/// before policy and queue insertion. The slot may be filled after binding.
+pub fn start_process_inbox_for_session_with_gate(
+    path: impl Into<PathBuf>,
+    session_id: &str,
+    slot: Arc<PeerReceiveGateSlot>,
+) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false, Some(slot))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, session_id, slot);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "UDS inbox is not available on this platform",
@@ -457,7 +529,8 @@ pub fn retarget_process_inbox(session_id: &str) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
         let path = process_socket_path().unwrap_or_else(|| default_socket_path(std::process::id()));
-        start_process_inbox_unix(path, Some(session_id.to_string()), true)
+        let gate = inbox().receive_gate.clone();
+        start_process_inbox_unix(path, Some(session_id.to_string()), true, gate)
     }
     #[cfg(not(unix))]
     {
@@ -469,14 +542,47 @@ pub fn retarget_process_inbox(session_id: &str) -> io::Result<PathBuf> {
     }
 }
 
+/// Retarget with a new runtime's gate instead of retaining the previous one.
+pub fn retarget_process_inbox_with_gate(
+    session_id: &str,
+    slot: Arc<PeerReceiveGateSlot>,
+) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let path = process_socket_path().unwrap_or_else(|| default_socket_path(std::process::id()));
+        start_process_inbox_unix(path, Some(session_id.to_string()), true, Some(slot))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (session_id, slot);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
+/// Replace the gate when a runtime remounts the same session without rebinding.
+pub fn set_process_inbox_receive_gate(gate: Arc<dyn PeerReceiveGate>) {
+    if let Some(slot) = inbox().receive_gate.as_ref() {
+        slot.set(gate);
+    }
+}
+
 #[cfg(unix)]
 fn start_process_inbox_unix(
     path: PathBuf,
     bound_session_id: Option<String>,
     require_session_fence: bool,
+    receive_gate: Option<Arc<PeerReceiveGateSlot>>,
 ) -> io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
+    let inherited_handle = RUNTIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|runtime| runtime.state.tokio_handle.clone());
     stop_process_inbox_inner()?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
@@ -493,10 +599,12 @@ fn start_process_inbox_unix(
             ));
         }
     }
-    let state = Arc::new(InboxState::new(
-        bound_session_id.clone(),
-        require_session_fence,
-    ));
+    let mut state = InboxState::new(bound_session_id.clone(), require_session_fence);
+    state.receive_gate = receive_gate;
+    state.tokio_handle = tokio::runtime::Handle::try_current()
+        .ok()
+        .or(inherited_handle);
+    let state = Arc::new(state);
     *state.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
     if let Some(p) = path.to_str() {
         std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", p);
@@ -596,7 +704,7 @@ fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState
 }
 
 #[cfg(unix)]
-fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &InboxState) {
+fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &Arc<InboxState>) {
     // `accept_loop` puts the LISTENER into non-blocking mode, and on macOS/BSD an
     // accepted socket INHERITS O_NONBLOCK (Linux does not — POSIX leaves it
     // unspecified and the two disagree). A non-blocking socket ignores
@@ -634,18 +742,19 @@ fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &InboxState)
                 }
                 while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
                     let line: Vec<u8> = buf.drain(..=idx).collect();
-                    let text = String::from_utf8_lossy(&line);
-                    let text = text.trim();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let Ok(v) = serde_json::from_str::<Value>(text) else {
+                    let Ok(text) = std::str::from_utf8(&line) else {
                         continue;
                     };
-                    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let Ok(v) = Utf16JsonProjection::parse(text) else {
+                        continue;
+                    };
+                    let kind = exact_field_string(&v, "", "type").unwrap_or("");
                     if kind == "auth" {
                         if first {
-                            let tok = v.get("token").and_then(Value::as_str).unwrap_or("");
+                            let tok = exact_field_string(&v, "", "token").unwrap_or("");
                             role = token_role(state, tok);
                             if required && role.is_none() {
                                 return;
@@ -726,34 +835,89 @@ fn peer_identity_apple(stream: &std::os::unix::net::UnixStream) -> Option<(u32, 
     Some((pid as u32, euid))
 }
 
-fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
-    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+fn dispatch_line(v: Utf16JsonProjection, state: &Arc<InboxState>, peer_pid: Option<u32>) {
+    let kind = exact_field_string(&v, "", "type").unwrap_or("");
     match kind {
         "auth" => {}
         "user" => {
             let Some(peer_pid) = peer_pid else {
                 return;
             };
-            let destination = v.get("toSessionId").and_then(Value::as_str);
+            let destination = exact_field_string(&v, "", "toSessionId");
             if destination.is_some_and(|value| Some(value) != state.bound_session_id.as_deref())
                 || (state.require_session_fence && destination.is_none())
             {
                 return;
             }
-            let content = v
-                .pointer("/message/content")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if content.is_empty() {
+            let Some(content) = exact_field_projection(&v, "message", "content") else {
+                return;
+            };
+            if content
+                .string_units("")
+                .is_none_or(|units| units.is_empty())
+            {
                 return;
             }
-            let from_addr = v.get("from").and_then(Value::as_str).map(str::to_string);
-            let msg_id = v.get("msg_id").and_then(Value::as_str).map(str::to_string);
+            let from_addr = exact_field_string(&v, "", "from").map(str::to_string);
+            let msg_id = exact_field_string(&v, "", "msg_id").map(str::to_string);
             let Some(msg) = attribute_user_message(content, from_addr, msg_id, peer_pid) else {
                 return;
             };
-            apply_inbound(msg, state);
+            if !reserve_inbound_id(&msg, state) {
+                return;
+            }
+            let Some(slot) = state.receive_gate.as_ref() else {
+                apply_inbound_reserved(msg, state);
+                return;
+            };
+            let Some(handle) = state.tokio_handle.as_ref() else {
+                apply_inbound_reserved(msg, state);
+                return;
+            };
+            let pending = Arc::new(Mutex::new(Some(msg)));
+            let original_text = pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|msg| msg.content.clone())
+                .unwrap_or_else(|| Utf16JsonProjection::from(""));
+            let gate = loop {
+                if let Some(gate) = slot.get() {
+                    break Some(gate);
+                }
+                if state.stop.load(Ordering::Acquire) {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let Some(gate) = gate else {
+                if let Some(msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    apply_inbound_reserved(msg, state);
+                }
+                return;
+            };
+            let commit_state = state.clone();
+            let commit_pending = pending.clone();
+            let commit: PeerQueueCommit = Arc::new(move |text| {
+                let Some(mut msg) = commit_pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                else {
+                    return false;
+                };
+                msg.content = text;
+                msg.mod_screened = true;
+                apply_inbound_reserved(msg, &commit_state)
+            });
+            let handled = state.bound_session_id.as_deref().is_some_and(|session_id| {
+                handle.block_on(gate.receive(session_id, &original_text, commit))
+            });
+            if !handled {
+                if let Some(msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    apply_inbound_reserved(msg, state);
+                }
+            }
         }
         "control" => {
             let Some(peer_pid) = peer_pid else {
@@ -763,8 +927,8 @@ fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
             {
                 return;
             }
-            if v.get("action").and_then(Value::as_str) == Some("peer_message_status") {
-                let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+            if exact_field_string(&v, "", "action") == Some("peer_message_status") {
+                let status = exact_field_string(&v, "", "status").unwrap_or("");
                 let notice = receipt_notice(status);
                 state
                     .receipts
@@ -777,17 +941,75 @@ fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
     }
 }
 
+/// Return a protocol field only if its key path and value are exact valid
+/// Rust text. Known routing/control fields have UTF-8 semantics; arbitrary
+/// payloads use `exact_field_projection` and retain all UTF-16 units.
+fn exact_field_string<'a>(
+    projection: &'a Utf16JsonProjection,
+    parent: &str,
+    field: &str,
+) -> Option<&'a str> {
+    let parent = normalized_pointer(parent);
+    let pointer = format!("{parent}/{field}");
+    if !exact_path_keys(projection, &pointer) {
+        return None;
+    }
+    let value = projection.string_at(&pointer)?;
+    let units = projection.string_units(&pointer)?;
+    units
+        .iter()
+        .copied()
+        .eq(value.encode_utf16())
+        .then_some(value)
+}
+
+fn exact_field_projection(
+    projection: &Utf16JsonProjection,
+    parent: &str,
+    field: &str,
+) -> Option<Utf16JsonProjection> {
+    let parent = normalized_pointer(parent);
+    let pointer = format!("{parent}/{field}");
+    if !exact_path_keys(projection, &pointer) {
+        return None;
+    }
+    projection.subprojection(&pointer).ok()
+}
+
+fn normalized_pointer(parent: &str) -> String {
+    if parent.is_empty() {
+        String::new()
+    } else if parent.starts_with('/') {
+        parent.to_owned()
+    } else {
+        format!("/{parent}")
+    }
+}
+
+fn exact_path_keys(projection: &Utf16JsonProjection, pointer: &str) -> bool {
+    let mut parent = String::new();
+    for segment in pointer.strip_prefix('/').unwrap_or(pointer).split('/') {
+        let field = segment.replace("~1", "/").replace("~0", "~");
+        if projection.key_units(&parent, &field) != field.encode_utf16().collect::<Vec<_>>() {
+            return false;
+        }
+        parent.push('/');
+        parent.push_str(segment);
+    }
+    true
+}
+
 /// Bind identity to the connecting live session. Unregistered pids are dropped.
 fn attribute_user_message(
-    content: String,
+    content: Utf16JsonProjection,
     from_addr: Option<String>,
     msg_id: Option<String>,
     peer_pid: u32,
 ) -> Option<PeerMessage> {
-    let wrap_from = parse_wrap_attr(&content, "from");
-    let wrap_name = parse_from_name(&content);
-    let wrap_sid = parse_wrap_attr(&content, "from-session");
-    let inner = extract_cross_session_inner(&content).to_string();
+    let wrap_from = parse_wrap_attr_source(&content, "from");
+    let wrap_name = parse_wrap_attr_source(&content, "from-name");
+    let wrap_sid = parse_wrap_attr_source(&content, "from-session");
+    let inner = extract_cross_session_inner_source(&content);
 
     let (from, from_session, from_mode, receipt_addr) = if peer_pid == std::process::id() {
         let from = process_name()
@@ -819,7 +1041,7 @@ fn attribute_user_message(
         return None;
     };
 
-    let content = wrap_cross_session_message_with_mode(
+    let content = wrap_cross_session_message_with_mode_source(
         &from,
         &from_session,
         Some(&from),
@@ -834,29 +1056,62 @@ fn attribute_user_message(
         msg_id,
         from_addr: receipt_addr,
         from_mode,
+        mod_screened: false,
     })
 }
 
-fn apply_inbound(msg: PeerMessage, state: &InboxState) {
+/// Read a known XML-style identity attribute over exact UTF-16. An
+/// unrepresentable value is not replacement-decoded into a trusted identity.
+fn parse_wrap_attr_source(content: &Utf16JsonProjection, attr: &str) -> Option<String> {
+    let units = content.string_units("")?;
+    let tag = format!("<{}", crate::host::live_sessions::CROSS_SESSION_TAG)
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let tag_start = units.windows(tag.len()).position(|window| window == tag)?;
+    let tag_end = units[tag_start..]
+        .iter()
+        .position(|unit| *unit == b'>' as u16)?
+        + tag_start;
+    let attrs = &units[tag_start + tag.len()..tag_end];
+    let key = format!("{attr}=\"").encode_utf16().collect::<Vec<_>>();
+    let key_start = attrs.windows(key.len()).position(|window| window == key)? + key.len();
+    let value_end = attrs[key_start..]
+        .iter()
+        .position(|unit| *unit == b'"' as u16)?
+        + key_start;
+    let value = String::from_utf16(&attrs[key_start..value_end]).ok()?;
+    (!value.is_empty()).then_some(value)
+}
+
+fn reserve_inbound_id(msg: &PeerMessage, state: &InboxState) -> bool {
     if let Some(message_id) = msg.msg_id.as_deref() {
         let mut seen = state
             .seen_message_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if seen.iter().any(|known| known == message_id) {
-            return;
+            return false;
         }
         if seen.len() >= SEEN_MESSAGE_LIMIT {
             seen.pop_front();
         }
         seen.push_back(message_id.to_string());
     }
+    true
+}
+
+fn apply_inbound(msg: PeerMessage, state: &InboxState) -> bool {
+    reserve_inbound_id(&msg, state) && apply_inbound_reserved(msg, state)
+}
+
+fn apply_inbound_reserved(msg: PeerMessage, state: &InboxState) -> bool {
     let (policy, cause) = inbound_decision(msg.from_mode.as_deref());
     match policy {
         InboundPolicy::Refuse | InboundPolicy::Default => {
             if policy == InboundPolicy::Refuse {
                 send_receipt(&msg, "denied");
             }
+            false
         }
         InboundPolicy::Hold => {
             send_receipt(&msg, "held");
@@ -873,14 +1128,16 @@ fn apply_inbound(msg: PeerMessage, state: &InboxState) {
                 announced: false,
                 quiet_until: None,
             });
+            false
         }
         InboundPolicy::Accept => {
-            send_receipt(&msg, "delivered");
             state
                 .accepted
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push_back(msg);
+                .push_back(msg.clone());
+            send_receipt(&msg, "delivered");
+            true
         }
     }
 }
@@ -1054,11 +1311,15 @@ pub fn next_unannounced_held() -> Option<HeldPeer> {
         .find(|e| !e.announced && e.quiet_until.is_none_or(|until| now >= until))?;
     entry.announced = true;
     entry.quiet_until = None;
-    let preview_src = extract_cross_session_inner(&entry.msg.content);
-    let preview: String = preview_src.chars().take(240).collect();
+    let preview_src = extract_cross_session_inner_source(&entry.msg.content);
+    let preview_units = preview_src.string_units("").unwrap_or_default();
+    let preview: String = String::from_utf16_lossy(&preview_units)
+        .chars()
+        .take(240)
+        .collect();
     let from = if entry.msg.from.is_empty() || entry.msg.from.starts_with("uds:") {
-        parse_from_name(&entry.msg.content)
-            .or_else(|| parse_wrap_attr(&entry.msg.content, "from"))
+        parse_wrap_attr_source(&entry.msg.content, "from-name")
+            .or_else(|| parse_wrap_attr_source(&entry.msg.content, "from"))
             .filter(|s| !s.starts_with("uds:"))
             .unwrap_or_else(|| "an unidentified session".into())
     } else {
@@ -1153,16 +1414,44 @@ pub fn enqueue_inbound(msg: PeerMessage) {
     apply_inbound(msg, &inbox());
 }
 
+/// Reserve a file-fallback message before its Mod receives it. The first
+/// `next(e)` invokes the returned commit, applying inbound policy and queueing
+/// the rewritten body once; a consumed message leaves the queue untouched.
+#[must_use]
+pub fn prepare_file_inbound(msg: PeerMessage) -> Option<(Utf16JsonProjection, PeerQueueCommit)> {
+    let state = inbox();
+    if !reserve_inbound_id(&msg, &state) {
+        return None;
+    }
+    let text = msg.content.clone();
+    let pending = Arc::new(Mutex::new(Some(msg)));
+    let commit: PeerQueueCommit = Arc::new(move |rewritten| {
+        let Some(mut msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return false;
+        };
+        msg.content = rewritten;
+        msg.mod_screened = true;
+        apply_inbound_reserved(msg, &state)
+    });
+    Some((text, commit))
+}
+
 /// Drain accepted UDS messages into reminder strings.
 #[must_use]
-pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
+pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<Utf16JsonProjection> {
+    take_accepted_peer_messages()
+        .iter()
+        .map(|msg| crate::host::live_sessions::peer_message_reminder(msg, mid_turn))
+        .collect()
+}
+
+/// Preserve the authenticated peer payload until the host has screened its
+/// model-facing text through `session.receive`.
+#[must_use]
+pub fn take_accepted_peer_messages() -> Vec<PeerMessage> {
     let state = inbox();
     let mut q = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
-    while let Some(msg) = q.pop_front() {
-        out.push(peer_message_reminder(&msg, mid_turn));
-    }
-    out
+    q.drain(..).collect()
 }
 
 /// Stop the accept loop, join it, and unlink the socket + key.
@@ -1300,7 +1589,7 @@ pub fn send_to_live_peer(
     sock: &Path,
     from_name: &str,
     from_sid: &str,
-    body: &str,
+    body: &Utf16JsonProjection,
 ) -> io::Result<()> {
     if !is_inbox_sock_path(sock) {
         return Err(io::Error::new(
@@ -1368,6 +1657,20 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    fn source_text(text: &str) -> Utf16JsonProjection {
+        text.into()
+    }
+
+    fn display_source_text(text: &Utf16JsonProjection) -> String {
+        String::from_utf16_lossy(&text.string_units("").unwrap())
+    }
+
+    fn dispatch_value(value: Value, state: &Arc<InboxState>, peer_pid: Option<u32>) {
+        let projection = Utf16JsonProjection::from_serde_value(&value)
+            .expect("test fixture must convert into a flat JSON projection");
+        dispatch_line(projection, state, peer_pid);
+    }
+
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -1377,6 +1680,37 @@ mod tests {
         std::env::remove_var("LINGXI_UDS_REQUIRE_AUTH");
         std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
         crate::host::live_sessions::set_process_permission_class(None);
+    }
+
+    #[test]
+    fn accepted_peer_payload_is_available_before_reminder_rendering() {
+        let _guard = test_guard();
+        stop_process_inbox();
+        let message = PeerMessage {
+            from: "sender".into(),
+            from_session_id: "peer-session".into(),
+            content: "hello".into(),
+            ..PeerMessage::default()
+        };
+        enqueue_accepted(message.clone());
+        assert_eq!(take_accepted_peer_messages(), vec![message]);
+        assert!(take_accepted_peer_reminders(false).is_empty());
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::host::live_sessions::set_process_dir(
+            crate::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions")),
+        );
+        crate::host::live_sessions::set_process_session_id("11111111-2222-4333-8444-555555555555");
+        enqueue_accepted(PeerMessage {
+            from: "sender".into(),
+            from_session_id: "peer-session".into(),
+            content: "hello".into(),
+            ..PeerMessage::default()
+        });
+        let delivered = crate::host::live_sessions::take_accepted_peer_deliveries(false);
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].origin_kind, "peer");
+        assert!(display_source_text(&delivered[0].text).contains("hello"));
+        stop_process_inbox();
     }
 
     #[test]
@@ -1442,7 +1776,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.sock");
         start_process_inbox(&path).unwrap();
-        send_to_live_peer(&path, "alpha", "s1", "hello").unwrap();
+        send_to_live_peer(&path, "alpha", "s1", &source_text("hello")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut got = Vec::new();
         while Instant::now() < deadline {
@@ -1455,9 +1789,44 @@ mod tests {
         stop_process_inbox();
         clean_env();
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("<cross-session-message"), "{got:?}");
-        assert!(got[0].contains("hello"), "{got:?}");
-        assert!(got[0].contains("from=\"alpha\""), "{got:?}");
+        assert!(
+            display_source_text(&got[0]).contains("<cross-session-message"),
+            "{got:?}"
+        );
+        assert!(display_source_text(&got[0]).contains("hello"), "{got:?}");
+        assert!(
+            display_source_text(&got[0]).contains("from=\"alpha\""),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn uds_message_keeps_isolated_surrogate_units_through_receive_gate_boundary() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        crate::host::live_sessions::set_process_name("receiver");
+        crate::host::live_sessions::set_process_session_id("session-b");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.sock");
+        start_process_inbox_for_session(&path, "session-b").unwrap();
+        let body = Utf16JsonProjection::parse(r#""left\ud800right""#).unwrap();
+        send_to_live_peer(&path, "sender", "session-a", &body).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while Instant::now() < deadline {
+            messages = take_accepted_peer_messages();
+            if !messages.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop_process_inbox();
+        clean_env();
+        assert_eq!(messages.len(), 1);
+        let inner = extract_cross_session_inner_source(&messages[0].content);
+        assert_eq!(inner.string_units(""), body.string_units(""));
     }
 
     /// A sender that connects and then pauses before writing must still be
@@ -1522,7 +1891,10 @@ mod tests {
             1,
             "a paused sender must still be delivered: {got:?}"
         );
-        assert!(got[0].contains("delayed hello"), "{got:?}");
+        assert!(
+            display_source_text(&got[0]).contains("delayed hello"),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1540,19 +1912,54 @@ mod tests {
         let message = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "22222222-3333-4444-8555-666666666666",
-            "fallback hello",
-            Some("fallback"),
+            &source_text("fallback hello"),
+            Some(&source_text("fallback")),
         );
         dir.send_inbox(session_id, &message).unwrap();
         let first = crate::host::live_sessions::take_accepted_peer_reminders(false);
         assert_eq!(first.len(), 1);
-        assert!(first[0].contains("fallback hello"));
+        assert!(display_source_text(&first[0]).contains("fallback hello"));
         assert!(crate::host::live_sessions::take_accepted_peer_reminders(false).is_empty());
 
         // A retry over the alternate transport with the same stable id must not
         // surface twice.
         dir.send_inbox(session_id, &message).unwrap();
         assert!(crate::host::live_sessions::take_accepted_peer_reminders(false).is_empty());
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+        stop_process_inbox();
+    }
+
+    #[test]
+    fn file_fallback_reaches_receive_gate_before_policy_and_queue() {
+        let _guard = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        crate::host::live_sessions::set_process_dir(dir.clone());
+        crate::host::live_sessions::set_process_session_id(session_id);
+        let message = crate::host::live_sessions::outbound_peer_message(
+            "sender",
+            "22222222-3333-4444-8555-666666666666",
+            &source_text("file body"),
+            None,
+        );
+        dir.send_inbox(session_id, &message).unwrap();
+        assert!(crate::host::live_sessions::take_queued_peer_deliveries(false).is_empty());
+        let drained = crate::host::live_sessions::drain_file_peer_messages(session_id);
+        assert_eq!(drained.len(), 1);
+        let (original, commit) = prepare_file_inbound(drained[0].clone()).unwrap();
+        assert!(display_source_text(&original).contains("file body"));
+        assert_eq!(inbox().accepted.lock().unwrap().len(), 0);
+        assert!(commit(source_text("rewritten file body")));
+        assert!(!commit(source_text("again")));
+        assert!(prepare_file_inbound(drained[0].clone()).is_none());
+        let delivered = crate::host::live_sessions::take_queued_peer_deliveries(false);
+        assert_eq!(delivered.len(), 1);
+        assert!(delivered[0].already_screened);
+        assert!(display_source_text(&delivered[0].text).contains("rewritten file body"));
         std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
         stop_process_inbox();
     }
@@ -1566,7 +1973,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("restart.sock");
         start_process_inbox(&path).unwrap();
-        send_to_live_peer(&path, "alpha", "s1", "first").unwrap();
+        send_to_live_peer(&path, "alpha", "s1", &source_text("first")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if !take_accepted_peer_reminders(false).is_empty() {
@@ -1576,7 +1983,7 @@ mod tests {
         }
         start_process_inbox(&path).unwrap();
         assert!(take_accepted_peer_reminders(false).is_empty());
-        send_to_live_peer(&path, "alpha", "s1", "second").unwrap();
+        send_to_live_peer(&path, "alpha", "s1", &source_text("second")).unwrap();
         let mut got = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -1588,8 +1995,16 @@ mod tests {
         }
         stop_process_inbox();
         clean_env();
-        assert!(got.iter().any(|s| s.contains("second")), "{got:?}");
-        assert!(got.iter().all(|s| !s.contains("first")), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|s| display_source_text(s).contains("second")),
+            "{got:?}"
+        );
+        assert!(
+            got.iter()
+                .all(|s| !display_source_text(s).contains("first")),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1620,7 +2035,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hold.sock");
         start_process_inbox(&path).unwrap();
-        send_to_live_peer(&path, "alpha", "s1", "park-me").unwrap();
+        send_to_live_peer(&path, "alpha", "s1", &source_text("park-me")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut held = None;
         while Instant::now() < deadline {
@@ -1639,7 +2054,11 @@ mod tests {
         let got = take_accepted_peer_reminders(false);
         stop_process_inbox();
         clean_env();
-        assert!(got.iter().any(|s| s.contains("park-me")), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|s| display_source_text(s).contains("park-me")),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1681,12 +2100,12 @@ mod tests {
 
     #[test]
     fn payload_shape() {
-        let p = user_payload("alpha", "sid", "uds:/tmp/x.sock", "hi");
+        let p = user_payload("alpha", "sid", "uds:/tmp/x.sock", &source_text("hi"));
         assert_eq!(p.msg_v, 1);
         assert_eq!(p.kind, "user");
         assert_eq!(p.message.role, "user");
         assert_eq!(p.priority, "next");
-        assert!(p.message.content.contains("from=\"alpha\""));
+        assert!(display_source_text(&p.message.content).contains("from=\"alpha\""));
     }
 
     #[test]
@@ -1696,7 +2115,7 @@ mod tests {
         std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
         crate::host::live_sessions::set_process_name("receiver");
         crate::host::live_sessions::set_process_session_id("session-b");
-        let state = InboxState::new(Some("session-b".into()), true);
+        let state = Arc::new(InboxState::new(Some("session-b".into()), true));
         let payload = |destination: Option<&str>, id: &str| {
             let mut value = serde_json::json!({
                 "type": "user",
@@ -1710,13 +2129,13 @@ mod tests {
             value
         };
 
-        dispatch_line(payload(None, "missing"), &state, Some(std::process::id()));
-        dispatch_line(
+        dispatch_value(payload(None, "missing"), &state, Some(std::process::id()));
+        dispatch_value(
             payload(Some("session-a"), "stale"),
             &state,
             Some(std::process::id()),
         );
-        dispatch_line(
+        dispatch_value(
             payload(Some("session-b"), "current"),
             &state,
             Some(std::process::id()),
@@ -1731,6 +2150,98 @@ mod tests {
             Some("current")
         );
         std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+    }
+
+    #[test]
+    fn receive_gate_commits_only_after_screening_and_marks_the_queue_entry() {
+        struct Gate {
+            state: Arc<InboxState>,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl PeerReceiveGate for Gate {
+            async fn receive(
+                &self,
+                destination_session_id: &str,
+                text: &Utf16JsonProjection,
+                commit: PeerQueueCommit,
+            ) -> bool {
+                assert_eq!(destination_session_id, "session-b");
+                let prior_calls = self.calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    self.state
+                        .accepted
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .len(),
+                    prior_calls
+                );
+                if display_source_text(text).contains("muted") {
+                    return true;
+                }
+                assert!(commit(source_text("rewritten")));
+                true
+            }
+        }
+
+        let _guard = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        crate::host::live_sessions::set_process_name("receiver");
+        crate::host::live_sessions::set_process_session_id("session-b");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let slot = Arc::new(PeerReceiveGateSlot::new());
+        let mut state = InboxState::new(Some("session-b".into()), false);
+        state.receive_gate = Some(slot.clone());
+        state.tokio_handle = Some(runtime.handle().clone());
+        let state = Arc::new(state);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(Gate {
+            state: state.clone(),
+            calls: calls.clone(),
+        });
+        for (index, (id, body)) in [("admitted", "hello"), ("consumed", "muted")]
+            .into_iter()
+            .enumerate()
+        {
+            let worker_state = state.clone();
+            let worker = std::thread::spawn(move || {
+                dispatch_value(
+                    serde_json::json!({
+                        "type":"user", "msg_id":id,
+                        "message":{"role":"user","content":body},
+                        "from":"uds:/tmp/source.sock"
+                    }),
+                    &worker_state,
+                    Some(std::process::id()),
+                );
+            });
+            if index == 0 {
+                std::thread::sleep(Duration::from_millis(40));
+                assert!(state
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                slot.set(gate.clone());
+            }
+            worker.join().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let accepted = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].content, source_text("rewritten"));
+        assert!(accepted[0].mod_screened);
+        drop(accepted);
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+        stop_process_inbox();
     }
 
     /// Shutdown must preserve BOTH queues, not just the accepted one.
@@ -1756,7 +2267,7 @@ mod tests {
         let mut accepted = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
-            "survive shutdown",
+            &source_text("survive shutdown"),
             None,
         );
         accepted.msg_id = Some("shutdown-accepted".into());
@@ -1766,7 +2277,7 @@ mod tests {
         let mut held = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
-            "held across shutdown",
+            &source_text("held across shutdown"),
             None,
         );
         held.msg_id = Some("shutdown-held".into());
@@ -1800,7 +2311,7 @@ mod tests {
         let mut message = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
-            "owned by A",
+            &source_text("owned by A"),
             None,
         );
         message.msg_id = Some("generation-a".into());
@@ -1836,8 +2347,12 @@ mod tests {
         )
         .unwrap();
         let peer = dir.find_by_pid(std::process::id()).unwrap();
-        let message =
-            crate::host::live_sessions::outbound_peer_message("sender", "source", "for A", None);
+        let message = crate::host::live_sessions::outbound_peer_message(
+            "sender",
+            "source",
+            &source_text("for A"),
+            None,
+        );
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let sender_dir = dir.clone();
         let sender = std::thread::spawn(move || {
@@ -1867,7 +2382,7 @@ mod tests {
         assert!(dir.drain_inbox("session-b").unwrap().is_empty());
         let original = dir.drain_inbox("session-a").unwrap();
         assert_eq!(original.len(), 1);
-        assert!(original[0].content.contains("for A"));
+        assert!(display_source_text(&original[0].content).contains("for A"));
         stop_process_inbox();
     }
 
@@ -1889,7 +2404,7 @@ mod tests {
         let mut message = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source",
-            "exactly once",
+            &source_text("exactly once"),
             None,
         );
         message.msg_id = Some("both-transports".into());
@@ -1920,7 +2435,10 @@ mod tests {
         stop_process_inbox();
         clean_env();
         assert_eq!(got.len(), 1, "one message must arrive once: {got:?}");
-        assert!(got[0].contains("exactly once"), "{got:?}");
+        assert!(
+            display_source_text(&got[0]).contains("exactly once"),
+            "{got:?}"
+        );
         assert!(leftover.is_empty(), "the drain must consume the inbox row");
     }
 
@@ -1949,7 +2467,7 @@ mod tests {
         let mut stale = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source",
-            "meant for A",
+            &source_text("meant for A"),
             None,
         );
         stale.msg_id = Some("stamped-for-a".into());
@@ -1971,7 +2489,7 @@ mod tests {
         let mut fresh = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source",
-            "meant for B",
+            &source_text("meant for B"),
             None,
         );
         fresh.msg_id = Some("stamped-for-b".into());
@@ -1988,7 +2506,10 @@ mod tests {
         stop_process_inbox();
         clean_env();
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("meant for B"), "{got:?}");
+        assert!(
+            display_source_text(&got[0]).contains("meant for B"),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -2005,7 +2526,7 @@ mod tests {
         let mut message = crate::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
-            "retained A",
+            &source_text("retained A"),
             None,
         );
         message.msg_id = Some("retained-a".into());
@@ -2049,7 +2570,7 @@ mod tests {
         let _g = test_guard();
         stop_process_inbox();
         clean_env();
-        dispatch_line(
+        dispatch_value(
             serde_json::json!({
                 "type": "control",
                 "action": "peer_message_status",

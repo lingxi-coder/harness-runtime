@@ -30,7 +30,7 @@ use lingxi_core::host::{
     WorkspaceBase, WorktreeError, WorktreeHandle, FUSION_MATERIAL_DIFF_BYTE_CAP,
     FUSION_MATERIAL_MAX_PATCH_FILES,
 };
-use serde_json::Value;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::any::Any;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -504,26 +504,49 @@ impl WorktreeScopedInvoker {
     fn scope(
         &self,
         name: &str,
-        mut input: Value,
+        mut input: Utf16JsonProjection,
         mut ctx: SubagentInvocationContext,
-    ) -> Result<(Value, SubagentInvocationContext), ToolInvokerError> {
+    ) -> Result<(Utf16JsonProjection, SubagentInvocationContext), ToolInvokerError> {
         if let Some((_, key)) = PATH_ARGS.iter().find(|(tool, _)| *tool == name) {
-            if let Some(raw) = input.get(*key).and_then(Value::as_str) {
-                if !self.contains(raw) {
-                    return Err(self.outside(raw));
+            if let Some(raw) = exact_string_at(&input, &format!("/{key}"))? {
+                if !self.contains(&raw) {
+                    return Err(self.outside(&raw));
                 }
             }
         }
         if name == "Glob" {
-            if let Some(pattern) = input.get("pattern").and_then(Value::as_str) {
-                if !self.glob_stays_inside(pattern) {
-                    return Err(self.outside(pattern));
+            if let Some(pattern) = exact_string_at(&input, "/pattern")? {
+                if !self.glob_stays_inside(&pattern) {
+                    return Err(self.outside(&pattern));
                 }
             }
         }
         if name == "Bash" {
-            if let Some(fields) = input.as_object_mut() {
-                fields.remove("dangerouslyDisableSandbox");
+            let sandbox_override_key: Vec<u16> =
+                "dangerouslyDisableSandbox".encode_utf16().collect();
+            if let Some(entries) = input.object_entries() {
+                if entries
+                    .iter()
+                    .any(|entry| entry.code_units == sandbox_override_key.as_slice())
+                {
+                    let mut fields = Vec::with_capacity(entries.len().saturating_sub(1));
+                    for entry in entries {
+                        if entry.code_units == sandbox_override_key.as_slice() {
+                            continue;
+                        }
+                        let value = input
+                            .subprojection_property_units(entry.code_units)
+                            .map_err(|_| {
+                                ToolInvokerError::Internal(
+                                    "failed to preserve scoped tool input".into(),
+                                )
+                            })?;
+                        fields.push((entry.code_units.to_vec(), value));
+                    }
+                    input = Utf16JsonProjection::object_units(fields).map_err(|_| {
+                        ToolInvokerError::Internal("failed to preserve scoped tool input".into())
+                    })?;
+                }
             }
         }
         ctx.cwd = Some(self.root.clone());
@@ -565,22 +588,55 @@ impl WorktreeScopedInvoker {
     }
 
     fn outside(&self, raw: &str) -> ToolInvokerError {
-        ToolInvokerError::Internal(format!(
-            "Permission denied: {raw} is outside this panel's working copy {}. \
+        ToolInvokerError::Internal(
+            format!(
+                "Permission denied: {raw} is outside this panel's working copy {}. \
              Work only inside the current directory.",
-            self.root.display()
-        ))
+                self.root.display()
+            )
+            .into(),
+        )
     }
+}
+
+fn exact_string_at(
+    input: &Utf16JsonProjection,
+    pointer: &str,
+) -> Result<Option<String>, ToolInvokerError> {
+    let Some(units) = input.string_units(pointer) else {
+        return Ok(None);
+    };
+    String::from_utf16(&units).map(Some).map_err(|_| {
+        ToolInvokerError::InvalidInput("path or pattern contains invalid UTF-16".into())
+    })
 }
 
 #[async_trait]
 impl ToolInvoker for WorktreeScopedInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.inner
+            .cleanup_computer_inputs(agent_id, origin_session_id)
+            .await
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner.permission_mode()
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Utf16JsonProjection) -> Option<bool> {
+        self.inner.tool_is_concurrency_safe(name, input)
+    }
+
     async fn invoke(
         &self,
         name: &str,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         let (input, ctx) = self.scope(name, input, ctx)?;
         self.inner.invoke(name, input, ctx).await
     }
@@ -588,10 +644,10 @@ impl ToolInvoker for WorktreeScopedInvoker {
     async fn invoke_with_workspace_lease(
         &self,
         name: &str,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         let (input, ctx) = self.scope(name, input, ctx)?;
         self.inner
             .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
@@ -601,7 +657,7 @@ impl ToolInvoker for WorktreeScopedInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
@@ -611,17 +667,22 @@ impl ToolInvoker for WorktreeScopedInvoker {
             .await
     }
 
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        let (input, ctx) = self.scope(name, input, ctx)?;
+        self.inner
+            .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.inner
-            .cleanup_computer_inputs(agent_id, origin_session_id)
-            .await
     }
 }
 
@@ -672,7 +733,7 @@ mod tests {
 
     #[derive(Default)]
     struct Recorder {
-        calls: Mutex<Vec<(String, Value, SubagentInvocationContext)>>,
+        calls: Mutex<Vec<(String, Utf16JsonProjection, SubagentInvocationContext)>>,
     }
 
     #[async_trait]
@@ -680,14 +741,14 @@ mod tests {
         async fn invoke(
             &self,
             name: &str,
-            input: Value,
+            input: Utf16JsonProjection,
             ctx: SubagentInvocationContext,
-        ) -> Result<Value, ToolInvokerError> {
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push((name.to_string(), input, ctx));
-            Ok(Value::Null)
+            Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -696,9 +757,13 @@ mod tests {
 
     fn ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
+            native_query_depth: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
@@ -712,10 +777,19 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),
         }
+    }
+
+    fn source_json(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON is valid")
     }
 
     struct Fixture {
@@ -755,7 +829,7 @@ mod tests {
             ("Grep", "path", "src"),
         ] {
             f.invoker
-                .invoke(tool, serde_json::json!({ key: path }), ctx())
+                .invoke(tool, source_json(serde_json::json!({ key: path })), ctx())
                 .await
                 .unwrap();
         }
@@ -768,15 +842,33 @@ mod tests {
         for (tool, key, path) in escapes {
             let err = f
                 .invoker
-                .invoke(tool, serde_json::json!({ key: path }), ctx())
+                .invoke(tool, source_json(serde_json::json!({ key: path })), ctx())
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&err, ToolInvokerError::Internal(msg) if msg.contains("outside this panel's working copy")),
+                matches!(&err, ToolInvokerError::Internal(msg) if msg.string_at("").is_some_and(|text| text.contains("outside this panel's working copy"))),
                 "{tool} {path:?}: {err:?}"
             );
         }
         assert_eq!(f.recorder.calls.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn unrepresentable_path_is_rejected_instead_of_lossily_scoped() {
+        let f = fixture();
+        let invalid_path = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let input = Utf16JsonProjection::object(vec![("file_path".into(), invalid_path)]).unwrap();
+        let err = f
+            .invoker
+            .invoke("Read", input, ctx())
+            .await
+            .expect_err("unpaired UTF-16 path must not be normalized through U+FFFD");
+        assert!(matches!(
+            err,
+            ToolInvokerError::InvalidInput(message)
+                if message.string_at("") == Some("path or pattern contains invalid UTF-16")
+        ));
+        assert!(f.recorder.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -787,7 +879,11 @@ mod tests {
         let target = f.worktree.join("escape/secret.rs");
         let err = f
             .invoker
-            .invoke("Edit", serde_json::json!({ "file_path": target }), ctx())
+            .invoke(
+                "Edit",
+                source_json(serde_json::json!({ "file_path": target })),
+                ctx(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolInvokerError::Internal(_)));
@@ -799,14 +895,18 @@ mod tests {
         f.invoker
             .invoke(
                 "Glob",
-                serde_json::json!({ "pattern": "src/**/*.rs" }),
+                source_json(serde_json::json!({ "pattern": "src/**/*.rs" })),
                 ctx(),
             )
             .await
             .unwrap();
         let inside = format!("{}/src/**/*.rs", f.worktree.display());
         f.invoker
-            .invoke("Glob", serde_json::json!({ "pattern": inside }), ctx())
+            .invoke(
+                "Glob",
+                source_json(serde_json::json!({ "pattern": inside })),
+                ctx(),
+            )
             .await
             .unwrap();
         for pattern in [
@@ -815,7 +915,11 @@ mod tests {
         ] {
             assert!(f
                 .invoker
-                .invoke("Glob", serde_json::json!({ "pattern": pattern }), ctx())
+                .invoke(
+                    "Glob",
+                    source_json(serde_json::json!({ "pattern": pattern })),
+                    ctx(),
+                )
                 .await
                 .is_err());
         }
@@ -827,7 +931,7 @@ mod tests {
         f.invoker
             .invoke(
                 "Bash",
-                serde_json::json!({ "command": "cargo test", "dangerouslyDisableSandbox": true }),
+                source_json(serde_json::json!({ "command": "cargo test", "dangerouslyDisableSandbox": true })),
                 ctx(),
             )
             .await
@@ -835,7 +939,10 @@ mod tests {
         let calls = f.recorder.calls.lock().unwrap();
         let (name, input, ctx) = &calls[0];
         assert_eq!(name, "Bash");
-        assert_eq!(input, &serde_json::json!({ "command": "cargo test" }));
+        assert_eq!(
+            input.to_json_string().unwrap(),
+            r#"{"command":"cargo test"}"#
+        );
         assert!(ctx.is_non_interactive_session);
         assert!(!ctx.can_show_permission_prompts);
         assert_eq!(ctx.mode_override.as_deref(), Some("acceptEdits"));

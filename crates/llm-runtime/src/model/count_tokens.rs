@@ -63,11 +63,13 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
             byte_len = byte_len.saturating_add(estimated_block_bytes(block));
             use lingxi_llm_client::protocol::ContentBlock;
             let exact_text = match block {
-                ContentBlock::Text { text, .. } => Some(("text", text)),
-                ContentBlock::ToolResult { content, .. } => Some(("content", content)),
+                ContentBlock::Text { text, .. } => Some(("text", serialized_len(text))),
+                ContentBlock::ToolResult { content, .. } if content.is_root_string() => {
+                    Some(("content", serialized_len(content)))
+                }
                 _ => None,
             };
-            if let Some((field, display)) = exact_text {
+            if let Some((field, display_len)) = exact_text {
                 if let Some(units) = request
                     .execution
                     .message_json_string_overrides
@@ -75,11 +77,9 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
                         "/messages/{message_index}/content/{block_index}/{field}"
                     ))
                 {
-                    byte_len = byte_len
-                        .saturating_sub(serialized_len(display))
-                        .saturating_add(lingxi_llm_client::exact_json::json_string_len_from_utf16(
-                            units,
-                        ));
+                    byte_len = byte_len.saturating_sub(display_len).saturating_add(
+                        lingxi_llm_client::exact_json::json_string_len_from_utf16(units),
+                    );
                 }
             }
         }
@@ -261,9 +261,7 @@ mod tests {
         let mut req = LlmRequest::new("model");
         req.input
             .system
-            .push(lingxi_llm_client::protocol::SystemBlock {
-                text: "12345678".into(),
-            }); // 8 bytes
+            .push(lingxi_llm_client::protocol::SystemBlock::new("12345678")); // 8 bytes
         assert!(approximate_tokens(&req) >= 2);
     }
 
@@ -295,16 +293,23 @@ mod tests {
                         text: "structured text".to_string(),
                         utf16_code_units: "structured text".encode_utf16().collect(),
                         cache_control: None,
+                        citations: None,
                     },
                     ContentBlock::ToolCall {
                         id: "call-1".to_string(),
                         name: "lookup".to_string(),
-                        input: serde_json::json!({"query": "weather in San Francisco"}),
+                        input: lingxi_llm_client::protocol::JsonPayload::parse(
+                            r#"{"query":"weather in San Francisco"}"#,
+                        )
+                        .unwrap(),
                     },
                     ContentBlock::ToolResult {
                         tool_call_id: "call-1".to_string(),
-                        output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
-                        is_error: false,
+                        output: lingxi_llm_client::protocol::JsonPayload::parse(
+                            r#"{"temperature":18,"unit":"celsius"}"#,
+                        )
+                        .unwrap(),
+                        is_error: Some(false),
                         cache_control: None,
                         cache_reference: None,
                     },
@@ -315,14 +320,17 @@ mod tests {
             &mut req,
             ToolDeclaration {
                 name: "lookup".to_string(),
-                description: "Look up current information for a location".to_string(),
-                input_schema: serde_json::json!({
+                description: "Look up current information for a location".into(),
+                input_schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                    &serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"}
                     },
                     "required": ["query"]
-                }),
+                    }),
+                )
+                .unwrap(),
                 ..Default::default()
             },
         );
@@ -352,9 +360,9 @@ mod tests {
         let HostedTool::WebSearch(config) = &mut request.input.hosted_tools[0] else {
             unreachable!()
         };
-        config
-            .allowed_domains
-            .extend((0..100).map(|n| format!("source-{n}.example.com")));
+        config.allowed_domains.extend((0..100).map(|n| {
+            lingxi_llm_client::protocol::JsonPayload::from(format!("source-{n}.example.com"))
+        }));
         assert!(approximate_tokens(&request) > with_tools + 500);
     }
 
@@ -366,12 +374,13 @@ mod tests {
         let plain = approximate_tokens(&request);
         request.input.output_format = OutputFormat::JsonSchema {
             name: "result".into(),
-            schema: serde_json::json!({
+            schema: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
                 "type": "object",
                 "properties": {
                     "answer": {"type": "string", "description": "Detailed instructions. ".repeat(100)}
                 }
-            }),
+            }))
+            .expect("test schema is valid JSON"),
             strict: true,
         };
         assert!(approximate_tokens(&request) > plain + 500);
@@ -388,6 +397,7 @@ mod tests {
                 content: vec![ContentBlock::Text {
                     text: text.clone(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
@@ -400,6 +410,7 @@ mod tests {
                     utf16_code_units: text.encode_utf16().collect(),
                     text,
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
@@ -420,6 +431,7 @@ mod tests {
                     text: display,
                     utf16_code_units: vec![0xd800; 300],
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
@@ -613,7 +625,7 @@ mod tests {
             .clone()
             .expect("request sent");
         assert!(
-            seen.url.ends_with("/v1/messages/count_tokens"),
+            seen.url.ends_with("/v1/messages/count_tokens?beta=true"),
             "url={}",
             seen.url
         );
@@ -647,10 +659,14 @@ mod tests {
             crate::model::betas::Endpoint::CountTokens,
             &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
         );
+        let expected = format!(
+            "{expected},{}",
+            lingxi_llm_client::providers::anthropic::request_policy::TOKEN_COUNTING
+        );
         assert_eq!(
             seen.headers.get("anthropic-beta").map(String::as_str),
             Some(expected.as_str()),
-            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens); got: {:?}",
+            "countTokens appends the mandatory SDK beta after model betas; got: {:?}",
             seen.headers.get("anthropic-beta"),
         );
     }
@@ -725,7 +741,7 @@ mod tests {
             .expect_err("must fail");
 
         assert!(
-            matches!(err, LlmError::Authentication { .. }),
+            matches!(err.classification_source(), LlmError::Authentication { .. }),
             "expected Authentication, got {err:?}"
         );
     }

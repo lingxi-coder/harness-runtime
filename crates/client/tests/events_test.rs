@@ -15,7 +15,7 @@ use client::protocol::controls::{
     ReasoningSelectionDto,
 };
 use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
-use client::protocol::listings::SessionAgentSummaryDto;
+use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
 use client::protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
@@ -31,6 +31,7 @@ use client::protocol::local_apps::{
 };
 use client::protocol::message::{MessageBlockDto, MessageDto};
 use client::protocol::permission::PermissionResolutionDto;
+use client::protocol::text::ClientTextDto;
 use client::protocol::tool_display::{ToolHeaderDto, ToolVerbDto};
 
 #[test]
@@ -85,11 +86,17 @@ fn session_agent_events_round_trip() {
         }],
         images: Vec::new(),
     };
+    let row = SessionAgentMessageRowDto {
+        message_index: 0,
+        message_uuid: "00000000-0000-0000-0000-000000000003".into(),
+        message,
+        api_error_json: None,
+    };
     for event in [
         ClientEvent::SessionAgentTranscript {
             session_id: "session".into(),
             agent_id: summary.agent_id.clone(),
-            messages: vec![message.clone()],
+            messages: vec![row.clone()],
             next_message_index: 1,
             revision: 1,
         },
@@ -100,8 +107,7 @@ fn session_agent_events_round_trip() {
         ClientEvent::SessionAgentMessage {
             session_id: "session".into(),
             agent_id: summary.agent_id.clone(),
-            message_index: 0,
-            message: message.clone(),
+            row,
         },
     ] {
         let json = serde_json::to_value(&event).expect("serialize session-agent event");
@@ -202,7 +208,7 @@ fn ask_user_question_resolved_round_trips() {
 fn slash_command_result_round_trips() {
     let ev = ClientEvent::SlashCommandResult {
         turn_id: Some(9),
-        display: "Switched model to opus".to_string(),
+        display: "Switched model to opus".into(),
         is_error: false,
     };
     let json = serde_json::to_value(&ev).expect("serialize SlashCommandResult");
@@ -218,7 +224,7 @@ fn slash_command_result_round_trips() {
 
     let minimal = ClientEvent::SlashCommandResult {
         turn_id: None,
-        display: "Unknown command".to_string(),
+        display: "Unknown command".into(),
         is_error: true,
     };
     let json = serde_json::to_value(&minimal).expect("serialize minimal SlashCommandResult");
@@ -227,19 +233,47 @@ fn slash_command_result_round_trips() {
     let back: ClientEvent =
         serde_json::from_value(json).expect("deserialize minimal SlashCommandResult");
     assert_eq!(back, minimal);
+
+    let source_text = ClientEvent::SlashCommandResult {
+        turn_id: Some(10),
+        display: ClientTextDto::from_code_units(vec![b'A' as u16, 0xd800, b'B' as u16]),
+        is_error: false,
+    };
+    let encoded = serde_json::to_string(&source_text).unwrap();
+    assert!(encoded.contains(r#""display":"A\ud800B""#));
+    let decoded: ClientEvent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, source_text);
 }
 
 /// `TextDelta` — 1:1 `OutputStream::emit_text`. Carries plain assistant text.
 #[test]
 fn text_delta_round_trips() {
     let ev = ClientEvent::TextDelta {
-        text: "hello world".to_string(),
+        text: "hello world".into(),
     };
     let json = serde_json::to_value(&ev).expect("serialize TextDelta");
     assert_eq!(json["type"], "text_delta");
     assert_eq!(json["text"], "hello world");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize TextDelta");
     assert_eq!(back, ev);
+}
+
+#[test]
+fn text_delta_keeps_lone_surrogates_as_an_ordinary_json_string() {
+    let ev = ClientEvent::TextDelta {
+        text: client::protocol::text::ClientTextDto::from_code_units(vec![
+            b'x' as u16,
+            0xd800,
+            b'y' as u16,
+        ]),
+    };
+    let wire = serde_json::to_string(&ev).expect("serialize exact text event");
+    assert_eq!(wire, r#"{"type":"text_delta","text":"x\ud800y"}"#);
+    let decoded: ClientEvent = serde_json::from_str(&wire).expect("deserialize exact text event");
+    let ClientEvent::TextDelta { text } = decoded else {
+        panic!("expected text delta")
+    };
+    assert_eq!(text.code_units, vec![b'x' as u16, 0xd800, b'y' as u16]);
 }
 
 /// `ToolUseStarted` — 1:1 `emit_tool_call`; the `serde_json::Value` input is
@@ -300,7 +334,7 @@ fn message_complete_round_trips() {
             role: "assistant".to_string(),
             blocks: vec![
                 MessageBlockDto::Text {
-                    text: "done".to_string(),
+                    text: "done".into(),
                 },
                 MessageBlockDto::ToolUse {
                     id: "tu_01".to_string(),
@@ -735,7 +769,7 @@ fn app_operation_failed_round_trips() {
     let ev = ClientEvent::AppOperationFailed {
         app_id: Some("habits-1a2b".to_string()),
         code: AppErrorCodeDto::NotYetAvailable,
-        message: "app runtime lands in phase 4".to_string(),
+        message: client::protocol::text::ClientTextDto::from_utf8("app runtime lands in phase 4"),
         request_id: Some("req-7".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppOperationFailed");
@@ -753,7 +787,7 @@ fn app_operation_failed_round_trips() {
     let ev_global = ClientEvent::AppOperationFailed {
         app_id: None,
         code: AppErrorCodeDto::InvalidRequest,
-        message: "bad app id".to_string(),
+        message: client::protocol::text::ClientTextDto::from_utf8("bad app id"),
         request_id: None,
     };
     let json_g = serde_json::to_value(&ev_global).expect("serialize global AppOperationFailed");
@@ -946,7 +980,7 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
             event: AppEventDto::LocalAppOperationFailed {
                 app_id: None,
                 code: LocalAppPluginErrorCodeDto::PluginDisabled,
-                message: "Enable the Local App plugin and retry once.".to_string(),
+                message: client::protocol::text::ClientTextDto::from_utf8("Enable the Local App plugin and retry once."),
                 request_id: Some("plugin-read-1".to_string()),
             },
         },
@@ -1088,4 +1122,52 @@ fn restored_zero_usage_snapshot_round_trips() {
     let json = serde_json::to_value(&ev).unwrap();
     assert_eq!(json["is_snapshot"], true);
     assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), ev);
+}
+
+#[test]
+fn source_text_failure_and_task_events_round_trip_full_tagged_envelopes() {
+    let app_failure_json = r#"{"type":"app_operation_failed","code":"lsp_diagnostics_failed","message":"diag \ud800"}"#;
+    let app_failure: ClientEvent = serde_json::from_str(app_failure_json).unwrap();
+    let ClientEvent::AppOperationFailed { message, .. } = &app_failure else {
+        panic!("expected AppOperationFailed");
+    };
+    assert_eq!(message.code_units, [100, 105, 97, 103, 32, 0xd800]);
+    let app_failure_roundtrip = serde_json::to_string(&app_failure).unwrap();
+    assert!(app_failure_roundtrip.contains(r#""message":"diag \ud800""#));
+    assert!(!app_failure_roundtrip.contains("code_units"));
+    assert_eq!(
+        serde_json::from_str::<ClientEvent>(&app_failure_roundtrip).unwrap(),
+        app_failure
+    );
+
+    let local_failure_json = r#"{"type":"app_event","event":{"type":"local_app_operation_failed","code":"invalid_mcp_settings","message":"app \udfff"}}"#;
+    let local_failure: ClientEvent = serde_json::from_str(local_failure_json).unwrap();
+    let ClientEvent::AppEvent {
+        event: AppEventDto::LocalAppOperationFailed { message, .. },
+    } = &local_failure
+    else {
+        panic!("expected LocalAppOperationFailed");
+    };
+    assert_eq!(message.code_units, [97, 112, 112, 32, 0xdfff]);
+    let local_roundtrip = serde_json::to_string(&local_failure).unwrap();
+    assert!(local_roundtrip.contains(r#""message":"app \udfff""#));
+    assert!(!local_roundtrip.contains("code_units"));
+    assert_eq!(
+        serde_json::from_str::<ClientEvent>(&local_roundtrip).unwrap(),
+        local_failure
+    );
+
+    let task_json = r#"{"type":"task_row","task":{"task_id":"b12345678","task_type":"local_agent","status":{"type":"running"},"description":"task \ud800","can_resume":false,"awaiting_plan_approval":false,"unread":false}}"#;
+    let task_event: ClientEvent = serde_json::from_str(task_json).unwrap();
+    let ClientEvent::TaskRow { task } = &task_event else {
+        panic!("expected TaskRow");
+    };
+    assert_eq!(task.description.code_units, [116, 97, 115, 107, 32, 0xd800]);
+    let task_roundtrip = serde_json::to_string(&task_event).unwrap();
+    assert!(task_roundtrip.contains(r#""description":"task \ud800""#));
+    assert!(!task_roundtrip.contains("code_units"));
+    assert_eq!(
+        serde_json::from_str::<ClientEvent>(&task_roundtrip).unwrap(),
+        task_event
+    );
 }

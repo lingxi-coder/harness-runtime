@@ -15,7 +15,7 @@
 //! Branding: `.claude/` → `.lingxi/` and "Claude Code" → "LingXi" (body and
 //! description).
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, BundledPromptFn, PromptPart};
 
 /// The inline skill body (`Ynb`), verbatim from the 2.1.205 binary with the
 /// branding substitutions above. Inline ⇒ no frontmatter strip, no `trimStart`.
@@ -28,14 +28,20 @@ pub(crate) const FEWER_PERMISSION_PROMPTS_DESCRIPTION: &str = "Scan your transcr
 pub struct FewerPermissionPromptsPromptFn;
 
 impl BundledPromptFn for FewerPermissionPromptsPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         // Reference: `t=Ynb(); if(e) t+="\n\n## Additional instructions from the
         // user\n\n"+e`. Note the header differs from the file-based skills'
         // `## User Request`, and the reference tests raw truthiness (not trim).
-        if args.is_empty() {
-            FEWER_PERMISSION_PROMPTS_BODY.to_string()
+        if args.string_units("").is_some_and(|units| units.is_empty()) {
+            FEWER_PERMISSION_PROMPTS_BODY.into()
         } else {
-            format!("{FEWER_PERMISSION_PROMPTS_BODY}\n\n## Additional instructions from the user\n\n{args}")
+            let prefix = format!(
+                "{FEWER_PERMISSION_PROMPTS_BODY}\n\n## Additional instructions from the user\n\n"
+            );
+            source_concat([PromptPart::Text(&prefix), PromptPart::Source(args)])
         }
     }
 }
@@ -43,6 +49,7 @@ impl BundledPromptFn for FewerPermissionPromptsPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn body_is_inline_and_branded() {
@@ -55,13 +62,15 @@ mod tests {
     #[test]
     fn build_appends_additional_instructions_header() {
         assert_eq!(
-            FewerPermissionPromptsPromptFn.build(""),
-            FEWER_PERMISSION_PROMPTS_BODY
+            FewerPermissionPromptsPromptFn
+                .build(&"".into())
+                .string_at(""),
+            Some(FEWER_PERMISSION_PROMPTS_BODY)
         );
-        let out = FewerPermissionPromptsPromptFn.build("prefer git read-only");
-        assert_eq!(
-            out,
-            format!("{FEWER_PERMISSION_PROMPTS_BODY}\n\n## Additional instructions from the user\n\nprefer git read-only")
+        let out = FewerPermissionPromptsPromptFn.build(&"prefer git read-only".into());
+        let expected = format!(
+            "{FEWER_PERMISSION_PROMPTS_BODY}\n\n## Additional instructions from the user\n\nprefer git read-only"
         );
+        assert_eq!(out.string_at(""), Some(expected.as_str()));
     }
 }

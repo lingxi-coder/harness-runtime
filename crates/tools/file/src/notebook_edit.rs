@@ -4,6 +4,7 @@
 //! through `serde_json::Value` so `preserve_order` (workspace feature) keeps
 //! key ordering byte-stable.
 
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -93,11 +94,11 @@ impl NotebookEditTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     // Requiredness mirrors the TS `inputSchema` strictObject
     // (`NotebookEditTool.ts:30-57`): only `notebook_path` + `new_source` are
     // required; `cell_id`, `cell_type`, and `edit_mode` are optional.
-    json!({
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["notebook_path", "new_source"],
@@ -116,7 +117,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "description": "The type of edit to make (replace, insert, delete). Defaults to replace."
             }
         }
-    })
+    }))
 });
 
 /// Parse a `cell-N` id into its numeric index, mirroring the TS `parseCellId`
@@ -137,11 +138,14 @@ impl Tool for NotebookEditTool {
     }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("edit Jupyter notebook cells (.ipynb)")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("edit Jupyter notebook cells (.ipynb)".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -149,17 +153,21 @@ impl Tool for NotebookEditTool {
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -170,13 +178,17 @@ impl Tool for NotebookEditTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         // Verbatim claude-code v2.1.183 NotebookEdit description const `f2a`
         // (em-dash is U+2014).
         "Edit a cell in a Jupyter notebook — replace, insert, or delete.".to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
         // Verbatim claude-code v2.1.183 NotebookEdit PROMPT const `A2a` (the
         // older cell_number-based text was version-skewed; v2.1.183 is cell_id-
         // based). `${Ws}` interpolates to the Read tool name (`Ws="Read"`, binary
@@ -189,46 +201,36 @@ Usage:\n\
 - You must use the Read tool on the notebook in this conversation before editing — this tool will fail otherwise.\n\
 - `notebook_path` must be an absolute path.\n\
 - `cell_id` is the `id` attribute shown in the Read tool's `<cell id=\"...\">` output. It is required for `replace` and `delete`.\n\
-- `edit_mode` defaults to `replace`. Use `insert` to add a new cell after the cell with the given `cell_id` (or at the beginning of the notebook if `cell_id` is omitted) — `cell_type` is required when inserting. Use `delete` to remove the cell.".to_string()
+- `edit_mode` defaults to `replace`. Use `insert` to add a new cell after the cell with the given `cell_id` (or at the beginning of the notebook if `cell_id` is omitted) — `cell_type` is required when inserting. Use `delete` to remove the cell."
+            .into()
     }
 
-    fn get_path(&self, input: &Value) -> Option<PathBuf> {
-        input
-            .get("notebook_path")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
+    fn get_path(&self, input: &Utf16JsonProjection) -> Option<PathBuf> {
+        crate::input_string(input, "notebook_path").map(PathBuf::from)
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
-        let notebook_path = input
-            .get("notebook_path")
-            .and_then(Value::as_str)
+        let notebook_path = crate::input_string(&input, "notebook_path")
             .ok_or_else(|| ToolError::InvalidInput("notebook_path is required".into()))?;
         // `cell_id` and `edit_mode` are optional per the TS schema
         // (`NotebookEditTool.ts:37-55`): `cell_id` absent means "insert at the
         // beginning"; `edit_mode` defaults to `replace`. `cell_type` is the
         // newly-honored insert/replace cell kind.
-        let cell_id = input.get("cell_id").and_then(Value::as_str);
-        let edit_mode = input
-            .get("edit_mode")
-            .and_then(Value::as_str)
-            .unwrap_or(EDIT_MODE_REPLACE);
-        let mut cell_type = input
-            .get("cell_type")
-            .and_then(Value::as_str)
-            .map(std::string::ToString::to_string);
-        let new_source = input
-            .get("new_source")
-            .and_then(Value::as_str)
-            .map(std::string::ToString::to_string);
+        let cell_id = crate::input_string(&input, "cell_id");
+        let edit_mode = crate::input_string(&input, "edit_mode").unwrap_or(EDIT_MODE_REPLACE);
+        let mut cell_type =
+            crate::input_string(&input, "cell_type").map(std::string::ToString::to_string);
+        let new_source =
+            crate::input_string(&input, "new_source").map(std::string::ToString::to_string);
 
-        let path = PathBuf::from(notebook_path);
+        let requested_path = crate::normalize_model_file_path(notebook_path, &self.ctx.cwd());
+        let path = requested_path.clone();
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
@@ -272,11 +274,11 @@ Usage:\n\
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
-                return Err(ToolError::InvalidInput(message));
+                return Err(ToolError::InvalidInput(message.into()));
             }
         };
         let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
@@ -292,7 +294,7 @@ Usage:\n\
             Ok(s) => s,
             Err(e) => {
                 self.emit_failed(&invocation_id, "io_read").await;
-                return Err(ToolError::Io(e.to_string()));
+                return Err(ToolError::Io(e.to_string().into()));
             }
         };
 
@@ -320,7 +322,7 @@ Usage:\n\
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         if let Err(e) = crate::check_read_before_write(
             &self.ctx.read_file_state,
-            &canon,
+            &requested_path,
             current_mtime_ms,
             &raw,
             // Oracle `X_n(S)`: notebooks are excluded from the waiver
@@ -341,7 +343,7 @@ Usage:\n\
                 // data shape so the model sees the soft error.
                 self.emit_failed(&invocation_id, "json_parse").await;
                 return Ok(ToolCallResult {
-                    data: json!({
+                    data: crate::generated_result(&json!({
                         "new_source": new_source,
                         "cell_type": cell_type.clone().unwrap_or_else(|| "code".to_string()),
                         "language": "python",
@@ -351,14 +353,15 @@ Usage:\n\
                         "notebook_path": canon.display().to_string(),
                         "original_file": "",
                         "updated_file": "",
-                    }),
+                    })),
                     // The soft error rides on `model_content` (the data carries no
                     // content/model_content key, so the fallback would JSON-dump).
-                    model_content: Some("Notebook is not valid JSON.".to_string()),
+                    model_content: Some("Notebook is not valid JSON.".into()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
                     mcp_meta: None,
+                    subagent_hooks_fired: false,
                 });
             }
         };
@@ -412,16 +415,16 @@ Usage:\n\
                 } else if let Some(n) = parse_cell_id(id) {
                     if n >= cells_len {
                         self.emit_failed(&invocation_id, "cell_not_found").await;
-                        return Err(ToolError::InvalidInput(format!(
-                            "Cell with index {n} does not exist in notebook."
-                        )));
+                        return Err(ToolError::InvalidInput(
+                            format!("Cell with index {n} does not exist in notebook.").into(),
+                        ));
                     }
                     n
                 } else {
                     self.emit_failed(&invocation_id, "cell_not_found").await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "Cell with ID \"{id}\" not found in notebook."
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("Cell with ID \"{id}\" not found in notebook.").into(),
+                    ));
                 }
             }
         };
@@ -551,7 +554,7 @@ Usage:\n\
                 Ok(()) => String::from_utf8(buf).expect("serde_json emits valid UTF-8"),
                 Err(e) => {
                     self.emit_failed(&invocation_id, "json_emit").await;
-                    return Err(ToolError::Io(e.to_string()));
+                    return Err(ToolError::Io(e.to_string().into()));
                 }
             }
         };
@@ -561,7 +564,7 @@ Usage:\n\
         }
         if let Err(e) = tokio::fs::write(&canon, serialized.as_bytes()).await {
             self.emit_failed(&invocation_id, "io_write").await;
-            return Err(ToolError::Io(e.to_string()));
+            return Err(ToolError::Io(e.to_string().into()));
         }
 
         // Post-write: update the read-state registry so an immediate second
@@ -575,9 +578,9 @@ Usage:\n\
             .ok()
             .and_then(|m| m.modified().ok())
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: serialized.clone(),
                 mtime_ms: new_mtime_ms,
@@ -588,6 +591,8 @@ Usage:\n\
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -623,12 +628,13 @@ Usage:\n\
         nb_data.insert("original_file".to_string(), json!(raw));
         nb_data.insert("updated_file".to_string(), json!(serialized));
         Ok(ToolCallResult {
-            data: Value::Object(nb_data),
-            model_content: Some(content),
+            data: crate::generated_result(&Value::Object(nb_data)),
+            model_content: Some(content.into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -656,14 +662,14 @@ mod tests {
 
     /// Simulate a prior full read of `target` (a notebook) so the
     /// read-before-write staleness guard (Batch F) is satisfied. Records the
-    /// file's current content + floored mtime under the canonicalized key with
-    /// `offset`/`limit` = `None`. Call AFTER writing the file's bytes.
+    /// file's current content + floored mtime under Native's normalized
+    /// session-cwd route key with `offset`/`limit` = `None`. Canonical remains
+    /// for disk access only.
     ///
-    /// NB: the Rust `Read` tool cannot populate this for `.ipynb` (no notebook
-    /// media support), so in production only a prior NotebookEdit's own
-    /// post-write `set` satisfies the guard — these tests seed it directly to
-    /// exercise the post-guard logic. (Documented partial-coverage gap.)
+    /// These focused guard tests seed state directly. The current production
+    /// Read-to-NotebookEdit path is exercised separately below.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let content = std::fs::read_to_string(&canon).unwrap();
         let mtime_ms = std::fs::metadata(&canon)
@@ -672,7 +678,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -721,7 +727,7 @@ mod tests {
         let read_tool = crate::read::FileReadTool::new(ctx.clone());
         read_tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                crate::generated_result(&json!({ "file_path": "nb.ipynb" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -731,20 +737,66 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
-                    "notebook_path": target.to_str().unwrap(),
+                crate::generated_result(&json!({
+                    "notebook_path": "nb.ipynb",
                     "cell_id": "c1",
                     "edit_mode": "replace",
                     "new_source": "print('via-real-read')"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("Read→NotebookEdit must satisfy the staleness guard");
         assert_eq!(
-            result.model_content.as_deref(),
+            crate::test_model_text(result.model_content.as_ref()),
             Some("Updated cell c1 with print('via-real-read')")
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_notebook_path_uses_session_cwd_and_records_the_absolute_route() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("relative.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        assert_ne!(
+            ctx.cwd(),
+            std::env::current_dir().unwrap(),
+            "the test must distinguish the session cwd from the process cwd"
+        );
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx.clone());
+
+        // The schema accepts this string and NotebookEdit has no validator
+        // rejecting relative paths. Its session cwd, not the process cwd, is
+        // the path base (the same rule as Read/Edit/Write).
+        let result = tool
+            .call(
+                crate::generated_result(&json!({
+                    "notebook_path": "relative.ipynb",
+                    "cell_id": "c1",
+                    "edit_mode": "replace",
+                    "new_source": "print('session-cwd')"
+                })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("relative NotebookEdit path resolves in the active session cwd");
+        assert!(crate::test_model_text(result.model_content.as_ref())
+            .unwrap()
+            .contains("session-cwd"));
+
+        let key = crate::normalize_model_file_path("relative.ipynb", &ctx.cwd());
+        let routes = ctx
+            .read_file_state
+            .lock()
+            .unwrap()
+            .requested_path_groups(&key);
+        assert!(
+            routes.iter().any(|route| route == &[target.clone()]),
+            "the model route is captured as the resolved session-cwd spelling: {routes:?}"
         );
     }
 
@@ -758,12 +810,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "replace",
                     "new_source": "print('world')"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -772,15 +824,21 @@ mod tests {
         // Model-facing string rides on model_content (the binary result `data` is
         // the {new_source, old_source, …} record — no `content` field).
         assert_eq!(
-            result.model_content.as_deref(),
+            crate::test_model_text(result.model_content.as_ref()),
             Some("Updated cell c1 with print('world')")
         );
-        assert_eq!(result.data["new_source"], "print('world')");
-        assert_eq!(result.data["old_source"], "print('hello')");
-        assert_eq!(result.data["edit_mode"], "replace");
-        assert_eq!(result.data["error"], "");
-        assert!(result.data.get("content").is_none());
-        assert!(result.data["updated_file"].is_string());
+        assert_eq!(
+            crate::test_data(&result.data)["new_source"],
+            "print('world')"
+        );
+        assert_eq!(
+            crate::test_data(&result.data)["old_source"],
+            "print('hello')"
+        );
+        assert_eq!(crate::test_data(&result.data)["edit_mode"], "replace");
+        assert_eq!(crate::test_data(&result.data)["error"], "");
+        assert!(crate::test_data(&result.data).get("content").is_none());
+        assert!(crate::test_data(&result.data)["updated_file"].is_string());
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert_eq!(modified["cells"][0]["source"], "print('world')");
@@ -799,12 +857,12 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c1",
                 "edit_mode": "replace",
                 "new_source": "print('world')"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -832,20 +890,26 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "delete"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // Model-facing string rides on model_content; data is the edit record.
-        assert_eq!(result.model_content.as_deref(), Some("Deleted cell c1"));
-        assert_eq!(result.data["edit_mode"], "delete");
-        assert_eq!(result.data["old_source"], "print('hello')");
+        assert_eq!(
+            crate::test_model_text(result.model_content.as_ref()),
+            Some("Deleted cell c1")
+        );
+        assert_eq!(crate::test_data(&result.data)["edit_mode"], "delete");
+        assert_eq!(
+            crate::test_data(&result.data)["old_source"],
+            "print('hello')"
+        );
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();
@@ -863,13 +927,13 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "insert",
                     "cell_type": "code",
                     "new_source": "print('inserted')"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -878,12 +942,12 @@ mod tests {
         // The message renders the FRESH cell id (NB.2 / NotebookEditTool.ts:
         // 152-156 with cell_id = new_cell_id), so only the static framing is
         // byte-fixed.
-        let content = result.model_content.as_deref().unwrap();
+        let content = crate::test_model_text(result.model_content.as_ref()).unwrap();
         assert!(content.starts_with("Inserted cell "));
         assert!(content.ends_with(" with print('inserted')"));
         // Insert has no prior cell → old_source omitted (binary `void 0`).
-        assert!(result.data.get("old_source").is_none());
-        assert_eq!(result.data["edit_mode"], "insert");
+        assert!(crate::test_data(&result.data).get("old_source").is_none());
+        assert_eq!(crate::test_data(&result.data)["edit_mode"], "insert");
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();
@@ -931,12 +995,12 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c1",
                 "edit_mode": "replace",
                 "new_source": "print('world')"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -961,12 +1025,12 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c2",
                 "edit_mode": "replace",
                 "new_source": "## Updated"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -992,13 +1056,13 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         for src in ["print('a')", "print('b')"] {
             tool.call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "insert",
                     "cell_type": "code",
                     "new_source": src
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1031,12 +1095,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         // "cell-0" addresses the first cell by index (parseCellId).
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "cell-0",
                 "edit_mode": "replace",
                 "new_source": "print('by index')"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1057,12 +1121,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "cell-99",
                     "edit_mode": "replace",
                     "new_source": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1082,13 +1146,13 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c1",
                 "edit_mode": "insert",
                 "cell_type": "markdown",
                 "new_source": "# inserted md"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1114,12 +1178,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "insert",
                     "new_source": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1136,12 +1200,17 @@ mod tests {
 
     #[test]
     fn schema_requiredness_matches_ts() {
-        let required = INPUT_SCHEMA["required"].as_array().unwrap();
-        assert_eq!(required, &[json!("notebook_path"), json!("new_source")]);
+        assert_eq!(INPUT_SCHEMA.array_len("/required"), Some(2));
+        assert_eq!(INPUT_SCHEMA.string_at("/required/0"), Some("notebook_path"));
+        assert_eq!(INPUT_SCHEMA.string_at("/required/1"), Some("new_source"));
         // cell_type is now a known property (enum code|markdown).
         assert_eq!(
-            INPUT_SCHEMA["properties"]["cell_type"]["enum"],
-            json!(["code", "markdown"])
+            INPUT_SCHEMA.string_at("/properties/cell_type/enum/0"),
+            Some("code")
+        );
+        assert_eq!(
+            INPUT_SCHEMA.string_at("/properties/cell_type/enum/1"),
+            Some("markdown")
         );
     }
 
@@ -1155,12 +1224,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         // No cell_id → insert at position 0 (NotebookEditTool.ts:351-352).
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "edit_mode": "insert",
                 "cell_type": "code",
                 "new_source": "print('first cell now')"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1184,11 +1253,11 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "edit_mode": "replace",
                     "new_source": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1211,11 +1280,11 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "delete"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1239,23 +1308,26 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let result = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "delete"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("malformed JSON is a soft Ok result, not an Err");
-        assert_eq!(result.data["error"], "Notebook is not valid JSON.");
+        assert_eq!(
+            crate::test_data(&result.data)["error"],
+            "Notebook is not valid JSON."
+        );
         // The soft data shape mirrors TS: edit_mode normalized to "replace",
         // cell_type defaulted to "code", the original cell_id echoed.
-        assert_eq!(result.data["edit_mode"], "replace");
-        assert_eq!(result.data["cell_type"], "code");
-        assert_eq!(result.data["cell_id"], "c1");
-        assert_eq!(result.data["language"], "python");
+        assert_eq!(crate::test_data(&result.data)["edit_mode"], "replace");
+        assert_eq!(crate::test_data(&result.data)["cell_type"], "code");
+        assert_eq!(crate::test_data(&result.data)["cell_id"], "c1");
+        assert_eq!(crate::test_data(&result.data)["language"], "python");
     }
 
     #[tokio::test]
@@ -1268,12 +1340,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "replace",
                     "new_source": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1281,8 +1353,10 @@ mod tests {
             .unwrap_err();
         match err {
             ToolError::InvalidInput(m) => assert_eq!(
-                m,
-                "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool."
+                m.string_at(""),
+                Some(
+                    "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool."
+                )
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1303,19 +1377,21 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "replace",
                     "new_source": "print('blocked')"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap_err();
         match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m.string_at(""), Some(crate::FILE_NOT_READ_ERROR));
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
     }
@@ -1333,12 +1409,12 @@ mod tests {
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c1",
                 "edit_mode": "replace",
                 "new_source": "print('first')"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1346,12 +1422,12 @@ mod tests {
         .unwrap();
         // No re-seed: the post-write set from the first edit satisfies the guard.
         tool.call(
-            json!({
+            crate::generated_result(&json!({
                 "notebook_path": target.to_str().unwrap(),
                 "cell_id": "c2",
                 "edit_mode": "replace",
                 "new_source": "## Updated"
-            }),
+            })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -1373,12 +1449,12 @@ mod tests {
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "nonexistent",
                     "edit_mode": "replace",
                     "new_source": "x"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )

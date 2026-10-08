@@ -435,6 +435,78 @@ pub fn render_cells_model_text(cells: &[Value]) -> String {
     text_blocks.join("\n")
 }
 
+/// Source-preserving equivalent used when a Mod replaces a Read result.
+pub(crate) fn render_cells_model_text_source(
+    cells: &crate::Utf16JsonProjection,
+) -> Option<crate::Utf16JsonProjection> {
+    let count = cells.array_len("")?;
+    let code = "code".encode_utf16().collect::<Vec<_>>();
+    let python = "python".encode_utf16().collect::<Vec<_>>();
+    let mut text_blocks: Vec<Vec<u16>> = Vec::new();
+    for index in 0..count {
+        let pointer = format!("/{index}");
+        let cell_type = cells
+            .string_units(&format!("{pointer}/cellType"))
+            .unwrap_or_default();
+        let cell_id = cells
+            .string_units(&format!("{pointer}/cell_id"))
+            .unwrap_or_default();
+        let source = cells
+            .string_units(&format!("{pointer}/source"))
+            .unwrap_or_default();
+        let mut block = Vec::new();
+        block.extend("<cell id=\"".encode_utf16());
+        block.extend_from_slice(&cell_id);
+        block.extend("\">".encode_utf16());
+        if cell_type != code {
+            block.extend("<cell_type>".encode_utf16());
+            block.extend_from_slice(&cell_type);
+            block.extend("</cell_type>".encode_utf16());
+        }
+        if cell_type == code {
+            if let Some(language) = cells.string_units(&format!("{pointer}/language")) {
+                if language != python {
+                    block.extend("<language>".encode_utf16());
+                    block.extend_from_slice(&language);
+                    block.extend("</language>".encode_utf16());
+                }
+            }
+        }
+        block.extend_from_slice(&source);
+        block.extend("</cell id=\"".encode_utf16());
+        block.extend_from_slice(&cell_id);
+        block.extend("\">".encode_utf16());
+        text_blocks.push(block);
+
+        let outputs = format!("{pointer}/outputs");
+        if let Some(output_count) = cells.array_len(&outputs) {
+            for output_index in 0..output_count {
+                if let Some(text) = cells.string_units(&format!("{outputs}/{output_index}/text")) {
+                    if !text.is_empty() {
+                        let mut output_block = vec![b'\n' as u16];
+                        output_block.extend(text);
+                        text_blocks.push(output_block);
+                    }
+                }
+            }
+        }
+    }
+    let total_units =
+        text_blocks.iter().map(Vec::len).sum::<usize>() + text_blocks.len().saturating_sub(1);
+    let mut units = Vec::with_capacity(total_units);
+    for (index, block) in text_blocks.iter().enumerate() {
+        if index > 0 {
+            units.push(b'\n' as u16);
+        }
+        units.extend_from_slice(block);
+    }
+    let display = String::from_utf16_lossy(&units);
+    Some(
+        crate::Utf16JsonProjection::root_string(display, units)
+            .expect("notebook display mirrors its UTF-16 source units"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +905,24 @@ mod tests {
             render_cells_model_text(&cells),
             "<cell id=\"c1\">print('hi')</cell id=\"c1\">\n\nhi\n"
         );
+    }
+
+    #[test]
+    fn source_model_text_keeps_lone_units_from_cell_and_output_strings() {
+        let cells = crate::Utf16JsonProjection::parse(
+            r#"[{"cellType":"code","cell_id":"c\ud800","source":"a\ud800b","outputs":[{"text":"o\ud800"}]}]"#,
+        )
+        .unwrap();
+        let rendered = render_cells_model_text_source(&cells).expect("array source renders");
+        let mut expected = "<cell id=\"c".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend("\">a".encode_utf16());
+        expected.push(0xd800);
+        expected.extend("b</cell id=\"c".encode_utf16());
+        expected.push(0xd800);
+        expected.extend("\">\n\no".encode_utf16());
+        expected.push(0xd800);
+        assert_eq!(rendered.string_units(""), Some(expected));
     }
 
     #[test]

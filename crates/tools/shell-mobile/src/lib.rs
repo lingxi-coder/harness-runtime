@@ -31,11 +31,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
@@ -59,18 +60,22 @@ const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 #[derive(Clone)]
 pub struct ShellMobileTool {
     ctx: BuiltinToolContext,
+    precommit_latch: tool_api::bash_precommit::BashPrecommitLatch,
 }
 
 impl ShellMobileTool {
     /// Construct from the builtin tool context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            precommit_latch: Default::default(),
+        }
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "command":     { "type": "string", "description": "The shell command to run (mksh dialect)." },
@@ -78,7 +83,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "description": { "type": "string", "description": "Optional short description of what the command does." }
         },
         "required": ["command"]
-    })
+    }))
 });
 
 /// Map a `prepare()` [`SandboxError`] to a tool error that NAMES the guarantee
@@ -97,7 +102,7 @@ fn map_sandbox_err(e: &SandboxError) -> ToolError {
         SandboxError::SymlinkEscape(s) => {
             ToolError::Internal(format!("shell sandbox symlink escape rejected: {s}"))
         }
-        SandboxError::Io(s) => ToolError::Io(format!("shell sandbox io error: {s}")),
+        SandboxError::Io(s) => ToolError::Io(format!("shell sandbox io error: {s}").into()),
     }
 }
 
@@ -119,7 +124,7 @@ fn map_process_err(e: &ProcessError, timeout_ms: u64) -> ToolError {
         ProcessError::SandboxEnforcementFailed(s) => ToolError::Internal(format!(
             "shell sandbox enforcement failed (fail-closed): {s}"
         )),
-        ProcessError::Io(s) => ToolError::Io(format!("shell io error: {s}")),
+        ProcessError::Io(s) => ToolError::Io(format!("shell io error: {s}").into()),
     }
 }
 
@@ -129,8 +134,16 @@ impl Tool for ShellMobileTool {
         TOOL_NAME
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -144,22 +157,26 @@ impl Tool for ShellMobileTool {
         MAX_TOOL_OUTPUT_LENGTH
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         // Conservative: a shell mutates cwd / filesystem, so never run it
         // concurrently with other tools.
         false
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         // A shell command can mutate the workspace; treat as not read-only.
         false
     }
 
-    fn is_destructive(&self, _input: &Value) -> bool {
+    fn is_destructive(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         // The guest shell (iSH/Alpine) really can reach the network: it ships
         // apk, npm, npx, pip, git and curl, and nothing below it enforces
         // deny-net. `call` deliberately does not refuse network intent there —
@@ -175,7 +192,7 @@ impl Tool for ShellMobileTool {
             .mobile_shell()
             .is_some_and(|shell| shell.force_platform_sandbox);
         if guest_shell {
-            if let Some(command) = input.get("command").and_then(Value::as_str) {
+            if let Some(command) = input.string_at("/command") {
                 if let Some(advice) = net_intent::network_intent(command) {
                     return PermissionResult::Ask {
                         reason: PermissionDecisionReason::Other {
@@ -183,7 +200,7 @@ impl Tool for ShellMobileTool {
                         },
                         prompt: PermissionPrompt {
                             title: "Allow network access?".into(),
-                            message: advice,
+                            message: advice.into(),
                             options: vec![
                                 "Allow once".into(),
                                 "Allow for this session".into(),
@@ -213,14 +230,14 @@ impl Tool for ShellMobileTool {
         }
     }
 
-    async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
-        match input.get("description").and_then(Value::as_str) {
+    async fn description(&self, input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
+        match input.string_at("/description") {
             Some(d) if !d.is_empty() => d.to_string(),
             _ => "Run shell command".into(),
         }
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         let (applets, sh_version, bundled, runtime_label) = match self.ctx.mobile_shell() {
             Some(a) => (
                 a.applets.clone(),
@@ -321,17 +338,25 @@ impl Tool for ShellMobileTool {
         if let Some(v) = sh_version {
             prompt.push_str(&format!("Shell version: {v}.\n"));
         }
-        prompt
+        let precommit = self.precommit_latch.suggestion(
+            opts.bash_precommit_skills,
+            opts.bash_precommit_session_generation,
+        );
+        if !precommit.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(&precommit);
+            prompt.push('\n');
+        }
+        prompt.into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let cmd = input
-            .get("command")
-            .and_then(Value::as_str)
+            .string_at("/command")
             .ok_or_else(|| ValidationError("missing `command`".into()))?;
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
@@ -341,20 +366,28 @@ impl Tool for ShellMobileTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // 1. Extract + validate the command.
-        let command = input
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
-            .to_string();
+        // The command is kept as UTF-16 source through validation and reaches
+        // the process boundary only when converted to the host OS string.
+        let command_units = input
+            .string_units("/command")
+            .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?;
+        let command = String::from_utf16_lossy(&command_units);
         if command.is_empty() {
             return Err(ToolError::InvalidInput("command must not be empty".into()));
         }
-        let timeout_ms = input.get("timeout").and_then(Value::as_u64);
+        let timeout_ms = input.at_pointer("/timeout").and_then(|value| {
+            let number = value.as_number()?;
+            (number.is_finite()
+                && number >= 0.0
+                && number.fract() == 0.0
+                && number < (u64::MAX as f64))
+                .then_some(number as u64)
+        });
         if let Some(t) = timeout_ms {
             if t > SHELL_MAX_TIMEOUT_MS {
                 return Err(ToolError::InvalidInput(format!(
@@ -370,7 +403,7 @@ impl Tool for ShellMobileTool {
         if let Some(advice) =
             android_host_intent::android_host_intent(&command, self.ctx.computer_control.is_some())
         {
-            return Err(ToolError::InvalidInput(advice));
+            return Err(ToolError::InvalidInput(advice.into()));
         }
 
         // The legacy shell is deny-net, so this is a clean advisory instead of
@@ -381,7 +414,7 @@ impl Tool for ShellMobileTool {
             .is_some_and(|shell| shell.force_platform_sandbox);
         if !mobile_linux_guest {
             if let Some(advice) = net_intent::network_intent(&command) {
-                return Err(ToolError::InvalidInput(advice));
+                return Err(ToolError::InvalidInput(advice.into()));
             }
         }
 
@@ -448,14 +481,14 @@ impl Tool for ShellMobileTool {
         let permission_denied = output_reports_permission_denial(&stdout, &stderr);
         let command_failed = out.exit_code != 0 || permission_denied;
         Ok(ToolCallResult {
-            data: json!({
+            data: tool_api::tool_trait::generated_builtin_result(&json!({
                 "exit_code": out.exit_code,
                 "stdout":    stdout,
                 "stderr":    stderr,
                 "is_error":  command_failed,
                 "timed_out": false,
                 "truncated": truncated_out || truncated_err,
-            }),
+            })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -463,6 +496,7 @@ impl Tool for ShellMobileTool {
             // reports failure to the model and Android timeline.
             is_error: permission_denied,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -627,14 +661,18 @@ mod tests {
         (ctx, sandbox, calls)
     }
 
+    fn source_input(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+    }
+
     #[test]
     fn name_is_shell_and_schema_has_command() {
         let (ctx, _, _) = enabled_ctx(ok_output(""));
         let tool = ShellMobileTool::new(ctx);
         assert_eq!(tool.name(), "Shell");
         let schema = tool.input_schema();
-        assert_eq!(schema["properties"]["command"]["type"], "string");
-        assert_eq!(schema["required"][0], "command");
+        assert_eq!(schema.string_at("/properties/command/type"), Some("string"));
+        assert_eq!(schema.string_at("/required/0"), Some("command"));
     }
 
     #[tokio::test]
@@ -642,7 +680,11 @@ mod tests {
         let (ctx, sandbox, calls) = enabled_ctx(ok_output("hi\n"));
         let tool = ShellMobileTool::new(ctx);
         let res = tool
-            .call(json!({"command": "echo hi"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_input(&json!({"command": "echo hi"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("call should succeed");
         // Mock sandbox recorded a deny-net policy.
@@ -652,9 +694,19 @@ mod tests {
         );
         // The runner ran once and its stdout reached the model.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(res.data["stdout"], "hi\n");
-        assert_eq!(res.data["exit_code"], 0);
-        assert_eq!(res.data["is_error"], false);
+        assert_eq!(res.data.string_at("/stdout"), Some("hi\n"));
+        assert_eq!(
+            res.data
+                .at_pointer("/exit_code")
+                .and_then(|value| value.as_number()),
+            Some(0.0)
+        );
+        assert_eq!(
+            res.data
+                .at_pointer("/is_error")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 
     #[tokio::test]
@@ -662,7 +714,11 @@ mod tests {
         let (ctx, sandbox, calls) = mobile_linux_ctx(ok_output("ok\n"));
         let tool = ShellMobileTool::new(ctx);
         let res = tool
-            .call(json!({"command": "apk add git"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_input(&json!({"command": "apk add git"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("mobile linux command should succeed after outer permission gate");
         assert_eq!(
@@ -670,7 +726,7 @@ mod tests {
             Some(NetworkPolicy::Allowed)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(res.data["stdout"], "ok\n");
+        assert_eq!(res.data.string_at("/stdout"), Some("ok\n"));
     }
 
     #[tokio::test]
@@ -687,7 +743,7 @@ mod tests {
             "git clone https://example.com/r.git",
         ] {
             let decision = tool
-                .check_permissions(&json!({ "command": command }), &fresh_ctx())
+                .check_permissions(&source_input(&json!({ "command": command })), &fresh_ctx())
                 .await;
             let PermissionResult::Ask { prompt, .. } = decision else {
                 panic!("{command:?} must require approval on the guest shell");
@@ -709,7 +765,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         for command in ["ls -la", "npm run build", "git status"] {
             let decision = tool
-                .check_permissions(&json!({ "command": command }), &fresh_ctx())
+                .check_permissions(&source_input(&json!({ "command": command })), &fresh_ctx())
                 .await;
             assert!(
                 matches!(decision, PermissionResult::Allow { .. }),
@@ -724,7 +780,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         let err = tool
             .call(
-                json!({"command": "git clone https://x"}),
+                source_input(&json!({"command": "git clone https://x"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -741,7 +797,7 @@ mod tests {
         let tool = ShellMobileTool::new(ctx);
         let err = tool
             .call(
-                json!({"command": "monkey -p com.android.chrome 1 2>&1 || true"}),
+                source_input(&json!({"command": "monkey -p com.android.chrome 1 2>&1 || true"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -751,7 +807,14 @@ mod tests {
             ToolError::InvalidInput(message) => message,
             other => panic!("unexpected error: {other:?}"),
         };
-        assert!(message.contains("unavailable in this build"), "{message}");
+        assert!(
+            message
+                .string_at("")
+                .unwrap()
+                .contains("unavailable in this build"),
+            "{}",
+            message.string_at("").unwrap()
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -766,12 +829,58 @@ mod tests {
         let (ctx, _, calls) = enabled_ctx(output);
         let tool = ShellMobileTool::new(ctx);
         let result = tool
-            .call(json!({"command": "echo safe"}), fresh_ctx(), fresh_tx())
+            .call(
+                source_input(&json!({"command": "echo safe"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("runner output still returns structured result");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(result.data["is_error"], true);
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/is_error")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn mobile_prompt_uses_native_precommit_sentence_and_request_carrier() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../shell/tests/fixtures/bash_precommit_286.json"
+        ))
+        .unwrap();
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "all_three")
+            .unwrap();
+        let expected = case["outputs"][0]["suggestion"].as_str().unwrap();
+        let (ctx, _, _) = enabled_ctx(ok_output(""));
+        let tool = ShellMobileTool::new(ctx);
+        assert!(!tool
+            .prompt(&PromptOptions::default())
+            .await
+            .string_at("")
+            .unwrap()
+            .contains("Always run `/"));
+        let prompt = tool
+            .clone()
+            .prompt(&PromptOptions {
+                bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
+                    custom_verify: true,
+                    custom_simplify: true,
+                    code_review: true,
+                },
+                ..Default::default()
+            })
+            .await;
+        let prompt = prompt.string_at("").unwrap();
+        assert!(prompt.contains(expected), "{prompt}");
     }
 
     #[tokio::test]
@@ -783,8 +892,10 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
+        let prompt = prompt.string_at("").unwrap();
         assert!(
             prompt.contains("mksh"),
             "prompt should declare mksh: {prompt}"
@@ -821,8 +932,10 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
+        let prompt = prompt.string_at("").unwrap();
         assert!(prompt.contains("mksh"), "still mksh dialect: {prompt}");
         assert!(prompt.contains("grep"), "lists a bundled applet: {prompt}");
         // Signals the inventory/interpreter is bundled+locked, not the device's system sh:
@@ -845,6 +958,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(

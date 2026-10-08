@@ -1,0 +1,5 @@
+{
+  "type": "ui_client_press",
+  "request_id": "press-1",
+  "request_json": "{\"subtype\":\"ui_client_press\"}"
+}

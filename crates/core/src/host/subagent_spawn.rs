@@ -10,6 +10,7 @@
 
 use crate::host::budget::BudgetEnforcerHandle;
 use crate::host::tool_invoker::ToolInvoker;
+use crate::types::utf16_json::Utf16JsonProjection;
 use crate::types::{AgentId, ConversationMessage, SessionId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -86,18 +87,45 @@ fn is_zero_parse_retries(value: &u32) -> bool {
     *value == 0
 }
 
+/// Trusted plugin identity attached by the host before an `agent.spawn` hook
+/// can rewrite its JSON input. The identity is retained for task-list
+/// provenance, never accepted from a plugin-returned spawn payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSpawnProvenance {
+    /// Native `$At`'s `hookCaller = r.plugin`, preserving undefined versus null.
+    pub hook_caller: crate::host::task_registry::FieldPresence<Value>,
+    /// Native `$At`'s `hookOrigin = r.origin`, preserving the source JSON.
+    pub hook_origin: crate::host::task_registry::FieldPresence<Value>,
+}
+
 /// Locked subagent input passed to [`SubagentSpawner::spawn`].
 ///
 /// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
 /// so the trait surface stays insulated from `lingxi-tools`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRequest {
     /// The subagent type to resolve (built-in or user/project catalog). NOT
     /// validated here — the spawner resolves it with claude-code precedence
     /// (catalog overrides built-ins; unknown → `general-purpose`).
+    #[serde(default)]
     pub subagent_type: String,
     /// Initial prompt seeded into the subagent's first turn.
-    pub prompt: String,
+    /// A root-string projection keeps the exact JavaScript UTF-16 units until
+    /// the prompt becomes the child's first model-visible message.
+    #[serde(
+        default = "empty_prompt_projection",
+        with = "crate::types::utf16_json::raw_json_serde"
+    )]
+    pub prompt: Utf16JsonProjection,
+    /// Host-only Native query depth captured at the Agent tool call. The child
+    /// starts at parent depth plus two, or depth one when no parent depth was
+    /// observed. This is distinct from recursive Agent spawn depth.
+    #[serde(skip)]
+    pub parent_native_query_depth: Option<u32>,
+    /// Host-trusted plugin caller/origin snapshot. It is intentionally omitted
+    /// from JSON so a model or plugin cannot assert task-list provenance.
+    #[serde(skip)]
+    pub agent_spawn_provenance: AgentSpawnProvenance,
     /// Effective observer inherited or declared for this spawn. The runtime
     /// validates the agent name and observer chain before launching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,8 +139,12 @@ pub struct SubagentSpawnRequest {
     // call sites and serialized payloads remain valid (frozen-crate rule).
     /// Short (3-5 word) human description of the task (TS `description`,
     /// required in the model-facing schema). Carried for telemetry / display.
-    #[serde(default)]
-    pub description: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub description: Option<Utf16JsonProjection>,
     /// Model-family override (`"sonnet"` | `"opus"` | `"haiku"`). Takes
     /// precedence over the resolved [`crate::host::…`] agent definition's model
     /// (TS `model`). The spawner maps this onto the agent model override.
@@ -214,8 +246,16 @@ pub struct SubagentSpawnRequest {
     /// `Notes:` trailer (re-appending it would bust the prompt cache). `None`
     /// (non-fork, or the orchestrator has not yet threaded the rendered prompt
     /// onto `ToolUseContext`) keeps the existing body+trailer behavior.
-    #[serde(default)]
-    pub fork_parent_system_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub fork_parent_system_prompt: Option<Utf16JsonProjection>,
+    /// Private live instruction state. Forks treat this as an explicit context
+    /// override; a cold restore rebuilds Gv and starts a fresh Ye cursor.
+    #[serde(skip)]
+    pub instruction_context: Option<crate::host::instructions::InstructionContext>,
     /// Structured-output schema (JSON Schema, serialised as a string) the child
     /// must satisfy: the runner injects a forced `StructuredOutput` tool whose
     /// `input_schema` IS this schema, forces `tool_choice` to it, and returns the
@@ -254,14 +294,22 @@ pub struct SubagentSpawnRequest {
     /// workflow runtime to substitute the schema-variant xBp prompt when
     /// `agent({schema})` is called without an explicit `agentType`
     /// (claude-code `DBp.getSystemPrompt => xBp`). `None` ⇒ use the definition's own body.
-    #[serde(default)]
-    pub system_prompt_override: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub system_prompt_override: Option<Utf16JsonProjection>,
     /// Per-spawn system-prompt addendum: appended to the fully-rendered system
     /// prompt (after Notes + env block). Used by the workflow runtime to inject
     /// the HBp/IBp NOTE addendum when the caller specifies an explicit `agentType`
     /// (claude-code's appended NOTE for workflow-context agents). `None` ⇒ no addendum.
-    #[serde(default)]
-    pub system_prompt_addendum: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub system_prompt_addendum: Option<Utf16JsonProjection>,
     /// Per-spawn additional disallowed tools: unioned with the resolved
     /// `AgentDefinition`'s `disallowed_tools` before tool resolution. Used by
     /// the workflow runtime to enforce `{SendUserMessage, Agent, Workflow}` on
@@ -303,13 +351,23 @@ pub struct SubagentSpawnRequest {
     /// guard (one live fork per skill) and is the identity a later resume
     /// corroborates against the on-disk scoping record
     /// (`session::forked_skill`). `None` for every non-fork spawn.
-    #[serde(default)]
-    pub forked_skill_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub forked_skill_name: Option<Utf16JsonProjection>,
     /// The display name a forked skill's run is attributed to (claude
     /// `attributionName`, from the launch's `spawnedBySkill`). Persisted in the
     /// scoping sidecar so a resume reconstructs the same attribution.
-    #[serde(default)]
-    pub forked_skill_attribution: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub forked_skill_attribution: Option<Utf16JsonProjection>,
     /// The forked skill's declared effort, persisted with its scoping.
     #[serde(default)]
     pub forked_skill_effort: Option<String>,
@@ -352,6 +410,44 @@ pub struct SubagentSpawnRequest {
     /// mechanical additions into three-way conflicts.
     #[serde(skip)]
     pub model_attempt: Option<crate::host::ModelAttemptContext>,
+    /// Ordinary Agent entrypoint opt-in. Serialized/model input cannot enable
+    /// the private final-report contract; shared resolver callers default off.
+    #[serde(skip)]
+    pub handback_opt_in: bool,
+    /// Trusted immediate parent's effective enforcing mode at launch. Kept
+    /// separate from the deprecated model-authored `mode` argument.
+    #[serde(skip)]
+    pub parent_permission_mode: Option<String>,
+    /// Host feature gate; absent uses the native default of true.
+    #[serde(skip)]
+    pub handback_enabled: Option<bool>,
+    /// Independent trusted successful-report turn-ending gate. Absent means
+    /// true; model input and environment variables cannot select it.
+    #[serde(skip)]
+    pub handback_ends_turn_enabled: Option<bool>,
+    /// Restored dynamic report state. Persisted recipes cannot mint a live
+    /// contract; the registered lifecycle owner revalidates this before start.
+    #[serde(skip)]
+    pub restored_handback_state: Option<crate::host::handback::HandbackState>,
+    /// Previously archived full reports carried by the trusted cold-restore
+    /// lifecycle. They remain historical and do not authorize this new run.
+    #[serde(skip)]
+    pub restored_handback_history: Vec<crate::host::handback::HandbackState>,
+    /// Registered cold-restore batch startup. It publishes every recipient
+    /// row/receiver before any member selects its reporting owner or calls APIs.
+    #[serde(skip)]
+    pub restore_handback_start: Option<crate::host::handback::HandbackRestoreParticipant>,
+}
+
+fn empty_prompt_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::new(), Vec::new())
+        .expect("empty UTF-16 text is a valid root string")
+}
+
+impl Default for SubagentSpawnRequest {
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("all SubagentSpawnRequest fields default")
+    }
 }
 
 /// Workflow-scoped model-query stall policy.
@@ -548,12 +644,45 @@ pub enum SubagentObservation {
         /// Typed conversation message emitted directly by the runner.
         message: ConversationMessage,
     },
+    /// A visible child transcript row with its source stream index. This is
+    /// emitted by the runner's shared row allocator so persistence and live
+    /// session-agent events retain the same identity across tombstones.
+    MessageRow {
+        /// Child that produced the message.
+        agent_id: AgentId,
+        /// Typed query row.
+        message: ConversationMessage,
+        /// Stable session-agent message index assigned before persistence.
+        message_index: u64,
+    },
+    /// A child transcript row was removed by native server-fallback cleanup.
+    /// The complete outer row is retained so client/history consumers can
+    /// remove by UUID even when `display_only` is true.
+    ServerFallbackTombstone {
+        /// Child that owned the removed row.
+        agent_id: AgentId,
+        /// Complete row envelope captured by the host.
+        message: crate::host::ServerFallbackTombstoneMessage,
+        /// Native display-only presentation flag.
+        display_only: bool,
+    },
+    /// A host-created API-error row produced when a server-selected fallback
+    /// is declined. This is independent of provider `LlmError` and preserves
+    /// the complete native envelope for observer/client consumers.
+    ServerFallbackApiErrorRow {
+        /// Child that emitted the row.
+        agent_id: AgentId,
+        /// Complete host-created row envelope.
+        row: crate::host::ServerFallbackApiErrorRow,
+        /// Stable session-agent index allocated with the query row.
+        message_index: u64,
+    },
     /// The child completed successfully.
     Completed {
         /// Child that completed.
         agent_id: AgentId,
         /// Final child result payload.
-        content: Value,
+        content: Utf16JsonProjection,
         /// Final-turn usage rollup.
         usage: SubagentUsage,
         /// Tool calls completed across the run.
@@ -600,6 +729,12 @@ pub trait SubagentSpawnObserver: Send + Sync {
     /// The default is a no-op so existing observers remain source-compatible.
     fn on_allocated(&self, _event: &SubagentObservation) {}
 
+    /// Synchronous receipt after every startup observer accepted the child and
+    /// the runner's start gate was released. Unlike `on_allocated`, this means
+    /// a Mod `agent.spawn` core may report the real id and selected model as
+    /// started. A rejected `before_start` never reaches this callback.
+    fn on_started(&self, _event: &SubagentObservation) {}
+
     /// Receive one typed event from the child lifecycle.
     async fn on_event(&self, event: SubagentObservation);
 }
@@ -615,10 +750,15 @@ pub trait SubagentSpawnObserver: Send + Sync {
 pub enum SubagentResult {
     /// The subagent finished normally.
     Completed {
+        /// Current reporting state, including the sanitized full report and
+        /// admitted or withheld disposition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handback: Option<crate::host::handback::HandbackState>,
         /// The real child pool agent id (claude `runAgent.ts:347` `agentId`).
         agent_id: crate::types::AgentId,
         /// Free-form JSON payload returned by the subagent.
-        content: Value,
+        #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+        content: Utf16JsonProjection,
         /// Token-usage rollup.
         usage: SubagentUsage,
         /// Number of tool-use blocks the subagent executed across the run
@@ -705,11 +845,33 @@ pub enum SubagentSpawnError {
     /// Distinct from [`Self::Runtime`] so callers can tell "a plugin said no"
     /// from "the runtime broke" — they warrant different messages to the user
     /// and only one of them is a bug.
-    #[error("SubagentSpawner: spawn denied by an agent.spawn hook: {0}")]
-    DeniedByHook(String),
+    #[error("SubagentSpawner: spawn denied by an agent.spawn hook")]
+    DeniedByHook(Utf16JsonProjection),
     /// Any other internal failure.
     #[error("SubagentSpawner: internal error: {0}")]
     Internal(String),
+}
+
+impl SubagentSpawnError {
+    /// Return the model-facing diagnostic without passing hook text through a
+    /// lossy Rust `String` conversion. Host-generated variants retain their
+    /// existing `Display` text; hook denials reproduce the prior Display prefix
+    /// followed by the original UTF-16 source units.
+    #[must_use]
+    pub fn source_diagnostic(&self) -> Utf16JsonProjection {
+        let units = match self {
+            Self::DeniedByHook(reason) => {
+                let mut units = "SubagentSpawner: spawn denied by an agent.spawn hook: "
+                    .encode_utf16()
+                    .collect::<Vec<_>>();
+                units.extend(reason.string_units("").unwrap_or_default());
+                units
+            }
+            _ => self.to_string().encode_utf16().collect(),
+        };
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("subagent error diagnostics are valid source strings")
+    }
 }
 
 /// Pre-spawn selection metadata for the `tengu_agent_tool_selected` event
@@ -772,6 +934,27 @@ pub struct AsyncLaunch {
     pub output_file: String,
 }
 
+/// Result of the first phase of a Mod `agent.spawn` chain. A forwarded input
+/// is revalidated by AgentTool before it starts the child; a direct answer
+/// starts no child, even when it contains a model name.
+pub enum AgentSpawnAdmission {
+    /// No Mod chain was installed; the original tool input remains in
+    /// AgentTool's own request and the discarded historical payload carried
+    /// no additional state.
+    Bypass,
+    Forwarded {
+        input: Utf16JsonProjection,
+        start: Box<dyn AgentSpawnStart>,
+    },
+    Answered(Utf16JsonProjection),
+}
+
+/// Complete the suspended Mod `next(e)` only at the real startup boundary.
+pub trait AgentSpawnStart: Send {
+    fn started(self: Box<Self>, agent_id: AgentId, model: String);
+    fn failed(self: Box<Self>, reason: String);
+}
+
 /// Inheritance bundle the parent agent hands to a child spawn.
 ///
 /// The recursion-lock + budget-inheritance invariants are asserted in
@@ -819,6 +1002,21 @@ pub struct SubagentListingEntry {
     /// Pre-rendered tools description (TS `getToolsDescription`): `All tools`,
     /// `All tools except X, Y`, an explicit `A, B, C`, or `None`.
     pub tools_description: String,
+}
+
+/// A model-facing agent listing row together with the producer-owned facts
+/// needed by Mods `agent.offer`. `provider` is absent when this host cannot
+/// recover the installed provider identity and tier; callers must then keep
+/// the row offered rather than inventing provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOfferCandidate {
+    /// The row rendered to the model when it is offered.
+    pub listing: SubagentListingEntry,
+    /// Wire `AgentDefinition.source` value used by Mods `agent.offer`.
+    pub source: String,
+    /// Native provider origin (`{ plugin, tier }`) when the host knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<serde_json::Value>,
 }
 
 /// Format one agent catalog line, the single source of truth for claude-code's
@@ -899,6 +1097,16 @@ pub fn should_inject_agent_list_in_messages() -> bool {
 /// this key, so the two payload kinds never collide.
 pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message__";
 
+/// Private progress-line envelope for a nested Agent server-fallback tombstone.
+/// It is decoded by the host Agent tool and never reaches a provider model.
+pub const FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL: &str =
+    "__forward_subagent_server_fallback_tombstone__";
+
+/// Private progress-line envelope for the complete synthetic API-error row
+/// produced when the host declines a server-selected fallback.
+pub const FORWARD_SUBAGENT_SERVER_FALLBACK_API_ERROR_SENTINEL: &str =
+    "__forward_subagent_server_fallback_api_error__";
+
 /// Stable prefix used when the provider-stream idle watchdog terminates a
 /// subagent. Callers use this category without exposing provider error text.
 pub const SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX: &str = "subagent workflow query timeout:";
@@ -965,6 +1173,27 @@ pub fn max_subagent_spawn_depth() -> u32 {
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Wrap the child tool invoker with session-owned dispatch middleware.
+    /// Desktop seats Mod `tool.call` here so every child tool call, including
+    /// nested Agent calls, traverses the same plugin worker as the main loop.
+    /// Hosts without executable Mods return the original capability unchanged.
+    fn decorate_tool_invoker(&self, invoker: Arc<dyn ToolInvoker>) -> Arc<dyn ToolInvoker> {
+        invoker
+    }
+
+    /// Begin the Mod chain before the Agent tool derives execution from any
+    /// rewritten fields. `provenance` is a host-only sidecar from the caller's
+    /// trusted Agent context; implementations must not reconstruct it from the
+    /// JSON input or a hook rewrite. Hosts without a Mod worker return
+    /// [`AgentSpawnAdmission::Bypass`]; AgentTool keeps its original typed input.
+    async fn begin_agent_spawn(
+        &self,
+        _input: Utf16JsonProjection,
+        _provenance: AgentSpawnProvenance,
+    ) -> Result<AgentSpawnAdmission, SubagentSpawnError> {
+        Ok(AgentSpawnAdmission::Bypass)
+    }
+
     /// Atomically reserve the entire panel group after activation. A host
     /// without this capability must fail closed, not fall back to racing
     /// ordinary spawns. Queue time counts against the original deadline.
@@ -999,10 +1228,20 @@ pub trait SubagentSpawner: Send + Sync {
     async fn resume_foreground(
         &self,
         _agent_id: &AgentId,
-        _message: String,
+        _message: Utf16JsonProjection,
     ) -> Result<(), SubagentSpawnError> {
         Err(SubagentSpawnError::Internal(
             "foreground resume is not wired".into(),
+        ))
+    }
+    /// Deliver an admitted report without granting human-message authority.
+    async fn resume_foreground_peer(
+        &self,
+        _agent_id: &AgentId,
+        _envelope: crate::host::handback::HandbackEnvelope,
+    ) -> Result<(), SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal(
+            "foreground peer resume is not wired".into(),
         ))
     }
     /// Connect the allocated foreground runner to the host's mailbox router.
@@ -1123,6 +1362,29 @@ pub trait SubagentSpawner: Send + Sync {
     /// real catalog with claude-code's later-wins precedence.
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         Vec::new()
+    }
+
+    /// Candidate metadata for the model-facing `agent.offer` pass. The raw
+    /// [`Self::agent_listing`] remains the execution catalog: a candidate
+    /// hidden from the model must not make an explicitly selected agent
+    /// impossible to resolve. Existing/mock spawners have no origin facts, so
+    /// their rows remain offered by the default implementation.
+    async fn agent_offer_candidates(&self) -> Vec<AgentOfferCandidate> {
+        self.agent_listing()
+            .await
+            .into_iter()
+            .map(|listing| AgentOfferCandidate {
+                listing,
+                source: String::new(),
+                provider: None,
+            })
+            .collect()
+    }
+
+    /// The catalog after model-facing `agent.offer` filtering. Execution and
+    /// lookup callers must continue using [`Self::agent_listing`].
+    async fn agent_listing_for_model(&self) -> Vec<SubagentListingEntry> {
+        self.agent_listing().await
     }
 
     /// The agent types that are UNAVAILABLE because every tool they may use is
@@ -1258,6 +1520,137 @@ pub trait SubagentSpawner: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use super::{SubagentResult, SubagentSpawnError, SubagentUsage};
+    use crate::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn denied_hook_diagnostic_keeps_lone_units_after_display_prefix() {
+        let reason_units = vec![u16::from(b'n'), 0xd800, u16::from(b'o')];
+        let reason = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&reason_units),
+            reason_units.clone(),
+        )
+        .unwrap();
+        let error = SubagentSpawnError::DeniedByHook(reason);
+
+        let mut expected = "SubagentSpawner: spawn denied by an agent.spawn hook: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        expected.extend(reason_units);
+        assert_eq!(error.source_diagnostic().string_units(""), Some(expected));
+    }
+
+    #[test]
+    fn host_subagent_error_diagnostic_uses_existing_display_text() {
+        let error = SubagentSpawnError::Runtime("worker failed".into());
+        assert_eq!(
+            error.source_diagnostic().string_at(""),
+            Some("SubagentSpawner: runtime error: worker failed")
+        );
+    }
+
+    #[test]
+    fn completed_subagent_content_serde_preserves_raw_json_shape_and_units() {
+        let result = SubagentResult::Completed {
+            handback: None,
+            agent_id: crate::types::AgentId::new(),
+            content: Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap(),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            total_tokens: 0,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
+            usage_complete: true,
+        };
+        let source = serde_json::to_string(&result).unwrap();
+        assert!(
+            source.contains(r#""content":{"text":"\ud800"}"#),
+            "{source}"
+        );
+        let restored: SubagentResult = serde_json::from_str(&source).unwrap();
+        let SubagentResult::Completed { content, .. } = restored else {
+            panic!("expected completion");
+        };
+        assert_eq!(content.string_units("/text").unwrap(), vec![0xd800]);
+    }
+
+    #[test]
+    fn spawn_prompt_is_raw_json_string_and_preserves_lone_utf16_units() {
+        let units = vec![b't' as u16, 0xd800, b's' as u16];
+        let description_units = vec![b'd' as u16, 0xdfff];
+        let request = super::SubagentSpawnRequest {
+            parent_native_query_depth: None,
+            prompt: Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units.clone(),
+            )
+            .unwrap(),
+            forked_skill_name: Some(
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .unwrap(),
+            ),
+            forked_skill_attribution: Some(
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                    .unwrap(),
+            ),
+            description: Some(
+                Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&description_units),
+                    description_units.clone(),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains(r#""prompt":"t\ud800s""#), "{encoded}");
+        assert!(
+            encoded.contains(r#""forked_skill_name":"t\ud800s""#),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains(r#""forked_skill_attribution":"t\ud800s""#),
+            "{encoded}"
+        );
+        assert!(
+            !encoded.contains(r#""prompt":{"root""#),
+            "prompt must serialize as a JSON string, not the flat carrier DTO"
+        );
+
+        let restored: super::SubagentSpawnRequest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.prompt.string_units(""), Some(units));
+        assert_eq!(
+            restored
+                .forked_skill_name
+                .as_ref()
+                .and_then(|name| name.string_units("")),
+            Some(vec![b't' as u16, 0xd800, b's' as u16])
+        );
+        assert_eq!(
+            restored
+                .description
+                .as_ref()
+                .and_then(|description| description.string_units("")),
+            Some(description_units)
+        );
+        assert!(encoded.contains(r#""description":"d\udfff""#), "{encoded}");
+        let default = super::SubagentSpawnRequest::default();
+        let default_json = serde_json::to_string(&default).unwrap();
+        assert!(
+            default_json.contains(r#""description":null"#),
+            "{default_json}"
+        );
+    }
+
+    #[test]
+    fn default_spawn_prompt_is_an_empty_root_string() {
+        let request = super::SubagentSpawnRequest::default();
+        assert_eq!(request.prompt.string_units(""), Some(Vec::new()));
+    }
+
     #[test]
     fn workflow_body_recovery_is_host_only_and_defaults_to_disabled() {
         use super::WorkflowQueryWatchdog;
@@ -1294,6 +1687,7 @@ mod tests {
         let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
         assert_eq!(restored.structured_output_parse_retries, 0);
         let enabled = super::SubagentSpawnRequest {
+            parent_native_query_depth: None,
             structured_output_parse_retries: 2,
             ..request
         };
@@ -1315,6 +1709,36 @@ mod tests {
         let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
         assert!(restored.model_attempt.is_none());
     }
+
+    #[test]
+    fn agent_spawn_provenance_is_host_only_and_cannot_be_forged_from_json() {
+        use crate::host::task_registry::FieldPresence;
+
+        let request = super::SubagentSpawnRequest {
+            parent_native_query_depth: None,
+            agent_spawn_provenance: super::AgentSpawnProvenance {
+                hook_caller: FieldPresence::Value(serde_json::json!("host-plugin")),
+                hook_origin: FieldPresence::Value(serde_json::json!(["host-plugin"])),
+            },
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(request).unwrap();
+        assert!(value.get("agent_spawn_provenance").is_none());
+        value["agent_spawn_provenance"] = serde_json::json!({
+            "hook_caller": "forged-plugin",
+            "hook_origin": ["forged-plugin"]
+        });
+        let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.agent_spawn_provenance.hook_caller,
+            FieldPresence::Missing
+        );
+        assert_eq!(
+            restored.agent_spawn_provenance.hook_origin,
+            FieldPresence::Missing
+        );
+    }
+
     use super::*;
     use std::sync::Arc;
 

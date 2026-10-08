@@ -1,5 +1,5 @@
 use crate::mobile::local_apps_host::{
-    canonical_cwd_string, remove_app_session_file, LocalAppsHostBroker,
+    LocalAppsHostBroker, canonical_cwd_string, remove_app_session_file,
 };
 use client::protocol::listings::SessionModeDto;
 use std::sync::{Arc, Mutex as StdMutex};

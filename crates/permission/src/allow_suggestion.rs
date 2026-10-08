@@ -44,7 +44,7 @@ use crate::rule::{
 };
 use crate::shell_command::{command_from_input, is_shell_tool};
 use crate::PermissionUpdateDestination;
-use serde_json::Value;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use std::sync::LazyLock;
 
 /// File-path tools whose `AllowAlways` narrows to the touched path.
@@ -55,23 +55,30 @@ const FILE_PATH_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit",
 /// `rule_content` is narrowed to the command / path / domain the call used, or a
 /// bare tool-wide allow when nothing narrowable is present (preserving the prior
 /// behavior for MCP tools and inputs without a recognizable command/path/url).
+/// Returns `None` when a recognized text field contains an isolated UTF-16
+/// surrogate, because a UTF-8-only persisted rule cannot represent that exact
+/// input and a tool-wide grant would be broader than the approved call.
 ///
 /// The returned rule's `source` is [`PermissionRuleSource::Session`] (the
 /// session-rule list); the persist layer assigns the durable destination
 /// (`settings.local.json`) separately.
 #[must_use]
-pub fn allow_suggestion(tool_name: &str, input: &Value) -> PermissionRule {
+pub fn allow_suggestion(tool_name: &str, input: &Utf16JsonProjection) -> Option<PermissionRule> {
     match narrowed_content(tool_name, input) {
-        Some(content) => PermissionRule {
+        Ok(Some(content)) => Some(PermissionRule {
             value: PermissionRuleValue {
                 tool_name: tool_name.to_string(),
-                rule_content: Some(content),
+                rule_content: Some(content.into()),
             },
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::Session,
-        },
-        // Nothing narrowable → fall back to the prior tool-wide allow.
-        None => PermissionRule::allow_tool_session(tool_name),
+        }),
+        // Missing/non-string fields keep the established tool-wide behavior.
+        Ok(None) => Some(PermissionRule::allow_tool_session(tool_name)),
+        // Rust rule content is UTF-8. If a narrowing field is an exact JS
+        // string containing an isolated surrogate, omit persistence rather
+        // than widening a one-call approval to a tool-wide rule.
+        Err(()) => None,
     }
 }
 
@@ -86,7 +93,7 @@ pub struct PermissionPersistenceSuggestion {
     /// Human-readable label for the consent row.
     pub label: String,
     /// Exact `PermissionUpdate` object selected by this row.
-    pub update: Value,
+    pub update: Utf16JsonProjection,
     /// Parsed equivalent used by the TUI's session fast path and persistence.
     pub rule: PermissionRule,
     /// Destination carried by `update`.
@@ -104,41 +111,46 @@ pub struct PermissionPersistenceSuggestion {
 #[must_use]
 pub fn permission_persistence_suggestion(
     prompted_tool_name: &str,
-    suggestions: &Value,
+    suggestions: &Utf16JsonProjection,
 ) -> Option<PermissionPersistenceSuggestion> {
-    let updates = suggestions.as_array()?;
-    let [update] = updates.as_slice() else {
-        return None;
-    };
-    let object = update.as_object()?;
-    if object.get("type").and_then(Value::as_str)? != "addRules"
-        || object.get("behavior").and_then(Value::as_str)? != "allow"
-    {
+    let root = suggestions.at_pointer("")?;
+    if root.array_len()? != 1 {
         return None;
     }
-    let destination = match object.get("destination").and_then(Value::as_str)? {
+    let update_view = root.get_index(0)?;
+    let update_type = exact_text(update_view.get_property("type")?)?;
+    let behavior = exact_text(update_view.get_property("behavior")?)?;
+    if update_type != "addRules" || behavior != "allow" {
+        return None;
+    }
+    let destination = match exact_text(update_view.get_property("destination")?)?.as_str() {
         "session" => PermissionUpdateDestination::Session,
         "localSettings" => PermissionUpdateDestination::LocalSettings,
         _ => return None,
     };
-    let rules = object.get("rules").and_then(Value::as_array)?;
-    let [wire_rule] = rules.as_slice() else {
+    let rules = update_view.get_property("rules")?;
+    if rules.array_len()? != 1 {
         return None;
-    };
-    let value = rule_value_from_wire(wire_rule)?;
+    }
+    let value = rule_value_from_wire(rules.get_index(0)?)?;
     if value.tool_name != normalize_legacy_tool_name(prompted_tool_name)
         || !safe_permission_label_piece(&value.tool_name)
     {
         return None;
     }
-    let target = match value.rule_content.as_deref() {
-        Some(content) if safe_permission_label_piece(content) => content.to_string(),
-        Some(_) => return None,
+    let target = match value.rule_content.as_ref() {
+        Some(content) => {
+            let display = content.string_at("")?;
+            if !safe_permission_label_piece(display) {
+                return None;
+            }
+            display.to_owned()
+        }
         None => format!("any {} command", value.tool_name),
     };
     Some(PermissionPersistenceSuggestion {
         label: format!("Yes, and don't ask again for {target}"),
-        update: update.clone(),
+        update: suggestions.subprojection("/0").ok()?,
         rule: PermissionRule {
             value,
             behavior: PermissionBehavior::Allow,
@@ -146,6 +158,10 @@ pub fn permission_persistence_suggestion(
         },
         destination,
     })
+}
+
+fn exact_text(value: JsonValueView<'_>) -> Option<String> {
+    crate::source_input::exact_string(value).map(str::to_owned)
 }
 
 /// Whether a session/allow `rule` matches a live call to `tool_name`/`input`.
@@ -158,14 +174,25 @@ pub fn permission_persistence_suggestion(
 /// fast-path. Used by the TUI / adapter gates' pre-dialog session-rule lookup so
 /// the narrowed rule they now persist is also honored within the session.
 #[must_use]
-pub fn call_matches_rule(rule: &PermissionRule, tool_name: &str, input: &Value) -> bool {
+pub fn call_matches_rule(
+    rule: &PermissionRule,
+    tool_name: &str,
+    input: &Utf16JsonProjection,
+) -> bool {
     if rule.value.tool_name != tool_name || !matches!(rule.behavior, PermissionBehavior::Allow) {
         return false;
     }
-    match rule.value.rule_content.as_deref() {
+    match rule.value.rule_content.as_ref() {
         // Tool-wide allow — matches every call to the tool (legacy behavior).
         None => true,
-        Some(content) => {
+        // A source rule with an unpaired surrogate is still a content rule.
+        // The UTF-8 matcher cannot evaluate it, but it must never fall back to
+        // the broader tool-wide grant.
+        Some(_) if rule.value.rule_content_text().is_none() => false,
+        Some(_) => {
+            let Some(content) = rule.value.rule_content_text() else {
+                return false;
+            };
             if is_shell_tool(tool_name) {
                 // Faithful shell allow-matcher: the stored prefix/exact rule must
                 // cover the live command (every sub-command).
@@ -174,7 +201,7 @@ pub fn call_matches_rule(rule: &PermissionRule, tool_name: &str, input: &Value) 
             } else {
                 // Path / domain / other: the live call must narrow to the SAME
                 // content (exact path / host), which is safe (never broader).
-                narrowed_content(tool_name, input).as_deref() == Some(content)
+                narrowed_content(tool_name, input).ok().flatten().as_deref() == Some(content)
             }
         }
     }
@@ -182,36 +209,53 @@ pub fn call_matches_rule(rule: &PermissionRule, tool_name: &str, input: &Value) 
 
 /// Compute the narrowed `rule_content` for `tool_name`/`input`, or `None` to keep
 /// the call tool-wide.
-fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
+fn narrowed_content(tool_name: &str, input: &Utf16JsonProjection) -> Result<Option<String>, ()> {
     if is_shell_tool(tool_name) {
+        if has_unrepresentable_string(input, "command") {
+            return Err(());
+        }
         // 2.1.211 `KQt`: for a shell tool with a command, the suggestion is ALWAYS
         // a concrete rule (a `<prefix> *` wildcard or an EXACT full command) —
         // never tool-wide. Only a call with no command at all stays tool-wide.
-        return command_from_input(input)
+        return Ok(command_from_input(input)
             .filter(|c| !c.trim().is_empty())
-            .map(bash_suggestion_content);
+            .map(bash_suggestion_content));
     }
     if FILE_PATH_TOOLS.contains(&tool_name) {
         return file_path_content(input);
     }
     if tool_name == "WebFetch" {
-        return webfetch_domain(input).map(|host| format!("domain:{host}"));
+        if has_unrepresentable_string(input, "url") {
+            return Err(());
+        }
+        return Ok(webfetch_domain(input).map(|host| format!("domain:{host}")));
     }
-    None
+    Ok(None)
 }
 
-fn rule_value_from_wire(rule: &Value) -> Option<PermissionRuleValue> {
-    let object = rule.as_object()?;
-    let tool_name = normalize_legacy_tool_name(object.get("toolName").and_then(Value::as_str)?);
-    let rule_content = match object.get("ruleContent") {
+fn has_unrepresentable_string(input: &Utf16JsonProjection, field: &str) -> bool {
+    input
+        .at_pointer("")
+        .and_then(|root| root.get_property(field))
+        .is_some_and(|value| value.code_units().is_some() && valid_view_string(value).is_none())
+}
+
+fn rule_value_from_wire(rule: JsonValueView<'_>) -> Option<PermissionRuleValue> {
+    let tool_name =
+        normalize_legacy_tool_name(exact_text(rule.get_property("toolName")?)?.as_str());
+    let rule_content = match rule.get_property("ruleContent") {
         None => None,
-        Some(Value::String(content)) => Some(content.clone()),
-        Some(_) => return None,
+        Some(content) => Some(projection_from_string_view(content)?),
     };
     Some(PermissionRuleValue {
         tool_name,
         rule_content,
     })
+}
+
+fn projection_from_string_view(value: JsonValueView<'_>) -> Option<Utf16JsonProjection> {
+    let units = value.code_units()?.to_vec();
+    Utf16JsonProjection::root_string(value.as_str()?.to_owned(), units).ok()
 }
 
 fn safe_permission_label_piece(value: &str) -> bool {
@@ -380,23 +424,39 @@ fn heredoc_prefix(command: &str) -> Option<String> {
     }
 }
 
+fn valid_view_string<'a>(value: JsonValueView<'a>) -> Option<&'a str> {
+    let units = value.code_units()?;
+    if !std::char::decode_utf16(units.iter().copied()).all(|unit| unit.is_ok()) {
+        return None;
+    }
+    value.as_str()
+}
+
+fn input_string<'a>(input: &'a Utf16JsonProjection, key: &str) -> Option<&'a str> {
+    valid_view_string(input.at_pointer("")?.get_property(key)?)
+}
+
 /// Pull a file path from a file-tool input (`file_path` for Edit/Write/Read,
 /// `notebook_path` for NotebookEdit, `path`/`pattern` for Glob).
-fn file_path_content(input: &Value) -> Option<String> {
+fn file_path_content(input: &Utf16JsonProjection) -> Result<Option<String>, ()> {
     for key in ["file_path", "notebook_path", "path", "pattern"] {
-        if let Some(s) = input.get(key).and_then(Value::as_str) {
-            if !s.is_empty() {
-                return Some(s.to_string());
+        if let Some(value) = input.at_pointer("").and_then(|root| root.get_property(key)) {
+            if let Some(s) = valid_view_string(value) {
+                if !s.is_empty() {
+                    return Ok(Some(s.to_string()));
+                }
+            } else if value.code_units().is_some() {
+                return Err(());
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Extract the host of a `WebFetch` call's `url` (scheme + userinfo + port +
 /// path stripped), e.g. `https://user@Example.COM:8443/x` → `example.com`.
-fn webfetch_domain(input: &Value) -> Option<String> {
-    let url = input.get("url").and_then(Value::as_str)?;
+fn webfetch_domain(input: &Utf16JsonProjection) -> Option<String> {
+    let url = input_string(input, "url")?;
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     // Authority ends at the first `/`, `?`, or `#`.
     let authority = after_scheme
@@ -422,11 +482,22 @@ fn webfetch_domain(input: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::Value;
 
-    fn content(tool: &str, input: Value) -> Option<String> {
-        let rule = allow_suggestion(tool, &input);
-        rule.value.rule_content
+    macro_rules! json {
+        ($($tokens:tt)*) => {{
+            let value = ::serde_json::json!($($tokens)*);
+            Utf16JsonProjection::from_serde_value(&value)
+                .expect("serde JSON test fixture should convert to UJP")
+        }};
+    }
+
+    fn content(tool: &str, input: Utf16JsonProjection) -> Option<String> {
+        allow_suggestion(tool, &input).and_then(|rule| {
+            rule.value
+                .rule_content
+                .and_then(|content| content.string_at("").map(str::to_owned))
+        })
     }
 
     #[test]
@@ -518,7 +589,8 @@ mod tests {
         );
         // The persisted ` *` prefix rule matches a covered command, not an
         // unrelated one.
-        let rule = allow_suggestion("Shell", &json!({ "command": "git status" }));
+        let rule = allow_suggestion("Shell", &json!({ "command": "git status" }))
+            .expect("well-formed command can be narrowed");
         assert!(call_matches_rule(
             &rule,
             "Shell",
@@ -570,11 +642,34 @@ mod tests {
     }
 
     #[test]
+    fn unrepresentable_source_text_never_becomes_a_tool_wide_persistent_allow() {
+        let shell = Utf16JsonProjection::parse(r#"{"command":"\ud800"}"#).unwrap();
+        let file = Utf16JsonProjection::parse(r#"{"file_path":"/project/\ud800"}"#).unwrap();
+        let web = Utf16JsonProjection::parse(r#"{"url":"https://\ud800.example/path"}"#).unwrap();
+
+        assert!(allow_suggestion("Bash", &shell).is_none());
+        assert!(allow_suggestion("Edit", &file).is_none());
+        assert!(allow_suggestion("WebFetch", &web).is_none());
+        assert!(allow_suggestion("Edit", &json!({})).is_some());
+
+        let source_rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some(Utf16JsonProjection::parse(r#""\ud800""#).unwrap()),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Session,
+        };
+        assert!(!call_matches_rule(&source_rule, "Bash", &shell));
+    }
+
+    #[test]
     fn unknown_and_mcp_tools_stay_tool_wide() {
         assert_eq!(content("WebSearch", json!({ "query": "x" })), None);
         assert_eq!(content("mcp__server__tool", json!({ "a": 1 })), None);
         // The fallback rule is the bare tool-wide allow.
-        let rule = allow_suggestion("mcp__server__tool", &json!({}));
+        let rule = allow_suggestion("mcp__server__tool", &json!({}))
+            .expect("missing input keeps the tool-wide suggestion");
         assert!(rule.value.rule_content.is_none());
         assert_eq!(rule.value.tool_name, "mcp__server__tool");
         assert!(matches!(rule.behavior, PermissionBehavior::Allow));
@@ -590,17 +685,31 @@ mod tests {
                 "destination": "session"
             }
         ]);
+        let expected_update = suggestions.subprojection("/0").unwrap();
         let suggestion = permission_persistence_suggestion("Bash", &suggestions).unwrap();
         assert_eq!(
             suggestion.label,
             "Yes, and don't ask again for git commit *"
         );
-        assert_eq!(suggestion.update, suggestions[0]);
+        assert_eq!(suggestion.update, expected_update);
         assert_eq!(
-            suggestion.rule.value.rule_content.as_deref(),
+            suggestion.rule.value.rule_content_text(),
             Some("git commit *")
         );
         assert_eq!(suggestion.destination, PermissionUpdateDestination::Session);
+    }
+
+    #[test]
+    fn permission_persistence_suggestion_preserves_exact_source_update() {
+        let suggestions = Utf16JsonProjection::parse(
+            r#"[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"git *"}],"behavior":"allow","destination":"session","opaque":"\ud800"}]"#,
+        )
+        .unwrap();
+        let suggestion = permission_persistence_suggestion("Bash", &suggestions).unwrap();
+        assert_eq!(
+            suggestion.update.string_units("/opaque"),
+            Some(vec![0xd800])
+        );
     }
 
     #[test]
@@ -622,7 +731,7 @@ mod tests {
 
     #[test]
     fn permission_persistence_suggestion_fails_closed_for_ambiguous_or_unsafe_updates() {
-        let update = |rule: Value| {
+        let update = |rule: serde_json::Value| {
             json!([{
                 "type": "addRules",
                 "rules": [rule],
@@ -632,12 +741,12 @@ mod tests {
         };
         assert!(permission_persistence_suggestion(
             "Bash",
-            &update(json!({"toolName": "Edit", "ruleContent": "/tmp/a"}))
+            &update(::serde_json::json!({"toolName": "Edit", "ruleContent": "/tmp/a"}))
         )
         .is_none());
         assert!(permission_persistence_suggestion(
             "Bash",
-            &update(json!({"toolName": "Bash", "ruleContent": "safe\nforged row"}))
+            &update(::serde_json::json!({"toolName": "Bash", "ruleContent": "safe\nforged row"}))
         )
         .is_none());
         assert!(permission_persistence_suggestion(

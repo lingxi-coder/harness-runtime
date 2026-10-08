@@ -6,17 +6,20 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::task_registry::TaskRecord;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, generated_builtin_result,
+    generated_builtin_schema, source_text_projection,
 };
-use tool_api::BuiltinToolContext;
 
 /// Model-facing name (2.1.232 `zy`).
 pub const LIST_AGENTS_TOOL_NAME: &str = "ListAgents";
@@ -31,8 +34,8 @@ const DESCRIPTION: &str = concat!(
     "bare name is not enough — two rows share it, or an error asks you to disambiguate."
 );
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -46,17 +49,17 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "description": "Not available in this build; leave unset."
             }
         }
-    })
+    }))
 });
 
-static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    generated_builtin_schema(&json!({
         "type": "object",
         "properties": {
             "listing": { "type": "string", "description": "Formatted list of reachable agents" }
         },
         "required": ["listing"]
-    })
+    }))
 });
 
 /// `ListAgents` tool.
@@ -244,20 +247,43 @@ impl Tool for ListAgentsTool {
         &[LIST_PEERS_TOOL_NAME]
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        Some("list agents you can SendMessage to")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("list agents you can SendMessage to".into())
     }
 
     fn user_facing_name(&self) -> Option<&str> {
         Some("ListAgents")
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&Value> {
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
         Some(&OUTPUT_SCHEMA)
+    }
+
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        let listing = output
+            .subprojection("/listing")
+            .ok()
+            .filter(|value| value.string_units("").is_some())
+            .ok_or_else(|| invalid_tool_input("ListAgents returned invalid output"))?;
+        Ok(
+            Utf16JsonProjection::object(vec![("listing".into(), listing)])
+                .expect("ListAgents parsed output is valid JSON"),
+        )
     }
 
     fn max_result_size_chars(&self) -> usize {
@@ -268,15 +294,19 @@ impl Tool for ListAgentsTool {
         lingxi_core::host::live_sessions::cross_session_messaging_enabled()
     }
 
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ListAgents is read-only".into(),
@@ -287,30 +317,40 @@ impl Tool for ListAgentsTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         DESCRIPTION.into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         DESCRIPTION.into()
     }
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let listing = self.format_listing(&ctx).await;
         Ok(ToolCallResult {
-            data: json!({ "listing": listing }),
-            model_content: Some(listing),
+            data: Utf16JsonProjection::object(vec![(
+                "listing".into(),
+                source_text_projection(&listing),
+            )])
+            .expect("ListAgents result is valid JSON"),
+            model_content: Some(source_text_projection(&listing)),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -326,6 +366,24 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    fn fixture() -> Utf16JsonProjection {
+        generated_builtin_result(&json!({}))
+    }
+
+    #[tokio::test]
+    async fn output_parser_retains_unpaired_listing_units() {
+        let units = vec![b'x' as u16, 0xD800, b'y' as u16];
+        let output = Utf16JsonProjection::object(vec![(
+            "listing".into(),
+            tool_api::tool_trait::source_text_projection_units(&units),
+        )])
+        .unwrap();
+        let tool = ListAgentsTool::new(shell_test_ctx(dummy_out()));
+
+        let parsed = tool.parse_output(&output).await.expect("string listing");
+        assert_eq!(parsed.string_units("/listing"), Some(units));
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -437,12 +495,17 @@ mod tests {
 
         let tool = ListAgentsTool::new(shell_test_ctx(dummy_out()));
         let result = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(), fresh_ctx(), fresh_tx())
             .await
             .expect("list succeeds");
         assert_eq!(
-            result.model_content.as_deref(),
-            Some("This session is lead [00000000] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself).")
+            result
+                .model_content
+                .as_ref()
+                .and_then(|text| text.string_at("")),
+            Some(
+                "This session is lead [00000000] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself)."
+            )
         );
     }
 
@@ -484,6 +547,7 @@ mod tests {
                 task_type: "local_agent".into(),
                 status: "running".into(),
                 description: "agent".into(),
+                agent_facts: None,
                 ..Default::default()
             },
         );
@@ -494,10 +558,15 @@ mod tests {
         let tool = ListAgentsTool::new(builtin);
 
         let result = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(fixture(), fresh_ctx(), fresh_tx())
             .await
             .expect("list succeeds");
-        let listing = result.model_content.unwrap();
+        let listing = result
+            .model_content
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .to_owned();
         assert!(listing.contains("This session is lead [00000000]"));
         assert!(listing.contains("worker-a  ·  local_agent  ·  busy"));
         assert!(listing.contains(

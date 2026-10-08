@@ -34,18 +34,17 @@ impl BuiltinCommandHandler for ConfigHandler {
             Ok(o) => {
                 telemetry::emit_command_completed(cmd_evt::CONFIG_COMPLETED, "");
                 CommandResult::Done {
-                    display: Some(format!(
-                        "Edited {} (exit {}).",
-                        o.edited_path.display(),
-                        o.exit_code
-                    )),
+                    display: Some(
+                        (format!("Edited {} (exit {}).", o.edited_path.display(), o.exit_code))
+                            .into(),
+                    ),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::CONFIG_FAILED, &msg);
                 CommandResult::Done {
-                    display: Some(format!("Could not edit config: {msg}")),
+                    display: Some((format!("Could not edit config: {msg}")).into()),
                 }
             }
         }
@@ -66,7 +65,7 @@ mod tests {
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
             name: "config".into(),
-            raw_args: String::new(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

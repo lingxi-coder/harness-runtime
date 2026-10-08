@@ -35,6 +35,7 @@
 //! form. It is OFF by default, so the demotion is inert in a default install —
 //! ported anyway so flipping it matches upstream.
 
+use lingxi_core::types::utf16_json::{raw_json_serde, Utf16JsonProjection};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 
@@ -63,7 +64,8 @@ pub fn live_host_context_disabled() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostContextRecord {
     /// The post-cap text (capped by the hooks layer at 2000 UTF-16 units).
-    pub value: String,
+    #[serde(with = "raw_json_serde")]
+    pub value: Utf16JsonProjection,
     /// The id of the tool call this context annotates (`id` upstream).
     pub tool_use_id: String,
     /// `hostPrincipal` — true only for an in-process host callback owned by
@@ -127,7 +129,7 @@ impl HostContextStore {
     pub fn publish(
         &self,
         tool_use_id: &str,
-        contexts: impl IntoIterator<Item = (String, bool)>,
+        contexts: impl IntoIterator<Item = (Utf16JsonProjection, bool)>,
         live: bool,
     ) {
         let mut guard = self.records.lock().unwrap_or_else(|e| e.into_inner());
@@ -182,9 +184,13 @@ pub fn store() -> &'static HostContextStore {
 mod tests {
     use super::*;
 
+    fn source_text(json: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(json).expect("test JSON string is valid")
+    }
+
     fn rec(live: bool) -> HostContextRecord {
         HostContextRecord {
-            value: "the user said go ahead".to_string(),
+            value: source_text(r#""the user said go ahead""#),
             tool_use_id: "toolu_1".to_string(),
             host_principal: false,
             live,
@@ -207,6 +213,40 @@ mod tests {
         assert!(!rec(false).may_carry_user_intent());
     }
 
+    /// Exact JSON text survives the hook-to-permission store boundary,
+    /// including an isolated UTF-16 surrogate that Rust `String` cannot hold.
+    #[test]
+    fn publish_preserves_exact_utf16_context_text() {
+        let store = HostContextStore::new();
+        let source = source_text(r#""before\ud800after""#);
+        store.publish("toolu_10", vec![(source.clone(), false)], true);
+
+        let record = store.snapshot().pop().unwrap();
+        assert_eq!(record.value, source);
+        assert_eq!(
+            record.value.string_units(""),
+            Some(vec![
+                b'b' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b'o' as u16,
+                b'r' as u16,
+                b'e' as u16,
+                0xd800,
+                b'a' as u16,
+                b'f' as u16,
+                b't' as u16,
+                b'e' as u16,
+                b'r' as u16,
+            ])
+        );
+
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(encoded.contains(r#"\ud800"#));
+        let decoded: HostContextRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.value, source);
+    }
+
     /// `publish` keeps execution order and stamps the annotated call's id.
     #[test]
     fn publish_preserves_order_and_ids() {
@@ -214,13 +254,16 @@ mod tests {
         assert!(store.is_empty());
         store.publish(
             "toolu_9",
-            vec![("first".to_string(), false), ("second".to_string(), true)],
+            vec![
+                (source_text(r#""first""#), false),
+                (source_text(r#""second""#), true),
+            ],
             true,
         );
         let snap = store.snapshot();
         assert_eq!(snap.len(), 2);
-        assert_eq!(snap[0].value, "first");
-        assert_eq!(snap[1].value, "second");
+        assert_eq!(snap[0].value.to_json_string().unwrap(), r#""first""#);
+        assert_eq!(snap[1].value.to_json_string().unwrap(), r#""second""#);
         assert!(snap[1].host_principal);
         assert!(snap.iter().all(|r| r.tool_use_id == "toolu_9"));
         assert!(snap.iter().all(|r| r.live));

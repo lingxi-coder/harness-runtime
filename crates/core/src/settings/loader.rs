@@ -241,6 +241,33 @@ mod tests {
     }
 
     #[test]
+    fn settings_file_preserves_lone_surrogate_attribution_units() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"attribution":{"commit":"\ud800","pr":"tail\udfff"}}"#,
+        )
+        .unwrap();
+
+        let settings = read_settings_file(&path)
+            .expect("raw source string is valid settings")
+            .expect("file exists");
+        let attribution = settings.attribution.expect("attribution object");
+        let commit = attribution.commit.expect("commit string");
+        assert_eq!(
+            commit.at_pointer("").expect("root value").code_units(),
+            Some([0xd800_u16].as_slice())
+        );
+        let pr = attribution.pr.expect("PR string");
+        let expected_pr = [b't' as u16, b'a' as u16, b'i' as u16, b'l' as u16, 0xdfff];
+        assert_eq!(
+            pr.at_pointer("").expect("root value").code_units(),
+            Some(expected_pr.as_slice())
+        );
+    }
+
+    #[test]
     fn returns_parse_error_for_malformed_json() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");

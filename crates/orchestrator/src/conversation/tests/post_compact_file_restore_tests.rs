@@ -1,18 +1,18 @@
 use super::*;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tool_api::read_file_state::{set, ReadFileEntry};
+use tool_api::read_file_state::{ReadFileEntry, set};
 use tool_api::registry::ToolRegistry;
-use tracing::field::Field;
 use tracing::Event;
 use tracing::Subscriber;
+use tracing::field::Field;
+use tracing_subscriber::Registry;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::Registry;
 
 fn stale_entry(content: &str) -> ReadFileEntry {
     ReadFileEntry {
@@ -24,6 +24,24 @@ fn stale_entry(content: &str) -> ReadFileEntry {
         seeded_from_context: false,
         is_partial_view: false,
     }
+}
+
+fn restore_text_blocks(message: &ConversationMessage) -> Vec<&str> {
+    let ConversationMessage::User {
+        content,
+        is_meta: true,
+        ..
+    } = message
+    else {
+        panic!("a restored file projects to one meta user message");
+    };
+    content
+        .iter()
+        .map(|block| match block {
+            lingxi_core::types::ContentBlock::Text { text, .. } => text.as_str(),
+            _ => panic!("the compact text-file projection contains only text"),
+        })
+        .collect()
 }
 
 /// Serialize + clean the process-global invoked-skill registry so these
@@ -159,6 +177,22 @@ async fn register_invoked_skill(
 ) {
     let session_id = orch.session.lock().await.session_id.to_string();
     compaction::invoked_skills::register_scoped(
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from(name),
+        path,
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from(content),
+        compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), agent_id),
+    );
+}
+
+async fn register_invoked_skill_source(
+    orch: &ConversationOrchestrator,
+    name: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    path: &std::path::Path,
+    content: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    agent_id: Option<&str>,
+) {
+    let session_id = orch.session.lock().await.session_id.to_string();
+    compaction::invoked_skills::register_scoped(
         name,
         path,
         content,
@@ -182,17 +216,19 @@ async fn reread_restores_fresh_content_not_stale_snapshot() {
     let restored = orch.restore_post_compact_attachments().await;
     assert_eq!(
         restored.len(),
-        2,
-        "native file attachments render call and result separately"
+        1,
+        "one durable file attachment carries both native call/result text blocks"
     );
+    let blocks = restore_text_blocks(&restored[0]);
+    assert_eq!(blocks.len(), 2);
     assert_eq!(
-        restored[0].text_content(),
+        blocks[0],
         format!(
-        "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
-        serde_json::json!({"file_path": path})
-    )
+            "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>\n",
+            serde_json::json!({"file_path": path})
+        )
     );
-    let body = restored[1].text_content();
+    let body = blocks[1];
     assert_eq!(
         body,
         "<system-reminder>\nResult of calling the Read tool:\n1\tNEW CONTENT\n</system-reminder>"
@@ -259,6 +295,8 @@ async fn preserved_read_tool_use_prevents_file_restore() {
             provider_id: None,
         }],
         stop_reason: None,
+
+        resumable: None,
     };
 
     let restored = orch
@@ -291,7 +329,7 @@ async fn textual_file_reference_does_not_suppress_a_fresh_restore() {
         .await;
     assert_eq!(
         restored.len(),
-        2,
+        1,
         "kXo dedups actual Read calls, not text that resembles an attachment"
     );
     assert_eq!(restore_names(&sink.events().await).len(), 1);
@@ -321,16 +359,22 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
             input: serde_json::json!({"file_path": path}),
             provider_id: Some("toolu-native-id".into()),
         }],
+
+        resumable: None,
     };
     let result = lingxi_core::types::ConversationMessage::User {
         id: lingxi_core::types::MessageId::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id,
-            content: tool_file::read::FILE_UNCHANGED_SHORT.into(),
-            is_error: false,
+            content: crate::tool_result_text::root_text(tool_file::read::FILE_UNCHANGED_SHORT),
+            is_error: Some(false),
             provider_tool_use_id: Some("toolu-native-id".into()),
             content_blocks: None,
         }],
@@ -338,8 +382,8 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
     let restored = orch
         .restore_post_compact_attachments_against(&[call, result])
         .await;
-    assert_eq!(restored.len(), 2);
-    assert!(restored[1].text_content().contains("1\tfresh"));
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0].text_content().contains("1\tfresh"));
 }
 
 #[tokio::test]
@@ -362,7 +406,17 @@ async fn file_restore_uses_utf16_rounding_and_dense_json_token_limits() {
         )
         .await;
         let restored = orch.restore_post_compact_attachments().await;
-        assert_eq!(restored.len(), if reference { 1 } else { 2 }, "{name}");
+        assert_eq!(restored.len(), 1, "{name}");
+        let attachments = orch.transcript.model_reminder_attachments.lock().unwrap();
+        assert_eq!(
+            attachments[&restored[0].id()]["type"],
+            if reference {
+                "compact_file_reference"
+            } else {
+                "file"
+            }
+        );
+        drop(attachments);
         if !reference {
             assert!(
                 tool_api::read_file_state::get(&map, &path).is_some(),
@@ -397,7 +451,7 @@ async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
     let restored = orch.restore_post_compact_attachments().await;
     assert_eq!(
         restored.len(),
-        4,
+        2,
         "30k + 30k serialized tokens overflow, but a later small file fits"
     );
     let all = restored
@@ -430,17 +484,26 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
             is_meta,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
             content: if is_meta {
                 vec![
                     lingxi_core::types::ContentBlock::Text {
                         text: first.clone(),
+                        citations: None,
                     },
                     lingxi_core::types::ContentBlock::Text {
                         text: second.clone(),
+                        citations: None,
                     },
                 ]
             } else {
-                vec![lingxi_core::types::ContentBlock::Text { text: body.clone() }]
+                vec![lingxi_core::types::ContentBlock::Text {
+                    text: body.clone(),
+                    citations: None,
+                }]
             },
         };
         assert_eq!(
@@ -519,10 +582,12 @@ async fn memory_entrypoints_are_excluded_but_nested_memory_files_can_restore() {
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
     let restored = orch.restore_post_compact_attachments().await;
-    assert_eq!(restored.len(), 2);
-    assert!(restored[0]
-        .text_content()
-        .contains(&format!("nested/{}", branding::MEMORY_FILE)));
+    assert_eq!(restored.len(), 1);
+    assert!(
+        restored[0]
+            .text_content()
+            .contains(&format!("nested/{}", branding::MEMORY_FILE))
+    );
     assert_eq!(restore_names(&sink.events().await).len(), 1);
 }
 
@@ -554,7 +619,7 @@ async fn deleted_file_is_dropped_and_fires_error_event() {
 }
 
 #[tokio::test]
-async fn host_seed_snapshot_is_not_restored_and_remains_cached() {
+async fn whole_cache_snapshot_restores_a_non_model_entry_from_current_disk() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("seeded.txt");
@@ -571,14 +636,301 @@ async fn host_seed_snapshot_is_not_restored_and_remains_cached() {
     let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
 
     let restored = orch.restore_post_compact_attachments().await;
-    assert!(
-        restored.is_empty(),
-        "host-seeded snapshots must not be restored into model context"
+    assert_eq!(
+        restored.len(),
+        1,
+        "native g_n snapshots the whole shared read cache"
     );
-    assert!(restore_names(&sink.events().await).is_empty());
-    assert!(
-        tool_api::read_file_state::get(&map, &path).is_some(),
-        "host-seeded snapshot must stay cached for staleness/dedup after compaction"
+    assert!(restored[0].text_content().contains("seeded on disk"));
+    assert_eq!(restore_names(&sink.events().await).len(), 1);
+    let fresh = tool_api::read_file_state::get(&map, &path).unwrap();
+    assert_eq!(fresh.content, "seeded on disk");
+    assert!(fresh.from_read);
+    assert!(!fresh.seeded_from_context);
+    assert_eq!(
+        map.lock().unwrap().requested_path_groups(&path),
+        vec![vec![path.clone()]],
+        "the post-compact producer records the path actually shown in its attachment"
+    );
+}
+
+#[tokio::test]
+async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_discarded_rows() {
+    use lingxi_core::host::FileSystem;
+    use platform_posix::fs::PosixFileSystem;
+    use tool_api::Tool;
+    let _rg = registry_guard();
+    let oracle: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../compaction/tests/fixtures/nested_compact_restore_2_1_287.json"
+    ))
+    .unwrap();
+    for name in [
+        "retained-nested-seed-restores-file",
+        "discarded-nested-seed-restores-file",
+    ] {
+        let case = oracle["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == name)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let path = cwd.join("pkg").join(branding::MEMORY_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = case["input"]["file"]["content"].as_str().unwrap();
+        std::fs::write(&path, body).unwrap();
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
+        let jsonl = cwd.join("restore.jsonl");
+        let orch = orch_with_bus(
+            cwd.clone(),
+            map.clone(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await
+        .with_jsonl_writer(Arc::new(session::JsonlWriter::new(
+            jsonl.clone(),
+            fs.clone(),
+        )));
+        let file = crate::prompt::MemoryFile {
+            source_content: None,
+            path: path.clone(),
+            parent: None,
+            body: body.into(),
+            is_local_override: false,
+            tier: memory::lingxi_md::LingxiMdTier::Project,
+            globs: None,
+            raw_content: body.into(),
+            content_differs_from_disk: false,
+        };
+        let emitted = orch
+            .persist_nested_memory_files(
+                vec![file.clone()],
+                &cwd.join("pkg/handler.rs"),
+                &cwd,
+                &Default::default(),
+            )
+            .await;
+        assert_eq!(
+            emitted.len(),
+            case["expected"]["initial"].as_array().unwrap().len()
+        );
+        let seed = tool_api::read_file_state::get(&map, &path).unwrap();
+        assert!(seed.seeded_from_context);
+        assert!(!seed.from_read);
+        assert!(
+            map.lock().unwrap().model_context_keys().is_empty(),
+            "the old model-only snapshot would drop this actual nested seed"
+        );
+        let kept = if case["input"]["history"].as_array().unwrap().is_empty() {
+            Vec::new()
+        } else {
+            emitted
+        };
+        let restored = orch.restore_post_compact_attachments_against(&kept).await;
+        assert_eq!(
+            restored.len(),
+            case["expected"]["restored"]["attachments"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+        assert_eq!(restore_text_blocks(&restored[0]).len(), 2);
+        let mut expected = case["expected"]["restored"]["attachments"][0]["attachment"].clone();
+        expected["filename"] = serde_json::json!(path);
+        expected["content"]["file"]["filePath"] = serde_json::json!(path);
+        let raw =
+            orch.transcript.model_reminder_attachments.lock().unwrap()[&restored[0].id()].clone();
+        assert_eq!(raw, expected);
+        assert_eq!(
+            serde_json::to_vec(&raw).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        orch.persist_message_to_jsonl(&restored[0]).await;
+        let bytes = tokio::fs::read_to_string(&jsonl).await.unwrap();
+        let rows = bytes
+            .lines()
+            .map(|line| serde_json::from_str::<session::JsonlMessage>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].message_type, "attachment");
+        assert_eq!(rows[1].uuid, restored[0].id().as_uuid().to_string());
+        assert!(rows[1].message.is_null());
+        assert_eq!(rows[1].extra["attachment"], expected);
+        let fresh = tool_api::read_file_state::get(&map, &path).unwrap();
+        assert_eq!(fresh.content, body);
+        assert!(fresh.from_read);
+        assert!(!fresh.seeded_from_context);
+        assert!(!fresh.is_partial_view);
+        assert_eq!(
+            fresh.mtime_ms,
+            tool_api::read_file_state::mtime_ms_floor(
+                std::fs::metadata(&path).unwrap().modified().unwrap()
+            )
+        );
+        assert!(
+            orch.persist_nested_memory_files(
+                vec![file],
+                &cwd.join("pkg/handler.rs"),
+                &cwd,
+                &Default::default()
+            )
+            .await
+            .is_empty(),
+            "restored Read state blocks a duplicate nested attachment even with no history baseline"
+        );
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            fs,
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![cwd],
+        );
+        ctx.read_file_state = map;
+        let reread = tool_file::FileReadTool::new(ctx)
+            .call(
+                serde_json::json!({"file_path": path}),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reread.data["type"], "file_unchanged",
+            "the internal full-Read offset mapping must still dedup a real subsequent Read"
+        );
+    }
+}
+
+#[tokio::test]
+async fn current_restore_excludes_five_eager_entrypoints_and_only_direct_artifact_files() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let cwd = root.join("repo");
+    let home = root.join("home");
+    let config_home = home.join(branding::DOT_DIR);
+    let managed = root.join("managed");
+    let auto_memory =
+        memory::memdir::paths::user_memdir_for_project(&config_home, &cwd).join("MEMORY.md");
+    let excluded = vec![
+        cwd.join(branding::MEMORY_FILE),
+        cwd.join(branding::MEMORY_LOCAL_FILE),
+        config_home.join(branding::MEMORY_FILE),
+        managed.join(branding::MEMORY_FILE),
+        auto_memory,
+        cwd.join("TOOL-RESULTS/ARTIFACT-hidden.txt"),
+    ];
+    let included = vec![
+        cwd.join("tool-results/ordinary.txt"),
+        cwd.join("pkg/artifact-ordinary.txt"),
+        cwd.join("tool-results/nested/artifact-child.txt"),
+    ];
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    for path in excluded.iter().chain(&included) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "fresh").unwrap();
+        tool_api::read_file_state::set_with_model_context(
+            &map,
+            path.clone(),
+            stale_entry("stale"),
+            false,
+        );
+    }
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(cwd, map.clone(), sink.clone())
+        .await
+        .with_config_home(config_home)
+        .with_nested_memory_roots(home, Some(managed));
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), included.len());
+    let sidecars = orch.transcript.model_reminder_attachments.lock().unwrap();
+    let filenames = restored
+        .iter()
+        .map(|message| {
+            sidecars[&message.id()]["filename"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        filenames,
+        included
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    );
+    drop(sidecars);
+    assert_eq!(restore_names(&sink.events().await).len(), included.len());
+    for path in excluded {
+        assert!(tool_api::read_file_state::get(&map, &path).is_none());
+    }
+}
+
+#[tokio::test]
+async fn current_full_text_restore_normalizes_body_and_counts_the_final_fragment() {
+    let _rg = registry_guard();
+    for (bytes, body, lines) in [
+        (b"".to_vec(), "", 1),
+        (b"a\n".to_vec(), "a\n", 2),
+        (b"\r\nimported\r\n".to_vec(), "\nimported\n", 3),
+        ("\u{feff}body\r".as_bytes().to_vec(), "body", 1),
+        (b"bad\xffbyte".to_vec(), "bad\u{fffd}byte", 1),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let path = cwd.join("plain.txt");
+        std::fs::write(&path, bytes).unwrap();
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("stale"));
+        let orch = orch_with_bus(cwd, map.clone(), Arc::new(telemetry::InMemorySink::new())).await;
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1);
+        let payload =
+            orch.transcript.model_reminder_attachments.lock().unwrap()[&restored[0].id()].clone();
+        assert_eq!(payload["content"]["file"]["content"], body);
+        assert_eq!(payload["content"]["file"]["numLines"], lines);
+        assert_eq!(payload["content"]["file"]["totalLines"], lines);
+        assert_eq!(payload["content"]["file"]["startLine"], 1);
+        assert_eq!(
+            tool_api::read_file_state::get(&map, &path).unwrap().content,
+            body
+        );
+    }
+}
+
+#[tokio::test]
+async fn equal_timestamp_restore_limit_keeps_native_cache_mru_order() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    for index in 0..7 {
+        let path = cwd.join(format!("{index}.txt"));
+        std::fs::write(&path, "fresh").unwrap();
+        set(&map, path, stale_entry("equal timestamp"));
+    }
+    let orch = orch_with_bus(cwd.clone(), map, Arc::new(telemetry::InMemorySink::new())).await;
+    let restored = orch.restore_post_compact_attachments().await;
+    let sidecars = orch.transcript.model_reminder_attachments.lock().unwrap();
+    let paths = restored
+        .iter()
+        .map(|message| {
+            sidecars[&message.id()]["filename"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        (2..7)
+            .rev()
+            .map(|index| cwd
+                .join(format!("{index}.txt"))
+                .to_string_lossy()
+                .into_owned())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -759,10 +1111,10 @@ async fn success_and_error_events_fire_per_file() {
     let restored = orch.restore_post_compact_attachments().await;
     assert_eq!(
         restored.len(),
-        2,
-        "only the live file's call and result survive"
+        1,
+        "only the live file's raw attachment survives"
     );
-    assert!(restored[1].text_content().contains("alive"));
+    assert!(restored[0].text_content().contains("alive"));
 
     let mut names = restore_names(&sink.events().await);
     names.sort();
@@ -828,7 +1180,7 @@ async fn invoked_skill_reappears_as_attachment_post_compact() {
 }
 
 #[tokio::test]
-async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidecar() {
+async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let orch = orch_with_bus(
@@ -838,11 +1190,13 @@ async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidec
     )
     .await;
     let body = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
-    register_invoked_skill(
+    let name = lingxi_core::types::utf16_json::Utf16JsonProjection::from("utf16");
+    let content = lingxi_core::types::utf16_json::Utf16JsonProjection::from(body.as_str());
+    register_invoked_skill_source(
         &orch,
-        "utf16",
+        &name,
         std::path::Path::new("/skills/utf16"),
-        &body,
+        &content,
         None,
     )
     .await;
@@ -939,12 +1293,19 @@ async fn invoked_skill_with_markdown_separator_is_deduped_without_parsing_its_co
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
 
-    let content = "Deploy the first stage.\n\n---\n\nThen deploy the second stage.";
-    register_invoked_skill(
+    let mut content_units = "Deploy the first stage.".encode_utf16().collect::<Vec<_>>();
+    content_units.push(0xd800);
+    content_units.extend("\n\n---\n\nThen deploy the second stage.".encode_utf16());
+    let content = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&content_units),
+        content_units.clone(),
+    )
+    .unwrap();
+    register_invoked_skill_source(
         &orch,
-        "deploy",
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from("deploy"),
         std::path::Path::new("/skills/deploy"),
-        content,
+        &content,
         None,
     )
     .await;
@@ -960,11 +1321,10 @@ async fn invoked_skill_with_markdown_separator_is_deduped_without_parsing_its_co
     assert_eq!(
         persisted
             .extra
-            .get("invokedSkillContents")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|contents| contents.first())
-            .and_then(serde_json::Value::as_str),
-        Some(content),
+            .subprojection("/invokedSkillContents/0")
+            .ok()
+            .and_then(|content| content.string_units("")),
+        Some(content_units.clone()),
         "the opaque body must be persisted without delimiter parsing"
     );
 
@@ -977,6 +1337,19 @@ async fn invoked_skill_with_markdown_separator_is_deduped_without_parsing_its_co
     resumed
         .restore_resume_runtime_metadata(std::slice::from_ref(&persisted))
         .await;
+    let resumed_contents = resumed
+        .transcript
+        .post_compact_skill_attachments
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&first[0].id())
+        .cloned()
+        .expect("resume restores the structured skill body");
+    assert_eq!(
+        resumed_contents[0].string_units(""),
+        Some(content_units.clone()),
+        "resume must keep the exact source units"
+    );
     let replayed =
         crate::state_from_messages(uuid::Uuid::new_v4(), std::slice::from_ref(&persisted));
     let restored = resumed

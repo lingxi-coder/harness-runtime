@@ -1,4 +1,5 @@
 use client::protocol::commands::SkillAdminCommandDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use plugin::plugin_source_sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -36,8 +37,11 @@ pub struct SkillCatalogEntry {
     pub readonly_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub description: Option<Utf16JsonProjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when_to_use: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,7 +114,7 @@ struct TrashMetadata {
 struct Inspection {
     markdown: String,
     revision: Option<String>,
-    description: Option<String>,
+    description: Option<Utf16JsonProjection>,
     when_to_use: Option<String>,
     parse_error: Option<String>,
     diagnostics_json: Option<String>,
@@ -365,7 +369,11 @@ fn bundled_markdown(name: &str) -> Result<String, String> {
     let skill = registry
         .get(name)
         .ok_or_else(|| format!("unknown bundled skill: {name}"))?;
-    Ok(skill.content.clone())
+    Ok(skill
+        .content
+        .string_at("")
+        .expect("bundled skill markdown is a UTF-8 source string")
+        .to_owned())
 }
 
 fn project_skill_roots(cwd: &Path, lingxi_home: &Path) -> Vec<PathBuf> {

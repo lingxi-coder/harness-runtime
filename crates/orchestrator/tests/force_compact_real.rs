@@ -15,7 +15,7 @@ use compaction::CompactionOrchestrator;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::sync::Arc;
@@ -100,8 +100,10 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("reply-{i} padded with enough detail for compaction"),
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
+                resumable: None,
             });
         }
     }
@@ -223,9 +225,11 @@ async fn manual_compact_seeds_empty_resume_slot_and_forwards_focus() {
         !texts.iter().any(|text| text.contains("reply-3")),
         "the preserved tail (newest reply) never reaches the summarizer"
     );
-    assert!(texts
-        .last()
-        .is_some_and(|text| text.contains("Additional Instructions:\nfocus on the Rust fixes")));
+    assert!(
+        texts
+            .last()
+            .is_some_and(|text| text.contains("Additional Instructions:\nfocus on the Rust fixes"))
+    );
 
     let summary_text = {
         let session = orch.session();
@@ -373,8 +377,10 @@ async fn failure_leaves_history_unchanged() {
                     id: MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
+                        citations: None,
                     }],
                     stop_reason: Some("end_turn".into()),
+                    resumable: None,
                 });
             }
         }
@@ -409,7 +415,10 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
     seed_history(&orch, 30).await;
 
     orch.force_compact().await.expect("first compact succeeds");
-    for i in 1..5 {
+    orch.force_compact()
+        .await
+        .expect("286 summarizes the remaining summary and preserved reply");
+    for i in 2..5 {
         let err = orch
             .force_compact()
             .await
@@ -420,9 +429,8 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
         );
     }
 
-    // No assertion on final length — the stub autocompact collapses to
-    // 1 + marker on each pass; we just confirm no panics / no leaks
-    // (validated implicitly by `cargo test` finishing).
+    // After summarize_all only the new boundary and summary remain; repeated
+    // calls have fewer than two API-round groups and do not call the model.
 }
 
 // ============================================================================
@@ -490,12 +498,15 @@ async fn compaction_safety_gate() {
         content: vec![LlmContentBlock::Text {
             text: "ack".into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: Usage::default(),
         cost: None,
-        provider_metadata: serde_json::Value::Null,
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("null")
+            .expect("null is valid JSON"),
+        resumable: None,
     };
     let api = Arc::new(MockApiClient::new(vec![response]));
     let (compactor, slot) = wired_compaction();
@@ -572,20 +583,20 @@ struct CompactLifecycleOutput(std::sync::Mutex<Vec<String>>);
 
 #[async_trait::async_trait]
 impl lingxi_core::host::OutputStream for CompactLifecycleOutput {
-    async fn emit_text(&self, _text: &str) {}
+    async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
     async fn emit_tool_result(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _model_text: &str,
-        _result: &serde_json::Value,
+        _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
     async fn emit_end_turn(&self, _reason: &str, _cost: &lingxi_core::host::CostSnapshot) {}
@@ -612,6 +623,60 @@ impl lingxi_core::host::OutputStream for CompactLifecycleOutput {
 
 struct LifecycleSummaryClient(&'static str, Option<tokio_util::sync::CancellationToken>);
 
+struct CancellingOverflowClient {
+    cancel: tokio_util::sync::CancellationToken,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for CancellingOverflowClient {
+    async fn query(
+        &self,
+        _request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.cancel.cancel();
+        Err(sidequery::SideQueryError::Api(
+            llm_runtime::LlmError::ContextOverflow { token_gap: 1 },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_overflow_prevents_a_summarize_all_retry() {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let client = Arc::new(CancellingOverflowClient {
+        cancel: cancel.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into()),
+    );
+    let compactor = Arc::new(CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        u64::MAX,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
+    seed_history(&orch, 2).await;
+    let before = orch.session().lock().await.history.clone();
+    let error = orch.force_compact_with_cancel(cancel).await.unwrap_err();
+    assert!(error.to_string().contains("Compaction canceled."));
+    assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(orch.session().lock().await.history, before);
+}
+
 #[async_trait::async_trait]
 impl sidequery::SideQueryClient for LifecycleSummaryClient {
     async fn query(
@@ -637,7 +702,7 @@ async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
     for (count, summary, cancel_after_summary, expected) in [
         (0, "ok", false, Vec::<&str>::new()),
         (
-            2,
+            1,
             "ok",
             false,
             vec![
@@ -645,6 +710,18 @@ async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
                 "summarizing",
                 "failed:Not enough messages to compact.",
             ],
+        ),
+        (
+            2,
+            "<summary>one exchange</summary>",
+            false,
+            vec!["started", "summarizing", "restoring", "success", "boundary"],
+        ),
+        (
+            2,
+            "<summary>one exchange</summary>",
+            true,
+            vec!["started", "summarizing", "failed:Compaction canceled."],
         ),
         (
             4,
@@ -734,8 +811,10 @@ async fn seed_marked(orch: &ConversationOrchestrator, n: usize, at: usize) -> St
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("ASSISTANT-{i}"),
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
+                resumable: None,
             }
         };
         if i == at {

@@ -6,6 +6,7 @@
 //! when a new agent is spawned. See spec §10.2.
 
 pub use lingxi_core::host::subagent_spawn::ObserverSpec;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -37,11 +38,22 @@ pub struct AgentDefinition {
     pub permission_mode: AgentPermissionMode,
     /// Origin of the definition (built-in, user file, plugin, ...).
     pub source: AgentSource,
+    /// Installed provider identity and seat for Mods `agent.offer`. This is
+    /// host-owned plugin metadata, never parsed from agent frontmatter or
+    /// persisted in a transcript. Non-plugin providers are derived from
+    /// `source` at listing time.
+    #[serde(skip)]
+    pub offer_provider: Option<serde_json::Value>,
     /// Directory the definition was loaded from. Used to resolve relative
     /// includes (e.g. system-prompt fragments).
     pub base_dir: PathBuf,
     /// Optional system-prompt body to prepend to the per-spawn template.
-    pub system_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub system_prompt: Option<Utf16JsonProjection>,
     /// MCP servers the agent should connect to.
     pub mcp_servers: Vec<AgentMcpServerSpec>,
     /// Hooks declared inside the agent's frontmatter.
@@ -72,6 +84,9 @@ pub struct AgentDefinition {
     /// Always run as a background task when spawned (claude `background`).
     #[serde(default)]
     pub background: bool,
+    /// Omit user/project/local instructions only when running as a subagent.
+    #[serde(default, rename = "omitClaudeMd")]
+    pub omit_claude_md: bool,
     /// Isolation mode: run in a git worktree, or remotely (claude
     /// `isolation`). `Remote` is ant-only and rejected by the parsers on
     /// non-ant builds.
@@ -106,7 +121,7 @@ pub struct AgentDefinition {
     /// claude-code 2.1.267 (`src_163219561.js` @1339284): *"Prompt cache TTL for
     /// this agent's requests (\"5m\" or \"1h\") when no `subagentPromptCacheTtl`
     /// setting or env var is set."* Consumed upstream as `agentCacheTtlOverride`
-    /// (@3483567); here it feeds `ApiService::should_1h_cache_ttl`.
+    /// (@3483567); the complete value is carried to the provider cache resolver.
     ///
     /// `None` means the frontmatter said nothing — env/setting decides, exactly
     /// as before this field existed.
@@ -139,12 +154,6 @@ impl AgentCacheTtl {
             "1h" => Some(Self::OneHour),
             _ => None,
         }
-    }
-
-    /// Does this TTL ask for the 1-hour wire breakpoint?
-    #[must_use]
-    pub fn wants_1h(self) -> bool {
-        matches!(self, Self::OneHour)
     }
 }
 
@@ -410,13 +419,6 @@ mod cache_ttl_tests {
         for raw in ["60m", "1hr", "1H", "3600", "", "true", "5 m"] {
             assert_eq!(AgentCacheTtl::parse(raw), None, "{raw:?} must not parse");
         }
-    }
-
-    /// Only `1h` changes the wire; `5m` is Anthropic's default lifetime.
-    #[test]
-    fn only_one_hour_requests_the_wire_breakpoint() {
-        assert!(AgentCacheTtl::OneHour.wants_1h());
-        assert!(!AgentCacheTtl::FiveMinutes.wants_1h());
     }
 
     /// The serde spellings are the frontmatter spellings, not the Rust names.

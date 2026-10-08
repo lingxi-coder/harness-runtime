@@ -41,6 +41,7 @@
 //!   differs from V8's `SyntaxError` message.
 
 use crate::parser::{tokenize_args, ParsedSlashCommand};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// An argument name from frontmatter formed an invalid regular expression.
 ///
@@ -179,7 +180,7 @@ fn strip_sentinel(value: &str) -> std::borrow::Cow<'_, str> {
 /// Returns [`SubstitutionError::InvalidArgumentName`] when a frontmatter
 /// argument name forms an invalid regular expression (step 1), mirroring the
 /// `SyntaxError` TS throws from `new RegExp(...)`.
-pub fn substitute_arguments_faithful(
+fn substitute_arguments_faithful(
     content: &str,
     args: Option<&str>,
     append_if_no_placeholder: bool,
@@ -251,7 +252,7 @@ fn replace_named_arg(
 ) -> Result<String, SubstitutionError> {
     validate_argument_name_regex(name).map_err(|reason| {
         SubstitutionError::InvalidArgumentName {
-            name: name.to_string(),
+            name: name.into(),
             reason,
         }
     })?;
@@ -449,6 +450,213 @@ fn replace_shorthand_indexed(content: &str, parsed_args: &[String]) -> String {
     out
 }
 
+/// Source-native argument substitution for a typed slash command. Safe unique
+/// markers let the existing regex/replacement ordering operate on generated
+/// UTF-8 while both template code units and user arguments are reinserted
+/// exactly afterward.
+pub fn substitute_arguments_source(
+    template: &Utf16JsonProjection,
+    args: &Utf16JsonProjection,
+    append_if_no_placeholder: bool,
+    argument_names: &[Utf16JsonProjection],
+) -> Result<Utf16JsonProjection, SubstitutionError> {
+    let template_units = template
+        .string_units("")
+        .expect("slash-command prompt template is a root string");
+    let (template_text, template_markers) =
+        markerize_template_units(&template_units, argument_names);
+    let raw_units = args
+        .string_units("")
+        .expect("slash-command arguments are a root string");
+    let positional = crate::parser::tokenize_args_source(&raw_units);
+    let mut nonce = 0usize;
+    let (full_marker, argument_markers) = loop {
+        let full = format!("__LINGXI_EXACT_ARGS_{nonce}__");
+        let arguments = (0..positional.len())
+            .map(|index| format!("__LINGXI_EXACT_ARG_{nonce}_{index}__"))
+            .collect::<Vec<_>>();
+        if !template_text.contains(&full)
+            && arguments
+                .iter()
+                .all(|marker| !template_text.contains(marker))
+        {
+            break (full, arguments);
+        }
+        nonce = nonce.saturating_add(1);
+    };
+
+    let (template_with_full, replaced_full) =
+        replace_full_arguments_with_marker(&template_text, &full_marker);
+    let synthetic_args = if argument_markers.is_empty() {
+        String::new()
+    } else {
+        argument_markers.join(" ")
+    };
+    // A declared name containing an unpaired code unit cannot be represented
+    // in the frontmatter regex source; it has no matching placeholder. Keep
+    // its positional index while skipping only that unmatchable name.
+    let argument_names = argument_names
+        .iter()
+        .map(|name| {
+            String::from_utf16(
+                &name
+                    .string_units("")
+                    .expect("argument names are root strings"),
+            )
+            .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let substituted = substitute_arguments_faithful(
+        &template_with_full,
+        Some(&synthetic_args),
+        false,
+        &argument_names,
+    )?;
+    let changed = replaced_full || substituted != template_with_full;
+    let mut marker_values =
+        Vec::<(String, Vec<u16>)>::with_capacity(positional.len() + 1 + template_markers.len());
+    marker_values.push((full_marker, strip_u16_sentinel(&raw_units)));
+    for (marker, value) in argument_markers.into_iter().zip(positional) {
+        marker_values.push((
+            marker,
+            strip_u16_sentinel(
+                &value
+                    .string_units("")
+                    .expect("tokenized arguments are root strings"),
+            ),
+        ));
+    }
+    marker_values.extend(template_markers);
+    let mut output = replace_markers_with_source(&substituted, &marker_values);
+    if append_if_no_placeholder && !changed && !raw_units.is_empty() {
+        let mut units = output.string_units("").unwrap_or_default();
+        units.extend("\n\nARGUMENTS: ".encode_utf16());
+        units.extend(strip_u16_sentinel(&raw_units));
+        output = projection_from_units(units);
+    }
+    Ok(output)
+}
+
+/// Replace lone surrogate units in a template with collision-free private-use
+/// markers before applying the existing UTF-8 placeholder scanner. Well-formed
+/// surrogate pairs decode to their exact scalar and therefore round-trip back
+/// to the same UTF-16 units.
+fn markerize_template_units(
+    units: &[u16],
+    argument_names: &[Utf16JsonProjection],
+) -> (String, Vec<(String, Vec<u16>)>) {
+    let mut unavailable = std::char::decode_utf16(units.iter().copied())
+        .filter_map(Result::ok)
+        .map(u32::from)
+        .collect::<std::collections::HashSet<_>>();
+    for name in argument_names {
+        let name_units = name
+            .string_units("")
+            .expect("argument names are root strings");
+        unavailable.extend(
+            std::char::decode_utf16(name_units.iter().copied())
+                .filter_map(Result::ok)
+                .map(u32::from),
+        );
+    }
+    let mut by_unit = std::collections::HashMap::<u16, char>::new();
+    let mut markers = Vec::new();
+    let mut output = String::new();
+    let mut next_marker = 0xf0000_u32;
+
+    for decoded in std::char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => output.push(character),
+            Err(error) => {
+                let unit = error.unpaired_surrogate();
+                let marker = *by_unit.entry(unit).or_insert_with(|| {
+                    while unavailable.contains(&next_marker)
+                        || char::from_u32(next_marker).is_none()
+                    {
+                        next_marker += 1;
+                        assert!(next_marker < 0x10fffe, "no source marker scalar available");
+                    }
+                    let marker = char::from_u32(next_marker).expect("available marker scalar");
+                    unavailable.insert(next_marker);
+                    next_marker += 1;
+                    markers.push((marker.to_string(), vec![unit]));
+                    marker
+                });
+                // Private-use scalars are non-word characters in the JS regex
+                // dialect used by the placeholder scanner. This preserves the
+                // boundary behavior a lone surrogate had before markerization.
+                output.push(marker);
+            }
+        }
+    }
+    (output, markers)
+}
+
+fn replace_full_arguments_with_marker(template: &str, marker: &str) -> (String, bool) {
+    const ARGUMENTS: &str = "$ARGUMENTS";
+    let mut output = String::with_capacity(template.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while let Some(relative) = template[cursor..].find(ARGUMENTS) {
+        let start = cursor + relative;
+        output.push_str(&template[cursor..start]);
+        let after = start + ARGUMENTS.len();
+        let suffix = &template[after..];
+        let index_end = suffix.strip_prefix('[').and_then(|tail| {
+            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0 && tail.as_bytes().get(digits) == Some(&b']'))
+                .then_some(after + 1 + digits + 1)
+        });
+        if let Some(end) = index_end {
+            output.push_str(ARGUMENTS);
+            cursor = end;
+        } else {
+            output.push_str(marker);
+            cursor = after;
+            changed = true;
+        }
+    }
+    output.push_str(&template[cursor..]);
+    (output, changed)
+}
+
+fn replace_markers_with_source(input: &str, markers: &[(String, Vec<u16>)]) -> Utf16JsonProjection {
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let next = markers
+            .iter()
+            .filter_map(|(marker, units)| {
+                input[cursor..]
+                    .find(marker)
+                    .map(|offset| (cursor + offset, marker, units))
+            })
+            .min_by_key(|(offset, _, _)| *offset);
+        let Some((start, marker, units)) = next else {
+            output.extend(input[cursor..].encode_utf16());
+            break;
+        };
+        output.extend(input[cursor..start].encode_utf16());
+        output.extend_from_slice(units);
+        cursor = start + marker.len();
+    }
+    projection_from_units(output)
+}
+
+fn strip_u16_sentinel(units: &[u16]) -> Vec<u16> {
+    units
+        .iter()
+        .copied()
+        .filter(|unit| *unit != 0xffff)
+        .collect()
+}
+
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    Utf16JsonProjection::root_string(display, units)
+        .expect("display projection is derived from the same UTF-16 units")
+}
+
 /// UTF-8 length (in bytes) of the char starting with leading byte `b`.
 fn utf8_char_len(b: u8) -> usize {
     if b < 0x80 {
@@ -462,14 +670,14 @@ fn utf8_char_len(b: u8) -> usize {
     }
 }
 
-/// Backwards-compatible 2-arg shim retained so downstream crates (e.g.
-/// `command-core`) keep compiling. Delegates to [`substitute_arguments_faithful`]
-/// with `append_if_no_placeholder = true` and no named arguments, passing the
-/// raw argument string. Because it passes **no** argument names, the named-arg
-/// regex path is never exercised and the call is infallible.
+/// Substitute a parsed slash command's source template with its exact raw
+/// argument source, appending arguments when no placeholder was present.
 #[must_use]
-pub fn substitute_arguments(template: &str, args: &ParsedSlashCommand) -> String {
-    substitute_arguments_faithful(template, Some(&args.raw_args), true, &[])
+pub fn substitute_arguments(
+    template: &Utf16JsonProjection,
+    args: &ParsedSlashCommand,
+) -> Utf16JsonProjection {
+    substitute_arguments_source(template, &args.raw_args, true, &[])
         .expect("substitute_arguments passes no argument names, so it cannot fail")
 }
 
@@ -781,6 +989,126 @@ mod tests {
     }
 
     #[test]
+    fn source_substitution_preserves_unpaired_argument_units() {
+        let args = Utf16JsonProjection::root_string(
+            "before �".into(),
+            vec![
+                b'b' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b'o' as u16,
+                b'r' as u16,
+                b'e' as u16,
+                b' ' as u16,
+                0xd800,
+            ],
+        )
+        .unwrap();
+        let output = substitute_arguments_source(
+            &Utf16JsonProjection::from("$ARGUMENTS"),
+            &args,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            output.string_units(""),
+            Some(vec![
+                b'b' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b'o' as u16,
+                b'r' as u16,
+                b'e' as u16,
+                b' ' as u16,
+                0xd800,
+            ])
+        );
+    }
+
+    #[test]
+    fn source_substitution_keeps_unmatchable_lone_argument_name() {
+        let args = Utf16JsonProjection::from("value");
+        let lone_name = Utf16JsonProjection::root_string("�".into(), vec![0xdfff]).unwrap();
+        let output = substitute_arguments_source(
+            &Utf16JsonProjection::from("prefix $value"),
+            &args,
+            false,
+            &[lone_name],
+        )
+        .unwrap();
+        assert_eq!(output.string_at(""), Some("prefix $value"));
+    }
+
+    #[test]
+    fn source_substitution_preserves_unpaired_template_units() {
+        let marker_candidate = char::from_u32(0xf0000).unwrap().to_string();
+        let template = Utf16JsonProjection::root_string(
+            format!("before {marker_candidate}� $ARGUMENTS"),
+            [
+                "before ".encode_utf16().collect::<Vec<_>>(),
+                marker_candidate.encode_utf16().collect(),
+                vec![0xd800],
+                " $ARGUMENTS".encode_utf16().collect(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let output = substitute_arguments_source(
+            &template,
+            &Utf16JsonProjection::from("run now"),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            output.string_units(""),
+            Some(
+                [
+                    "before ".encode_utf16().collect::<Vec<_>>(),
+                    marker_candidate.encode_utf16().collect(),
+                    vec![0xd800],
+                    " run now".encode_utf16().collect()
+                ]
+                .concat()
+            )
+        );
+    }
+
+    #[test]
+    fn lone_template_units_keep_non_word_placeholder_boundaries() {
+        let template_units = [
+            "$name".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " $0".encode_utf16().collect(),
+            vec![0xdfff],
+            " tail".encode_utf16().collect(),
+        ]
+        .concat();
+        let template = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&template_units),
+            template_units,
+        )
+        .unwrap();
+        let output = substitute_arguments_source(
+            &template,
+            &Utf16JsonProjection::from("value second"),
+            false,
+            &[Utf16JsonProjection::from("name")],
+        )
+        .unwrap();
+        let expected = [
+            "value".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            " second".encode_utf16().collect(),
+            vec![0xdfff],
+            " tail".encode_utf16().collect(),
+        ]
+        .concat();
+        assert_eq!(output.string_units(""), Some(expected));
+    }
+
+    #[test]
     fn session_id_placeholder_left_untouched() {
         // ${LINGXI_SESSION_ID} is not an arg placeholder; substitution ignores it.
         // $1 -> index 1 -> "b".
@@ -788,15 +1116,16 @@ mod tests {
         assert_eq!(out, "id=${LINGXI_SESSION_ID} b");
     }
 
-    // ----- shim -----
+    // ----- parsed command helper -----
 
     #[test]
-    fn shim_substitutes_positional_and_arguments() {
-        let p = crate::parser::parse_slash_command("/foo a b c").unwrap();
+    fn parsed_command_helper_substitutes_positional_and_arguments() {
+        let p = crate::parser::parse_slash_command(&"/foo a b c".into()).unwrap();
         // $1 -> index 1 -> "b" (faithful), $ARGUMENTS -> raw "a b c".
         assert_eq!(
-            substitute_arguments("first=$1 all=$ARGUMENTS", &p),
-            "first=b all=a b c"
+            substitute_arguments(&Utf16JsonProjection::from("first=$1 all=$ARGUMENTS"), &p)
+                .string_at(""),
+            Some("first=b all=a b c")
         );
     }
 }

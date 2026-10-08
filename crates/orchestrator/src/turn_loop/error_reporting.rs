@@ -7,7 +7,9 @@ use crate::error::OrchestratorError;
 #[doc = " Re-exported from `model::prompt_too_long` (the orchestrator's own copy),"]
 #[doc = " which is the authoritative source for this string in this crate."]
 use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
-use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId,
+};
 use llm_runtime::LlmError;
 
 /// Append the byte-exact [`PROMPT_TOO_LONG_ERROR_MESSAGE`] as an assistant text
@@ -223,11 +225,28 @@ pub(super) fn truncate_goal_condition(condition: &str, max_width: usize) -> Stri
 }
 
 /// `` `Goal cleared after an unrecoverable error (${i}): "${Yl(e.condition,T4v,!0)}". Run /goal again to continue.` ``
-pub(crate) fn goal_cleared_after_error_message(label: &str, condition: &str) -> String {
-    let truncated = truncate_goal_condition(condition, GOAL_CLEAR_CONDITION_WIDTH);
-    format!(
-        "Goal cleared after an unrecoverable error ({label}): \"{truncated}\". \
-         Run /goal again to continue."
+pub(crate) fn goal_cleared_after_error_message(
+    label: &str,
+    condition: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let units = condition
+        .string_units("")
+        .expect("goal condition is source text");
+    // Grapheme width is computed on the display image; slice the original
+    // units at the same UTF-16 offset so unpaired units survive the notice.
+    let display = String::from_utf16_lossy(&units);
+    let truncated = truncate_goal_condition(&display, GOAL_CLEAR_CONDITION_WIDTH);
+    let (prefix, suffix) = if truncated == display {
+        (units.as_slice(), "")
+    } else if let Some(prefix) = truncated.strip_suffix('…') {
+        (&units[..prefix.encode_utf16().count()], "…")
+    } else {
+        (&units[..truncated.encode_utf16().count()], "")
+    };
+    source_error_affixes(
+        &format!("Goal cleared after an unrecoverable error ({label}): \""),
+        prefix,
+        &format!("{suffix}\". Run /goal again to continue."),
     )
 }
 
@@ -345,8 +364,12 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![ContentBlock::Text {
+            text: text.clone(),
+            citations: None,
+        }],
         stop_reason: Some("prompt_too_long".to_string()),
+        resumable: None,
     };
     {
         let mut s = orch.session.lock().await;
@@ -357,7 +380,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     // assistant line (here a single text block → one line either way) — the
     // per-block split is streaming-only.
     orch.persist_message_to_jsonl(&assistant_msg).await;
-    orch.output.emit_text(&text).await;
+    orch.output.emit_text(&text.into()).await;
     assistant_id
 }
 
@@ -377,9 +400,11 @@ pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrat
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
+            citations: None,
         }],
         // The binary surfaces this as `error:"invalid_request"`.
         stop_reason: Some("invalid_request".to_string()),
+        resumable: None,
     };
     {
         let mut s = orch.session.lock().await;
@@ -387,7 +412,7 @@ pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrat
     }
     orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output
-        .emit_text(compaction::RAPID_REFILL_THRASHING_MESSAGE)
+        .emit_text(&compaction::RAPID_REFILL_THRASHING_MESSAGE.into())
         .await;
     assistant_id
 }
@@ -412,8 +437,9 @@ pub(crate) fn terminal_api_error_text(
     stop_reason: &str,
     request_id: Option<&str>,
     stop_details: Option<&llm_runtime::HistoryStopDetails>,
-) -> Option<String> {
-    match stop_reason {
+    response_message_id: Option<&str>,
+) -> Option<Utf16JsonProjection> {
+    let scalar = match stop_reason {
         "max_tokens" => Some(format!(
             "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the LINGXI_MAX_OUTPUT_TOKENS environment variable.",
             compaction::max_output_tokens_for_model(model)
@@ -426,6 +452,21 @@ pub(crate) fn terminal_api_error_text(
             // category-aware via `rnt(cat) = cat ∈ {"cyber","bio"}` and
             // `pd() = firstParty` (always true for LingXi's Anthropic path).
             let category = stop_details.and_then(|sd| sd.category.as_deref());
+            // Public Native 2.1.293 print-mode captures pin these labeled
+            // surfaces. The provider message ID is not the HTTP request ID.
+            if !interactive && (category.is_none() || category == Some("cyber")) {
+                if let Some(label) = crate::prompt::env_meta::marketing_name_for_model(model) {
+                    let mut notice = if category == Some("cyber") {
+                        format!("API Error: {label}'s safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`")
+                    } else {
+                        format!("API Error: {label} can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup")
+                    };
+                    if let Some(id) = response_message_id.filter(|id| !id.is_empty()) {
+                        notice.push_str(&format!("\n\nMessage ID: {id}"));
+                    }
+                    return Some(notice.into());
+                }
+            }
             let cyber_or_bio = matches!(category, Some("cyber" | "bio"));
             let is_cyber = matches!(category, Some("cyber"));
             let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
@@ -459,7 +500,9 @@ pub(crate) fn terminal_api_error_text(
                     // — DOUBLE `\n` separators (od -c verified on 2.1.195 @206804081;
                     // the `strings` dump misled an earlier pass into single `\n`).
                     // `<brand>` is the LingXi rebrand.
-                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}")
+                    format!(
+                        "API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}"
+                    )
                 }
                 None => {
                     // NO-LABEL branch.
@@ -498,11 +541,14 @@ pub(crate) fn terminal_api_error_text(
                         // `military_weapons` arm entirely — 0 hits for
                         // 'weapons-related content' / 'military_weapons' in 206.
                         let clause = refusal_explanation_clause(
-                            stop_details.and_then(|sd| sd.explanation.as_deref()),
+                            stop_details.and_then(|sd| sd.explanation.as_ref()),
                         );
-                        format!(
-                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).{clause} {m}"
-                        )
+                        let suffix = request_id.filter(|id| !id.is_empty()).map_or_else(String::new, |id| format!("\n\nRequest ID: {id}"));
+                        return Some(source_error_affixes(
+                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).",
+                            &clause.string_units("").expect("source explanation clause"),
+                            &format!(" {m}{suffix}"),
+                        ));
                     }
                 }
             };
@@ -517,7 +563,8 @@ pub(crate) fn terminal_api_error_text(
             Some(format!("{base}{suffix}"))
         }
         _ => None,
-    }
+    };
+    scalar.map(Into::into)
 }
 
 /// The binary `U2e` explanation clause `${a}`:
@@ -529,25 +576,36 @@ pub(crate) fn terminal_api_error_text(
 /// 400 chars — only then is its tail trimmed (matching `o.length>s` gating the
 /// `trimEnd`). The cap is by `char` count (the port's truncation convention; JS
 /// uses UTF-16 units — identical for the typical ASCII refusal text).
-pub(super) fn refusal_explanation_clause(explanation: Option<&str>) -> String {
-    let Some(o) = explanation.filter(|s| !s.is_empty()) else {
-        return String::new();
+pub(super) fn refusal_explanation_clause(
+    explanation: Option<&Utf16JsonProjection>,
+) -> Utf16JsonProjection {
+    let Some(mut units) = explanation.and_then(|text| text.string_units("")) else {
+        return "".into();
     };
-    const CAP: usize = 400;
-    let i = if o.chars().count() > CAP {
-        let head: String = o.chars().take(CAP).collect();
-        format!("{}\u{2026}", head.trim_end())
-    } else {
-        o.to_string()
-    };
-    if i.is_empty() {
-        return String::new();
+    if units.is_empty() {
+        return "".into();
     }
-    let ends_punct = i
-        .chars()
+    if units.len() > 400 {
+        units.truncate(400);
+        while units.last().is_some_and(|unit| {
+            matches!(unit,
+                0x0009..=0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000..=0x200a |
+                0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+            )
+        }) {
+            units.pop();
+        }
+        units.push(0x2026);
+    }
+    let suffix = if units
         .last()
-        .is_some_and(|c| matches!(c, '.' | '!' | '?' | '\u{2026}'));
-    format!(" {i}{}", if ends_punct { "" } else { "." })
+        .is_some_and(|unit| matches!(*unit, 46 | 33 | 63 | 0x2026))
+    {
+        ""
+    } else {
+        "."
+    };
+    source_error_affixes(" ", &units, suffix)
 }
 
 /// Surface the terminal `API Error: …` assistant message on the BATCHED path
@@ -564,6 +622,7 @@ pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
     stop_reason: &str,
     stop_details: Option<&llm_runtime::HistoryStopDetails>,
+    response_message_id: Option<&str>,
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;
@@ -579,12 +638,21 @@ pub(crate) async fn surface_terminal_api_error(
         stop_reason,
         request_id.as_deref(),
         stop_details,
+        response_message_id,
     )?;
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![ContentBlock::TextJsUtf16 {
+            text: text
+                .string_at("")
+                .expect("source terminal error")
+                .to_owned(),
+            utf16_code_units: text.string_units("").expect("source terminal error"),
+            citations: None,
+        }],
         stop_reason: Some(stop_reason.to_string()),
+        resumable: None,
     };
     {
         let mut s = orch.session.lock().await;
@@ -604,12 +672,14 @@ pub(crate) async fn surface_terminal_api_error(
             api_error_status: None,
             inner_stop_reason: None,
             truncated_after_output: false,
+            terminal_reason: None,
         },
         "refusal" => ApiErrorEnvelope {
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
             truncated_after_output: false,
+            terminal_reason: None,
         },
         // `terminal_api_error_text` returned `Some` only for the three reasons
         // above; any other value can't reach here.
@@ -617,6 +687,9 @@ pub(crate) async fn surface_terminal_api_error(
     };
     orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
+    if stop_reason == "refusal" {
+        orch.output.emit_terminal_api_error(None, "api_error").await;
+    }
     orch.output.emit_text(&text).await;
     Some(assistant_id)
 }
@@ -634,17 +707,16 @@ pub(crate) async fn surface_terminal_api_error(
 /// layer has handled 429/529; everything else falls through to `model_error`.
 #[must_use]
 pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
-    matches!(
-        e,
-        OrchestratorError::PermissionAbort { .. }
-            | OrchestratorError::RepeatedOverloaded
-            | OrchestratorError::ApiCall(
-                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
-            )
-            | OrchestratorError::Streaming(
-                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
-            )
-    )
+    match e {
+        OrchestratorError::PermissionAbort { .. } | OrchestratorError::RepeatedOverloaded => true,
+        OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => matches!(
+            error.classification_source(),
+            LlmError::RateLimited { .. }
+                | LlmError::Overloaded { .. }
+                | LlmError::RequestDispatchRejected { .. }
+        ),
+        _ => false,
+    }
 }
 
 pub(super) async fn maybe_checkpoint_for_trigger(
@@ -698,11 +770,13 @@ pub(super) async fn maybe_checkpoint_on_rate_limit(
     orch: &ConversationOrchestrator,
     error: &OrchestratorError,
 ) {
-    if !matches!(
-        error,
-        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
-            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
-    ) {
+    let is_rate_limited = match error {
+        OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
+            matches!(error.classification_source(), LlmError::RateLimited { .. })
+        }
+        _ => false,
+    };
+    if !is_rate_limited {
         return;
     }
     maybe_checkpoint_for_trigger(orch, session::CheckpointTrigger::RateLimited).await;
@@ -711,14 +785,14 @@ pub(super) async fn maybe_checkpoint_on_rate_limit(
 /// Surface a `model_error` turn-end (port of `query.ts:955-997`'s top-level
 /// `catch`). A runtime error that escaped the API layer (not PTL/overflow/rate/
 /// overload — those propagate upstream) is NOT a hard failure: log
-/// `tengu_query_error`, yield the raw text VERBATIM as an `isApiErrorMessage`
-/// assistant (`createAssistantAPIErrorMessage`, no `API Error:` prefix), end with
+/// `tengu_query_error`, yield the classified presentation text as an `isApiErrorMessage`
+/// assistant (provider HTTP errors carry Native's `API Error: ` prefix), end with
 /// `reason:'model_error'`. Session survives. `yieldMissingToolResultBlocks` is a
 /// no-op (history appends only after success); `queryDepth=0` (subagents bypass
 /// this orchestrator); per-turn `assistantMessages`/`toolUses` counts omitted.
 pub(crate) async fn surface_model_error(
     orch: &ConversationOrchestrator,
-    error_text: &str,
+    error_text: Utf16JsonProjection,
     env: ApiErrorEnvelope,
 ) -> MessageId {
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
@@ -730,7 +804,11 @@ pub(crate) async fn surface_model_error(
         metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
         bus.log_event("tengu_query_error", metadata).await;
     }
-    surface_api_error_notice(orch, error_text, env).await
+    let status = env.api_error_status;
+    let reason = env.terminal_reason.unwrap_or("api_error");
+    let id = surface_api_error_notice(orch, error_text, env).await;
+    orch.output.emit_terminal_api_error(status, reason).await;
+    id
 }
 
 /// Persist + emit an api-error assistant message (the `createAssistantAPIErrorMessage`
@@ -740,21 +818,41 @@ pub(crate) async fn surface_model_error(
 /// directly, not through the top-level catch — so it does NOT fire `tengu_query_error`).
 pub(crate) async fn surface_api_error_notice(
     orch: &ConversationOrchestrator,
-    error_text: &str,
+    error_text: Utf16JsonProjection,
     env: ApiErrorEnvelope,
 ) -> MessageId {
     // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
     // falling back to the `NO_CONTENT_MESSAGE` placeholder when empty.
-    let text = if error_text.is_empty() {
-        "(no content)".to_string()
+    let error_text = if error_text.string_at("") == Some("") {
+        "(no content)".into()
     } else {
-        error_text.to_string()
+        error_text
+    };
+    let text = error_text
+        .string_at("")
+        .expect("API error content must be a string projection")
+        .to_owned();
+    let utf16_code_units = error_text
+        .string_units("")
+        .expect("API error content must carry exact string code units");
+    let content = if utf16_code_units == text.encode_utf16().collect::<Vec<_>>() {
+        ContentBlock::Text {
+            text: text.clone(),
+            citations: None,
+        }
+    } else {
+        ContentBlock::TextJsUtf16 {
+            text: text.clone(),
+            utf16_code_units,
+            citations: None,
+        }
     };
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![content],
         stop_reason: Some("model_error".to_string()),
+        resumable: None,
     };
     {
         let mut s = orch.session.lock().await;
@@ -769,6 +867,222 @@ pub(crate) async fn surface_api_error_notice(
     // TYPED error and passed in here (the classifier deferral is now CLOSED).
     orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
-    orch.output.emit_text(&text).await;
+    orch.output.emit_text(&error_text).await;
     assistant_id
+}
+
+/// Produce the display text associated with an orchestrator error without
+/// throwing away provider code units when the underlying LLM error has an
+/// exact Source carrier. Non-LLM errors are host-generated UTF-8 text.
+pub(crate) fn orchestrator_error_text_source(
+    error: &OrchestratorError,
+    model: &str,
+) -> Utf16JsonProjection {
+    match error {
+        OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
+            let native = error.native_anthropic_error_facts();
+            if native.is_some() && error.http_status() == Some(404) {
+                return format!("There's an issue with the selected model ({model}). It may not exist or you may not have access to it. Run --model to pick a different model.").into();
+            }
+            let text = llm_runtime::error_display_source(error);
+            if let Some(facts) = native {
+                if error.http_status().is_some_and(|status| status >= 500) {
+                    let mut message = text
+                        .string_units("")
+                        .expect("error text is a source string");
+                    // Native Zce(e).replace(/[.!?\u2026]+$/, "") operates on
+                    // the original JavaScript string, including lone units.
+                    while message
+                        .last()
+                        .is_some_and(|unit| matches!(unit, 0x2e | 0x21 | 0x3f | 0x2026))
+                    {
+                        message.pop();
+                    }
+                    let suffix = format!(
+                        ". This is a server-side issue, usually temporary — try again in a moment.{}",
+                        native_server_status_hint(facts),
+                    );
+                    return source_error_affixes("API Error: ", &message, &suffix);
+                }
+            }
+            // Native 2.1.293 writes this prefix into both its assistant JSONL
+            // row and final CLI result. A local validation error has no SDK
+            // provider-text carrier and must not acquire an HTTP identity.
+            let prefix =
+                error
+                    .native_anthropic_error_facts()
+                    .and_then(|_| match error.http_status() {
+                        Some(400) => Some("API Error: "),
+                        Some(401 | 403) => Some("Failed to authenticate. API Error: "),
+                        _ => None,
+                    });
+            if let Some(prefix) = prefix {
+                source_error_affixes(
+                    prefix,
+                    &text
+                        .string_units("")
+                        .expect("error text is a source string"),
+                    "",
+                )
+            } else {
+                text
+            }
+        }
+        _ => error.to_string().into(),
+    }
+}
+
+fn source_error_affixes(prefix: &str, text: &[u16], suffix: &str) -> Utf16JsonProjection {
+    let units = prefix
+        .encode_utf16()
+        .chain(text.iter().copied())
+        .chain(suffix.encode_utf16())
+        .collect::<Vec<_>>();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("affixing source text preserves its UTF-16 units")
+}
+
+/// Native 2.1.293 jJn. Route facts come from the dispatched SDK request, so a
+/// profile's gateway hint cannot accidentally use another profile's endpoint.
+fn native_server_status_hint(
+    facts: &lingxi_llm_client::protocol::NativeAnthropicErrorFacts,
+) -> String {
+    use lingxi_llm_client::protocol::ProtocolFamily;
+    let provider = match facts.protocol {
+        ProtocolFamily::BedrockClaude => "bedrock",
+        ProtocolFamily::VertexClaude => "vertex",
+        ProtocolFamily::FoundryClaude => "foundry",
+        _ => facts.provider_id.as_str(),
+    };
+    match provider {
+        "anthropic"
+            if std::env::var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL")
+                .is_ok_and(|value| !value.is_empty()) =>
+        {
+            " If it persists, check https://status.claude.com.".into()
+        }
+        "anthropic" => match facts.request_authority.as_deref() {
+            None | Some("api.anthropic.com") => {
+                " If it persists, check https://status.claude.com.".into()
+            }
+            Some(authority) => {
+                format!(" If it persists, check your inference gateway ({authority}).")
+            }
+        },
+        "anthropicAws" => " If it persists, check https://status.claude.com.".into(),
+        "anthropicGoogleCloud" => {
+            " If it persists, check https://status.claude.com and Google Cloud's status page."
+                .into()
+        }
+        other => {
+            let label = match other {
+                "bedrock" => "Amazon Bedrock",
+                "vertex" => "Google Vertex AI",
+                "foundry" => "Microsoft Foundry",
+                "mantle" => "Amazon Bedrock (Mantle)",
+                "gateway" => "Cloud gateway",
+                other => other,
+            };
+            format!(" If it persists, check your {label} service status.")
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_error_tests {
+    use super::*;
+    use lingxi_llm_client::protocol::{
+        NativeAnthropicErrorFacts, ProtocolFamily, ProviderErrorText, ProviderId,
+    };
+
+    #[test]
+    fn native_293_noninteractive_refusal_matches_captured_result_text() {
+        let captures = [
+            (Some("cyber"), "msg_fixed_stop_details_cyber_293", include_str!("../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-cyber/native.stdout.raw")),
+            (None, "msg_fixed_stop_details_generic_293", include_str!("../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-generic/native.stdout.raw")),
+        ];
+        for (category, message_id, capture) in captures {
+            let native = Utf16JsonProjection::parse(capture.trim()).unwrap();
+            let details = llm_runtime::HistoryStopDetails {
+                category: category.map(str::to_owned),
+                explanation: Some(
+                    Utf16JsonProjection::parse(r#""source \ud800 explanation""#).unwrap(),
+                ),
+            };
+            let text = terminal_api_error_text(
+                "claude-sonnet-4-5",
+                false,
+                "refusal",
+                None,
+                Some(&details),
+                Some(message_id),
+            )
+            .unwrap();
+            assert_eq!(text.string_units(""), native.string_units("/result"));
+        }
+    }
+
+    #[test]
+    fn goal_notice_retains_unpaired_units_before_a_truncated_newline() {
+        let condition = Utf16JsonProjection::parse(r#""ship \ud800\nthen rest""#).unwrap();
+        let result = goal_cleared_after_error_message("context limit reached", &condition);
+        let expected = "Goal cleared after an unrecoverable error (context limit reached): \"ship "
+            .encode_utf16()
+            .chain([0xd800, 0x2026])
+            .chain("\". Run /goal again to continue.".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(result.string_units(""), Some(expected));
+    }
+
+    #[test]
+    fn explanation_slice_uses_utf16_units_and_preserves_a_split_pair() {
+        let explanation: Utf16JsonProjection = format!("{}😀tail", "a".repeat(399)).into();
+        let clause = refusal_explanation_clause(Some(&explanation));
+        let units = clause.string_units("").unwrap();
+        assert_eq!(&units[400..], &[0xd83d, 0x2026]);
+    }
+
+    fn error(units: Vec<u16>, native: bool) -> OrchestratorError {
+        OrchestratorError::ApiCall(LlmError::ProviderErrorText {
+            source: Box::new(LlmError::InvalidRequest {
+                message: "500 fixture".into(),
+            }),
+            text: ProviderErrorText::new(String::from_utf16_lossy(&units), units).unwrap(),
+            native_anthropic_facts: native.then(|| NativeAnthropicErrorFacts {
+                provider_id: ProviderId::from("anthropic"),
+                protocol: ProtocolFamily::AnthropicMessages,
+                request_authority: Some("127.0.0.1:57288".into()),
+                thinking_resumption_refused: false,
+                thinking_resumption_beta_requested: None,
+                thinking_resumption_beta_refused: false,
+            }),
+        })
+    }
+
+    #[test]
+    fn native_server_error_trims_only_trailing_punctuation_without_losing_source() {
+        for ending in ["", ".!?…", ". "] {
+            let units = "500 provider "
+                .encode_utf16()
+                .chain([0xd800])
+                .chain(ending.encode_utf16())
+                .collect::<Vec<_>>();
+            let rendered = orchestrator_error_text_source(&error(units, true), "claude-sonnet-4-5");
+            let retained_ending = if ending == ". " { ending } else { "" };
+            let expected = "API Error: 500 provider ".encode_utf16().chain([0xd800]).chain(retained_ending.encode_utf16()).chain(". This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:57288).".encode_utf16()).collect::<Vec<_>>();
+            assert_eq!(rendered.string_units(""), Some(expected));
+        }
+    }
+
+    #[test]
+    fn other_provider_error_keeps_its_existing_presentation() {
+        let units = "500 provider "
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            orchestrator_error_text_source(&error(units.clone(), false), "model").string_units(""),
+            Some(units)
+        );
+    }
 }

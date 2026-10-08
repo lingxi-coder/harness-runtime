@@ -5,8 +5,8 @@ use lingxi_core::host::OutputEvent;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
-    mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, mock_message_response,
+    noop_hook_executor,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig};
 use std::collections::VecDeque;
@@ -37,12 +37,13 @@ impl PtlMockApi {
 impl OrchestratorApiClient for PtlMockApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        let msgs = match request {
+            orchestrator::OrchestratorApiRequest::Main(request) => request.messages,
+            orchestrator::OrchestratorApiRequest::HookPrompt(request) => request.messages,
+        };
+
         self.captured_lens.lock().await.push(msgs.len());
         let mut q = self.queue.lock().await;
         q.pop_front().unwrap_or_else(|| {
@@ -65,6 +66,7 @@ fn ok_text(text: &str) -> Result<HistoryResponse, LlmError> {
         vec![LlmContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     ))
@@ -148,8 +150,10 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
                 text: format!(
                     "round-{i} assistant reply with filler text to give the round weight"
                 ),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         });
     }
 }
@@ -163,11 +167,11 @@ async fn unwired_ptl_does_not_truncate_or_retry_the_main_request() {
     orch.run_turn("trigger").await.unwrap();
     assert_eq!(api.call_lens().await.len(), 1);
     assert_eq!(orch.session().lock().await.history[..before.len()], before);
-    assert!(output
-        .snapshot()
-        .await
-        .iter()
-        .any(|event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long")));
+    assert!(
+        output.snapshot().await.iter().any(
+            |event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long")
+        )
+    );
 }
 
 #[tokio::test]
@@ -202,11 +206,13 @@ async fn reactive_summary_success_retries_once_below_the_local_auto_threshold() 
             "the summary preserves the oldest user request after leading context"
         );
     }
-    assert!(output
-        .snapshot()
-        .await
-        .iter()
-        .any(|event| matches!(event, OutputEvent::Text { text } if text == "recovered")));
+    assert!(
+        output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, OutputEvent::Text { text } if text == "recovered"))
+    );
     assert!(orch.session().lock().await.history.iter().any(|message| matches!(message, ConversationMessage::System { content, .. } if content == "Conversation compacted")));
 }
 
@@ -229,9 +235,11 @@ async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry(
     assert_eq!(api.call_lens().await.len(), 1);
     assert_eq!(orch.session().lock().await.history[..before.len()], before);
     assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long · automatic compaction failed: summarization produced empty response")));
-    assert!(!output
-        .snapshot()
-        .await
-        .iter()
-        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+    assert!(
+        !output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. }))
+    );
 }

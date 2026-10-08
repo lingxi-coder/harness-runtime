@@ -10,13 +10,13 @@
 //!
 //! ## Shape (mirrors `TuiPermissionGate`, id-keyed)
 //!
-//! `check(name, &Value)` ([`lingxi_core::host::PermissionGate`]):
+//! `check(name, &Utf16JsonProjection)` ([`lingxi_core::host::PermissionGate`]):
 //! 1. Consult the session rules — short-circuit `Allow` if a rule matches the
 //!    bare tool name (same as the TUI gate).
 //! 2. Build a [`PermissionKindDto::ToolUseConfirm`] from `permission::tool_default`
 //!    (the `PromptDefault` → `default_allow: bool` collapse, reusing
 //!    [`crate::adapter::lowering::prompt_default_to_allow`]) and the lowered tool input
-//!    JSON string ([`crate::adapter::lowering::value_to_json_string`]).
+//!    JSON string by serializing the exact projection at this transport boundary.
 //! 3. Assign a fresh `request_id` via an [`AtomicU64`], park a
 //!    `oneshot::Sender<PermissionResponse>` in the id-keyed `HashMap`, and emit a
 //!    [`PermissionRequest`] DTO through the [`PermissionRequestSink`].
@@ -51,6 +51,7 @@ use crate::protocol::permission::{
     WorkerInfoDto,
 };
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::gate::{
     AutoModePrompt, PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
     PermissionResponse, PromptWorker,
@@ -61,7 +62,7 @@ use permission::{
 };
 use tokio::sync::{oneshot, Mutex};
 
-use crate::adapter::lowering::{prompt_default_to_allow, value_to_json_string};
+use crate::adapter::lowering::prompt_default_to_allow;
 use crate::adapter::ClientEventSink;
 
 /// Default per-request timeout — a `check()` parked longer than this resolves
@@ -87,12 +88,12 @@ pub trait PermissionRequestSink: Send + Sync {
 }
 
 /// One parked permission round-trip: the oneshot the awaiting `check()` blocks
-/// on, plus the call's tool input (so `resolve` can narrow an `AllowAlways`).
+/// on, plus the exact call input (so `resolve` can narrow an `AllowAlways`).
 struct ParkedRequest {
     /// Resolves the awaiting `check()` future.
     sender: oneshot::Sender<PermissionResponse>,
     /// The tool input of the call, captured at `check()` time.
-    input: serde_json::Value,
+    input: Utf16JsonProjection,
     /// Canonical tool name captured with the request; resolution never trusts
     /// a late transport-side lookup that may have timed out or been cancelled.
     tool_name: String,
@@ -408,26 +409,32 @@ impl AdapterPermissionGate {
         if allow_always {
             // NARROW the persisted grant to the specific command / path / domain
             // the call used (claude-code `ruleSuggestions`), not a tool-wide allow.
-            let rule = permission::allow_suggestion(&tool_name, &input);
-            self.session_allow_rules.lock().await.push(rule.clone());
-            // (3c) Durably record the choice to settings.local.json when a
-            // persist target is wired. Best-effort: a write failure must not
-            // fail the resolve (the session rule above still skips re-prompts).
-            // Skip a degenerate empty tool name (a missing request id resolves
-            // `tool_name = ""`) so we never persist `allow: [""]`.
-            if let Some(paths) = self.persist_paths.as_ref().filter(|_| {
-                !tool_name.is_empty() && self.persistence_enabled.load(Ordering::Acquire)
-            }) {
-                let update = PermissionUpdate {
-                    rule,
-                    destination: PermissionUpdateDestination::LocalSettings,
-                };
-                if let Err(e) = persist_permission_update(&update, paths).await {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        error_kind = std::any::type_name_of_val(&e),
-                        "failed to persist AllowAlways permission rule"
-                    );
+            // Exact lone-surrogate command/path/url text can be approved for
+            // this call but cannot be represented in the UTF-8 permission
+            // rule format. In that case the policy returns None and we skip
+            // only the persistent rule; the user's current AllowAlways still
+            // resolves this parked request as approved.
+            if let Some(rule) = permission::allow_suggestion(&tool_name, &input) {
+                self.session_allow_rules.lock().await.push(rule.clone());
+                // (3c) Durably record the choice to settings.local.json when a
+                // persist target is wired. Best-effort: a write failure must not
+                // fail the resolve (the session rule above still skips re-prompts).
+                // Skip a degenerate empty tool name (a missing request id resolves
+                // `tool_name = ""`) so we never persist `allow: [""]`.
+                if let Some(paths) = self.persist_paths.as_ref().filter(|_| {
+                    !tool_name.is_empty() && self.persistence_enabled.load(Ordering::Acquire)
+                }) {
+                    let update = PermissionUpdate {
+                        rule,
+                        destination: PermissionUpdateDestination::LocalSettings,
+                    };
+                    if let Err(e) = persist_permission_update(&update, paths).await {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            error_kind = std::any::type_name_of_val(&e),
+                            "failed to persist AllowAlways permission rule"
+                        );
+                    }
                 }
             }
         }
@@ -517,7 +524,7 @@ impl AdapterPermissionGate {
     async fn check_with_context_impl(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
         background_owned: bool,
         suppress_always_allow_rule: bool,
@@ -580,11 +587,7 @@ impl AdapterPermissionGate {
                 .then_some(AutoModePrompt::ExitPlanMode);
             (
                 PermissionKindDto::ExitPlanMode {
-                    plan: input
-                        .get("plan")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
+                    plan: input.string_at("/plan").unwrap_or_default().to_owned(),
                 },
                 auto_mode_prompt,
             )
@@ -595,7 +598,9 @@ impl AdapterPermissionGate {
             (
                 PermissionKindDto::ToolUseConfirm {
                     tool_name: name.to_string(),
-                    tool_input_json: value_to_json_string(input),
+                    tool_input_json: input
+                        .to_json_string()
+                        .expect("permission input projection must serialize as JSON"),
                     default_allow,
                 },
                 auto_mode_prompt,
@@ -675,7 +680,7 @@ impl AdapterPermissionGate {
                 // which also already removed the entry.
                 parked_guard.armed = false;
                 return PermissionOutcome::Deny {
-                    reason: "permission request dropped (connection closed)".to_string(),
+                    reason: "permission request dropped (connection closed)".into(),
                 };
             }
             Err(_elapsed) => {
@@ -688,7 +693,7 @@ impl AdapterPermissionGate {
                         .await;
                 }
                 return PermissionOutcome::Deny {
-                    reason: "permission request timed out".to_string(),
+                    reason: "permission request timed out".into(),
                 };
             }
         };
@@ -716,7 +721,7 @@ impl AdapterPermissionGate {
                 decision_classification: None,
             },
             PermissionResponse::Deny => PermissionOutcome::Deny {
-                reason: "user denied via permission dialog".to_string(),
+                reason: "user denied via permission dialog".into(),
             },
         }
     }
@@ -728,7 +733,7 @@ impl PermissionGate for AdapterPermissionGate {
         self.persistence_enabled.store(enabled, Ordering::Release);
     }
 
-    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+    async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision {
         // Main-thread call — no worker attribution on the wire.
         self.check_with_worker(name, input, None).await
     }
@@ -736,7 +741,7 @@ impl PermissionGate for AdapterPermissionGate {
     async fn check_with_worker(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
@@ -753,7 +758,7 @@ impl PermissionGate for AdapterPermissionGate {
     async fn check_with_context(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         match self
@@ -779,6 +784,40 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
+
+    fn source_fixture(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value)
+            .expect("test fixture is a generated JSON value")
+    }
+
+    // The existing gate tests are bounded JSON fixtures. Keep their Value
+    // ingress test-only while production receives the original UJP.
+    impl AdapterPermissionGate {
+        async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+            let source = source_fixture(input);
+            <Self as PermissionGate>::check(self, name, &source).await
+        }
+
+        async fn check_with_worker(
+            &self,
+            name: &str,
+            input: &serde_json::Value,
+            worker: Option<PromptWorker>,
+        ) -> PermissionDecision {
+            let source = source_fixture(input);
+            <Self as PermissionGate>::check_with_worker(self, name, &source, worker).await
+        }
+
+        async fn check_with_context(
+            &self,
+            name: &str,
+            input: &serde_json::Value,
+            context: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            let source = source_fixture(input);
+            <Self as PermissionGate>::check_with_context(self, name, &source, context).await
+        }
+    }
 
     /// A [`PermissionRequestSink`] that captures every emitted request so a test
     /// can read back the assigned `request_id` and assert the lowered fields.
@@ -833,7 +872,10 @@ mod tests {
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
 
         let g = gate.clone();
-        let task = tokio::spawn(async move { g.check("Bash", &json!({"command": "ls"})).await });
+        let task = tokio::spawn(async move {
+            g.check("Bash", &source_fixture(&json!({"command": "ls"})))
+                .await
+        });
 
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
@@ -853,6 +895,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_permission_input_escapes_lone_surrogate_and_skips_unrepresentable_rule() {
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
+        let source = Utf16JsonProjection::parse(r#"{"command":"\ud800"}"#).unwrap();
+        let g = gate.clone();
+        let task = tokio::spawn(async move {
+            <AdapterPermissionGate as PermissionGate>::check(g.as_ref(), "Bash", &source).await
+        });
+
+        wait_for_pending(&gate, 1).await;
+        let request = sink.last().await;
+        let PermissionKindDto::ToolUseConfirm {
+            tool_input_json, ..
+        } = request.kind
+        else {
+            panic!("expected tool confirmation request");
+        };
+        assert_eq!(tool_input_json, r#"{"command":"\ud800"}"#);
+        assert!(
+            gate.resolve(
+                request.request_id,
+                PermissionResponseDto::AllowAlways,
+                "Bash"
+            )
+            .await
+        );
+        assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
+        assert!(gate.session_allow_rules().lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn eligible_auto_response_is_rich_outcome_without_session_rule() {
         let sink = MockRequestSink::arc();
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
@@ -862,8 +935,12 @@ mod tests {
         };
         let g = gate.clone();
         let task = tokio::spawn(async move {
-            g.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
-                .await
+            g.check_with_context(
+                "Bash",
+                &source_fixture(&json!({"command": "echo hi"})),
+                &ctx,
+            )
+            .await
         });
 
         wait_for_pending(&gate, 1).await;
@@ -928,7 +1005,9 @@ mod tests {
         let rules = Arc::new(Mutex::new(vec![PermissionRule::allow_tool_session("Bash")]));
         let gate = AdapterPermissionGate::with_rules(sink.clone(), rules);
 
-        let decision = gate.check("Bash", &json!({"command": "ls"})).await;
+        let decision = gate
+            .check("Bash", &source_fixture(&json!({"command": "ls"})))
+            .await;
         assert_eq!(decision, PermissionDecision::Allow);
         // No request was emitted to the transport.
         assert!(sink.requests().await.is_empty());
@@ -942,7 +1021,7 @@ mod tests {
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
 
         let g = gate.clone();
-        let task = tokio::spawn(async move { g.check("Bash", &json!({})).await });
+        let task = tokio::spawn(async move { g.check("Bash", &source_fixture(&json!({}))).await });
 
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
@@ -971,7 +1050,7 @@ mod tests {
 
         let g = gate.clone();
         let task = tokio::spawn(async move {
-            g.check_with_context("McpTool", &json!({"value": 1}), &ctx)
+            g.check_with_context("McpTool", &source_fixture(&json!({"value": 1})), &ctx)
                 .await
         });
 
@@ -1005,7 +1084,7 @@ mod tests {
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
 
         let g = gate.clone();
-        let input = json!({ "command": "git commit -m \"x\"" });
+        let input = source_fixture(&json!({ "command": "git commit -m \"x\"" }));
         let task = tokio::spawn(async move { g.check("Bash", &input).await });
 
         wait_for_pending(&gate, 1).await;

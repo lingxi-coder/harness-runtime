@@ -1,0 +1,1699 @@
+{
+  "version": "2.1.286",
+  "binary_sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "source_byte_ranges": [
+    {
+      "source_chunk": "src_183727495.js",
+      "source_line": 1528,
+      "signature": "var wEt=\"claude/endTurn\"; complete vEt and dEo",
+      "start": 185265466,
+      "end": 185265767,
+      "sha256": "50f625eb5bc7534891b6f205d09e20b7a937a4f6bf0c0d6b5284752a3eca4296",
+      "source": "var wEt=\"claude/endTurn\";function vEt(e){return e?._meta?.[wEt]===!0}function dEo(e){if(e.type!==\"user\")return!1;let n=e.toolEndsTurn?\"tool\":vEt(e.mcpMeta)?\"mcp_meta\":!1;if(!n)return!1;let r=e.message.content;if(Array.isArray(r)&&r.some((s)=>s.type===\"tool_result\"&&s.is_error===!0))return!1;return n}"
+    }
+  ],
+  "execution": {
+    "native_helpers": [
+      "vEt",
+      "dEo"
+    ],
+    "source_rewrites": [],
+    "dependency_substitutions": [],
+    "result_values": "Native false, \"tool\", or \"mcp_meta\" are preserved without independently implementing classification."
+  },
+  "helper_mapping": {
+    "single_result_boolean": "A user frame containing exactly one tool_result, with boolean toolEndsTurn and is_error. helper_input maps to tool_result_turn_end(tool_ends_turn, is_error, mcp_meta.as_ref()). Null mcp_meta maps to None; all other JSON values remain Some(value). Native false maps to None, and a native source string maps to the corresponding typed source.",
+    "raw_frame_only": "No helper_input is supplied. Non-boolean/missing control fields, non-user frames, multiple results, and non-tool-result content are outside that single-result bool domain. Do not coerce these raw fixtures into Rust bool arguments or treat a whole aggregated frame as one invocation."
+  },
+  "mcp_marker_cases": [
+    {
+      "name": "absent",
+      "input": null,
+      "expected": false
+    },
+    {
+      "name": "nested_true",
+      "input": {
+        "_meta": {
+          "claude/endTurn": true
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "nested_false",
+      "input": {
+        "_meta": {
+          "claude/endTurn": false
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_one",
+      "input": {
+        "_meta": {
+          "claude/endTurn": 1
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_zero",
+      "input": {
+        "_meta": {
+          "claude/endTurn": 0
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_string_true",
+      "input": {
+        "_meta": {
+          "claude/endTurn": "true"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_string_false",
+      "input": {
+        "_meta": {
+          "claude/endTurn": "false"
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_null",
+      "input": {
+        "_meta": {
+          "claude/endTurn": null
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_object",
+      "input": {
+        "_meta": {
+          "claude/endTurn": {}
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "nested_array",
+      "input": {
+        "_meta": {
+          "claude/endTurn": []
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "flat_key",
+      "input": {
+        "claude/endTurn": true
+      },
+      "expected": false
+    },
+    {
+      "name": "other_key",
+      "input": {
+        "_meta": {
+          "vendor/endTurn": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "missing_key",
+      "input": {
+        "_meta": {}
+      },
+      "expected": false
+    },
+    {
+      "name": "meta_null",
+      "input": {
+        "_meta": null
+      },
+      "expected": false
+    },
+    {
+      "name": "meta_true",
+      "input": {
+        "_meta": true
+      },
+      "expected": false
+    },
+    {
+      "name": "meta_array",
+      "input": {
+        "_meta": [
+          true
+        ]
+      },
+      "expected": false
+    },
+    {
+      "name": "top_level_array",
+      "input": [
+        {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "top_level_string",
+      "input": "true",
+      "expected": false
+    },
+    {
+      "name": "top_level_true",
+      "input": true,
+      "expected": false
+    },
+    {
+      "name": "top_level_one",
+      "input": 1,
+      "expected": false
+    }
+  ],
+  "cases": [
+    {
+      "name": "mcp_absent",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": null
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_true",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        }
+      },
+      "expected": "mcp_meta",
+      "expected_helper_source": "mcp_meta"
+    },
+    {
+      "name": "mcp_nested_false",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": false
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": false
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_one",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": 1
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": 1
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_zero",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": 0
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": 0
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_string_true",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": "true"
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": "true"
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_string_false",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": "false"
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": "false"
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_null",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": null
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": null
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_object",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": {}
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": {}
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_nested_array",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": []
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": []
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_flat_key",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "claude/endTurn": true
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "claude/endTurn": true
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_other_key",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "vendor/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "vendor/endTurn": true
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_missing_key",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {}
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {}
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_meta_null",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": null
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": null
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_meta_true",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": true
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": true
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_meta_array",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": [
+            true
+          ]
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": [
+            true
+          ]
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_top_level_array",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": [
+          {
+            "_meta": {
+              "claude/endTurn": true
+            }
+          }
+        ],
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": [
+          {
+            "_meta": {
+              "claude/endTurn": true
+            }
+          }
+        ]
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_top_level_string",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": "true",
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": "true"
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_top_level_true",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": true,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": true
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_top_level_one",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": 1,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": false,
+        "mcp_meta": 1
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "no_marker_error",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": true,
+        "mcp_meta": null
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "tool_marker",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": false,
+        "mcp_meta": null
+      },
+      "expected": "tool",
+      "expected_helper_source": "tool"
+    },
+    {
+      "name": "tool_marker_error",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": true,
+        "mcp_meta": null
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "mcp_marker_error",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": false,
+        "is_error": true,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "tool_precedes_mcp",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        }
+      },
+      "expected": "tool",
+      "expected_helper_source": "tool"
+    },
+    {
+      "name": "tool_and_mcp_error",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": true,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        }
+      },
+      "expected": false,
+      "expected_helper_source": null
+    },
+    {
+      "name": "tool_precedes_invalid_mcp",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": "true"
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": false,
+        "mcp_meta": {
+          "_meta": {
+            "claude/endTurn": "true"
+          }
+        }
+      },
+      "expected": "tool",
+      "expected_helper_source": "tool"
+    },
+    {
+      "name": "top_level_error_is_ignored",
+      "domain": "single_result_boolean",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        },
+        "is_error": true
+      },
+      "helper_input": {
+        "tool_ends_turn": true,
+        "is_error": false,
+        "mcp_meta": null
+      },
+      "expected": "tool",
+      "expected_helper_source": "tool"
+    },
+    {
+      "name": "raw_tool_marker_one",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": 1,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_tool_marker_negative_one",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": -1,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_tool_marker_string_false",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": "false",
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_tool_marker_empty_object",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": {},
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_tool_marker_empty_array",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": [],
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_tool_marker_zero",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": 0,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": false
+    },
+    {
+      "name": "raw_tool_marker_empty_string",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": "",
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": false
+    },
+    {
+      "name": "raw_tool_marker_null",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": null,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "toolEndsTurn is not a boolean. Native dEo uses JS truthiness; the Rust trusted carrier accepts bool only.",
+      "expected": false
+    },
+    {
+      "name": "raw_falsey_tool_marker_with_mcp",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": 0,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "The falsey numeric toolEndsTurn value is outside the Rust bool carrier; native falls through to the MCP marker.",
+      "expected": "mcp_meta"
+    },
+    {
+      "name": "raw_error_one",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": 1
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "is_error is not a boolean. Native suppresses only ===true; the Rust ToolResult field is bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_error_string_true",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": "true"
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "is_error is not a boolean. Native suppresses only ===true; the Rust ToolResult field is bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_error_empty_object",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": {}
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "is_error is not a boolean. Native suppresses only ===true; the Rust ToolResult field is bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_error_null",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": null
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "is_error is not a boolean. Native suppresses only ===true; the Rust ToolResult field is bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_error_zero",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": 0
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "is_error is not a boolean. Native suppresses only ===true; the Rust ToolResult field is bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_missing_error_field",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result"
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "No is_error field exists on the raw result; the Rust helper requires an explicit bool.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_missing_tool_marker",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "The raw frame omits toolEndsTurn; the Rust helper requires an explicit bool.",
+      "expected": "mcp_meta"
+    },
+    {
+      "name": "raw_non_user_assistant",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "assistant",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "Native dEo first requires a user frame; the helper is called at the typed tool-result boundary and has no frame-type argument.",
+      "expected": false
+    },
+    {
+      "name": "raw_non_user_attachment",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "attachment",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "Native dEo first requires a user frame; the helper is called at the typed tool-result boundary and has no frame-type argument.",
+      "expected": false
+    },
+    {
+      "name": "raw_non_user_system",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "system",
+        "toolEndsTurn": true,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "fixture-tool-use",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "Native dEo first requires a user frame; the helper is called at the typed tool-result boundary and has no frame-type argument.",
+      "expected": false
+    },
+    {
+      "name": "raw_multiple_results_error_first",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "is_error": true
+            },
+            {
+              "type": "tool_result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "One raw user frame contains multiple results. Native scans every result for an exact true error; a single invocation helper cannot represent this frame.",
+      "expected": false
+    },
+    {
+      "name": "raw_multiple_results_error_last",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "is_error": false
+            },
+            {
+              "type": "tool_result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "One raw user frame contains multiple results. Native scans every result for an exact true error; a single invocation helper cannot represent this frame.",
+      "expected": false
+    },
+    {
+      "name": "raw_multiple_results_all_success",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "is_error": false
+            },
+            {
+              "type": "tool_result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "One raw user frame contains multiple results. Native scans every result for an exact true error; a single invocation helper cannot represent this frame.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_multiple_results_non_boolean_error",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "is_error": 1
+            },
+            {
+              "type": "tool_result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "One raw user frame contains multiple results. Native scans every result for an exact true error; a single invocation helper cannot represent this frame.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_multiple_results_mcp_error_last",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": false,
+        "mcpMeta": {
+          "_meta": {
+            "claude/endTurn": true
+          }
+        },
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "is_error": false
+            },
+            {
+              "type": "tool_result",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "The MCP marker is on a raw multi-result frame; any contained exact true tool_result error suppresses it.",
+      "expected": false
+    },
+    {
+      "name": "raw_string_content",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": "no tool-result array"
+        }
+      },
+      "unmapped_reason": "The content is not one typed tool_result. Native only scans arrays and only suppresses tool_result blocks; the helper consumes an actual invocation result.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_null_content",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": null
+        }
+      },
+      "unmapped_reason": "The content is not one typed tool_result. Native only scans arrays and only suppresses tool_result blocks; the helper consumes an actual invocation result.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_object_content",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": {}
+        }
+      },
+      "unmapped_reason": "The content is not one typed tool_result. Native only scans arrays and only suppresses tool_result blocks; the helper consumes an actual invocation result.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_empty_array",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": []
+        }
+      },
+      "unmapped_reason": "The content is not one typed tool_result. Native only scans arrays and only suppresses tool_result blocks; the helper consumes an actual invocation result.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_text_error_field",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible text",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "The content is not one typed tool_result. Native only scans arrays and only suppresses tool_result blocks; the helper consumes an actual invocation result.",
+      "expected": "tool"
+    },
+    {
+      "name": "raw_missing_tool_use_id",
+      "domain": "raw_frame_only",
+      "input": {
+        "type": "user",
+        "toolEndsTurn": true,
+        "mcpMeta": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "content": "completed tool result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "unmapped_reason": "Native does not require a tool_use_id here. The typed invocation boundary supplies a real tool-use id; this malformed raw frame is intentionally not mapped.",
+      "expected": "tool"
+    }
+  ]
+}

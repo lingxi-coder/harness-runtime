@@ -246,7 +246,7 @@ impl SecurityReviewHandler {
 impl BuiltinCommandHandler for SecurityReviewHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::InjectMessage {
-            content: SECURITY_REVIEW_PROMPT.to_string(),
+            content: SECURITY_REVIEW_PROMPT.to_string().into(),
         }
     }
 
@@ -266,11 +266,12 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "security-review".to_string(),
-            raw_args: String::new(),
+            name: "security-review".into(),
+            raw_args: String::new().into(),
             positional_args: vec![],
         }
     }

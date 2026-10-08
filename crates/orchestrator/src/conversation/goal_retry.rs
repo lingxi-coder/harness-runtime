@@ -5,12 +5,22 @@ use std::time::SystemTime;
 
 #[derive(Default)]
 pub(crate) struct GoalRetryState {
-    goal: Option<(SystemTime, String)>,
+    goal: Option<(
+        SystemTime,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+    )>,
     retries: u32,
     announced: Option<&'static str>,
     pending: Option<CancellationToken>,
     queued_id: Option<String>,
-    checkin: Option<(String, CancellationToken, (SystemTime, String))>,
+    checkin: Option<(
+        String,
+        CancellationToken,
+        (
+            SystemTime,
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ),
+    )>,
 }
 impl Drop for GoalRetryState {
     fn drop(&mut self) {
@@ -82,7 +92,7 @@ impl ConversationOrchestrator {
                         return;
                     }
                     state.announced = Some(cause.key());
-                    (cause.text().to_string(), false)
+                    (cause.text().into(), false)
                 }
                 GoalInterruption::Retry(cause) => {
                     if state.pending.is_some() {
@@ -93,7 +103,7 @@ impl ConversationOrchestrator {
                             return;
                         }
                         state.announced = Some("gave_up");
-                        (goal_interruption::gave_up_announcement(cause), true)
+                        (goal_interruption::gave_up_announcement(cause).into(), true)
                     } else {
                         if self
                             .mid_turn_input
@@ -132,7 +142,8 @@ impl ConversationOrchestrator {
                                 cause,
                                 goal_interruption::RETRY_BACKOFF_MS[attempt as usize],
                                 attempt + 1,
-                            ),
+                            )
+                            .into(),
                             false,
                         )
                     }
@@ -145,7 +156,7 @@ impl ConversationOrchestrator {
     /// Queue an idle deferral check-in without consuming the interruption retry budget.
     pub(crate) async fn queue_goal_checkin(
         &self,
-        body: String,
+        body: lingxi_core::types::utf16_json::Utf16JsonProjection,
         goal: &lingxi_core::session::ActiveGoalState,
     ) -> bool {
         if !self.prompt_is_interactive() || crate::prompt::goal_checkin::checkin_interval_ms() == 0
@@ -296,17 +307,40 @@ mod tests {
     use crate::prompt::goal_interruption::RetryCause;
     use crate::test_support::*;
 
+    fn source_text(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            text.to_owned(),
+            text.encode_utf16().collect(),
+        )
+        .unwrap()
+    }
+
     #[derive(Default)]
-    struct Queue(std::sync::Mutex<Vec<(String, String, CancellationToken)>>);
+    struct Queue(
+        std::sync::Mutex<
+            Vec<(
+                String,
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+                CancellationToken,
+            )>,
+        >,
+    );
     #[async_trait::async_trait]
     impl crate::prompt::mid_turn_input::MidTurnInputSource for Queue {
         fn supports_goal_retries(&self) -> bool {
             true
         }
-        async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+        async fn enqueue_goal_retry(
+            &self,
+            id: String,
+            body: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            cancel: CancellationToken,
+        ) {
             self.0.lock().unwrap().push((id, body, cancel));
         }
-        async fn take_mid_turn_input(&self) -> Option<String> {
+        async fn take_mid_turn_input(
+            &self,
+        ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
             None
         }
     }
@@ -327,20 +361,21 @@ mod tests {
             message_delta_stop("end_turn"),
             message_stop(),
         ]]));
-        let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
-            crate::OrchestratorConfig {
-                interactive_session: interactive,
-                ..Default::default()
-            },
-            Arc::new(MockApiClient::new(vec![])),
-            api.clone(),
-            Arc::new(tool_api::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        ));
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig {
+                    interactive_session: interactive,
+                    ..Default::default()
+                },
+                Arc::new(MockApiClient::new(vec![])),
+                api.clone(),
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
         orch.enable_goal_retries();
         let queue = Arc::new(Queue::default());
         if wire {
@@ -406,14 +441,16 @@ mod tests {
         .unwrap();
         let calls = api.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].messages.iter().any(|m| m.is_meta()
-            && m.text_content()
-                .contains("The last turn ended before the goal could be evaluated")));
+        assert!(calls[0].messages.iter().any(|m| {
+            m.is_meta()
+                && m.text_content()
+                    .contains("The last turn ended before the goal could be evaluated")
+        }));
         orch.set_active_goal("replacement").await;
         orch.run_queued_prompt_batch(
             vec![crate::QueuedPromptInput {
                 goal_retry_id: Some(id),
-                text: body,
+                text: body.clone(),
                 is_meta: true,
                 ..Default::default()
             }],
@@ -490,7 +527,7 @@ mod tests {
         orch.run_queued_prompt_batch(
             vec![
                 crate::QueuedPromptInput {
-                    text: "human instruction".into(),
+                    text: source_text("human instruction"),
                     ..Default::default()
                 },
                 crate::QueuedPromptInput {
@@ -506,7 +543,11 @@ mod tests {
         .unwrap();
         assert!(token.is_cancelled());
         let calls = api.captured_calls().await;
-        assert!(!calls[0].messages.iter().any(|m| m.text_content() == body));
+        let body_display = body.string_at("").unwrap().into_owned();
+        assert!(!calls[0]
+            .messages
+            .iter()
+            .any(|m| m.text_content() == body_display));
         assert!(orch.queue_goal_checkin(body, &goal).await);
         let (new_id, _, _) = queue.0.lock().unwrap().pop().unwrap();
         assert!(!orch.admit_goal_retry(&old_id).await);

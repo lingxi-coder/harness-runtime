@@ -129,7 +129,7 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -224,7 +224,7 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -280,7 +280,7 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "all done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -353,7 +353,7 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

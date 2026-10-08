@@ -152,7 +152,7 @@ mod tests {
         let sink: Arc<dyn ClientEventSink> = ListenerSink::arc(listener.clone());
 
         let text = ClientEvent::TextDelta {
-            text: "hello from the engine".to_string(),
+            text: "hello from the engine".into(),
         };
         let ended = ClientEvent::TurnEnded {
             outcome: TurnOutcomeDto::EndTurn,

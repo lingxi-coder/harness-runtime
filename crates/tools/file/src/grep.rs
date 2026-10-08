@@ -4,8 +4,7 @@
 //! bundled `rg` binary; this Rust port keeps an **in-process** engine built on
 //! the `ignore` + `grep_*` crates (which is what ripgrep itself is built on),
 //! so flag parity is *behavioral*, not process-identical. The model-facing
-//! result is a single `content` string (read verbatim by the turn-loop
-//! `tool_result_to_model_text` serialization rule).
+//! result is mapped from structured data to a model-facing string.
 //!
 //! Documented divergences from the `rg` CLI (behavioral parity, not blockers):
 //! - Engine is `ignore::WalkBuilder` + `grep_searcher`, not the `rg` process.
@@ -37,6 +36,7 @@
 //!   `ignore`-crate overrides with the reference prefixing (rooted `/P` → `!P`;
 //!   relative `P` → `!**/P`). Empty (no `Read`-deny rule) ⇒ VCS excludes only.
 
+use crate::Utf16JsonProjection;
 use async_trait::async_trait;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -44,6 +44,7 @@ use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
+use lingxi_core::types::utf16_json::JsonValueView;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -51,6 +52,9 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use tool_api::context::ToolUseContext;
+use tool_api::native_output::{
+    parse_object, string_array, OutputField, OutputFieldType, UnknownOutputKeys,
+};
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
@@ -238,6 +242,110 @@ fn format_limit_info(applied_limit: Option<usize>, applied_offset: usize) -> Str
     parts.join(", ")
 }
 
+/// Claude Code 2.1.287 `Grep.mapToolResultToToolResultBlockParam`. The data's
+/// `content` is the unadorned search output; pagination and summary text are
+/// produced here for both ordinary results and Mod replacements.
+fn text_projection(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("Grep model text remains a root-string projection")
+}
+
+fn map_grep_result_text(data: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let limit = crate::unsigned_integer_at(data, "/appliedLimit")
+        .and_then(|value| usize::try_from(value).ok());
+    let offset = crate::unsigned_integer_at(data, "/appliedOffset")
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let pagination = format_limit_info(limit, offset);
+    let content = data.string_units("/content").unwrap_or_default();
+    match data.string_at("/mode").unwrap_or("files_with_matches") {
+        "content" => {
+            let mut body = if !content.is_empty() {
+                content.clone()
+            } else if offset > 0 && crate::unsigned_integer_at(data, "/totalLines").unwrap_or(0) > 0
+            {
+                "No entries at this offset".encode_utf16().collect()
+            } else {
+                "No matches found".encode_utf16().collect()
+            };
+            if !pagination.is_empty() {
+                body.extend(
+                    format!("\n\n[Showing results with pagination = {pagination}]").encode_utf16(),
+                );
+            }
+            Some(text_projection(body))
+        }
+        "count" => {
+            let matches = crate::unsigned_integer_at(data, "/numMatches").unwrap_or(0);
+            let files = crate::unsigned_integer_at(data, "/numFiles").unwrap_or(0);
+            let mut body = if !content.is_empty() {
+                content.clone()
+            } else if matches > 0 {
+                "No entries at this offset".encode_utf16().collect()
+            } else {
+                "No matches found".encode_utf16().collect()
+            };
+            let suffix = if pagination.is_empty() {
+                String::new()
+            } else {
+                format!(" with pagination = {pagination}")
+            };
+            body.extend(
+                format!(
+                    "\n\nFound {matches} total {} across {files} {}.{suffix}",
+                    if matches == 1 {
+                        "occurrence"
+                    } else {
+                        "occurrences"
+                    },
+                    if files == 1 { "file" } else { "files" },
+                )
+                .encode_utf16(),
+            );
+            Some(text_projection(body))
+        }
+        _ => {
+            let count = crate::unsigned_integer_at(data, "/numFiles")?;
+            if count == 0 {
+                return Some(
+                    if offset > 0
+                        && crate::unsigned_integer_at(data, "/totalFiles").unwrap_or(0) > 0
+                    {
+                        format!(
+                        "No entries at this offset. [Showing results with pagination = {pagination}]"
+                    )
+                    .into()
+                    } else {
+                        "No files found".into()
+                    },
+                );
+            }
+            let filename_count = data.array_len("/filenames")?;
+            let filenames = (0..filename_count)
+                .map(|index| data.string_units(&format!("/filenames/{index}")))
+                .collect::<Option<Vec<_>>>()?;
+            let suffix = if pagination.is_empty() {
+                String::new()
+            } else {
+                format!(" {pagination}")
+            };
+            let mut output = format!(
+                "Found {count} {}{suffix}\n",
+                if count == 1 { "file" } else { "files" },
+            )
+            .encode_utf16()
+            .collect::<Vec<_>>();
+            for (index, filename) in filenames.iter().enumerate() {
+                if index > 0 {
+                    output.push(b'\n' as u16);
+                }
+                output.extend_from_slice(filename);
+            }
+            Some(text_projection(output))
+        }
+    }
+}
+
 /// `plural` (`stringUtils.ts:32-38`).
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
@@ -381,12 +489,15 @@ fn apply_max_columns(text: String, is_context: bool) -> String {
 /// (`$Wr`: trim, `/^[-+]?\d+(\.\d+)?$/` → `Number`), so `"3"` is a valid 3
 /// while `"3.5"` is a rejected 3.5 and `"abc"` stays a string. The rendered
 /// value follows JS `${l}` (`1.5` → `1.5`, `null` → `null`, a string → itself).
-fn validate_whole_number(name: &str, value: Option<&Value>) -> Result<(), ValidationError> {
-    let Some(value) = value else { return Ok(()) };
+fn validate_whole_number(name: &str, input: &Utf16JsonProjection) -> Result<(), ValidationError> {
+    let Some(value) = input.get_property(name) else {
+        return Ok(());
+    };
     // `$Wr` — the `ece(...)` preprocess: a numeric string becomes a number.
     let coerced: Option<f64> = match value {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => {
+        value if value.as_number().is_some() => value.as_number(),
+        value if value.as_str().is_some() => {
+            let s = value.as_str().unwrap_or_default();
             let t = s.trim();
             let numeric = {
                 let body = t
@@ -414,26 +525,34 @@ fn validate_whole_number(name: &str, value: Option<&Value>) -> Result<(), Valida
         return Ok(());
     }
     // JS `${l}` rendering of the ORIGINAL (post-preprocess) value.
-    let rendered = match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::String(s) => match coerced {
+    let rendered = if value.is_null() {
+        "null".to_string()
+    } else if let Some(boolean) = value.as_bool() {
+        boolean.to_string()
+    } else if let Some(string) = value.as_str() {
+        match coerced {
             // The preprocess replaced the string with a number, so `${l}`
             // prints the number.
             Some(f) => render_js_number(f),
-            None => s.clone(),
-        },
-        Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), render_js_number),
-        other => other.to_string(),
+            None => string.to_string(),
+        }
+    } else if let Some(number) = value.as_number() {
+        render_js_number(number)
+    } else {
+        input
+            .subprojection(&format!("/{name}"))
+            .ok()
+            .and_then(|projection| projection.to_json_string().ok())
+            .unwrap_or_default()
     };
     let hint = if name == "head_limit" {
         " Pass 0 for unlimited."
     } else {
         ""
     };
-    Err(ValidationError(format!(
-        "{name} must be a whole number of 0 or more, got {rendered}.{hint}"
-    )))
+    Err(ValidationError(
+        format!("{name} must be a whole number of 0 or more, got {rendered}.{hint}").into(),
+    ))
 }
 
 /// JS `${n}` for a finite number: integers print without a `.0` tail.
@@ -446,11 +565,8 @@ fn render_js_number(f: f64) -> String {
 }
 
 /// `semanticNumber`-ish coercion: accept JSON number or numeric string.
-fn value_as_usize(v: &Value) -> Option<usize> {
-    if let Some(n) = v.as_u64() {
-        return Some(n as usize);
-    }
-    if let Some(f) = v.as_f64() {
+fn value_as_usize(v: JsonValueView<'_>) -> Option<usize> {
+    if let Some(f) = v.as_number() {
         if f >= 0.0 {
             return Some(f as usize);
         }
@@ -466,7 +582,7 @@ fn value_as_usize(v: &Value) -> Option<usize> {
 }
 
 /// `semanticBoolean`-ish coercion: accept JSON bool or boolean-ish string.
-fn value_as_bool(v: &Value) -> Option<bool> {
+fn value_as_bool(v: JsonValueView<'_>) -> Option<bool> {
     if let Some(b) = v.as_bool() {
         return Some(b);
     }
@@ -594,8 +710,8 @@ impl GrepTool {
 /// The six the port used to inject (`output_mode`, `-n`, `-i`, `-o`, `offset`,
 /// `multiline`) were model-visible bytes the oracle never sends; the runtime
 /// defaults themselves are unaffected — they live in `call()`.
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["pattern"],
@@ -620,7 +736,26 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "offset":      { "type": "number", "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0." },
             "multiline":   { "type": "boolean", "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false." }
         }
-    })
+    }))
+});
+
+static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    tool_api::tool_trait::generated_builtin_schema(&json!({
+        "type":"object",
+        "required":["numFiles","filenames"],
+        "properties":{
+            "mode":{"type":"string","enum":["content","files_with_matches","count"]},
+            "numFiles":{"type":"number"},
+            "filenames":{"type":"array","items":{"type":"string"}},
+            "content":{"type":"string"},
+            "numLines":{"type":"number"},
+            "numMatches":{"type":"number"},
+            "totalFiles":{"type":"number"},
+            "totalLines":{"type":"number"},
+            "appliedLimit":{"type":"number"},
+            "appliedOffset":{"type":"number"}
+        }
+    }))
 });
 
 struct GrepWalkArgs {
@@ -801,7 +936,7 @@ fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolErr
             "a path one of its Read deny rules is written through changed while the search was being prepared. Retry."
         }
     };
-    ToolError::InvalidInput(format!("Refusing to search {}: {reason}", path.display()))
+    ToolError::InvalidInput(format!("Refusing to search {}: {reason}", path.display()).into())
 }
 
 #[async_trait]
@@ -812,11 +947,95 @@ impl Tool for GrepTool {
 
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
-    fn search_hint(&self) -> Option<&str> {
-        Some("search file contents with regex (ripgrep)")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("search file contents with regex (ripgrep)".into())
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        crate::input_repair_metadata()
+    }
+    fn output_schema(&self) -> Option<&Utf16JsonProjection> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    async fn parse_output(
+        &self,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ToolError> {
+        let parsed = parse_object(
+            output,
+            TOOL_NAME,
+            &[
+                OutputField {
+                    name: "mode",
+                    kind: OutputFieldType::String,
+                    required: false,
+                },
+                OutputField {
+                    name: "numFiles",
+                    kind: OutputFieldType::Number,
+                    required: true,
+                },
+                OutputField {
+                    name: "filenames",
+                    kind: OutputFieldType::Array,
+                    required: true,
+                },
+                OutputField {
+                    name: "content",
+                    kind: OutputFieldType::String,
+                    required: false,
+                },
+                OutputField {
+                    name: "numLines",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "numMatches",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "totalFiles",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "totalLines",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "appliedLimit",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+                OutputField {
+                    name: "appliedOffset",
+                    kind: OutputFieldType::Number,
+                    required: false,
+                },
+            ],
+            UnknownOutputKeys::Strip,
+        )?;
+        string_array(output, "/filenames", TOOL_NAME, "filenames")?;
+        if parsed.get_property("mode").is_some()
+            && !matches!(
+                parsed.string_at("/mode").as_deref(),
+                Some("content" | "files_with_matches" | "count")
+            )
+        {
+            return Err(tool_api::native_output::invalid(
+                TOOL_NAME,
+                "output field `mode` has an invalid value",
+            ));
+        }
+        Ok(parsed)
+    }
+    fn map_result_text(&self, result: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+        map_grep_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -829,10 +1048,10 @@ impl Tool for GrepTool {
     fn max_result_size_chars(&self) -> usize {
         GREP_MAX_RESULT_SIZE_CHARS
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
@@ -850,27 +1069,31 @@ impl Tool for GrepTool {
     /// 3. the ENOENT `stat` on `path`.
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         crate::dir_validate::validate_no_null_bytes(
             TOOL_NAME,
             &[
-                ("pattern", input.get("pattern").and_then(Value::as_str)),
-                ("path", input.get("path").and_then(Value::as_str)),
-                ("glob", input.get("glob").and_then(Value::as_str)),
-                ("type", input.get("type").and_then(Value::as_str)),
+                ("pattern", crate::input_string(input, "pattern")),
+                ("path", crate::input_string(input, "path")),
+                ("glob", crate::input_string(input, "glob")),
+                ("type", crate::input_string(input, "type")),
             ],
         )?;
-        validate_whole_number("head_limit", input.get("head_limit"))?;
-        validate_whole_number("offset", input.get("offset"))?;
+        validate_whole_number("head_limit", input)?;
+        validate_whole_number("offset", input)?;
         // TL-4 (2.1.260): the DISK probe moved to `call` — see the note on
         // `FileGlobTool::validate_input`. Probing before the permission decision
         // told the model whether a path it may not read exists.
         Ok(())
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -884,26 +1107,30 @@ impl Tool for GrepTool {
     /// Oracle `async description(){return Wka(void 0)}` — `qk(undefined)` is
     /// false, so this is the LONG arm, whose Agent bullet is itself gated on the
     /// subagent steer (ST-03).
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
     }
 
-    async fn prompt(&self, opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
         // Model-gated, mirroring claude-code `prompt({model:e}){return Wka(e)}`
         // where `Wka(e){if(qk(e))return SHORT; return LONG}` (2.1.238 source text
         // @286224735). `description(){return Wka(void 0)}` is hard-pinned to the
         // LONG (`qk(undefined)`=false). Predicate shared with TodoWrite via
         // `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            GREP_PROMPT_SHORT.to_string()
+            GREP_PROMPT_SHORT.into()
         } else {
-            grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
+            grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default()).into()
         }
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -914,42 +1141,48 @@ impl Tool for GrepTool {
         let trusted = self.ctx.trusted_dirs();
 
         // --- Arg parsing (GrepTool.ts:310-326) ---
-        let pattern = input
-            .get("pattern")
-            .and_then(Value::as_str)
+        let pattern = crate::input_string(&input, "pattern")
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
         // claude-code Grep `getPath`: a supplied `path` is used as-is, otherwise
         // the LIVE cwd (`Ct()`). The no-cell fallback (`cwd_now()`==
         // `ctx.workspace`) equals the former `trusted_dirs.first()` boot cwd, so
         // behavior is byte-identical until a Bash `cd` moves the shared cell.
-        let base = input
-            .get("path")
-            .and_then(Value::as_str)
+        let base = crate::input_string(&input, "path")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.cwd_now());
-        let glob_filter = input.get("glob").and_then(Value::as_str);
-        let type_filter = input.get("type").and_then(Value::as_str);
-        let output_mode = input
-            .get("output_mode")
-            .and_then(Value::as_str)
+        let glob_filter = crate::input_string(&input, "glob");
+        let type_filter = crate::input_string(&input, "type");
+        let output_mode = crate::input_string(&input, "output_mode")
             .unwrap_or("files_with_matches")
             .to_string();
-        let case_insensitive = input.get("-i").and_then(value_as_bool).unwrap_or(false);
-        let show_line_numbers = input.get("-n").and_then(value_as_bool).unwrap_or(true);
+        let case_insensitive = input
+            .get_property("-i")
+            .and_then(value_as_bool)
+            .unwrap_or(false);
+        let show_line_numbers = input
+            .get_property("-n")
+            .and_then(value_as_bool)
+            .unwrap_or(true);
         let multiline = input
-            .get("multiline")
+            .get_property("multiline")
             .and_then(value_as_bool)
             .unwrap_or(false);
         // `-o` / `--only-matching` (rg -o): emit only the matched substrings, one
         // per line. Only meaningful in content mode (claude-code: "Requires
         // output_mode: content") and ignores -A/-B/-C context (like rg -o).
-        let only_matching = input.get("-o").and_then(value_as_bool).unwrap_or(false);
-        let context_before = input.get("-B").and_then(value_as_usize);
-        let context_after = input.get("-A").and_then(value_as_usize);
-        let context_c = input.get("-C").and_then(value_as_usize);
-        let context_param = input.get("context").and_then(value_as_usize);
-        let head_limit = input.get("head_limit").and_then(value_as_usize);
-        let offset = input.get("offset").and_then(value_as_usize).unwrap_or(0);
+        let only_matching = input
+            .get_property("-o")
+            .and_then(value_as_bool)
+            .unwrap_or(false);
+        let context_before = input.get_property("-B").and_then(value_as_usize);
+        let context_after = input.get_property("-A").and_then(value_as_usize);
+        let context_c = input.get_property("-C").and_then(value_as_usize);
+        let context_param = input.get_property("context").and_then(value_as_usize);
+        let head_limit = input.get_property("head_limit").and_then(value_as_usize);
+        let offset = input
+            .get_property("offset")
+            .and_then(value_as_usize)
+            .unwrap_or(0);
 
         let content_mode = output_mode == "content";
         let files_mode = output_mode == "files_with_matches";
@@ -979,7 +1212,7 @@ impl Tool for GrepTool {
         // Desktop filesystems translate nothing and this is a no-op.
         let base = match translate_model_path(&self.ctx.fs, base, false) {
             Ok(base) => base,
-            Err(message) => return Err(ToolError::InvalidInput(message)),
+            Err(message) => return Err(ToolError::InvalidInput(message.into())),
         };
         // TL-4 (2.1.260): the search-path probe. It lived in `validate_input`,
         // which runs BEFORE the permission decision, so a missing path was
@@ -991,7 +1224,7 @@ impl Tool for GrepTool {
         // must be probed as the host directory that actually backs it. In
         // `validate_input` it ran on the UNTRANSLATED path, so guest Grep failed
         // its own path check on the main dispatch path.
-        if input.get("path").and_then(Value::as_str).is_some() {
+        if crate::input_string(&input, "path").is_some() {
             crate::dir_validate::validate_grep_path(&base.to_string_lossy(), &self.cwd_now())
                 .map_err(|e| ToolError::InvalidInput(e.0))?;
         }
@@ -1024,9 +1257,9 @@ impl Tool for GrepTool {
         {
             Ok(m) => m,
             Err(e) => {
-                return Err(ToolError::InvalidInput(format!(
-                    "invalid regex {pattern:?}: {e}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("invalid regex {pattern:?}: {e}").into(),
+                ));
             }
         };
 
@@ -1059,9 +1292,9 @@ impl Tool for GrepTool {
         if let Some(g) = glob_filter {
             for pat in split_glob_patterns(g) {
                 if let Err(e) = ob.add(&pat) {
-                    return Err(ToolError::InvalidInput(format!(
-                        "invalid glob {pat:?}: {e}"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("invalid glob {pat:?}: {e}").into(),
+                    ));
                 }
             }
         }
@@ -1078,7 +1311,7 @@ impl Tool for GrepTool {
                     }
                     for exclusion in exclusions {
                         ob.add(&exclusion)
-                            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+                            .map_err(|e| ToolError::InvalidInput(e.to_string().into()))?;
                     }
                 }
             }
@@ -1086,7 +1319,7 @@ impl Tool for GrepTool {
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
-                return Err(ToolError::InvalidInput(format!("invalid glob: {e}")));
+                return Err(ToolError::InvalidInput(format!("invalid glob: {e}").into()));
             }
         };
 
@@ -1099,7 +1332,9 @@ impl Tool for GrepTool {
                 match tb.build() {
                     Ok(types) => Some(types),
                     Err(e) => {
-                        return Err(ToolError::InvalidInput(format!("invalid type {t:?}: {e}")));
+                        return Err(ToolError::InvalidInput(
+                            format!("invalid type {t:?}: {e}").into(),
+                        ));
                     }
                 }
             }
@@ -1164,7 +1399,7 @@ impl Tool for GrepTool {
             })
         })
         .await
-        .map_err(|e| ToolError::Io(e.to_string()))?
+        .map_err(|e| ToolError::Io(e.to_string().into()))?
         .map_err(|error| search_resolution_error(&search_path, error))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
@@ -1173,17 +1408,15 @@ impl Tool for GrepTool {
         let had_results =
             total_matches > 0 || !files_matched.is_empty() || !content_lines.is_empty();
         if timed_out && !had_results {
-            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
+            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl).into()));
         }
 
         // --- Assemble per-mode result data (claude-code GrepTool outputSchema,
-        // 2.1.191) + the model text. Field order mirrors the binary's construction
-        // (preserve_order). content/count keep the matching text IN `data.content`
-        // (the model reads it via the fallback); files_with_matches has NO content
-        // (the filenames ARE the result), so its model text rides on
-        // `model_content`. No `truncated` — not part of the binary result. ---
+        // 2.1.287) + model text. `data.content` is the raw search output; the
+        // mapper adds empty-result wording, pagination, and count summaries.
+        // No `truncated` — not part of the binary result. ---
         let mut data = Map::new();
-        let mut mc_channel: Option<String> = None;
+        let mc_channel: Option<String>;
         let applied_offset = if offset > 0 { Some(offset) } else { None };
 
         if content_mode {
@@ -1205,7 +1438,7 @@ impl Tool for GrepTool {
                     "No matches found".to_string()
                 }
             } else {
-                content_str
+                content_str.clone()
             };
             let model = if limit_info.is_empty() {
                 result_content
@@ -1216,7 +1449,7 @@ impl Tool for GrepTool {
             data.insert("mode".to_string(), json!("content"));
             data.insert("numFiles".to_string(), json!(0));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("content".to_string(), json!(model));
+            data.insert("content".to_string(), json!(content_str));
             data.insert("numLines".to_string(), json!(num_lines));
             data.insert("totalLines".to_string(), json!(total_lines));
             if let Some(l) = applied_limit {
@@ -1225,6 +1458,7 @@ impl Tool for GrepTool {
             if let Some(o) = applied_offset {
                 data.insert("appliedOffset".to_string(), json!(o));
             }
+            mc_channel = Some(model);
         } else if count_mode {
             let total_file_count = u64::try_from(count_lines.len()).unwrap_or(u64::MAX);
             let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
@@ -1267,7 +1501,7 @@ impl Tool for GrepTool {
             data.insert("mode".to_string(), json!("count"));
             data.insert("numFiles".to_string(), json!(total_file_count));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("content".to_string(), json!(model));
+            data.insert("content".to_string(), json!(limited.join("\n")));
             data.insert("numMatches".to_string(), json!(total));
             if let Some(l) = applied_limit {
                 data.insert("appliedLimit".to_string(), json!(l));
@@ -1275,6 +1509,7 @@ impl Tool for GrepTool {
             if let Some(o) = applied_offset {
                 data.insert("appliedOffset".to_string(), json!(o));
             }
+            mc_channel = Some(model);
         } else {
             // files_with_matches (default). Sort mtime-desc + filename tiebreak;
             // pure filename sort under cfg!(test) (TS NODE_ENV === 'test').
@@ -1349,12 +1584,13 @@ impl Tool for GrepTool {
         }
 
         Ok(ToolCallResult {
-            data: Value::Object(data),
-            model_content: mc_channel,
+            data: crate::generated_result(&Value::Object(data)),
+            model_content: mc_channel.map(Into::into),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -1366,6 +1602,10 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    fn mapped_display(data: &Utf16JsonProjection) -> Option<String> {
+        map_grep_result_text(data).and_then(|text| text.string_at("").map(str::to_owned))
+    }
 
     /// S2 (PathAtlas): a guest base directory translates onto its host twin
     /// (untranslated it would fail containment as a nonexistent path).
@@ -1381,16 +1621,18 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                serde_json::json!({ "pattern": "needle", "path": "/workspace/abc" }),
+                crate::generated_result(
+                    &serde_json::json!({ "pattern": "needle", "path": "/workspace/abc" }),
+                ),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
         assert!(
-            result.data.to_string().contains("hit.txt"),
+            result.data.to_json_string().unwrap().contains("hit.txt"),
             "grep over a guest base must search host files: {}",
-            result.data
+            result.data.to_json_string().unwrap()
         );
     }
 
@@ -1425,15 +1667,85 @@ mod tests {
     }
 
     fn content_str(result: &ToolCallResult) -> String {
-        // content/count keep the text in `data.content`; files_with_matches has no
-        // content field, so its model text rides on `model_content`.
+        // The structured content/count payload is raw; all three modes carry
+        // their model-facing render on `model_content`.
         result
-            .data
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .or(result.model_content.as_deref())
+            .model_content
+            .as_ref()
+            .and_then(|content| content.string_at(""))
+            .or_else(|| result.data.string_at("/content"))
             .expect("content in data or model_content channel")
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn mod_replacement_uses_greps_result_mapper() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let valid = crate::generated_result(
+            &json!({"numFiles":0,"filenames":[],"mode":"content","content":""}),
+        );
+        assert!(tool.parse_output(&valid).await.is_ok());
+        let extra = crate::generated_result(&json!({
+            "numFiles":1,"filenames":["a.rs"],"mode":"files_with_matches",
+            "unexpected":"strip me"
+        }));
+        let parsed = tool.parse_output(&extra).await.unwrap();
+        assert_eq!(
+            parsed.string_at("/mode").as_deref(),
+            Some("files_with_matches")
+        );
+        assert!(parsed.get_property("unexpected").is_none());
+        let invalid =
+            crate::generated_result(&json!({"numFiles":0,"filenames":[],"mode":"invalid"}));
+        assert!(tool.parse_output(&invalid).await.is_err());
+        let invalid_item =
+            crate::generated_result(&json!({"numFiles":1,"filenames":[1],"mode":"content"}));
+        assert!(tool.parse_output(&invalid_item).await.is_err());
+        let content = json!({
+            "mode":"content", "content":"a.rs:1:match", "appliedLimit":3,
+            "numFiles":0, "filenames":[]
+        });
+        assert_eq!(
+            mapped_display(&crate::generated_result(&content)).as_deref(),
+            Some("a.rs:1:match\n\n[Showing results with pagination = limit: 3]")
+        );
+        let count = json!({
+            "mode":"count", "content":"", "numMatches":2,
+            "numFiles":1, "filenames":[], "appliedOffset":5
+        });
+        assert_eq!(
+            mapped_display(&crate::generated_result(&count)).as_deref(),
+            Some(
+                "No entries at this offset\n\nFound 2 total occurrences across 1 file. with pagination = offset: 5"
+            )
+        );
+        let files = json!({
+            "mode":"files_with_matches", "numFiles":2,
+            "filenames":["a.rs","b.rs"], "appliedOffset":1
+        });
+        assert_eq!(
+            mapped_display(&crate::generated_result(&files)).as_deref(),
+            Some("Found 2 files offset: 1\na.rs\nb.rs")
+        );
+        let past_end = json!({
+            "mode":"files_with_matches", "numFiles":0, "filenames":[],
+            "totalFiles":4, "appliedOffset":10
+        });
+        assert_eq!(
+            mapped_display(&crate::generated_result(&past_end)).as_deref(),
+            Some("No entries at this offset. [Showing results with pagination = offset: 10]")
+        );
+        let exact = Utf16JsonProjection::parse(
+            r#"{"mode":"content","content":"hit \ud800","appliedLimit":1}"#,
+        )
+        .unwrap();
+        let mapped = map_grep_result_text(&exact).unwrap();
+        let mut expected = "hit ".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend("\n\n[Showing results with pagination = limit: 1]".encode_utf16());
+        assert_eq!(mapped.string_units(""), Some(expected));
     }
 
     #[test]
@@ -1449,7 +1761,7 @@ mod tests {
         // description() = Ajr(void 0) ⇒ always LONG.
         let d = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1462,8 +1774,11 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(long, grep_description(true));
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short = tool
@@ -1471,8 +1786,11 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
-            .await;
+            .await
+            .string_at("")
+            .expect("prompt is a JSON string");
         assert_eq!(short, GREP_PROMPT_SHORT);
         assert!(short.starts_with(
             "Content search built on ripgrep. Prefer this over `grep`/`rg` via a registered shell tool \u{2014} results integrate with the permission UI and file links."
@@ -1503,14 +1821,14 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["numMatches"], 1);
-        assert_eq!(result.data["numFiles"], 1);
+        assert_eq!(crate::test_data(&result.data)["numMatches"], 1);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 1);
     }
 
     /// Count mode must report the TRUE per-file + total count, with NO per-file
@@ -1524,15 +1842,15 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // True count (150), not the old GREP_PER_FILE_CAP (100).
-        assert_eq!(result.data["numMatches"], 150);
-        assert_eq!(result.data["numFiles"], 1);
+        assert_eq!(crate::test_data(&result.data)["numMatches"], 150);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 1);
         let c = content_str(&result);
         assert!(
             c.contains("big.rs:150"),
@@ -1555,14 +1873,16 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
+                crate::generated_result(
+                    &json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
         // All 150 lines recorded (old cap would have stopped at 100).
-        assert_eq!(result.data["numLines"], 150);
+        assert_eq!(crate::test_data(&result.data)["numLines"], 150);
         // (`truncated` is not part of the binary GrepTool result.)
     }
 
@@ -1676,17 +1996,17 @@ mod tests {
         let tool = GrepTool::new(context);
         let result = tool
             .call(
-                json!({"pattern":"needle", "glob":"**/*"}),
+                crate::generated_result(&json!({"pattern":"needle", "glob":"**/*"})),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["numFiles"], 1);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 1);
         assert!(content_str(&result).contains("public.txt"));
         let error = tool
             .call(
-                json!({"pattern":"needle","path":output}),
+                crate::generated_result(&json!({"pattern":"needle","path":output})),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1697,13 +2017,15 @@ mod tests {
             .contains("Task output files are read individually"));
         let result = tool
             .call(
-                json!({"pattern":"needle","path":output.join("b12345678.output")}),
+                crate::generated_result(
+                    &json!({"pattern":"needle","path":output.join("b12345678.output")}),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(result.data["numFiles"], 1);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 1);
     }
 
     #[tokio::test]
@@ -1715,13 +2037,17 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "fn" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         // Filename sort under cfg!(test): a.rs before b.rs.
         assert_eq!(content_str(&result), "Found 2 files\na.rs\nb.rs");
-        assert_eq!(result.data["numFiles"], 2);
-        assert_eq!(result.data["mode"], "files_with_matches");
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 2);
+        assert_eq!(crate::test_data(&result.data)["mode"], "files_with_matches");
     }
 
     #[tokio::test]
@@ -1731,11 +2057,15 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "zzz_nomatch" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "zzz_nomatch" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         assert_eq!(content_str(&result), "No files found");
-        assert_eq!(result.data["numFiles"], 0);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 0);
     }
 
     #[tokio::test]
@@ -1747,7 +2077,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "glob": "*.rs" }),
+                crate::generated_result(&json!({ "pattern": "fn", "glob": "*.rs" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1775,7 +2105,11 @@ mod tests {
             let tool = GrepTool::new(ctx);
             let out = content_str(
                 &tool
-                    .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "fn" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
                     .await
                     .unwrap(),
             );
@@ -1792,7 +2126,11 @@ mod tests {
             let tool = GrepTool::new(ctx);
             let out = content_str(
                 &tool
-                    .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+                    .call(
+                        crate::generated_result(&json!({ "pattern": "fn" })),
+                        fresh_ctx(),
+                        fresh_tx(),
+                    )
                     .await
                     .unwrap(),
             );
@@ -1819,13 +2157,14 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "needle", "path": link }),
+                crate::generated_result(&json!({ "pattern": "needle", "path": link })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        let matches = result.data["filenames"].as_array().unwrap();
+        let data = crate::test_data(&result.data);
+        let matches = data["filenames"].as_array().unwrap();
         assert!(matches
             .iter()
             .any(|value| value.as_str().unwrap().ends_with("target/hit.rs")));
@@ -1856,11 +2195,11 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let error = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "pattern": "needle",
                     "path": tmp.path(),
                     "output_mode": "content"
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1896,7 +2235,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let error = tool
             .call(
-                json!({ "pattern": "needle", "path": link }),
+                crate::generated_result(&json!({ "pattern": "needle", "path": link })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1939,7 +2278,11 @@ mod tests {
         ctx.read_deny_exclude_globs = vec!["/deny-link/**".to_string()];
         let tool = GrepTool::new(ctx);
         let error = tool
-            .call(json!({ "pattern": "victim" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "victim" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1963,7 +2306,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "type": "rust" }),
+                crate::generated_result(&json!({ "pattern": "fn", "type": "rust" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1980,7 +2323,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": r"fn \w+", "output_mode": "content" }),
+                crate::generated_result(&json!({ "pattern": r"fn \w+", "output_mode": "content" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -1991,7 +2334,7 @@ mod tests {
             content_str(&result),
             "a.rs:1:fn foo() {}\na.rs:2:fn bar() {}"
         );
-        assert_eq!(result.data["numLines"], 2);
+        assert_eq!(crate::test_data(&result.data)["numLines"], 2);
     }
 
     #[tokio::test]
@@ -2002,7 +2345,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "-n": false }),
+                crate::generated_result(
+                    &json!({ "pattern": "fn", "output_mode": "content", "-n": false }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2019,7 +2364,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": r"fn \w+", "output_mode": "content", "-o": true }),
+                crate::generated_result(
+                    &json!({ "pattern": r"fn \w+", "output_mode": "content", "-o": true }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2038,7 +2385,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "ab", "output_mode": "content", "-o": true, "-n": false }),
+                crate::generated_result(
+                    &json!({ "pattern": "ab", "output_mode": "content", "-o": true, "-n": false }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2056,7 +2405,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "match", "output_mode": "content", "-B": 1, "-A": 1 }),
+                crate::generated_result(
+                    &json!({ "pattern": "match", "output_mode": "content", "-B": 1, "-A": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2076,7 +2427,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "hit", "output_mode": "content", "-C": 1 }),
+                crate::generated_result(
+                    &json!({ "pattern": "hit", "output_mode": "content", "-C": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2094,13 +2447,13 @@ mod tests {
 
         let before_after = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "pattern": "match",
                     "output_mode": "content",
                     "-o": true,
                     "-B": 1,
                     "-A": 1
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2113,12 +2466,12 @@ mod tests {
 
         let context_param = tool
             .call(
-                json!({
+                crate::generated_result(&json!({
                     "pattern": "match",
                     "output_mode": "content",
                     "-o": true,
                     "context": 1
-                }),
+                })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2139,7 +2492,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 3 }),
+                crate::generated_result(
+                    &json!({ "pattern": "fn", "output_mode": "content", "head_limit": 3 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2150,8 +2505,13 @@ mod tests {
             c.ends_with("\n\n[Showing results with pagination = limit: 3]"),
             "pagination note: {c}"
         );
-        assert_eq!(result.data["numLines"], 3);
-        assert_eq!(result.data["appliedLimit"], 3);
+        assert_eq!(crate::test_data(&result.data)["numLines"], 3);
+        assert_eq!(crate::test_data(&result.data)["appliedLimit"], 3);
+        assert!(!crate::test_data(&result.data)["content"]
+            .as_str()
+            .unwrap()
+            .contains("[Showing results"));
+        assert_eq!(mapped_display(&result.data).as_deref(), Some(c.as_str()));
     }
 
     #[tokio::test]
@@ -2163,7 +2523,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0, "offset": 2 }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0, "offset": 2 })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2175,10 +2535,12 @@ mod tests {
             "offset note: {c}"
         );
         // limit 0 = unlimited, so no applied_limit even though offset applied.
-        assert!(result.data.get("applied_limit").is_none());
-        assert_eq!(result.data["appliedOffset"], 2);
+        assert!(crate::test_data(&result.data)
+            .get("applied_limit")
+            .is_none());
+        assert_eq!(crate::test_data(&result.data)["appliedOffset"], 2);
         // 2.1.212: the full pre-pagination line count rides on `totalLines`.
-        assert_eq!(result.data["totalLines"], 5);
+        assert_eq!(crate::test_data(&result.data)["totalLines"], 5);
     }
 
     /// 2.1.212: paging PAST the last match (empty page, offset>0, totalLines>0)
@@ -2192,7 +2554,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0, "offset": 10 }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0, "offset": 10 })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2208,9 +2570,9 @@ mod tests {
             c.ends_with("\n\n[Showing results with pagination = offset: 10]"),
             "offset note preserved: {c}"
         );
-        assert_eq!(result.data["numLines"], 0);
-        assert_eq!(result.data["totalLines"], 3);
-        assert_eq!(result.data["appliedOffset"], 10);
+        assert_eq!(crate::test_data(&result.data)["numLines"], 0);
+        assert_eq!(crate::test_data(&result.data)["totalLines"], 3);
+        assert_eq!(crate::test_data(&result.data)["appliedOffset"], 10);
     }
 
     /// A genuinely empty search (no offset) still reports "No matches found":
@@ -2224,7 +2586,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "nonexistent_zzz", "output_mode": "content" }),
+                crate::generated_result(
+                    &json!({ "pattern": "nonexistent_zzz", "output_mode": "content" }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2232,7 +2596,7 @@ mod tests {
             .unwrap();
         let c = content_str(&result);
         assert_eq!(c, "No matches found");
-        assert_eq!(result.data["totalLines"], 0);
+        assert_eq!(crate::test_data(&result.data)["totalLines"], 0);
     }
 
     #[tokio::test]
@@ -2244,7 +2608,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "a+", "output_mode": "content", "-n": false }),
+                crate::generated_result(
+                    &json!({ "pattern": "a+", "output_mode": "content", "-n": false }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2273,7 +2639,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2286,8 +2652,13 @@ mod tests {
         );
         assert!(c.contains("a.rs:2"), "per-file count: {c}");
         assert!(c.contains("b.rs:1"), "per-file count: {c}");
-        assert_eq!(result.data["numMatches"], 3);
-        assert_eq!(result.data["numFiles"], 2);
+        assert_eq!(crate::test_data(&result.data)["numMatches"], 3);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 2);
+        assert!(!crate::test_data(&result.data)["content"]
+            .as_str()
+            .unwrap()
+            .contains("Found 3 total occurrences"));
+        assert_eq!(mapped_display(&result.data).as_deref(), Some(c.as_str()));
     }
 
     #[tokio::test]
@@ -2298,7 +2669,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2321,7 +2692,9 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count", "head_limit": 1 }),
+                crate::generated_result(
+                    &json!({ "pattern": "fn", "output_mode": "count", "head_limit": 1 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2333,9 +2706,9 @@ mod tests {
             "count summary should use full totals, not paginated rows: {c}"
         );
         assert_eq!(c.lines().filter(|line| line.ends_with(":1")).count(), 1);
-        assert_eq!(result.data["numMatches"], 3);
-        assert_eq!(result.data["numFiles"], 3);
-        assert_eq!(result.data["appliedLimit"], 1);
+        assert_eq!(crate::test_data(&result.data)["numMatches"], 3);
+        assert_eq!(crate::test_data(&result.data)["numFiles"], 3);
+        assert_eq!(crate::test_data(&result.data)["appliedLimit"], 1);
     }
 
     #[tokio::test]
@@ -2347,7 +2720,9 @@ mod tests {
         // Without multiline this would not match; with it, dot/[\s\S] span lines.
         let result = tool
             .call(
-                json!({ "pattern": r"struct \{[\s\S]*?field", "multiline": true }),
+                crate::generated_result(
+                    &json!({ "pattern": r"struct \{[\s\S]*?field", "multiline": true }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2368,7 +2743,7 @@ mod tests {
         let pattern = format!("{}x{}", "(".repeat(55), ")".repeat(55));
         let result = tool
             .call(
-                json!({ "pattern": pattern, "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": pattern, "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2378,7 +2753,7 @@ mod tests {
             content_str(&result),
             "nested.txt:1\n\nFound 1 total occurrence across 1 file."
         );
-        assert_eq!(result.data["numMatches"], 1);
+        assert_eq!(crate::test_data(&result.data)["numMatches"], 1);
     }
 
     #[tokio::test]
@@ -2390,7 +2765,11 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         let result = tool
-            .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "fn" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap();
         // .git/config must not appear.
@@ -2413,7 +2792,9 @@ mod tests {
         // Content mode, unlimited head_limit → records valve is the only bound.
         let result = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
+                crate::generated_result(
+                    &json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
+                ),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -2421,18 +2802,21 @@ mod tests {
             .unwrap();
         // The records valve trips at GREP_RECORDS_CAP — observable as numLines
         // capped (`truncated` is not part of the binary GrepTool result).
-        assert_eq!(result.data["numLines"], GREP_RECORDS_CAP as i64);
+        assert_eq!(
+            crate::test_data(&result.data)["numLines"],
+            GREP_RECORDS_CAP as i64
+        );
 
         // Count mode still reports the TRUE total (valve doesn't cap counting).
         let count = tool
             .call(
-                json!({ "pattern": "fn", "output_mode": "count" }),
+                crate::generated_result(&json!({ "pattern": "fn", "output_mode": "count" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap();
-        assert_eq!(count.data["numMatches"], n as i64);
+        assert_eq!(crate::test_data(&count.data)["numMatches"], n as i64);
     }
 
     #[tokio::test]
@@ -2441,7 +2825,11 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         let err = tool
-            .call(json!({ "pattern": "(unclosed" }), fresh_ctx(), fresh_tx())
+            .call(
+                crate::generated_result(&json!({ "pattern": "(unclosed" })),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid regex"));
@@ -2454,7 +2842,7 @@ mod tests {
         let tool = GrepTool::new(ctx);
         let d = tool
             .description(
-                &json!({}),
+                &crate::generated_result(&json!({})),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -2473,7 +2861,10 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         assert_eq!(
-            tool.search_hint(),
+            tool.search_hint()
+                .as_ref()
+                .and_then(|hint| hint.string_at(""))
+                .as_deref(),
             Some("search file contents with regex (ripgrep)")
         );
     }
@@ -2493,11 +2884,17 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
         let tool = GrepTool::new(ctx).with_live_cwd(cell);
-        let names: Vec<String> = tool
-            .call(json!({ "pattern": "needle" }), fresh_ctx(), fresh_tx())
-            .await
-            .unwrap()
-            .data["filenames"]
+        let names: Vec<String> = crate::test_data(
+            &tool
+                .call(
+                    crate::generated_result(&json!({ "pattern": "needle" })),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap()
+                .data,
+        )["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -2522,7 +2919,9 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
         tool.validate_input(
-            &json!({ "pattern": "needle", "path": file.to_str().unwrap() }),
+            &crate::generated_result(
+                &json!({ "pattern": "needle", "path": file.to_str().unwrap() }),
+            ),
             &fresh_ctx(),
         )
         .await
@@ -2541,7 +2940,7 @@ mod tests {
         // `call` (post-permission), so this exercises `call`.
         assert!(
             tool.validate_input(
-                &json!({ "pattern": "x", "path": "no_such_dir" }),
+                &crate::generated_result(&json!({ "pattern": "x", "path": "no_such_dir" })),
                 &fresh_ctx()
             )
             .await
@@ -2550,14 +2949,14 @@ mod tests {
         );
         let err = tool
             .call(
-                json!({ "pattern": "x", "path": "no_such_dir" }),
+                crate::generated_result(&json!({ "pattern": "x", "path": "no_such_dir" })),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .unwrap_err();
         let err = match err {
-            ToolError::InvalidInput(message) => message,
+            ToolError::InvalidInput(message) => message.string_at("").unwrap().to_owned(),
             other => panic!("expected InvalidInput, got {other:?}"),
         };
         // The note prints the LIVE cwd (canonicalized sub), NOT the workspace.

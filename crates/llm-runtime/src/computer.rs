@@ -229,12 +229,11 @@ pub(crate) fn current_continuation() -> Option<ContinuationRef> {
 pub fn response_execution_binding(
     response: &HistoryResponse,
 ) -> Option<lingxi_core::host::NativeContinuationBinding> {
-    let binding: lingxi_core::host::NativeContinuationBinding = serde_json::from_value(
+    let binding: lingxi_core::host::NativeContinuationBinding = serde_json::from_str(
         response
             .provider_metadata
-            .get("llm_client")?
-            .get("computer_binding")?
-            .clone(),
+            .payload_at("/llm_client/computer_binding")?
+            .as_json_source(),
     )
     .ok()?;
     [
@@ -266,13 +265,12 @@ pub fn response_continuation(
 ) -> Result<Option<ContinuationRef>, LlmError> {
     let Some(value) = response
         .provider_metadata
-        .get("llm_client")
-        .and_then(|metadata| metadata.get("continuation"))
-        .filter(|value| !value.is_null())
+        .payload_at("/llm_client/continuation")
+        .filter(|value| value.as_json_source().trim() != "null")
     else {
         return Ok(None);
     };
-    serde_json::from_value(value.clone())
+    serde_json::from_str(value.as_json_source())
         .map(Some)
         .map_err(|error| LlmError::InvalidRequest {
             message: format!("invalid durable computer continuation: {error}"),
@@ -331,7 +329,7 @@ pub fn decode_computer_calls(
     if response.content.iter().any(|block| {
         matches!(block,
         crate::ContentBlock::ProviderContent { value, .. }
-        if value["type"] == "lingxi_computer_binding")
+        if value.string_at("/type").as_deref() == Some("lingxi_computer_binding"))
     }) {
         return Ok(Vec::new());
     }
@@ -558,13 +556,15 @@ mod tests {
         )
         .unwrap();
         request.input.native_options = native.native_options;
-        assert!(client
-            .prepare(&request)
-            .await
-            .unwrap()
-            .provider_request
-            .url
-            .ends_with("/interactions"));
+        assert!(
+            client
+                .prepare(&request)
+                .await
+                .unwrap()
+                .provider_request
+                .url
+                .ends_with("/interactions")
+        );
     }
 
     #[tokio::test]
@@ -587,12 +587,14 @@ mod tests {
             },
         )
         .await;
-        assert!(client
-            .prepare(&request)
-            .await
-            .unwrap()
-            .computer_binding
-            .is_none());
+        assert!(
+            client
+                .prepare(&request)
+                .await
+                .unwrap()
+                .computer_binding
+                .is_none()
+        );
         request.execution.computer_native = true;
         assert!(client.prepare(&request).await.is_err());
     }
@@ -644,14 +646,16 @@ mod tests {
             if stream {
                 assert!(service.stream_request(request.clone()).await.is_err());
             } else {
-                assert!(service
-                    .execute_non_stream_request(
-                        request.clone(),
-                        crate::NonStreamingRequestClass::Main,
-                        Default::default()
-                    )
-                    .await
-                    .is_err());
+                assert!(
+                    service
+                        .execute_non_stream_request(
+                            request.clone(),
+                            crate::NonStreamingRequestClass::Main,
+                            Default::default()
+                        )
+                        .await
+                        .is_err()
+                );
             }
             assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
             assert!(
@@ -780,14 +784,18 @@ mod tests {
         assert!(!binding.account.contains("account-key"));
         request.execution.expected_computer_binding = Some(binding);
         first.prepare(&request).await.unwrap();
-        assert!(client("https://api.anthropic.com", "different-account-key")
-            .prepare(&request)
-            .await
-            .is_err());
-        assert!(client("https://different.example", "account-key")
-            .prepare(&request)
-            .await
-            .is_err());
+        assert!(
+            client("https://api.anthropic.com", "different-account-key")
+                .prepare(&request)
+                .await
+                .is_err()
+        );
+        assert!(
+            client("https://different.example", "account-key")
+                .prepare(&request)
+                .await
+                .is_err()
+        );
     }
 
     fn request() -> crate::LlmRequest {
@@ -911,13 +919,17 @@ mod tests {
             model: "model".into(),
             content: vec![crate::ContentBlock::ProviderContent {
                 protocol: "open_ai_responses".into(),
-                value: json!({"type":"lingxi_computer_binding"}),
+                value: wire::JsonPayload::from_generated_value(
+                    &json!({"type":"lingxi_computer_binding"}),
+                )
+                .unwrap(),
             }],
             stop_reason: Some("tool_use".into()),
             stop_details: None,
             usage: Default::default(),
             cost: None,
-            provider_metadata: serde_json::Value::Null,
+            provider_metadata: wire::JsonPayload::parse("null").unwrap(),
+            resumable: None,
         };
         let frame = ComputerFrame {
             width: 800,

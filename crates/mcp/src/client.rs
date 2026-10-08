@@ -6,7 +6,7 @@
 //! enum so the public surface in `lib.rs` resolves.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -14,12 +14,23 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use futures_util::stream::unfold;
+use lingxi_core::host::json_schema_validator::{
+    CompiledJsonSchema, JsonSchemaValidation, JsonSchemaValidator, JsonSchemaValidatorSession,
+    SchemaCompileError, SchemaProfile,
+};
+use lingxi_core::host::mcp_result::{
+    connection_error_diagnostic, drive_modern_request, result_error_diagnostic, JsonrpcMcpResultIo,
+    McpInputRequiredOptions, McpResultError, McpResultProgress,
+};
 use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream,
     McpPermissionCeiling, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
     McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
+
+type UJP = Utf16JsonProjection;
 
 use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
@@ -82,14 +93,126 @@ const MCP_LIST_RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(1_000),
 ];
 
+fn source_string(text: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
+        .expect("Rust string is representable as a source projection")
+}
+
+fn empty_source_string() -> Utf16JsonProjection {
+    source_string("")
+}
+
+fn source_string_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display form is derived from exact UTF-16 units")
+}
+
+fn concat_source_strings(parts: &[&Utf16JsonProjection]) -> Utf16JsonProjection {
+    let units = parts
+        .iter()
+        .flat_map(|part| part.string_units("").unwrap_or_default())
+        .collect();
+    source_string_units(units)
+}
+
+pub(crate) fn prepend_source_text(
+    prefix: &str,
+    source: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(source.string_units("").unwrap_or_default());
+    source_string_units(units)
+}
+
+fn truncate_source_description_at_limit(
+    source: &Utf16JsonProjection,
+    limit: usize,
+) -> Utf16JsonProjection {
+    let Some(mut units) = source.string_units("") else {
+        return source.clone();
+    };
+    if units.len() <= limit {
+        return source.clone();
+    }
+    let mut end = limit;
+    if end > 0
+        && (0xD800..=0xDBFF).contains(&units[end - 1])
+        && units
+            .get(end)
+            .is_some_and(|next| (0xDC00..=0xDFFF).contains(next))
+    {
+        end -= 1;
+    }
+    units.truncate(end);
+    units.extend("… [truncated]".encode_utf16());
+    source_string_units(units)
+}
+
+pub(crate) fn truncate_source_description(source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    truncate_source_description_at_limit(source, mcp_description_length_limit())
+}
+
+fn deserialize_required_source_string<'de, D>(
+    deserializer: D,
+) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let source = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if source.string_units("").is_some() {
+        Ok(source)
+    } else {
+        Err(serde::de::Error::custom("MCP field must be a JSON string"))
+    }
+}
+
+fn deserialize_optional_source_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let source = lingxi_core::types::utf16_json::raw_json_serde::deserialize_option(deserializer)?;
+    match source {
+        None => Ok(None),
+        Some(source) if source.at_pointer("").is_some_and(|value| value.is_null()) => Ok(None),
+        Some(source) if source.string_units("").is_some() => Ok(Some(source)),
+        Some(_) => Err(serde::de::Error::custom(
+            "MCP field must be a string or null",
+        )),
+    }
+}
+
+fn source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("constant empty object is valid JSON")
+}
+
+fn source_member(source: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    source
+        .subprojection_property_units(&key.encode_utf16().collect::<Vec<_>>())
+        .ok()
+}
+
+fn source_null() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("constant null is valid JSON")
+}
+
+fn null_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null JSON")
+}
+
 fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
     if let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error {
         if remote
             .data
             .as_ref()
-            .and_then(|data| data.get("httpStatus"))
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|status| (400..500).contains(&status))
+            .and_then(|data| {
+                Utf16JsonProjection::parse(data.as_json())
+                    .ok()?
+                    .number_at("/httpStatus")
+                    .filter(|status| status.fract() == 0.0 && (400.0..500.0).contains(status))
+            })
+            .is_some()
         {
             return false;
         }
@@ -121,25 +244,137 @@ fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
     }
 }
 
-/// Maximum character length for free-form text fields sourced from MCP
-/// servers (tool/prompt descriptions, server `instructions`). Mirrors
-/// claude-code `services/mcp/client.ts:1163-1166`.
+/// Default UTF-16 length limit for free-form MCP descriptions/instructions.
+/// Claude Code 2.1.286 `sB()` permits a positive configured override.
 pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
-/// Truncate `text` to at most `MAX_MCP_DESCRIPTION_LENGTH` Unicode scalar
-/// values. If truncation happens, appends the literal suffix
-/// `"\u{2026} [truncated]"` (U+2026 horizontal ellipsis + space + the
-/// English word `[truncated]`) — matching claude-code's exact wording so
-/// downstream tooling can detect the marker.
-///
+fn mcp_description_length_limit() -> usize {
+    let key = format!("{}MAX_MCP_DESCRIPTION_LENGTH", branding::ENV_PREFIX);
+    mcp_description_length_limit_from_env(std::env::var(key).ok().as_deref())
+}
+
+fn mcp_description_length_limit_from_env(value: Option<&str>) -> usize {
+    let parsed = value.and_then(|value| {
+        let value = value.trim_matches(|character| {
+            matches!(character,
+                '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
+                    | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+                    | '\u{205f}' | '\u{3000}' | '\u{feff}'
+            )
+        });
+        let digits = value.strip_prefix('+').unwrap_or(value);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        // The oracle's typed env table uses int({ min: 1, digitsOnly: true }).
+        // A finite positive limit larger than usize never truncates any Rust
+        // string, so saturate it rather than reverting to the default cap.
+        let number = digits.parse::<f64>().ok()?;
+        if !number.is_finite() || number < 1.0 {
+            return None;
+        }
+        Some(digits.parse::<usize>().unwrap_or(usize::MAX))
+    });
+    parsed.unwrap_or(MAX_MCP_DESCRIPTION_LENGTH)
+}
+
+/// Truncate using the configured UTF-16 code-unit budget, preserving complete
+/// Unicode scalar values. Claude Code 2.1.286 `Yr`/`re` drops a high surrogate
+/// at the cut and appends the exact `"… [truncated]"` suffix outside the budget.
 /// Returns a borrowed `Cow` when no truncation is required.
 #[must_use]
 pub fn truncate_description(text: &str) -> Cow<'_, str> {
-    if text.chars().count() <= MAX_MCP_DESCRIPTION_LENGTH {
-        return Cow::Borrowed(text);
+    truncate_description_at_limit(text, mcp_description_length_limit())
+}
+
+fn truncate_description_at_limit(text: &str, limit: usize) -> Cow<'_, str> {
+    let mut remaining = limit;
+    for (offset, character) in text.char_indices() {
+        let units = character.len_utf16();
+        if units > remaining {
+            return Cow::Owned(format!("{}… [truncated]", &text[..offset]));
+        }
+        remaining -= units;
     }
-    let head: String = text.chars().take(MAX_MCP_DESCRIPTION_LENGTH).collect();
-    Cow::Owned(format!("{head}\u{2026} [truncated]"))
+    Cow::Borrowed(text)
+}
+
+#[cfg(test)]
+mod description_truncation_tests {
+    use super::*;
+
+    #[test]
+    fn description_limit_matches_typed_positive_integer_env() {
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-1"),
+            Some("1.5"),
+            Some("2e3"),
+            Some("12chars"),
+        ] {
+            assert_eq!(
+                mcp_description_length_limit_from_env(value),
+                2048,
+                "{value:?}"
+            );
+        }
+        for (value, expected) in [
+            ("1", 1),
+            ("  +4  ", 4),
+            ("\u{feff}+4\u{00a0}", 4),
+            ("0002", 2),
+            ("8192", 8192),
+        ] {
+            assert_eq!(mcp_description_length_limit_from_env(Some(value)), expected);
+        }
+        assert_eq!(
+            mcp_description_length_limit_from_env(Some("18446744073709551616")),
+            usize::MAX
+        );
+        assert_eq!(
+            mcp_description_length_limit_from_env(Some(&"9".repeat(400))),
+            2048
+        );
+    }
+
+    #[test]
+    fn description_truncation_counts_utf16_and_drops_a_split_surrogate_pair() {
+        for (text, limit, expected) in [
+            ("a😀b", 1, "a… [truncated]"),
+            ("a😀b", 2, "a… [truncated]"),
+            ("a😀b", 3, "a😀… [truncated]"),
+            ("a😀b", 4, "a😀b"),
+            ("😀", 1, "… [truncated]"),
+            ("e\u{301}好", 2, "e\u{301}… [truncated]"),
+            ("", 0, ""),
+        ] {
+            assert_eq!(truncate_description_at_limit(text, limit), expected);
+        }
+        let text = "😀".repeat(1025);
+        assert_eq!(
+            truncate_description_at_limit(&text, 2048),
+            format!("{}… [truncated]", "😀".repeat(1024))
+        );
+    }
+
+    #[test]
+    fn description_truncation_preserves_boundary_and_larger_override() {
+        let text = "a".repeat(4096);
+        assert!(matches!(
+            truncate_description_at_limit(&text, 4096),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            truncate_description_at_limit(&text, 2048),
+            format!("{}… [truncated]", "a".repeat(2048))
+        );
+        assert!(matches!(
+            truncate_description_at_limit("é😀", 3),
+            Cow::Borrowed(_)
+        ));
+    }
 }
 
 /// Strip dangerous Unicode categories from a single string — a 1:1 port of
@@ -284,13 +519,19 @@ pub fn recursively_sanitize_unicode(value: serde_json::Value) -> serde_json::Val
 /// surfaces booleans. The conversion happens in [`decode_server_capabilities`].
 #[derive(Debug, Deserialize)]
 struct InitializeResponse {
-    #[serde(default)]
-    capabilities: serde_json::Value,
+    #[serde(
+        default = "source_null",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    capabilities: Utf16JsonProjection,
     /// Server-provided free-form instructions appended to the system prompt.
     /// Truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] on receipt (matches
     /// `claude-code/src/services/mcp/client.ts:1163-1166`).
-    #[serde(default)]
-    instructions: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    instructions: Option<UJP>,
 }
 
 /// Decode the server's capability JSON object into the trait DTO.
@@ -300,22 +541,30 @@ struct InitializeResponse {
 /// (even with an empty object value) is treated as `true`. The one strict
 /// extension bit currently lifted into the DTO is
 /// `io.modelcontextprotocol/skills.directoryRead`.
-fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto {
-    use std::collections::HashMap;
-    let obj = raw.as_object();
-    let has = |k: &str| obj.is_some_and(|o| o.contains_key(k));
-    let directory_read = obj
-        .and_then(|o| o.get("extensions"))
-        .and_then(|v| v.get("io.modelcontextprotocol/skills"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|ext| ext.get("directoryRead"))
-        .and_then(serde_json::Value::as_bool)
+fn decode_server_capabilities(raw: &Utf16JsonProjection) -> ServerCapabilitiesDto {
+    let has = |key: &str| raw.get_property(key).is_some();
+    let directory_read = raw
+        .get_property("extensions")
+        .and_then(|value| value.get_property("io.modelcontextprotocol/skills"))
+        .and_then(|value| value.get_property("directoryRead"))
+        .and_then(|value| value.as_bool())
         == Some(true);
-    let experimental: HashMap<String, serde_json::Value> = obj
-        .and_then(|o| o.get("experimental"))
-        .and_then(|v| v.as_object())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
+    let experimental = source_member(raw, "experimental")
+        .filter(|value| {
+            value
+                .at_pointer("")
+                .and_then(|view| view.object_entries())
+                .is_some()
+        })
+        .unwrap_or_else(source_object);
+    let extensions = source_member(raw, "extensions")
+        .filter(|value| {
+            value
+                .at_pointer("")
+                .and_then(|view| view.object_entries())
+                .is_some()
+        })
+        .unwrap_or_else(source_object);
     ServerCapabilitiesDto {
         tools: has("tools"),
         resources: has("resources"),
@@ -323,15 +572,14 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
         logging: has("logging"),
         directory_read,
         experimental,
-        extensions: obj
-            .and_then(|o| o.get("extensions"))
-            .and_then(|v| v.as_object())
-            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default(),
+        extensions,
     }
 }
 
-pub(crate) fn modern_meta(version: &str) -> serde_json::Value {
+pub(crate) fn modern_meta(
+    version: &str,
+    elicitation: lingxi_core::host::McpElicitationMode,
+) -> serde_json::Value {
     serde_json::json!({
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientInfo": {
@@ -341,10 +589,7 @@ pub(crate) fn modern_meta(version: &str) -> serde_json::Value {
             "description": "An agentic coding tool",
             "websiteUrl": crate::MCP_WEBSITE_URL,
         },
-        "io.modelcontextprotocol/clientCapabilities": {
-            "roots": {},
-            "elicitation": {},
-        },
+        "io.modelcontextprotocol/clientCapabilities": lingxi_core::host::mcp_client_capabilities(elicitation),
     })
 }
 
@@ -354,6 +599,7 @@ fn modern_request_requires_meta(method: &str) -> bool {
         "tools/list"
             | "tools/call"
             | "subscriptions/listen"
+            | "completion/complete"
             | "prompts/list"
             | "prompts/get"
             | "resources/list"
@@ -372,6 +618,8 @@ fn modern_request_requires_result_type(method: &str) -> bool {
 /// One instance per server connection; owns its `Connection` and inbound
 /// handler registrations.
 pub struct McpClient {
+    /// Same frozen capability authority used by the owning connection attempt.
+    elicitation: lingxi_core::host::McpElicitationCapabilities,
     /// claude-code `transportErrorState.pendingElicitations` — how many
     /// elicitations this connection has OPEN right now. Shared with the
     /// registered `elicitation/create` handler, which owns the increment and
@@ -395,11 +643,11 @@ pub struct McpClient {
     /// directory-listing path no longer depends on this raw cache. The raw
     /// object is still kept for direct-client initialize semantics, precise
     /// extension reads beyond the DTO surface, and byte-faithful tests.
-    raw_server_capabilities: RwLock<Option<serde_json::Value>>,
+    raw_server_capabilities: RwLock<Option<Utf16JsonProjection>>,
     /// Server-provided instructions string from the `initialize` response,
     /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt
     /// (matches claude-code `client.ts:1163-1166`).
-    server_instructions: RwLock<Option<String>>,
+    server_instructions: RwLock<Option<UJP>>,
     /// Per-server `tools/call` timeout (ms) from the resolved
     /// [`crate::McpServerConfig::timeout_ms`]; fed to [`mcp_tool_timeout_for`]
     /// (`BHs`). `None` = fall back to the `MCP_TOOL_TIMEOUT` env / default.
@@ -415,6 +663,11 @@ pub struct McpClient {
     /// Strictest ceiling computed for the most recent tools/list response.
     /// Kept out of `McpToolDto` to preserve the discovery-cache wire shape.
     effective_permission_ceilings: std::sync::RwLock<BTreeMap<String, McpPermissionCeiling>>,
+    /// One connection-owned MCP output-schema session, plus the compiled
+    /// plans from the latest `tools/list` response.
+    output_schema_session: Option<Arc<dyn JsonSchemaValidatorSession>>,
+    output_schema_plans:
+        RwLock<HashMap<String, Result<Arc<dyn CompiledJsonSchema>, OutputSchemaCompileFailure>>>,
     /// Transport kind of the underlying connection, feeding the `GLd` idle-timeout
     /// resolver ([`mcp_tool_idle_timeout_for`]): stdio → 30 min default, remote →
     /// 5 min, in-process (IDE/SDK) → no idle timeout. Defaults to
@@ -434,6 +687,12 @@ pub struct McpClient {
     negotiated: McpNegotiatedProtocol,
 }
 
+#[derive(Debug, Clone)]
+enum OutputSchemaCompileFailure {
+    Invalid(Utf16JsonProjection),
+    Worker(String),
+}
+
 impl McpClient {
     /// Subscribe to notifications from this live server connection.
     ///
@@ -450,7 +709,10 @@ impl McpClient {
                 Ok(notification) => Some((
                     McpNotificationDto {
                         method: notification.method,
-                        params: notification.params.unwrap_or(serde_json::Value::Null),
+                        params: notification.params.map_or_else(source_null, |params| {
+                            Utf16JsonProjection::parse(params.as_json())
+                                .expect("JSON-RPC notification params are valid source JSON")
+                        }),
                     },
                     receiver,
                 )),
@@ -461,7 +723,10 @@ impl McpClient {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Some((
                     McpNotificationDto {
                         method: "notifications/resources/list_changed".to_string(),
-                        params: serde_json::json!({ "lagged": skipped }),
+                        params: Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({ "lagged": skipped }),
+                        )
+                        .expect("fixed lagged notification is JSON"),
                     },
                     receiver,
                 )),
@@ -475,7 +740,7 @@ impl McpClient {
     /// Build a new client wrapping a JSON-RPC `Connection`.
     ///
     /// Registers two inbound request handlers required by the
-    /// `{roots:{listChanged:true}, elicitation:{}}` capability advertisement:
+    /// roots and form/URL elicitation capability advertisement:
     ///
     /// * `roots/list` -> [`RootsListHandler`] returning `file://<cwd>`.
     /// * `elicitation/create` -> [`ElicitationCreateHandler`] returning
@@ -569,6 +834,7 @@ impl McpClient {
 
         Self {
             elicitation_pending,
+            elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             server_name,
             cwd,
             connection,
@@ -580,6 +846,8 @@ impl McpClient {
             config_tools: Vec::new(),
             config_tool_permissions: BTreeMap::new(),
             effective_permission_ceilings: std::sync::RwLock::new(BTreeMap::new()),
+            output_schema_session: None,
+            output_schema_plans: RwLock::new(HashMap::new()),
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
             negotiated: McpNegotiatedProtocol {
@@ -587,6 +855,70 @@ impl McpClient {
                 version: "2025-11-25".to_string(),
             },
         }
+    }
+
+    /// Attach the host's shared validator service and create this live
+    /// connection's own MCP 2020 session. The service can be globally shared;
+    /// validation state and compiled plans remain connection-scoped.
+    #[must_use]
+    pub fn with_json_schema_validator(mut self, validator: Arc<dyn JsonSchemaValidator>) -> Self {
+        self.output_schema_session =
+            Some(validator.new_session(SchemaProfile::McpOutputSchema2020));
+        self
+    }
+
+    /// Parse a tool result using the schema compiled for this live connection.
+    /// A tool without an advertised schema retains its original source value.
+    pub async fn parse_tool_output(
+        &self,
+        full_name: &str,
+        output: &Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpClientError> {
+        let plan = self
+            .output_schema_plans
+            .read()
+            .await
+            .get(full_name)
+            .cloned();
+        let Some(plan) = plan else {
+            return Ok(output.clone());
+        };
+        let plan = plan.map_err(|error| match error {
+            OutputSchemaCompileFailure::Invalid(detail) => {
+                McpClientError::OutputSchemaCompileInvalid {
+                    full_name: full_name.to_owned(),
+                    detail,
+                }
+            }
+            OutputSchemaCompileFailure::Worker(detail) => McpClientError::Rpc(
+                format!("MCP output schema for {full_name} could not compile: {detail}").into(),
+            ),
+        })?;
+        match plan.validate(output).await.map_err(|error| {
+            McpClientError::Rpc(
+                format!("MCP output schema validation failed for {full_name}: {error}").into(),
+            )
+        })? {
+            JsonSchemaValidation::Valid => Ok(output.clone()),
+            JsonSchemaValidation::Invalid { detail, keywords } => {
+                Err(McpClientError::OutputSchemaInvalid {
+                    full_name: full_name.to_owned(),
+                    detail,
+                    keywords,
+                })
+            }
+        }
+    }
+
+    async fn validate_tool_result_output(
+        &self,
+        full_name: &str,
+        mut result: McpToolResultDto,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        if let Some(output) = result.structured_content.as_ref() {
+            result.structured_content = Some(self.parse_tool_output(full_name, output).await?);
+        }
+        Ok(result)
     }
 
     /// Builder that attaches the resolved per-server config options — the
@@ -620,6 +952,11 @@ impl McpClient {
     #[must_use]
     pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
         self.transport_kind = kind;
+        if lingxi_core::host::McpElicitationCapabilities::for_transport(kind).legacy
+            == lingxi_core::host::McpElicitationMode::Bare
+        {
+            self.elicitation.legacy = lingxi_core::host::McpElicitationMode::Bare;
+        }
         self
     }
 
@@ -645,52 +982,205 @@ impl McpClient {
         self
     }
 
+    /// Install the host's current capability authority without recomputing feature gates.
+    #[must_use]
+    pub fn with_elicitation_capabilities(
+        mut self,
+        elicitation: lingxi_core::host::McpElicitationCapabilities,
+    ) -> Self {
+        self.elicitation = elicitation;
+        self
+    }
+
+    pub(crate) fn elicitation_capabilities(&self) -> lingxi_core::host::McpElicitationCapabilities {
+        self.elicitation
+    }
+
+    /// Adopt the handshake already performed by the host transport. Repeating
+    /// initialize here would invalidate modern negotiated connections.
+    #[must_use]
+    pub fn with_handshake_state(
+        mut self,
+        capabilities: ServerCapabilitiesDto,
+        metadata: Option<&lingxi_core::host::McpServerMetadataDto>,
+    ) -> Self {
+        *self.raw_server_capabilities.get_mut() = metadata
+            .and_then(|metadata| metadata.raw_capabilities.as_ref())
+            .cloned();
+        *self.server_capabilities.get_mut() = Some(capabilities);
+        *self.server_instructions.get_mut() = metadata
+            .and_then(|metadata| metadata.instructions.as_ref())
+            .map(truncate_source_description);
+        self
+    }
+
     fn modern(&self) -> bool {
         self.negotiated.era == McpProtocolEra::Modern
     }
 
-    fn request_params(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+    fn request_params_projection(
+        &self,
+        method: &str,
+        mut params: Utf16JsonProjection,
+    ) -> Utf16JsonProjection {
         if !self.modern() || !modern_request_requires_meta(method) {
             return params;
         }
-        let mut object = params.as_object().cloned().unwrap_or_default();
-        let mut required = modern_meta(&self.negotiated.version)
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        if let Some(existing) = object
-            .remove("_meta")
-            .and_then(|value| value.as_object().cloned())
-        {
-            for (key, value) in existing {
-                required.entry(key).or_insert(value);
+        let required_value = modern_meta(&self.negotiated.version, self.elicitation.modern);
+        let mut required = Utf16JsonProjection::from_serde_value(&required_value)
+            .expect("fixed MCP metadata is JSON");
+        if let Ok(existing) = params.subprojection("/_meta") {
+            if existing.object_entries().is_some() {
+                required
+                    .merge_object_projection(&existing)
+                    .expect("MCP request metadata objects merge");
             }
         }
-        object.insert("_meta".to_string(), serde_json::Value::Object(required));
-        serde_json::Value::Object(object)
+        params
+            .set_field("_meta", required)
+            .expect("MCP request params are an object");
+        params
     }
 
-    fn validate_response(
+    async fn request_result_projection(
         &self,
         method: &str,
-        value: &mut serde_json::Value,
-    ) -> Result<(), McpClientError> {
-        if !self.modern() || !modern_request_requires_result_type(method) {
-            return Ok(());
+        params: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpResultError> {
+        let params = self.request_params_projection(method, params);
+        if self.modern() && modern_request_requires_result_type(method) {
+            return drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection: self.connection.clone(),
+                    client_capabilities: Utf16JsonProjection::from_serde_value(
+                        &modern_meta(&self.negotiated.version, self.elicitation.modern)
+                            ["io.modelcontextprotocol/clientCapabilities"],
+                    )
+                    .expect("fixed MCP client capabilities are JSON"),
+                },
+                method,
+                params,
+                McpInputRequiredOptions::default(),
+            )
+            .await;
         }
-        let Some(object) = value.as_object_mut() else {
-            return Err(McpClientError::Deserialize(
-                "modern MCP reply must be an object envelope".into(),
-            ));
+        let source = params.to_json_string().map_err(|error| {
+            lingxi_core::host::mcp_result::McpSdkError::new(
+                "INVALID_PARAMS",
+                error.to_string(),
+                None,
+            )
+        })?;
+        let result = self
+            .connection
+            .call_raw_json_unbounded(method, source)
+            .await?;
+        Utf16JsonProjection::parse(&result).map_err(|error| {
+            lingxi_core::host::mcp_result::McpSdkError::new(
+                "INVALID_RESULT",
+                error.to_string(),
+                None,
+            )
+            .into()
+        })
+    }
+
+    async fn call_modern_tool(
+        &self,
+        tool: &str,
+        input: Utf16JsonProjection,
+        timeout: std::time::Duration,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        let mut params = Utf16JsonProjection::object(vec![
+            ("name".to_owned(), source_string(tool)),
+            ("arguments".to_owned(), input),
+        ])
+        .expect("fixed MCP tool-call members are unique");
+        if let Some(id) = tool_use_id {
+            params
+                .set_field(
+                    "_meta",
+                    Utf16JsonProjection::object(vec![(
+                        "claudecode/toolUseId".to_owned(),
+                        source_string(id),
+                    )])
+                    .expect("fixed MCP metadata members are unique"),
+                )
+                .expect("MCP tool-call params are an object");
+        }
+        let params = self.request_params_projection("tools/call", params);
+        let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let callback = on_progress
+            .filter(|_| tool_use_id.is_some())
+            .map(|callback| {
+                let activity = last_activity.clone();
+                Arc::new(move |event: McpResultProgress| {
+                    if let Ok(mut instant) = activity.lock() {
+                        *instant = tokio::time::Instant::now();
+                    }
+                    callback(McpProgressEvent {
+                        progress: event.progress,
+                        total: event.total,
+                        message: event.message,
+                    });
+                }) as lingxi_core::host::mcp_result::McpResultProgressCallback
+            });
+        let options = McpInputRequiredOptions {
+            per_request_timeout: timeout,
+            max_total_timeout: Some(timeout),
+            on_progress: callback,
+            ..Default::default()
         };
-        match object.remove("resultType") {
-            Some(serde_json::Value::String(result_type)) if result_type == "complete" => Ok(()),
-            Some(serde_json::Value::String(result_type)) => Err(McpClientError::Deserialize(
-                format!("unsupported modern MCP resultType: {result_type}"),
-            )),
-            Some(_) | None => Err(McpClientError::Deserialize(
-                "modern MCP reply missing resultType".into(),
-            )),
+        let io = JsonrpcMcpResultIo {
+            connection: self.connection.clone(),
+            client_capabilities: Utf16JsonProjection::from_serde_value(
+                &modern_meta(&self.negotiated.version, self.elicitation.modern)
+                    ["io.modelcontextprotocol/clientCapabilities"],
+            )
+            .expect("fixed MCP client capabilities are JSON"),
+        };
+        let request = drive_modern_request(&io, "tools/call", params, options);
+        let idle_timeout = mcp_tool_idle_timeout_for(self.config_timeout_ms, self.transport_kind);
+        let value = if idle_timeout.is_zero() {
+            request
+                .await
+                .map_err(|e| self.tool_result_error(e, tool, timeout))?
+        } else {
+            tokio::select! {
+                value=request=>value.map_err(|e|self.tool_result_error(e,tool,timeout))?,
+                idle=idle_watchdog(idle_timeout,last_activity,self.server_name.clone(),tool.to_owned())=>return idle,
+            }
+        };
+        serde_json::from_str::<ToolCallResponse>(
+            &value
+                .to_json_string()
+                .map_err(|e| McpClientError::Deserialize(e.to_string().into()))?,
+        )
+        .map(|resp| McpToolResultDto {
+            content: resp.content,
+            is_error: resp.is_error,
+            meta: resp.meta,
+            structured_content: resp.structured_content,
+        })
+        .map_err(|e| McpClientError::Deserialize(e.to_string().into()))
+    }
+
+    fn tool_result_error(
+        &self,
+        error: McpResultError,
+        tool: &str,
+        timeout: std::time::Duration,
+    ) -> McpClientError {
+        if matches!(&error,McpResultError::Sdk(error) if error.code == "REQUEST_TIMEOUT") {
+            McpClientError::Timeout {
+                server: self.server_name.clone(),
+                tool: tool.to_owned(),
+                secs: timeout.as_secs().max(1),
+            }
+        } else {
+            mcp_client_error_from_result(error)
         }
     }
 
@@ -745,19 +1235,26 @@ impl McpClient {
     ///   * `"method":"initialize"`
     ///   * `"clientInfo":{"name":"lingxi", ...}`
     ///   * `"protocolVersion":"2025-11-25"`
-    ///   * `"capabilities":{"roots":{"listChanged":true},"elicitation":{}}`
+    ///   * `"capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}`
+    ///     for the current ordinary transport default; an explicit Bare
+    ///     initialize choice uses an empty elicitation object.
     ///
     /// On success, the parsed [`ServerCapabilitiesDto`] is both returned
     /// and stored in [`McpClient::server_capabilities`]; the optional
     /// `instructions` string is truncated (see [`truncate_description`])
     /// and stored in [`McpClient::server_instructions`].
     pub async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
-        let params = InitializeParams::default();
-        let resp: InitializeResponse = self
+        let mut params = InitializeParams::default();
+        params.capabilities.elicitation = self.elicitation.legacy.wire();
+        let params_source = serde_json::to_string(&params)
+            .map_err(|error| McpClientError::Rpc(error.to_string().into()))?;
+        let response_source = self
             .connection
-            .call("initialize", &params)
+            .call_raw_json("initialize", params_source)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+            .map_err(|e| McpClientError::Rpc(e.to_string().into()))?;
+        let resp: InitializeResponse = serde_json::from_str(&response_source)
+            .map_err(|error| McpClientError::Rpc(error.to_string().into()))?;
 
         let caps = decode_server_capabilities(&resp.capabilities);
         *self.server_capabilities.write().await = Some(caps.clone());
@@ -769,16 +1266,16 @@ impl McpClient {
         // (client.ts:1163-1166: if > MAX_MCP_DESCRIPTION_LENGTH, slice
         // + "\u{2026} [truncated]").
         if let Some(raw) = resp.instructions {
-            let orig_len = raw.chars().count();
-            let truncated = truncate_description(&raw).into_owned();
-            if orig_len > MAX_MCP_DESCRIPTION_LENGTH {
+            let orig_len = raw.string_units("").map_or(0, |units| units.len());
+            let limit = mcp_description_length_limit();
+            let truncated = truncate_source_description_at_limit(&raw, limit);
+            if orig_len > limit {
                 tracing::warn!(
                     target: "lingxi_mcp::client",
                     server = %self.server_name,
                     from = orig_len,
-                    to = MAX_MCP_DESCRIPTION_LENGTH,
-                    "Server instructions truncated from {orig_len} to {} chars",
-                    MAX_MCP_DESCRIPTION_LENGTH,
+                    to = limit,
+                    "Server instructions truncated from {orig_len} to {limit} UTF-16 units",
                 );
             }
             *self.server_instructions.write().await = Some(truncated);
@@ -789,7 +1286,7 @@ impl McpClient {
 
     /// Returns the (possibly truncated) server instructions captured during
     /// `initialize`, or `None` if the server omitted them.
-    pub async fn server_instructions(&self) -> Option<String> {
+    pub async fn server_instructions(&self) -> Option<UJP> {
         self.server_instructions.read().await.clone()
     }
 
@@ -802,7 +1299,7 @@ impl McpClient {
     async fn list_paginated<T>(
         &self,
         method: &'static str,
-        decode: fn(serde_json::Value) -> Result<(Vec<T>, Option<String>), McpClientError>,
+        decode: fn(&Utf16JsonProjection) -> Result<(Vec<T>, Option<UJP>), McpClientError>,
     ) -> Result<Vec<T>, McpClientError> {
         // Claude Code's modern `client.listTools()` path reports one aggregate
         // event, while legacy tools plus every prompts/resources traversal use
@@ -813,18 +1310,16 @@ impl McpClient {
         let mut retry_index = 0_usize;
         'retry: loop {
             let mut items = Vec::new();
-            let mut cursor: Option<String> = None;
+            let mut cursor: Option<UJP> = None;
             let mut page_count = 0_usize;
             loop {
-                let mut params = serde_json::json!({});
-                if let Some(cursor) = cursor.as_deref() {
-                    params["cursor"] = serde_json::Value::String(cursor.to_string());
+                let mut fields = Vec::new();
+                if let Some(cursor) = cursor.clone() {
+                    fields.push(("cursor".to_owned(), cursor));
                 }
-                let mut raw_value: serde_json::Value = match self
-                    .connection
-                    .call(method, self.request_params(method, params))
-                    .await
-                {
+                let params = Utf16JsonProjection::object(fields)
+                    .expect("paginated MCP request fields are unique");
+                let source = match self.request_result_projection(method, params).await {
                     Ok(value) => value,
                     Err(error) => {
                         if !aggregate_tools && page_count > 0 && !emitted_error {
@@ -837,7 +1332,8 @@ impl McpClient {
                             );
                             emitted_error = true;
                         }
-                        if retryable_list_connection_error(&error) {
+                        if matches!(&error, McpResultError::Connection(rpc) if retryable_list_connection_error(rpc))
+                        {
                             if let Some(delay) = MCP_LIST_RETRY_DELAYS.get(retry_index).copied() {
                                 retry_index += 1;
                                 tracing::debug!(
@@ -851,7 +1347,7 @@ impl McpClient {
                                 continue 'retry;
                             }
                         }
-                        return Err(mcp_client_error_from_rpc(&error));
+                        return Err(mcp_client_error_from_result(error));
                     }
                 };
 
@@ -859,19 +1355,7 @@ impl McpClient {
                 // arrives, before schema decoding. A malformed second page is
                 // therefore reported as pageCount=2 with only page-one items.
                 page_count += 1;
-                if let Err(error) = self.validate_response(method, &mut raw_value) {
-                    if !aggregate_tools && !emitted_error {
-                        emit_list_paginated(
-                            method,
-                            Some(page_count),
-                            items.len(),
-                            "error",
-                            Some("pages"),
-                        );
-                    }
-                    return Err(error);
-                }
-                let (page_items, next_cursor) = match decode(raw_value) {
+                let (page_items, next_cursor) = match decode(&source) {
                     Ok(page) => page,
                     Err(error) => {
                         if !aggregate_tools && !emitted_error {
@@ -894,9 +1378,10 @@ impl McpClient {
                     if aggregate_tools {
                         if capped {
                             emit_list_paginated(method, None, 0, "capped", Some("aggregate"));
-                            return Err(McpClientError::Rpc(format!(
-                                "{method} pagination exceeded {MAX_MCP_LIST_PAGES} pages"
-                            )));
+                            return Err(McpClientError::Rpc(
+                                format!("{method} pagination exceeded {MAX_MCP_LIST_PAGES} pages")
+                                    .into(),
+                            ));
                         }
                         emit_list_paginated(
                             method,
@@ -910,6 +1395,115 @@ impl McpClient {
                     // Ordinary one-page success is intentionally silent. The
                     // oracle reports this `pages` source only after traversing
                     // multiple pages; its aggregate tools helper is separate.
+                    if page_count > 1 {
+                        emit_list_paginated(
+                            method,
+                            Some(page_count),
+                            items.len(),
+                            if capped { "capped" } else { "complete" },
+                            Some("pages"),
+                        );
+                    }
+                    if capped {
+                        tracing::warn!(
+                            target: "lingxi_mcp::client",
+                            server = %self.server_name,
+                            "{method}: stopped at {} pages with more pending",
+                            MAX_MCP_LIST_PAGES,
+                        );
+                    }
+                    return Ok(items);
+                }
+            }
+        }
+    }
+
+    async fn list_tools_paginated_source(&self) -> Result<Vec<RawTool>, McpClientError> {
+        let method = "tools/list";
+        let aggregate_tools = self.modern();
+        let mut emitted_error = false;
+        let mut retry_index = 0_usize;
+        'retry: loop {
+            let mut items = Vec::new();
+            let mut cursor: Option<Utf16JsonProjection> = None;
+            let mut page_count = 0_usize;
+            loop {
+                let mut fields = Vec::new();
+                if let Some(cursor) = cursor.clone() {
+                    fields.push(("cursor".to_owned(), cursor));
+                }
+                let params = Utf16JsonProjection::object(fields)
+                    .expect("tools/list request fields are unique");
+                let source = match self.request_result_projection(method, params).await {
+                    Ok(source) => source,
+                    Err(error) => {
+                        if !aggregate_tools && page_count > 0 && !emitted_error {
+                            emit_list_paginated(
+                                method,
+                                Some(page_count),
+                                items.len(),
+                                "error",
+                                Some("pages"),
+                            );
+                            emitted_error = true;
+                        }
+                        if matches!(&error,McpResultError::Connection(rpc) if retryable_list_connection_error(rpc))
+                        {
+                            if let Some(delay) = MCP_LIST_RETRY_DELAYS.get(retry_index).copied() {
+                                retry_index += 1;
+                                tracing::debug!(
+                                    target: "lingxi_mcp::client",
+                                    server = %self.server_name,
+                                    method,
+                                    delay_ms = delay.as_millis(),
+                                    "{method} failed ({error}); retrying",
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue 'retry;
+                            }
+                        }
+                        return Err(mcp_client_error_from_result(error));
+                    }
+                };
+
+                page_count += 1;
+                let (page_items, next_cursor) = match decode_tools_list_page(&source) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        if !aggregate_tools && !emitted_error {
+                            emit_list_paginated(
+                                method,
+                                Some(page_count),
+                                items.len(),
+                                "error",
+                                Some("pages"),
+                            );
+                        }
+                        return Err(error);
+                    }
+                };
+                items.extend(page_items);
+                cursor = next_cursor;
+
+                let capped = cursor.is_some() && page_count >= MAX_MCP_LIST_PAGES;
+                if cursor.is_none() || capped {
+                    if aggregate_tools {
+                        if capped {
+                            emit_list_paginated(method, None, 0, "capped", Some("aggregate"));
+                            return Err(McpClientError::Rpc(
+                                format!("{method} pagination exceeded {MAX_MCP_LIST_PAGES} pages")
+                                    .into(),
+                            ));
+                        }
+                        emit_list_paginated(
+                            method,
+                            None,
+                            items.len(),
+                            "complete",
+                            Some("aggregate"),
+                        );
+                        return Ok(items);
+                    }
                     if page_count > 1 {
                         emit_list_paginated(
                             method,
@@ -948,9 +1542,7 @@ impl McpClient {
     /// omitted so MCP tools can override builtins by name. Mirrors
     /// `client.ts:1762-1770`.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDto>, McpClientError> {
-        let raw_tools = self
-            .list_paginated("tools/list", decode_tools_list_page)
-            .await?;
+        let raw_tools = self.list_tools_paginated_source().await?;
 
         // Mirror `client.ts:1762-1770`: `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` env gate.
         // When this env var is truthy AND the transport type is "sdk", the tool
@@ -966,8 +1558,10 @@ impl McpClient {
                 // reaches the model (oracle `Wrt`/`qrt`, see
                 // `crate::tool_schema`). Must run before the DTO is built so
                 // a dropped tool never gets constructed.
-                let decision =
-                    crate::tool_schema::decide_tool_schema(self.server_url.as_deref(), &t.input_schema);
+                let decision = crate::tool_schema::decide_tool_schema_source(
+                    self.server_url.as_deref(),
+                    &t.input_schema,
+                );
                 if let Some(reason) = decision.drop_reason {
                     tracing::warn!(
                         server = %self.server_name,
@@ -996,12 +1590,18 @@ impl McpClient {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
                 let description = match decision.description_note {
-                    // oracle: `E.description ? \`${note}\n\n${description}\` : note`.
-                    Some(note) if !t.description.is_empty() => {
-                        format!("{note}\n\n{}", t.description)
-                    }
-                    Some(note) => note,
-                    None => t.description,
+                    // The note is generated UTF-8, while the remote description
+                    // remains its original source projection.
+                    Some(note) => match t.description.as_ref().filter(|description| {
+                        description.string_units("").is_some_and(|units| !units.is_empty())
+                    }) {
+                        Some(description) => {
+                            let prefix = source_string(&format!("{note}\n\n"));
+                            concat_source_strings(&[&prefix, description])
+                        }
+                        None => source_string(&note),
+                    },
+                    None => t.description.unwrap_or_else(empty_source_string),
                 };
                 let search_hint = tool_meta_search_hint(&t.meta);
                 let always_load = tool_meta_always_load(&t.meta);
@@ -1009,7 +1609,7 @@ impl McpClient {
                 Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
-                    description: truncate_description(&description).into_owned(),
+                    description: truncate_source_description(&description),
                     input_schema: decision.schema,
                     output_schema: t.output_schema,
                     annotations: t.annotations,
@@ -1033,6 +1633,23 @@ impl McpClient {
             })
             .collect();
         self.apply_config_permission_ceilings(&mut tools);
+        if let Some(session) = &self.output_schema_session {
+            let mut plans = HashMap::new();
+            for tool in &tools {
+                if let Some(schema) = &tool.output_schema {
+                    let compiled = session.compile(schema).await.map_err(|error| match error {
+                        SchemaCompileError::InvalidSchema(detail) => {
+                            OutputSchemaCompileFailure::Invalid(detail)
+                        }
+                        SchemaCompileError::Worker(detail) => {
+                            OutputSchemaCompileFailure::Worker(detail)
+                        }
+                    });
+                    plans.insert(tool.full_name.clone(), compiled);
+                }
+            }
+            *self.output_schema_plans.write().await = plans;
+        }
         Ok(tools)
     }
 
@@ -1127,7 +1744,7 @@ impl McpClient {
     pub async fn call_tool(
         &self,
         full_name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpClientError> {
         self.call_tool_with_timeout(
             full_name,
@@ -1144,7 +1761,7 @@ impl McpClient {
     pub async fn call_tool_with_timeout(
         &self,
         full_name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         timeout: std::time::Duration,
     ) -> Result<McpToolResultDto, McpClientError> {
         self.call_tool_with_meta(full_name, input, timeout, None, None)
@@ -1160,7 +1777,7 @@ impl McpClient {
     pub async fn call_tool_with_progress(
         &self,
         full_name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
     ) -> Result<McpToolResultDto, McpClientError> {
@@ -1195,7 +1812,7 @@ impl McpClient {
     pub async fn call_tool_with_meta(
         &self,
         full_name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         timeout: std::time::Duration,
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
@@ -1210,9 +1827,18 @@ impl McpClient {
         let tool_name = full_name
             .strip_prefix(&prefix)
             .ok_or_else(|| {
-                McpClientError::Rpc(format!("full_name {full_name:?} missing prefix {prefix:?}"))
+                McpClientError::Rpc(
+                    format!("full_name {full_name:?} missing prefix {prefix:?}").into(),
+                )
             })?
             .to_string();
+
+        if self.modern() {
+            let result = self
+                .call_modern_tool(&tool_name, input, timeout, tool_use_id, on_progress)
+                .await?;
+            return self.validate_tool_result_output(full_name, result).await;
+        }
 
         // MCP.3: assemble the request `_meta`. claude-code stamps
         // `_meta: { "claudecode/toolUseId": <id> }` onto the tools/call request
@@ -1252,11 +1878,14 @@ impl McpClient {
             // The MCP SDK uses the outgoing request id as the progressToken; the
             // router owns request ids here, so we mint a process-unique token and
             // stamp it into `_meta.progressToken` for the server to echo back.
-            let token = serde_json::Value::String(format!(
+            let token = format!(
                 "lingxi-mcp-progress-{}",
                 NEXT_PROGRESS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            meta.insert("progressToken".to_string(), token.clone());
+            );
+            meta.insert(
+                "progressToken".to_string(),
+                serde_json::Value::String(token.clone()),
+            );
             let callback = on_progress.expect("progress_active implies Some(callback)");
             let mut notifications = self.connection.notifications();
             let activity = last_activity.clone();
@@ -1267,10 +1896,13 @@ impl McpClient {
                             if n.method != "notifications/progress" {
                                 continue;
                             }
-                            let Some(p) = n.params.as_ref() else {
+                            let Some(params) = n.params.as_ref() else {
                                 continue;
                             };
-                            if p.get("progressToken") != Some(&token) {
+                            let Ok(p) = Utf16JsonProjection::parse(params.as_json()) else {
+                                continue;
+                            };
+                            if p.string_at("/progressToken") != Some(token.as_str()) {
                                 continue;
                             }
                             // Reset the idle watchdog: a matching progress note is
@@ -1280,15 +1912,14 @@ impl McpClient {
                             }
                             // SDK `onprogress` payload: `{progress, total?, message?}`
                             // (`client.ts:3109-3111`).
-                            let progress = p
-                                .get("progress")
-                                .and_then(serde_json::Value::as_f64)
-                                .unwrap_or(0.0);
-                            let total = p.get("total").and_then(serde_json::Value::as_f64);
-                            let message = p
-                                .get("message")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string);
+                            let progress = p.number_at("/progress").unwrap_or(0.0);
+                            let total = p.number_at("/total");
+                            let message = p.subprojection("/message").ok().filter(|value| {
+                                value
+                                    .at_pointer("")
+                                    .and_then(|value| value.code_units())
+                                    .is_some()
+                            });
                             callback(McpProgressEvent {
                                 progress,
                                 total,
@@ -1306,14 +1937,17 @@ impl McpClient {
             None
         };
 
-        let mut params = serde_json::json!({
-            "name": tool_name,
-            "arguments": input,
-        });
+        let mut params = Utf16JsonProjection::object(vec![
+            ("name".to_owned(), source_string(&tool_name)),
+            ("arguments".to_owned(), input),
+        ])
+        .expect("fixed MCP tool-call members are unique");
         if !meta.is_empty() {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
-            }
+            let meta = Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(meta))
+                .expect("MCP tool metadata is generated JSON");
+            params
+                .set_field("_meta", meta)
+                .expect("MCP tool-call params are an object");
         }
 
         // Sub-second timeouts still report at least 1s to keep the
@@ -1321,10 +1955,13 @@ impl McpClient {
         // the millis fraction so non-zero sub-second timeouts don't collapse
         // to "after 0s".
         let secs = timeout.as_secs().max(1);
-        let params = self.request_params("tools/call", params);
+        let params = self.request_params_projection("tools/call", params);
+        let params_json = params
+            .to_json_string()
+            .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
         let fut = self
             .connection
-            .call::<_, serde_json::Value>("tools/call", params);
+            .call_raw_json_unbounded("tools/call", params_json);
 
         // Race the call against the overall `BHs` timeout and — when enabled —
         // the `GLd` idle watchdog. When the idle watchdog is disabled (`ZERO`)
@@ -1341,19 +1978,7 @@ impl McpClient {
                         secs,
                     }),
                     Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
-                    Ok(Ok(mut value)) => {
-                        match self.validate_response("tools/call", &mut value) {
-                            Err(error) => Err(error),
-                            Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
-                                .map(|resp| McpToolResultDto {
-                                    content: resp.content,
-                                    is_error: resp.is_error,
-                                    meta: resp.meta,
-                                    structured_content: resp.structured_content,
-                                })
-                                .map_err(|e| McpClientError::Deserialize(e.to_string())),
-                        }
-                    },
+                    Ok(Ok(value)) => decode_tool_call_response(&value),
                 },
                 idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
             }
@@ -1365,17 +1990,7 @@ impl McpClient {
                     secs,
                 }),
                 Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
-                Ok(Ok(mut value)) => match self.validate_response("tools/call", &mut value) {
-                    Err(error) => Err(error),
-                    Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
-                        .map(|resp| McpToolResultDto {
-                            content: resp.content,
-                            is_error: resp.is_error,
-                            meta: resp.meta,
-                            structured_content: resp.structured_content,
-                        })
-                        .map_err(|e| McpClientError::Deserialize(e.to_string())),
-                },
+                Ok(Ok(value)) => decode_tool_call_response(&value),
             }
         };
 
@@ -1384,7 +1999,8 @@ impl McpClient {
             handle.abort();
         }
 
-        outcome
+        let result = outcome?;
+        self.validate_tool_result_output(full_name, result).await
     }
 
     /// Enumerate every prompt advertised by the server.
@@ -1401,7 +2017,9 @@ impl McpClient {
             .into_iter()
             .map(|p| McpPromptDto {
                 name: p.name,
-                description: p.description.map(|d| truncate_description(&d).into_owned()),
+                description: p
+                    .description
+                    .map(|description| truncate_source_description(&description)),
                 arguments: p
                     .arguments
                     .into_iter()
@@ -1415,21 +2033,22 @@ impl McpClient {
             .collect())
     }
 
-    /// Render a prompt template with the supplied arguments. The returned
-    /// `Value` is the server's `{description, messages}` envelope verbatim.
+    /// Render a prompt template with the supplied source arguments. The
+    /// returned projection retains the server's `{description, messages}`
+    /// envelope without materializing an arbitrary JSON value.
     pub async fn get_prompt(
         &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, McpClientError> {
-        let params = serde_json::json!({ "name": name, "arguments": arguments });
-        let mut value: serde_json::Value = self
-            .connection
-            .call("prompts/get", self.request_params("prompts/get", params))
+        name: &UJP,
+        arguments: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, McpClientError> {
+        let params = Utf16JsonProjection::object(vec![
+            ("name".to_owned(), name.clone()),
+            ("arguments".to_owned(), arguments),
+        ])
+        .expect("fixed prompts/get request members are unique");
+        self.request_result_projection("prompts/get", params)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("prompts/get", &mut value)?;
-        Ok(value)
+            .map_err(mcp_client_error_from_result)
     }
 
     /// Enumerate every resource advertised by the server.
@@ -1456,18 +2075,18 @@ impl McpClient {
     /// Fetch the contents of one resource by URI. Returns the FIRST element
     /// of the server's `contents` array (the protocol allows multiple but
     /// claude-code always reads the first).
-    pub async fn read_resource(&self, uri: &str) -> Result<McpResourceContentDto, McpClientError> {
-        let mut raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "resources/read",
-                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
-            )
+    pub async fn read_resource(&self, uri: &UJP) -> Result<McpResourceContentDto, McpClientError> {
+        let params = Utf16JsonProjection::object(vec![("uri".to_owned(), uri.clone())])
+            .expect("fixed resources/read request members are unique");
+        let raw_source = self
+            .request_result_projection("resources/read", params)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("resources/read", &mut raw_value)?;
-        let resp: ResourceReadResponse = serde_json::from_value(raw_value)
-            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
+            .map_err(mcp_client_error_from_result)?;
+        let source = raw_source
+            .to_json_string()
+            .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+        let resp: ResourceReadResponse = serde_json::from_str(&source)
+            .map_err(|e| McpClientError::Deserialize(e.to_string().into()))?;
         resp.contents
             .into_iter()
             .next()
@@ -1495,27 +2114,27 @@ impl McpClient {
     /// bytes are written to (a session/tool-results dir in production).
     pub async fn read_resource_rich(
         &self,
-        uri: &str,
+        uri: &UJP,
         output_dir: &std::path::Path,
     ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpClientError> {
-        let mut raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "resources/read",
-                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
-            )
+        let params = Utf16JsonProjection::object(vec![("uri".to_owned(), uri.clone())])
+            .expect("fixed resources/read request members are unique");
+        let raw_source = self
+            .request_result_projection("resources/read", params)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("resources/read", &mut raw_value)?;
-        let resp: ResourceReadRichResponse = serde_json::from_value(raw_value)
-            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
+            .map_err(mcp_client_error_from_result)?;
+        let source = raw_source
+            .to_json_string()
+            .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+        let resp: ResourceReadRichResponse = serde_json::from_str(&source)
+            .map_err(|e| McpClientError::Deserialize(e.to_string().into()))?;
         let raw: Vec<crate::mcp_output_storage::RawResourceContent> = resp
             .contents
             .into_iter()
             .map(|c| crate::mcp_output_storage::RawResourceContent {
                 // Echo the request URI when the server omits one (parity with
                 // the posix transport).
-                uri: c.uri.unwrap_or_else(|| uri.to_string()),
+                uri: c.uri.unwrap_or_else(|| uri.clone()),
                 mime_type: c.mime_type,
                 meta: c.meta,
                 text: c.text,
@@ -1536,7 +2155,7 @@ impl McpClient {
     /// if `initialize` has not completed. See [`Self::raw_server_capabilities`]
     /// — the decoded [`ServerCapabilitiesDto`] drops `extensions`, which the
     /// MCP-skills directory-read predicate needs.
-    pub async fn server_capabilities_raw(&self) -> Option<serde_json::Value> {
+    pub async fn server_capabilities_raw(&self) -> Option<Utf16JsonProjection> {
         self.raw_server_capabilities.read().await.clone()
     }
 
@@ -1574,44 +2193,47 @@ impl McpClient {
     /// this method does not re-derive it.
     pub async fn read_mcp_directory(
         &self,
-        uri: &str,
+        uri: &UJP,
     ) -> Result<Vec<McpDirectoryEntry>, McpClientError> {
         let mut out: Vec<McpDirectoryEntry> = Vec::new();
-        let mut cursor: Option<String> = None;
+        let mut cursor: Option<UJP> = None;
         let mut page: usize = 0;
         loop {
-            let mut params = serde_json::json!({ "uri": uri });
-            if let Some(c) = cursor.as_deref() {
-                params["cursor"] = serde_json::Value::String(c.to_string());
+            let mut fields = vec![("uri".to_owned(), uri.clone())];
+            if let Some(cursor) = cursor.clone() {
+                fields.push(("cursor".to_owned(), cursor));
             }
-            let mut raw_value: serde_json::Value = match self
-                .connection
-                .call(
-                    "resources/directory/read",
-                    self.request_params("resources/directory/read", params),
-                )
+            let params =
+                Utf16JsonProjection::object(fields).expect("directory request fields are unique");
+            let raw_source = match self
+                .request_result_projection("resources/directory/read", params)
                 .await
             {
-                Ok(r) => r,
+                Ok(source) => source,
                 Err(e) => {
-                    if page > 0 && is_invalid_params(&e) {
+                    if page > 0
+                        && matches!(&e, McpResultError::Connection(rpc) if is_invalid_params(rpc))
+                    {
                         tracing::warn!(
                             target: "lingxi_mcp::client",
                             server = %self.server_name,
-                            "resources/directory/read {uri}: page {} returned InvalidParams on cursor; returning {} entries from prior pages",
+                            "resources/directory/read {}: page {} returned InvalidParams on cursor; returning {} entries from prior pages",
+                            uri.to_json_string().unwrap_or_else(|_| "<invalid-uri>".into()),
                             page + 1,
                             out.len(),
                         );
                         return Ok(out);
                     }
-                    return Err(McpClientError::Rpc(e.to_string()));
+                    return Err(McpClientError::Rpc(result_error_diagnostic(&e)));
                 }
             };
-            self.validate_response("resources/directory/read", &mut raw_value)?;
-            let resp: DirectoryReadResponse = serde_json::from_value(raw_value)
-                .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
+            let source = raw_source
+                .to_json_string()
+                .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+            let resp: DirectoryReadResponse = serde_json::from_str(&source)
+                .map_err(|e| McpClientError::Deserialize(e.to_string().into()))?;
             out.extend(resp.resources);
-            cursor = resp.next_cursor;
+            cursor = decode_next_cursor(resp.next_cursor)?;
             page += 1;
             if cursor.is_none() || page >= MAX_MCP_DIRECTORY_PAGES {
                 break;
@@ -1621,7 +2243,8 @@ impl McpClient {
             tracing::warn!(
                 target: "lingxi_mcp::client",
                 server = %self.server_name,
-                "resources/directory/read {uri}: stopped at {} pages with more pending",
+                "resources/directory/read {}: stopped at {} pages with more pending",
+                uri.to_json_string().unwrap_or_else(|_| "<invalid-uri>".into()),
                 MAX_MCP_DIRECTORY_PAGES,
             );
         }
@@ -1632,11 +2255,14 @@ impl McpClient {
     /// non-error response. The health checker uses this to detect dead
     /// servers without forcing a full `tools/list` roundtrip.
     pub async fn ping(&self) -> Result<(), McpClientError> {
-        let _: serde_json::Value = self
-            .connection
-            .call("ping", serde_json::Value::Null)
+        let params = Utf16JsonProjection::parse("null").expect("null JSON");
+        let source = self
+            .request_result_projection("ping", params)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+            .map_err(mcp_client_error_from_result)?;
+        source
+            .to_json_string()
+            .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
         Ok(())
     }
 }
@@ -1658,7 +2284,7 @@ pub struct McpProgressEvent {
     /// Optional total against which `progress` advances.
     pub total: Option<f64>,
     /// Optional human-readable status message.
-    pub message: Option<String>,
+    pub message: Option<Utf16JsonProjection>,
 }
 
 /// Callback invoked for each forwarded MCP progress notification (MCP.4).
@@ -1669,8 +2295,12 @@ pub type McpProgressCallback = Arc<dyn Fn(McpProgressEvent) + Send + Sync>;
 /// Wire-level shape of a `prompts/list` response body.
 #[derive(Debug, Deserialize)]
 struct PromptsListResponse {
-    #[serde(rename = "nextCursor", default)]
-    next_cursor: Option<String>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    next_cursor: Option<UJP>,
     #[serde(default)]
     prompts: Vec<RawPrompt>,
 }
@@ -1678,9 +2308,10 @@ struct PromptsListResponse {
 /// Wire-level shape for one prompt entry inside `prompts/list`.
 #[derive(Debug, Deserialize)]
 struct RawPrompt {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_source_string")]
+    name: UJP,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    description: Option<UJP>,
     #[serde(default)]
     arguments: Vec<RawPromptArgument>,
 }
@@ -1688,9 +2319,10 @@ struct RawPrompt {
 /// Wire-level shape for one prompt argument.
 #[derive(Debug, Deserialize)]
 struct RawPromptArgument {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_source_string")]
+    name: UJP,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    description: Option<UJP>,
     #[serde(default)]
     required: bool,
 }
@@ -1698,8 +2330,12 @@ struct RawPromptArgument {
 /// Wire-level shape of a `resources/list` response body.
 #[derive(Debug, Deserialize)]
 struct ResourcesListResponse {
-    #[serde(rename = "nextCursor", default)]
-    next_cursor: Option<String>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    next_cursor: Option<UJP>,
     #[serde(default)]
     resources: Vec<RawResource>,
 }
@@ -1712,15 +2348,23 @@ pub const MAX_MCP_LIST_PAGES: usize = 20;
 /// Wire-level shape for one resource entry inside `resources/list`.
 #[derive(Debug, Deserialize)]
 struct RawResource {
-    uri: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_source_string")]
+    uri: UJP,
+    #[serde(
+        default = "empty_source_string",
+        deserialize_with = "deserialize_required_source_string"
+    )]
+    name: UJP,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    description: Option<UJP>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<serde_json::Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<UJP>,
 }
 
 /// TR-03 `NSf` (oracle @289724681) — the hard page cap on a paginated
@@ -1737,15 +2381,25 @@ pub const MAX_MCP_DIRECTORY_PAGES: usize = 20;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpDirectoryEntry {
     /// Child resource URI — the value to pass back as `uri` to descend.
-    pub uri: String,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub uri: UJP,
     /// Child resource name.
-    #[serde(default)]
-    pub name: String,
+    #[serde(
+        default = "empty_source_string",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    pub name: UJP,
     /// Child MIME type; absent when the server omits it (the oracle maps
     /// `c.mimeType!==void 0 ? qG(c.mimeType) : void 0`, i.e. an omitted type
     /// stays omitted rather than becoming `""`).
-    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    #[serde(
+        rename = "mimeType",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    pub mime_type: Option<UJP>,
 }
 
 /// Wire-level shape of one `resources/directory/read` page.
@@ -1754,8 +2408,12 @@ struct DirectoryReadResponse {
     #[serde(default)]
     resources: Vec<McpDirectoryEntry>,
     /// Opaque continuation token; `None`/absent ends the pagination loop.
-    #[serde(rename = "nextCursor", default)]
-    next_cursor: Option<String>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    next_cursor: Option<UJP>,
 }
 
 /// `s instanceof Jy && s.code === Qp.InvalidParams` — the oracle's tolerated
@@ -1780,13 +2438,21 @@ struct ResourceReadResponse {
 /// Wire-level shape for one element of the `contents` array in `resources/read`.
 #[derive(Debug, Deserialize)]
 struct RawResourceContent {
-    uri: String,
-    #[serde(default)]
-    text: String,
+    #[serde(deserialize_with = "deserialize_required_source_string")]
+    uri: UJP,
+    #[serde(
+        default = "empty_source_string",
+        deserialize_with = "deserialize_required_source_string"
+    )]
+    text: UJP,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<serde_json::Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<UJP>,
 }
 
 /// Wire-level shape of a `resources/read` response for the MCP-5d rich path.
@@ -1802,14 +2468,18 @@ struct ResourceReadRichResponse {
 /// Wire-level shape for one `contents[]` element on the rich path.
 #[derive(Debug, Deserialize)]
 struct RawResourceContentRich {
-    #[serde(default)]
-    uri: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    uri: Option<UJP>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
-    #[serde(rename = "_meta", default)]
-    meta: Option<serde_json::Value>,
-    #[serde(default)]
-    text: Option<String>,
+    #[serde(
+        rename = "_meta",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<UJP>,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    text: Option<UJP>,
     #[serde(default)]
     blob: Option<String>,
 }
@@ -2143,8 +2813,12 @@ fn parse_int_base10_prefix(s: &str) -> Option<u64> {
 /// Wire-level shape of a `tools/list` response body.
 #[derive(Debug, Deserialize)]
 struct ToolsListResponse {
-    #[serde(rename = "nextCursor", default)]
-    next_cursor: Option<String>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    next_cursor: Option<Utf16JsonProjection>,
     #[serde(default)]
     tools: Vec<RawTool>,
 }
@@ -2158,64 +2832,144 @@ struct ToolsListResponse {
 #[derive(Debug, Deserialize)]
 struct RawTool {
     name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(rename = "inputSchema", default)]
-    input_schema: serde_json::Value,
-    #[serde(rename = "outputSchema", default)]
-    output_schema: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_source_string")]
+    description: Option<UJP>,
+    #[serde(
+        rename = "inputSchema",
+        default = "null_projection",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize"
+    )]
+    input_schema: Utf16JsonProjection,
+    #[serde(
+        rename = "outputSchema",
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    output_schema: Option<Utf16JsonProjection>,
     #[serde(default)]
     annotations: Option<lingxi_core::host::McpToolAnnotationsDto>,
     #[serde(default)]
     icons: Vec<lingxi_core::host::McpIconDto>,
-    #[serde(default, rename = "_meta")]
-    meta: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "_meta",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
 }
 
 fn decode_tools_list_page(
-    raw: serde_json::Value,
-) -> Result<(Vec<RawTool>, Option<String>), McpClientError> {
-    // `recursivelySanitizeUnicode(result.tools)` is applied to the response
-    // before typed processing in the oracle.
-    let response: ToolsListResponse = serde_json::from_value(recursively_sanitize_unicode(raw))
-        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
-    Ok((response.tools, response.next_cursor))
+    raw: &Utf16JsonProjection,
+) -> Result<(Vec<RawTool>, Option<Utf16JsonProjection>), McpClientError> {
+    let source = raw
+        .to_json_string()
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    let response: ToolsListResponse = serde_json::from_str(&source)
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    let next_cursor = match response.next_cursor {
+        None => None,
+        Some(cursor) if cursor.at_pointer("").is_some_and(|value| value.is_null()) => None,
+        Some(cursor)
+            if cursor
+                .at_pointer("")
+                .and_then(|value| value.as_str())
+                .is_some() =>
+        {
+            Some(cursor)
+        }
+        Some(_) => {
+            return Err(McpClientError::Deserialize(
+                "tools/list nextCursor must be a string or null".into(),
+            ));
+        }
+    };
+    Ok((response.tools, next_cursor))
 }
 
 fn decode_prompts_list_page(
-    raw: serde_json::Value,
-) -> Result<(Vec<RawPrompt>, Option<String>), McpClientError> {
-    let response: PromptsListResponse =
-        serde_json::from_value(recursively_sanitize_unicode(raw))
-            .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
-    Ok((response.prompts, response.next_cursor))
+    raw: &Utf16JsonProjection,
+) -> Result<(Vec<RawPrompt>, Option<UJP>), McpClientError> {
+    let source = raw
+        .to_json_string()
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    let mut response: PromptsListResponse = serde_json::from_str(&source)
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    for prompt in &mut response.prompts {
+        prompt.name = sanitize_source_prompt_string(prompt.name.clone());
+        prompt.description = prompt.description.take().map(sanitize_source_prompt_string);
+        for argument in &mut prompt.arguments {
+            argument.name = sanitize_source_prompt_string(argument.name.clone());
+            argument.description = argument
+                .description
+                .take()
+                .map(sanitize_source_prompt_string);
+        }
+    }
+    Ok((response.prompts, decode_next_cursor(response.next_cursor)?))
 }
 
 fn decode_resources_list_page(
-    raw: serde_json::Value,
-) -> Result<(Vec<RawResource>, Option<String>), McpClientError> {
-    let response: ResourcesListResponse = serde_json::from_value(raw)
-        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
-    Ok((response.resources, response.next_cursor))
+    raw: &Utf16JsonProjection,
+) -> Result<(Vec<RawResource>, Option<UJP>), McpClientError> {
+    let source = raw
+        .to_json_string()
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    let response: ResourcesListResponse = serde_json::from_str(&source)
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    Ok((
+        response.resources,
+        decode_next_cursor(response.next_cursor)?,
+    ))
 }
 
-fn tool_meta_search_hint(meta: &Option<serde_json::Value>) -> Option<String> {
-    meta.as_ref()
-        .and_then(|meta| meta.get("anthropic/searchHint"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+fn decode_next_cursor(cursor: Option<UJP>) -> Result<Option<UJP>, McpClientError> {
+    match cursor {
+        None => Ok(None),
+        Some(value) if value.at_pointer("").is_some_and(|view| view.is_null()) => Ok(None),
+        Some(value)
+            if value
+                .at_pointer("")
+                .and_then(|view| view.as_str())
+                .is_some() =>
+        {
+            Ok(Some(value))
+        }
+        Some(_) => Err(McpClientError::Deserialize(
+            "MCP list nextCursor must be a string or null".into(),
+        )),
+    }
 }
 
-fn tool_meta_always_load(meta: &Option<serde_json::Value>) -> Option<bool> {
-    meta.as_ref()
-        .and_then(|meta| meta.get("anthropic/alwaysLoad"))
-        .and_then(serde_json::Value::as_bool)
+fn sanitize_source_prompt_string(value: UJP) -> UJP {
+    let Some(units) = value.string_units("") else {
+        return value;
+    };
+    let Ok(text) = String::from_utf16(&units) else {
+        // Preserve ill-formed UTF-16 exactly rather than routing it through a
+        // Rust String that would replace unpaired code units.
+        return value;
+    };
+    source_string(&partially_sanitize_unicode(&text))
 }
 
-fn tool_meta_requires_user_interaction(meta: &Option<serde_json::Value>) -> bool {
+fn tool_meta_search_hint(meta: &Option<Utf16JsonProjection>) -> Option<UJP> {
+    let source = meta
+        .as_ref()?
+        .subprojection_property_units(&"anthropic/searchHint".encode_utf16().collect::<Vec<_>>())
+        .ok()?;
+    source.string_units("").map(|_| source)
+}
+
+fn tool_meta_always_load(meta: &Option<Utf16JsonProjection>) -> Option<bool> {
     meta.as_ref()
-        .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
-        .and_then(serde_json::Value::as_bool)
+        .and_then(|meta| meta.get_property("anthropic/alwaysLoad"))
+        .and_then(|value| value.as_bool())
+}
+
+fn tool_meta_requires_user_interaction(meta: &Option<Utf16JsonProjection>) -> bool {
+    meta.as_ref()
+        .and_then(|meta| meta.get_property("anthropic/requiresUserInteraction"))
+        .and_then(|value| value.as_bool())
         .unwrap_or(false)
 }
 
@@ -2228,14 +2982,40 @@ fn tool_meta_requires_user_interaction(meta: &Option<serde_json::Value>) -> bool
 /// `result.structuredContent` straight off the raw result).
 #[derive(Debug, Deserialize)]
 struct ToolCallResponse {
-    #[serde(default)]
-    content: serde_json::Value,
+    #[serde(
+        default = "null_projection",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    content: Utf16JsonProjection,
     #[serde(rename = "isError", default)]
     is_error: bool,
-    #[serde(rename = "_meta", default)]
-    meta: Option<serde_json::Value>,
-    #[serde(rename = "structuredContent", default)]
-    structured_content: Option<serde_json::Value>,
+    #[serde(
+        rename = "_meta",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    meta: Option<Utf16JsonProjection>,
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option"
+    )]
+    structured_content: Option<Utf16JsonProjection>,
+}
+
+fn decode_tool_call_response(source: &str) -> Result<McpToolResultDto, McpClientError> {
+    let response = serde_json::from_str::<ToolCallResponse>(source)
+        .map_err(|error| McpClientError::Deserialize(error.to_string().into()))?;
+    Ok(McpToolResultDto {
+        content: response.content,
+        is_error: response.is_error,
+        meta: response.meta,
+        structured_content: response.structured_content,
+    })
 }
 
 /// Errors emitted by [`McpClient`] operations.
@@ -2272,8 +3052,8 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     },
     /// Underlying JSON-RPC transport returned an error response or framing
     /// failure; the inner string is the stringified `JsonRpcError`.
-    #[error("JSON-RPC error: {0}")]
-    Rpc(String),
+    #[error("JSON-RPC error: {}", .0.string_at("").unwrap_or_default())]
+    Rpc(UJP),
     /// HTTP status metadata retained by streamable HTTP/SSE transports.
     #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
     HttpResponse {
@@ -2283,18 +3063,56 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
         www_authenticate: Option<String>,
         /// Original transport error text. Retained for the MCP SDK's narrow
         /// HTTP-400 stale-session phrases; never emitted as telemetry.
-        message: String,
+        message: UJP,
     },
+    /// Native modern SDK or locally registered handler failure.
+    #[error(transparent)]
+    Result(#[from] McpResultError),
     /// Server returned a syntactically valid response that did not match
     /// the expected DTO shape.
-    #[error("malformed response: {0}")]
-    Deserialize(String),
+    #[error("malformed response: {}", .0.string_at("").unwrap_or_default())]
+    Deserialize(UJP),
+    /// Server returned structured tool output that failed its advertised
+    /// output schema. The validator detail stays in the source projection so
+    /// tool-result hooks and error adapters do not have to stringify it.
+    #[error("MCP output for {full_name} does not match its schema ({keywords:?})")]
+    OutputSchemaInvalid {
+        full_name: String,
+        detail: Utf16JsonProjection,
+        keywords: Vec<String>,
+    },
+    /// The advertised output schema is invalid. Keep its validator detail as
+    /// a source projection rather than formatting it into a lossy string.
+    #[error("MCP output schema for {full_name} is invalid")]
+    OutputSchemaCompileInvalid {
+        full_name: String,
+        detail: Utf16JsonProjection,
+    },
     /// `initialize` handshake failed.
-    #[error("initialize failed: {0}")]
-    Initialize(String),
+    #[error("initialize failed: {}", .0.string_at("").unwrap_or_default())]
+    Initialize(UJP),
 }
 
 impl McpClientError {
+    /// Return model-facing error text as a source projection. Remote JSON-RPC
+    /// and schema diagnostics retain their original UTF-16 data; only errors
+    /// created from Rust diagnostics are projected from valid UTF-8 text.
+    #[must_use]
+    pub fn source_diagnostic(&self) -> Option<UJP> {
+        match self {
+            Self::Rpc(message) => Some(prepend_source_text("JSON-RPC error: ", message)),
+            Self::HttpResponse { message, .. } => Some(message.clone()),
+            Self::Result(error) => Some(result_error_diagnostic(error)),
+            Self::Deserialize(message) => {
+                Some(prepend_source_text("malformed response: ", message))
+            }
+            Self::OutputSchemaInvalid { detail, .. }
+            | Self::OutputSchemaCompileInvalid { detail, .. } => Some(detail.clone()),
+            Self::Initialize(message) => Some(prepend_source_text("initialize failed: ", message)),
+            Self::Timeout { .. } | Self::IdleTimeout { .. } => Some(self.to_string().into()),
+        }
+    }
+
     /// Whether this error permits one credential refresh and retry.
     #[must_use]
     pub fn is_auth_response(&self) -> bool {
@@ -2318,7 +3136,7 @@ impl McpClientError {
                 status: 404,
                 message,
                 ..
-            } if !message.contains("Failed to open SSE stream")
+            } if !source_contains_ascii(message, "Failed to open SSE stream")
         ) || matches!(
             self,
             Self::HttpResponse {
@@ -2329,8 +3147,10 @@ impl McpClientError {
         ) || matches!(
             self,
             Self::Rpc(message)
-                if (message.contains("code=-32000") && message.contains("Connection closed"))
-                    || ((message.contains("code=400") || message.contains("HTTP 400"))
+                if (source_contains_ascii(message, "code=-32000")
+                    && source_contains_ascii(message, "Connection closed"))
+                    || ((source_contains_ascii(message, "code=400")
+                        || source_contains_ascii(message, "HTTP 400"))
                         && has_stale_session_phrase(message))
         )
     }
@@ -2348,33 +3168,69 @@ impl McpClientError {
     }
 }
 
-fn has_stale_session_phrase(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("server not initialized")
-        || message.contains("no valid session id")
-        || message.contains("mcp-session-id header is required")
+fn source_contains_ascii(source: &UJP, needle: &str) -> bool {
+    let Some(units) = source.string_units("") else {
+        return false;
+    };
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    let fold = |unit: u16| {
+        if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        }
+    };
+    units.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(&needle)
+            .all(|(actual, expected)| fold(*actual) == fold(*expected))
+    })
+}
+
+fn has_stale_session_phrase(message: &UJP) -> bool {
+    source_contains_ascii(message, "server not initialized")
+        || source_contains_ascii(message, "no valid session id")
+        || source_contains_ascii(message, "mcp-session-id header is required")
+}
+
+fn mcp_client_error_from_result(error: McpResultError) -> McpClientError {
+    match error {
+        McpResultError::Connection(rpc) => mcp_client_error_from_rpc(&rpc),
+        error => McpClientError::Result(error),
+    }
 }
 
 fn mcp_client_error_from_rpc(error: &jsonrpc::ConnectionError) -> McpClientError {
     if let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error {
-        if let Some(data) = remote.data.as_ref() {
+        if let Some(data) = remote
+            .data
+            .as_ref()
+            .and_then(|data| Utf16JsonProjection::parse(data.as_json()).ok())
+        {
             if let Some(status) = data
-                .get("httpStatus")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|status| u16::try_from(status).ok())
+                .number_at("/httpStatus")
+                .filter(|status| {
+                    status.fract() == 0.0 && *status >= 0.0 && *status <= u16::MAX as f64
+                })
+                .map(|status| status as u16)
             {
                 let www_authenticate = data
-                    .get("wwwAuthenticate")
-                    .and_then(serde_json::Value::as_str)
+                    .string_at("/wwwAuthenticate")
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
-                let body = data
-                    .get("body")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty());
+                let body = data.subprojection("/body").ok().filter(|value| {
+                    value
+                        .string_units("")
+                        .is_some_and(|units| !units.is_empty())
+                });
+                let remote_message = source_string_units(remote.message.code_units().to_vec());
                 let message = body.map_or_else(
-                    || remote.message.clone(),
-                    |body| format!("{}; {body}", remote.message),
+                    || remote_message.clone(),
+                    |body| {
+                        let separator = source_string("; ");
+                        concat_source_strings(&[&remote_message, &separator, &body])
+                    },
                 );
                 return McpClientError::HttpResponse {
                     status,
@@ -2385,16 +3241,17 @@ fn mcp_client_error_from_rpc(error: &jsonrpc::ConnectionError) -> McpClientError
         }
     }
 
-    let message = error.to_string();
-    let Some(marker) = message.find("MCP_HTTP_STATUS=") else {
-        return McpClientError::Rpc(message);
+    let message = connection_error_diagnostic(error);
+    let display = message.string_at("").unwrap_or_default();
+    let Some(marker) = display.find("MCP_HTTP_STATUS=") else {
+        return McpClientError::Rpc(message.into());
     };
-    let metadata = &message[marker + "MCP_HTTP_STATUS=".len()..];
+    let metadata = &display[marker + "MCP_HTTP_STATUS=".len()..];
     let Some((status, rest)) = metadata.split_once(';') else {
-        return McpClientError::Rpc(message);
+        return McpClientError::Rpc(message.into());
     };
     let Ok(status) = status.parse::<u16>() else {
-        return McpClientError::Rpc(message);
+        return McpClientError::Rpc(message.into());
     };
     let www_authenticate = rest
         .strip_prefix("WWW_AUTHENTICATE=")
@@ -2449,20 +3306,26 @@ mod constructor_tests {
         let error = jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(
             jsonrpc::messages::ResponseError {
                 code: -32_001,
-                message: "MCP_HTTP_STATUS=400;WWW_AUTHENTICATE=".to_string(),
-                data: Some(serde_json::json!({
-                    "httpStatus": 400,
-                    "wwwAuthenticate": null,
-                    "body": "Server not initialized"
-                })),
+                message: "MCP_HTTP_STATUS=400;WWW_AUTHENTICATE=".to_string().into(),
+                data: Some(
+                    jsonrpc::JsonPayload::from_serializable(&serde_json::json!({
+                        "httpStatus": 400,
+                        "wwwAuthenticate": null,
+                        "body": "Server not initialized"
+                    }))
+                    .unwrap(),
+                ),
             },
         ));
         let classified = mcp_client_error_from_rpc(&error);
         assert!(classified.is_session_expired());
         assert_eq!(classified.session_expired_error_code(), Some("400"));
 
-        let connection_closed =
-            McpClientError::Rpc("remote error: code=-32000, message=Connection closed".to_string());
+        let connection_closed = McpClientError::Rpc(
+            "remote error: code=-32000, message=Connection closed"
+                .to_string()
+                .into(),
+        );
         assert!(connection_closed.is_session_expired());
         assert_eq!(connection_closed.session_expired_error_code(), None);
     }
@@ -2472,7 +3335,7 @@ mod constructor_tests {
         let error = McpClientError::HttpResponse {
             status: 404,
             www_authenticate: None,
-            message: "Failed to open SSE stream".to_string(),
+            message: "Failed to open SSE stream".to_string().into(),
         };
         assert!(!error.is_session_expired());
     }
@@ -2507,7 +3370,7 @@ mod constructor_tests {
                 .expect("notification subscription must receive a server push")
                 .expect("the live connection must remain open");
         assert_eq!(notification.method, "notifications/resources/list_changed");
-        assert_eq!(notification.params, serde_json::json!({}));
+        assert_eq!(notification.params, source_object());
 
         // Dropping the stream releases only this receiver; the client remains
         // usable and other subscribers are not affected.
@@ -2584,6 +3447,8 @@ mod constructor_tests {
             "id": request["id"].clone(),
             "result": {
                 "resultType": "complete",
+                "ttlMs": 0,
+                "cacheScope": "private",
                 "tools": []
             }
         });
@@ -2715,14 +3580,8 @@ mod constructor_tests {
         // owns `_meta` / `structuredContent` decoding. (A full transport
         // loopback is exercised by the constructor tests above; here we assert
         // the byte-faithful passthrough deterministically.)
-        let body = serde_json::json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "isError": false,
-            "_meta": { "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } },
-            "structuredContent": { "rows": [{ "id": 7 }], "total": 1 },
-        });
-        let resp: super::ToolCallResponse =
-            serde_json::from_value(body).expect("decode tools/call body");
+        let body = r#"{"content":[{"type":"text","text":"\ud800"}],"isError":false,"_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#;
+        let resp = super::decode_tool_call_response(body).expect("decode tools/call body");
         let dto = super::McpToolResultDto {
             content: resp.content,
             is_error: resp.is_error,
@@ -2732,14 +3591,23 @@ mod constructor_tests {
 
         assert!(!dto.is_error);
         assert_eq!(
-            dto.meta.as_ref().expect("meta present"),
-            &serde_json::json!({ "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } }),
-            "_meta must round-trip byte-for-byte",
+            dto.content.string_units("/0/text").as_deref(),
+            Some([0xd800].as_slice()),
+            "content text must retain its exact JavaScript code unit",
         );
         assert_eq!(
-            dto.structured_content.as_ref().expect("structured present"),
-            &serde_json::json!({ "rows": [{ "id": 7 }], "total": 1 }),
-            "structuredContent must round-trip byte-for-byte",
+            dto.meta
+                .as_ref()
+                .expect("meta present")
+                .string_at("/anthropic~1trace"),
+            Some("abc"),
+        );
+        assert_eq!(
+            dto.structured_content
+                .as_ref()
+                .expect("structured present")
+                .number_at("/rows/0/id"),
+            Some(7.0),
         );
     }
 
@@ -2747,12 +3615,10 @@ mod constructor_tests {
     fn call_tool_absent_meta_yields_none_no_empty_object() {
         // A result WITHOUT `_meta` / `structuredContent` must decode to `None`
         // for both — never an empty object, never a panic.
-        let body = serde_json::json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "isError": false,
-        });
-        let resp: super::ToolCallResponse =
-            serde_json::from_value(body).expect("decode tools/call body");
+        let resp = super::decode_tool_call_response(
+            r#"{"content":[{"type":"text","text":"ok"}],"isError":false}"#,
+        )
+        .expect("decode tools/call body");
         assert!(resp.meta.is_none(), "absent _meta must be None");
         assert!(
             resp.structured_content.is_none(),
@@ -2760,8 +3626,7 @@ mod constructor_tests {
         );
 
         // Wholly empty body (server returned `{}`) is still safe.
-        let empty: super::ToolCallResponse =
-            serde_json::from_value(serde_json::json!({})).expect("decode empty body");
+        let empty = super::decode_tool_call_response("{}").expect("decode empty body");
         assert!(empty.meta.is_none());
         assert!(empty.structured_content.is_none());
         assert!(!empty.is_error);
@@ -2780,7 +3645,8 @@ mod constructor_tests {
             client
                 .call_tool_with_progress(
                     "mcp__filesystem__read_file",
-                    serde_json::json!({ "path": "/x" }),
+                    Utf16JsonProjection::from_serde_value(&serde_json::json!({ "path": "/x" }))
+                        .unwrap(),
                     Some("tu-123"),
                     None,
                 )
@@ -2834,7 +3700,7 @@ mod constructor_tests {
 
         let handle = tokio::spawn(async move {
             client
-                .call_tool("mcp__filesystem__read_file", serde_json::json!({}))
+                .call_tool("mcp__filesystem__read_file", source_object())
                 .await
         });
 
@@ -2883,7 +3749,7 @@ mod constructor_tests {
             client
                 .call_tool_with_progress(
                     "mcp__filesystem__read_file",
-                    serde_json::json!({}),
+                    source_object(),
                     Some("tu-9"),
                     Some(cb),
                 )
@@ -2948,7 +3814,7 @@ mod constructor_tests {
             McpProgressEvent {
                 progress: 3.0,
                 total: Some(10.0),
-                message: Some("halfway".to_string()),
+                message: Some(source_string("halfway")),
             },
         );
     }
@@ -2972,7 +3838,7 @@ mod constructor_tests {
             client
                 .call_tool_with_progress(
                     "mcp__filesystem__read_file",
-                    serde_json::json!({}),
+                    source_object(),
                     Some("tu-1"),
                     Some(cb),
                 )
@@ -3127,16 +3993,20 @@ mod constructor_tests {
         assert!(tools[1].requires_user_interaction);
         assert_eq!(
             tools[1].output_schema,
-            Some(serde_json::json!({
-                "type": "object",
-                "properties": { "ok": { "type": "boolean" } }
-            }))
+            Some(
+                Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } }
+                }))
+                .unwrap()
+            )
         );
         assert_eq!(
             tools[1]
                 .annotations
                 .as_ref()
-                .and_then(|a| a.title.as_deref()),
+                .and_then(|a| a.title.as_ref())
+                .and_then(|title| title.string_at("")),
             Some("B")
         );
         assert_eq!(tools[1].icons.len(), 1);
@@ -3144,19 +4014,22 @@ mod constructor_tests {
             tools[1]
                 .annotations
                 .as_ref()
-                .and_then(|annotations| annotations.extra.get("vendor/riskTier")),
-            Some(&serde_json::json!("reviewed"))
+                .and_then(|annotations| annotations.extra.string_at("/vendor~1riskTier")),
+            Some("reviewed")
         );
         assert_eq!(
-            tools[1].icons[0].extra.get("vendor/accent"),
-            Some(&serde_json::json!("blue"))
+            tools[1].icons[0].extra.string_at("/vendor~1accent"),
+            Some("blue")
         );
         assert_eq!(
             tools[1].meta,
-            Some(serde_json::json!({
-                "anthropic/requiresUserInteraction": true,
-                "openai/outputTemplate": "ui://example/widget.html"
-            }))
+            Some(
+                Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                    "anthropic/requiresUserInteraction": true,
+                    "openai/outputTemplate": "ui://example/widget.html"
+                }))
+                .unwrap()
+            )
         );
     }
 
@@ -3186,7 +4059,7 @@ mod constructor_tests {
             server_name: "srv".into(),
             tool_name: "write".into(),
             description: "write".into(),
-            input_schema: serde_json::json!({}),
+            input_schema: Utf16JsonProjection::parse("{}").unwrap(),
             output_schema: None,
             annotations: None,
             icons: Vec::new(),

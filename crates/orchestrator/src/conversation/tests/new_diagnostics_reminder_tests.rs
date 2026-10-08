@@ -1,15 +1,17 @@
 use super::*;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-struct MockDiag(Option<String>);
+struct MockDiag(Option<lingxi_core::types::utf16_json::Utf16JsonProjection>);
 #[async_trait::async_trait]
 impl lingxi_core::host::NewDiagnosticsSource for MockDiag {
-    async fn take_new_diagnostics_block(&self) -> Option<String> {
+    async fn take_new_diagnostics_block(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.0.clone()
     }
 }
@@ -36,7 +38,7 @@ fn orch_with_diag(
 #[tokio::test]
 async fn injects_block_when_source_has_new_diagnostics() {
     let block = "<new-diagnostics>The following new diagnostic issues were detected:\n\nx.rs:\n  \u{2718} [Line 1:1] boom</new-diagnostics>";
-    let orch = orch_with_diag(Some(Arc::new(MockDiag(Some(block.to_string())))));
+    let orch = orch_with_diag(Some(Arc::new(MockDiag(Some(block.into())))));
     let msg = orch
         .new_diagnostics_reminder_message()
         .await
@@ -57,13 +59,17 @@ async fn injects_block_when_source_has_new_diagnostics() {
 #[tokio::test]
 async fn no_reminder_without_source_or_when_empty() {
     // No source wired (the common no-LSP case).
-    assert!(orch_with_diag(None)
-        .new_diagnostics_reminder_message()
-        .await
-        .is_none());
+    assert!(
+        orch_with_diag(None)
+            .new_diagnostics_reminder_message()
+            .await
+            .is_none()
+    );
     // Source wired but nothing new.
-    assert!(orch_with_diag(Some(Arc::new(MockDiag(None))))
-        .new_diagnostics_reminder_message()
-        .await
-        .is_none());
+    assert!(
+        orch_with_diag(Some(Arc::new(MockDiag(None))))
+            .new_diagnostics_reminder_message()
+            .await
+            .is_none()
+    );
 }

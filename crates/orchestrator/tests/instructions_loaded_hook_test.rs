@@ -80,6 +80,126 @@ impl RuntimeSpawner for UnusedRuntime {
 struct RecordingHandler {
     log: Arc<Mutex<Vec<(PathBuf, InstructionsMemoryType, InstructionsLoadReason)>>>,
 }
+
+/// Capture the complete current native eager-hook payload. Acquisition and
+/// rendering are replayed over real files by memory_block's paired golden test.
+struct DetailedRecordingHandler {
+    log: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+#[async_trait]
+impl BuiltinHookHandler for DetailedRecordingHandler {
+    fn id(&self) -> &str {
+        "record-current-eager-payload"
+    }
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        if let HookEvent::InstructionsLoaded {
+            file_path,
+            memory_type,
+            load_reason,
+            globs,
+            trigger_file_path,
+            parent_file_path,
+        } = event
+        {
+            // The eager native producer supplies no lazy trigger.
+            assert!(trigger_file_path.is_none());
+            let mut payload = serde_json::json!({
+                "file_path": file_path,
+                "memory_type": memory_type,
+                "load_reason": load_reason,
+            });
+            if let Some(globs) = globs {
+                payload["globs"] = serde_json::json!(globs);
+            }
+            if let Some(parent) = parent_file_path {
+                payload["parent_file_path"] = serde_json::json!(parent);
+            }
+            self.log.lock().unwrap().push(payload);
+        }
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn current_native_eager_hook_goldens_preserve_globs_and_import_parents() {
+    let oracle: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/instruction_eager_2_1_287.json")).unwrap();
+    let cases = oracle["hookCases"].as_array().unwrap();
+    assert_eq!(cases.len(), 11);
+    for case in cases {
+        let cwd = PathBuf::from("/work/current-eager-fixture");
+        let replace = |text: &str| {
+            text.replace("/repo", &cwd.display().to_string())
+                .replace("CLAUDE.md", branding::MEMORY_FILE)
+                .replace(".claude", branding::DOT_DIR)
+        };
+        let files = case["expected"]["acquired"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| MemoryFile {
+                source_content: None,
+                path: replace(file["path"].as_str().unwrap()).into(),
+                parent: file
+                    .get("parent")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|path| PathBuf::from(replace(path))),
+                body: file["content"].as_str().unwrap().into(),
+                is_local_override: false,
+                tier: serde_json::from_value(file["type"].clone()).unwrap(),
+                globs: file
+                    .get("globs")
+                    .map(|value| serde_json::from_value(value.clone()).unwrap()),
+                raw_content: file
+                    .get("rawContent")
+                    .unwrap_or(&file["content"])
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                content_differs_from_disk: file["contentDiffersFromDisk"].as_bool().unwrap(),
+            })
+            .collect();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.register(builtin_hook(
+            "record-current-eager-payload",
+            HookEventType::InstructionsLoaded,
+        ));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(DetailedRecordingHandler { log: log.clone() }));
+        let orch = orch_with(Arc::new(exec), files, cwd.clone());
+        orch.fire_instructions_loaded().await;
+        let mut expected = case["expected"]["hooks"].clone();
+        for event in expected.as_array_mut().unwrap() {
+            for key in ["file_path", "parent_file_path"] {
+                if let Some(path) = event.get(key).and_then(serde_json::Value::as_str) {
+                    event[key] = serde_json::Value::String(replace(path));
+                }
+            }
+        }
+        assert_eq!(
+            serde_json::json!(log.lock().unwrap().clone()),
+            expected,
+            "{}",
+            case["name"]
+        );
+        // The same cached acquisition never fires a second eager batch.
+        orch.fire_instructions_loaded().await;
+        assert_eq!(
+            serde_json::json!(log.lock().unwrap().clone()),
+            expected,
+            "{}",
+            case["name"]
+        );
+    }
+}
 #[async_trait]
 impl BuiltinHookHandler for RecordingHandler {
     fn id(&self) -> &str {
@@ -191,6 +311,8 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
     // `memory_type` is now taken straight from each file's tier.
     let cwd = PathBuf::from("/work/repo");
     let project = MemoryFile {
+        parent: None,
+        source_content: None,
         path: cwd.join("LINGXI.md"),
         body: "project rules".into(),
         is_local_override: false,
@@ -200,6 +322,8 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         content_differs_from_disk: false,
     };
     let local = MemoryFile {
+        parent: None,
+        source_content: None,
         path: cwd.join("LINGXI.local.md"),
         body: "local override".into(),
         is_local_override: true,
@@ -246,6 +370,8 @@ async fn managed_tier_file_reports_memory_type_managed() {
 
     let cwd = PathBuf::from("/work/repo");
     let managed = MemoryFile {
+        parent: None,
+        source_content: None,
         path: PathBuf::from("/Library/Application Support/LingXi/LINGXI.md"),
         body: "enterprise policy".into(),
         is_local_override: false,
@@ -284,6 +410,8 @@ async fn failing_instructions_loaded_hook_does_not_break_fire() {
     exec.register_builtin(Arc::new(FailingHandler));
     let cwd = PathBuf::from("/work/repo");
     let file = MemoryFile {
+        parent: None,
+        source_content: None,
         path: cwd.join("LINGXI.md"),
         body: "x".into(),
         is_local_override: false,
@@ -308,6 +436,8 @@ async fn fire_instructions_loaded_is_noop_without_a_registered_hook() {
     let exec = exec_with_recorder(registry, Arc::new(RecordingHandler { log: log.clone() }));
     let cwd = PathBuf::from("/work/repo");
     let file = MemoryFile {
+        parent: None,
+        source_content: None,
         path: cwd.join("LINGXI.md"),
         body: "x".into(),
         is_local_override: false,

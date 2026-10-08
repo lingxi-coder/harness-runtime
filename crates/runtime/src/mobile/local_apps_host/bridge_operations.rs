@@ -1,13 +1,13 @@
-use super::public_ip;
-use super::read_limited_stream;
-use super::required_string;
 use super::BridgeFailure;
-use super::LocalAppsHostBroker;
 use super::LOCAL_APP_BRIDGE_CONTROL_BYTES;
 use super::LOCAL_APP_BRIDGE_FILE_BYTES;
 use super::LOCAL_APP_BRIDGE_LLM_BYTES;
+use super::LocalAppsHostBroker;
 use super::MAX_NETWORK_RESPONSE_BYTES;
 use super::UI_TIMEOUT;
+use super::public_ip;
+use super::read_limited_stream;
+use super::required_string;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::AppAuthorizationDecisionDto;
@@ -16,16 +16,17 @@ use client::protocol::local_apps::AppBridgeRequestDto;
 use client::protocol::local_apps::AppBridgeResponseDto;
 use client::protocol::local_apps::AppEventDto;
 use client::protocol::local_apps::AppUiRequestDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
-use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use serde_json::json;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
 use tokio::time::Duration;
+use tokio::time::timeout;
 
 impl LocalAppsHostBroker {
     pub(super) async fn request_ui(&self, request: AppUiRequestDto) -> Result<Value, String> {
@@ -91,7 +92,11 @@ impl LocalAppsHostBroker {
                 request_id: request.request_id,
                 app_id: request.app_id,
                 ok: true,
-                result_json: Some(value.to_string()),
+                result_json: Some(
+                    value
+                        .to_json_string()
+                        .expect("bridge response source projection is valid JSON"),
+                ),
                 error: None,
                 error_code: None,
             },
@@ -113,7 +118,7 @@ impl LocalAppsHostBroker {
     pub(super) async fn execute_bridge_inner(
         &self,
         request: &AppBridgeRequestDto,
-    ) -> Result<Value, BridgeFailure> {
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
         // Track every page request, not just the eventual mutation: an async
         // click handler may await a query/device bridge before issuing its
         // persisted write. Only MutateData receives the scoped event id.
@@ -136,7 +141,7 @@ impl LocalAppsHostBroker {
         &self,
         request: &AppBridgeRequestDto,
         qa_bridge_event_id: Option<&str>,
-    ) -> Result<Value, BridgeFailure> {
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
         let payload_json = request.payload_json.as_deref().unwrap_or("{}");
         let payload_limit = if matches!(
             request.operation,
@@ -178,6 +183,24 @@ impl LocalAppsHostBroker {
         })?;
         input.insert("app_id".into(), Value::String(request.app_id.clone()));
         match request.operation {
+            AppBridgeOperationDto::AgentSend => {
+                return self
+                    .agent_send_source_value(&request.app_id, &request.request_id, &payload)
+                    .await;
+            }
+            AppBridgeOperationDto::AgentStream => {
+                return self
+                    .agent_stream_source_value(&request.app_id, &request.request_id, &payload)
+                    .await;
+            }
+            AppBridgeOperationDto::LlmStream => {
+                return self
+                    .llm_stream_source_value(&request.app_id, &request.request_id, &payload)
+                    .await;
+            }
+            _ => {}
+        }
+        let result: Result<Value, BridgeFailure> = match request.operation {
             AppBridgeOperationDto::QueryData => self
                 .query_data_value(Value::Object(input))
                 .await
@@ -259,10 +282,7 @@ impl LocalAppsHostBroker {
             }
             AppBridgeOperationDto::MediaGet => self.media_value(&request.app_id, &payload).await,
             AppBridgeOperationDto::LlmChat => self.llm_chat_value(&request.app_id, &payload).await,
-            AppBridgeOperationDto::LlmStream => {
-                self.llm_stream_value(&request.app_id, &request.request_id, &payload)
-                    .await
-            }
+            AppBridgeOperationDto::LlmStream => unreachable!("handled with source response above"),
             AppBridgeOperationDto::AgentPost => {
                 self.agent_post_value(&request.app_id, &payload).await
             }
@@ -286,13 +306,8 @@ impl LocalAppsHostBroker {
                     .await
                     .map_err(BridgeFailure::from)
             }
-            AppBridgeOperationDto::AgentSend => {
-                self.agent_send_value(&request.app_id, &request.request_id, &payload)
-                    .await
-            }
-            AppBridgeOperationDto::AgentStream => {
-                self.agent_stream_value(&request.app_id, &request.request_id, &payload)
-                    .await
+            AppBridgeOperationDto::AgentSend | AppBridgeOperationDto::AgentStream => {
+                unreachable!("handled with source response above")
             }
             AppBridgeOperationDto::AgentCancel => {
                 self.agent_cancel_value(&request.app_id, &payload).await
@@ -322,7 +337,14 @@ impl LocalAppsHostBroker {
                 .await
                 .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
-        }
+        };
+        let value = result?;
+        Utf16JsonProjection::from_serde_value(&value).map_err(|error| {
+            BridgeFailure::coded(
+                "bridge_response_invalid",
+                format!("could not project generated bridge response: {error}"),
+            )
+        })
     }
     pub(super) fn build_bridge_invocation_context(
         &self,

@@ -37,7 +37,8 @@
 //! (the Conventions angle); the `--comment`/`--fix` sections need none. The
 //! agent-launching tool is `"Agent"` = LingXi's `AGENT_TOOL_NAME`.
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, source_from_units, BundledPromptFn, PromptPart};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 const BODY_LOW: &str = include_str!("code_review_body_low.md");
 const BODY_MEDIUM: &str = include_str!("code_review_body_medium.md");
@@ -77,39 +78,46 @@ fn body_for(effort: &str) -> &'static str {
 /// Parsed `/code-review` args (port of `wWp`/`ywo`/`iyt`).
 struct Parsed {
     effort: String,
-    target: String,
+    target: Utf16JsonProjection,
     comment: bool,
     fix: bool,
 }
 
 /// Port of `wWp(e)`: strip the `--comment`/`--fix` flags, then read the leading
 /// effort level (or `ultra`), with the remainder as the review target.
-fn parse_args(raw: &str) -> Parsed {
-    let trimmed = raw.trim();
+fn parse_args(raw: &Utf16JsonProjection) -> Parsed {
+    let units = raw.string_units("").unwrap_or_default();
+    let trimmed = trim_units(&units);
     // `ywo` rawFirstToken = first token of the trimmed RAW (before flag strip);
     // only used for the `ultra` check.
-    let raw_first = trimmed.split_whitespace().next().unwrap_or("");
+    let tokens = split_whitespace_units(&trimmed);
+    let raw_first = tokens
+        .first()
+        .and_then(|token| String::from_utf16(token).ok());
     // Strip the only two flags (whole-word). Token-based: realistic targets have
     // no significant internal whitespace, so this matches the reference regex.
     let mut comment = false;
     let mut fix = false;
-    let rest: Vec<&str> = trimmed
-        .split_whitespace()
-        .filter(|t| match *t {
-            "--comment" => {
+    let rest: Vec<Vec<u16>> = tokens
+        .into_iter()
+        .filter(|token| {
+            if token == &"--comment".encode_utf16().collect::<Vec<_>>() {
                 comment = true;
                 false
-            }
-            "--fix" => {
+            } else if token == &"--fix".encode_utf16().collect::<Vec<_>>() {
                 fix = true;
                 false
+            } else {
+                true
             }
-            _ => true,
         })
         .collect();
-    let target_after_first = || rest.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
+    let target_after_first = || join_tokens(rest.iter().skip(1));
 
-    if raw_first.eq_ignore_ascii_case("ultra") {
+    if raw_first
+        .as_deref()
+        .is_some_and(|token| token.eq_ignore_ascii_case("ultra"))
+    {
         // ultraFallback → `l="max"`; the fallback preamble is context-dependent
         // and omitted (see module docs).
         return Parsed {
@@ -120,7 +128,10 @@ fn parse_args(raw: &str) -> Parsed {
         };
     }
     // `iyt`: lowercase, alias `med`→`medium`, valid iff one of the 5 levels.
-    let first = rest.first().copied().unwrap_or("");
+    let first = rest
+        .first()
+        .and_then(|token| String::from_utf16(token).ok())
+        .unwrap_or_default();
     let lvl = first.to_ascii_lowercase();
     let lvl = if lvl == "med" {
         "medium".to_string()
@@ -138,7 +149,7 @@ fn parse_args(raw: &str) -> Parsed {
     // explicit undefined → `"medium"` (no session context), target = whole rest.
     Parsed {
         effort: "medium".into(),
-        target: rest.join(" "),
+        target: join_tokens(rest.iter()),
         comment,
         fix,
     }
@@ -148,30 +159,92 @@ fn parse_args(raw: &str) -> Parsed {
 pub struct CodeReviewPromptFn;
 
 impl BundledPromptFn for CodeReviewPromptFn {
-    fn build(&self, args: &str) -> String {
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
         let p = parse_args(args);
         // Reference inline assembly: `v + EWp(effort) + (comment?vWp) + (fix?CWp)`
         // (the `Hrb` preamble and `T.text` are empty for the reachable default).
-        let mut out = String::new();
-        if !p.target.is_empty() {
-            out.push_str("Review target: `");
-            out.push_str(&p.target);
-            out.push_str("`\n\n");
+        let mut parts = Vec::new();
+        if !p
+            .target
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
+            parts.push(PromptPart::Text("Review target: `"));
+            parts.push(PromptPart::Source(&p.target));
+            parts.push(PromptPart::Text("`\n\n"));
         }
-        out.push_str(body_for(&p.effort));
+        parts.push(PromptPart::Text(body_for(&p.effort)));
         if p.comment {
-            out.push_str(COMMENT_SECTION);
+            parts.push(PromptPart::Text(COMMENT_SECTION));
         }
         if p.fix {
-            out.push_str(FIX_SECTION);
+            parts.push(PromptPart::Text(FIX_SECTION));
         }
-        out
+        source_concat(parts)
     }
+}
+
+fn trim_units(units: &[u16]) -> Vec<u16> {
+    let is_whitespace = |unit: u16| {
+        char::from_u32(u32::from(unit))
+            .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+    };
+    let mut start = 0;
+    let mut end = units.len();
+    while start < end && is_whitespace(units[start]) {
+        start += 1;
+    }
+    while end > start && is_whitespace(units[end - 1]) {
+        end -= 1;
+    }
+    units[start..end].to_vec()
+}
+
+fn split_whitespace_units(input: &[u16]) -> Vec<Vec<u16>> {
+    let is_whitespace = |unit: u16| {
+        char::from_u32(u32::from(unit))
+            .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+    };
+    let mut tokens = Vec::new();
+    let mut current = Vec::new();
+    for unit in input {
+        if is_whitespace(*unit) {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(*unit);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn join_tokens<'a>(tokens: impl Iterator<Item = &'a Vec<u16>>) -> Utf16JsonProjection {
+    let mut joined = Vec::new();
+    for token in tokens {
+        if !joined.is_empty() {
+            joined.push(b' ' as u16);
+        }
+        joined.extend_from_slice(token);
+    }
+    source_from_units(joined)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
+
+    fn build_display(args: &str) -> String {
+        CodeReviewPromptFn
+            .build(&args.into())
+            .string_at("")
+            .unwrap()
+            .to_owned()
+    }
 
     #[test]
     fn bodies_are_branded_and_resolved() {
@@ -195,32 +268,32 @@ mod tests {
     #[test]
     fn default_is_the_medium_body() {
         // No args ⇒ medium effort, no target — exactly the medium body.
-        assert_eq!(CodeReviewPromptFn.build(""), BODY_MEDIUM);
-        assert_eq!(CodeReviewPromptFn.build("   "), BODY_MEDIUM);
+        assert_eq!(build_display(""), BODY_MEDIUM);
+        assert_eq!(build_display("   "), BODY_MEDIUM);
     }
 
     #[test]
     fn explicit_effort_selects_the_body() {
-        assert_eq!(CodeReviewPromptFn.build("low"), BODY_LOW);
-        assert_eq!(CodeReviewPromptFn.build("high"), BODY_HIGH);
-        assert_eq!(CodeReviewPromptFn.build("xhigh"), BODY_XHIGH);
-        assert_eq!(CodeReviewPromptFn.build("max"), BODY_MAX);
+        assert_eq!(build_display("low"), BODY_LOW);
+        assert_eq!(build_display("high"), BODY_HIGH);
+        assert_eq!(build_display("xhigh"), BODY_XHIGH);
+        assert_eq!(build_display("max"), BODY_MAX);
         // `med` aliases to medium; case-insensitive.
-        assert_eq!(CodeReviewPromptFn.build("med"), BODY_MEDIUM);
-        assert_eq!(CodeReviewPromptFn.build("HIGH"), BODY_HIGH);
+        assert_eq!(build_display("med"), BODY_MEDIUM);
+        assert_eq!(build_display("HIGH"), BODY_HIGH);
         // ultra maps to the max body.
-        assert_eq!(CodeReviewPromptFn.build("ultra"), BODY_MAX);
+        assert_eq!(build_display("ultra"), BODY_MAX);
     }
 
     #[test]
     fn target_prepends_review_target_line() {
         assert_eq!(
-            CodeReviewPromptFn.build("pull/42"),
+            build_display("pull/42"),
             format!("Review target: `pull/42`\n\n{BODY_MEDIUM}")
         );
         // Level + target.
         assert_eq!(
-            CodeReviewPromptFn.build("high src/foo.rs"),
+            build_display("high src/foo.rs"),
             format!("Review target: `src/foo.rs`\n\n{BODY_HIGH}")
         );
     }
@@ -229,16 +302,16 @@ mod tests {
     fn flags_append_their_sections_and_are_stripped_from_target() {
         // --comment / --fix appended; not treated as the target.
         assert_eq!(
-            CodeReviewPromptFn.build("--comment"),
+            build_display("--comment"),
             format!("{BODY_MEDIUM}{COMMENT_SECTION}")
         );
         assert_eq!(
-            CodeReviewPromptFn.build("--fix"),
+            build_display("--fix"),
             format!("{BODY_MEDIUM}{FIX_SECTION}")
         );
         // Level + flags + target, both sections in order.
         assert_eq!(
-            CodeReviewPromptFn.build("high --fix --comment pull/9"),
+            build_display("high --fix --comment pull/9"),
             format!("Review target: `pull/9`\n\n{BODY_HIGH}{COMMENT_SECTION}{FIX_SECTION}")
         );
     }

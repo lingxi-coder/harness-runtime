@@ -23,7 +23,7 @@
 //! is emitted for any non-empty instruction (documented; the no-arg usage path
 //! is exact).
 
-use crate::BundledPromptFn;
+use crate::model::{source_concat, trim_source_text, BundledPromptFn, PromptPart};
 
 /// The orchestration template (`_rb`), fully resolved except the `${e}`
 /// instruction placeholder, substituted in [`BatchPromptFn::build`].
@@ -45,14 +45,25 @@ pub(crate) const BATCH_ARGUMENT_HINT: &str = "<instruction>";
 pub struct BatchPromptFn;
 
 impl BundledPromptFn for BatchPromptFn {
-    fn build(&self, args: &str) -> String {
-        let t = args.trim();
-        if t.is_empty() {
-            BATCH_USAGE.to_string()
+    fn build(
+        &self,
+        args: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        let target = trim_source_text(args);
+        if target
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+        {
+            BATCH_USAGE.into()
         } else {
-            // `_rb(t)`: substitute the instruction. (The `await BE()` git guard
-            // is a runtime check unavailable here; see module docs.)
-            BATCH_TEMPLATE.replace("${e}", t)
+            let (prefix, suffix) = BATCH_TEMPLATE
+                .split_once("${e}")
+                .expect("batch template has one instruction interpolation");
+            source_concat([
+                PromptPart::Text(prefix),
+                PromptPart::Source(&target),
+                PromptPart::Text(suffix),
+            ])
         }
     }
 }
@@ -60,6 +71,7 @@ impl BundledPromptFn for BatchPromptFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[test]
     fn template_is_resolved_except_the_instruction() {
@@ -81,16 +93,22 @@ mod tests {
 
     #[test]
     fn empty_arg_returns_usage() {
-        assert_eq!(BatchPromptFn.build(""), BATCH_USAGE);
-        assert_eq!(BatchPromptFn.build("   "), BATCH_USAGE);
+        assert_eq!(
+            BatchPromptFn.build(&"".into()).string_at(""),
+            Some(BATCH_USAGE)
+        );
+        assert_eq!(
+            BatchPromptFn.build(&"   ".into()).string_at(""),
+            Some(BATCH_USAGE)
+        );
         assert!(BatchPromptFn
-            .build("")
+            .build(&"".into())
             .starts_with("Provide an instruction"));
     }
 
     #[test]
     fn instruction_is_substituted_into_the_template() {
-        let out = BatchPromptFn.build("migrate lodash to native");
+        let out = BatchPromptFn.build(&"migrate lodash to native".into());
         assert!(!out.contains("${e}"));
         assert!(out.contains("## User Instruction\n\nmigrate lodash to native"));
         assert!(out.starts_with("# Batch: Parallel Work Orchestration"));

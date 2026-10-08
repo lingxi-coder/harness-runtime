@@ -31,7 +31,7 @@ impl BuiltinCommandHandler for UsageHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let cost = self.handle.snapshot_cost().await;
         CommandResult::Done {
-            display: Some(render_usage_snapshot(&cost)),
+            display: Some((render_usage_snapshot(&cost)).into()),
         }
     }
 
@@ -56,8 +56,8 @@ mod tests {
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "usage".to_string(),
-            raw_args: String::new(),
+            name: "usage".into(),
+            raw_args: String::new().into(),
             positional_args: Vec::new(),
         }
     }

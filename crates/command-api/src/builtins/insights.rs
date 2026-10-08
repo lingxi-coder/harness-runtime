@@ -11,9 +11,10 @@
 //! user-supplied args are surfaced here from `args.raw_args`.
 
 use crate::builtin_support::names::core_description;
-use crate::model::{BuiltinCommandHandler, CommandResult};
+use crate::model::{source_concat, BuiltinCommandHandler, CommandResult, PromptPart};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// `/insights` handler — returns the insights prompt as `InjectMessage`.
 ///
@@ -52,17 +53,12 @@ impl BuiltinCommandHandler for InsightsHandler {
 /// line only when `args` is non-empty (the TS reads `args` solely to detect
 /// the `--homespaces` collection flag; here any raw args are surfaced so the
 /// next turn can honor them).
-fn build_prompt(args: &str) -> String {
-    let additional = if args.is_empty() {
-        String::new()
-    } else {
-        format!("Additional user input: {args}\n")
-    };
+fn build_prompt(args: &Utf16JsonProjection) -> Utf16JsonProjection {
     // claude-code 2.1.205 framing — single-newline sections, the
     // for-your-context-only summary label, and the verbatim-output
     // instruction (the older "Here is what the user sees:" / "Now output the
     // following message exactly:" wording is gone from the binary).
-    format!(
+    let framing = format!(
         r#"The user just ran /insights to generate a usage report analyzing their LingXi sessions.
 Here is the full insights data:
 {{insights_json}}
@@ -77,18 +73,29 @@ Your shareable insights report is ready:
 {{report_url}}
 Want to dig into any section or try one of the suggestions?
 </message>
-{additional}"#
-    )
+"#
+    );
+    if args.string_units("").is_some_and(|units| units.is_empty()) {
+        framing.into()
+    } else {
+        source_concat([
+            PromptPart::Text(&framing),
+            PromptPart::Text("Additional user input: "),
+            PromptPart::Source(args),
+            PromptPart::Text("\n"),
+        ])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
-            name: "insights".to_string(),
-            raw_args: raw.to_string(),
+            name: "insights".into(),
+            raw_args: raw.into(),
             positional_args: vec![],
         }
     }
@@ -98,21 +105,28 @@ mod tests {
         let h = InsightsHandler::new();
         match h.handle(&args("")).await {
             CommandResult::InjectMessage { content } => {
-                assert!(content.contains(
+                assert!(content.string_at("").unwrap().contains(
                     "The user just ran /insights to generate a usage report analyzing their LingXi sessions."
                 ));
-                assert!(content.contains(
+                assert!(content.string_at("").unwrap().contains(
                     "Output the text between <message> tags verbatim as your entire response. Do not omit any line:"
                 ));
-                assert!(content.contains(
+                assert!(content.string_at("").unwrap().contains(
                     "At-a-glance summary (for your context only — the user has not seen any output yet):"
                 ));
-                assert!(content.contains("Your shareable insights report is ready:"));
-                assert!(
-                    content.contains("Want to dig into any section or try one of the suggestions?")
-                );
+                assert!(content
+                    .string_at("")
+                    .unwrap()
+                    .contains("Your shareable insights report is ready:"));
+                assert!(content
+                    .string_at("")
+                    .unwrap()
+                    .contains("Want to dig into any section or try one of the suggestions?"));
                 // No args => no "Additional user input:" line.
-                assert!(!content.contains("Additional user input:"));
+                assert!(!content
+                    .string_at("")
+                    .unwrap()
+                    .contains("Additional user input:"));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }
@@ -123,7 +137,10 @@ mod tests {
         let h = InsightsHandler::new();
         match h.handle(&args("--homespaces")).await {
             CommandResult::InjectMessage { content } => {
-                assert!(content.contains("Additional user input: --homespaces"));
+                assert!(content
+                    .string_at("")
+                    .unwrap()
+                    .contains("Additional user input: --homespaces"));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

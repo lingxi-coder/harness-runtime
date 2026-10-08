@@ -10,16 +10,20 @@
 use super::{BridgeFailure, LocalAppsHostBroker};
 use async_trait::async_trait;
 use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::{AppAgentProfileProposalDto, AppCapabilityKindDto, AppEventDto};
+use client::protocol::local_apps::{
+    AppAgentProfileProposalDto, AppAgentTerminalErrorDto, AppAgentTurnResponseDto,
+    AppCapabilityKindDto, AppEventDto,
+};
 use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use local_apps::mailbox::{load_mailbox, save_mailbox};
 use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
     AppCapability, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -110,7 +114,8 @@ pub(crate) struct AgentOutputStream {
     app_id: String,
     request_id: String,
     stream_id: Option<String>,
-    text: tokio::sync::Mutex<String>,
+    text_code_units: tokio::sync::Mutex<Vec<u16>>,
+    terminal_error: tokio::sync::Mutex<Option<AppAgentTerminalErrorDto>>,
     next_seq: AtomicU64,
     usage: Arc<AgentTurnUsageState>,
     max_tokens: Option<u32>,
@@ -140,7 +145,8 @@ impl AgentOutputStream {
             app_id: app_id.to_string(),
             request_id: request_id.to_string(),
             stream_id,
-            text: tokio::sync::Mutex::new(String::new()),
+            text_code_units: tokio::sync::Mutex::new(Vec::new()),
+            terminal_error: tokio::sync::Mutex::new(None),
             next_seq: AtomicU64::new(0),
             usage: Arc::new(AgentTurnUsageState::default()),
             max_tokens,
@@ -222,8 +228,19 @@ impl AgentOutputStream {
         .await;
     }
 
-    pub(crate) async fn text_snapshot(&self) -> String {
-        self.text.lock().await.clone()
+    pub(crate) async fn display_text_snapshot(&self) -> String {
+        let code_units = self.text_code_units.lock().await;
+        String::from_utf16_lossy(&code_units)
+    }
+
+    async fn terminal_error_snapshot(&self) -> Option<AppAgentTerminalErrorDto> {
+        self.terminal_error.lock().await.clone()
+    }
+
+    pub(super) async fn text_source_snapshot(&self) -> Utf16JsonProjection {
+        let code_units = self.text_code_units.lock().await.clone();
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&code_units), code_units)
+            .expect("display text is derived from the exact UTF-16 source")
     }
 
     pub(crate) fn is_streaming(&self) -> bool {
@@ -239,11 +256,67 @@ impl AgentOutputStream {
     }
 }
 
+pub(super) fn source_text(text: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect())
+        .expect("Rust text is a valid root string")
+}
+
+fn agent_turn_response_source(
+    session_id: &str,
+    turn_id: &str,
+    stream_id: Option<&str>,
+    cancelled: bool,
+    text: Utf16JsonProjection,
+    terminal_error: Option<AppAgentTerminalErrorDto>,
+) -> Utf16JsonProjection {
+    let code_units = text
+        .string_units("")
+        .expect("agent turn response text is a root JSON string");
+    let response = AppAgentTurnResponseDto {
+        cancelled,
+        session_id: session_id.to_owned(),
+        stream_id: stream_id.map(str::to_owned),
+        text: client::protocol::text::ClientTextDto::from_code_units(code_units),
+        turn_id: turn_id.to_owned(),
+        terminal_error,
+    };
+    let source = serde_json::to_string(&response)
+        .expect("agent turn response DTO serializes with exact UTF-16 text");
+    Utf16JsonProjection::parse(&source).expect("agent turn response is valid source JSON")
+}
+
 #[async_trait]
 impl OutputStream for AgentOutputStream {
-    async fn emit_text(&self, text: &str) {
+    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+        let terminal_error = AppAgentTerminalErrorDto {
+            api_error_status,
+            terminal_reason: terminal_reason.to_owned(),
+        };
+        *self.terminal_error.lock().await = Some(terminal_error.clone());
+        let Some(stream_id) = &self.stream_id else {
+            return;
+        };
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        self.emit_frame(
+            client::protocol::local_apps::AppBridgeStreamFrameDto::TerminalApiError {
+                app_id: self.app_id.clone(),
+                request_id: self.request_id.clone(),
+                stream_id: stream_id.clone(),
+                seq,
+                api_error_status: terminal_error.api_error_status,
+                terminal_reason: terminal_error.terminal_reason,
+            },
+        )
+        .await;
+    }
+
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let code_units = text
+            .string_units("")
+            .expect("OutputStream text is a root-string source projection");
+        let display = String::from_utf16_lossy(&code_units);
         if let Some(max_tokens) = self.max_tokens {
-            let estimated = text.len().div_ceil(4) as u64;
+            let estimated = display.len().div_ceil(4) as u64;
             let max_tokens = u64::from(max_tokens);
             let mut current = self.usage.output_tokens.load(Ordering::Acquire);
             loop {
@@ -268,20 +341,23 @@ impl OutputStream for AgentOutputStream {
         } else {
             self.usage
                 .output_tokens
-                .fetch_add(text.len().div_ceil(4) as u64, Ordering::AcqRel);
+                .fetch_add(display.len().div_ceil(4) as u64, Ordering::AcqRel);
         }
-        self.text.lock().await.push_str(text);
+        self.text_code_units.lock().await.extend(code_units);
         let Some(stream_id) = &self.stream_id else {
             return;
         };
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let data_json = Utf16JsonProjection::object(vec![("text".to_string(), text.clone())])
+            .and_then(|value| value.to_json_string())
+            .expect("text data frame is a valid source JSON object");
         self.emit_frame(
             client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
                 app_id: self.app_id.clone(),
                 request_id: self.request_id.clone(),
                 stream_id: stream_id.clone(),
                 seq,
-                data_json: serde_json::json!({"text": text}).to_string(),
+                data_json,
             },
         )
         .await;
@@ -331,7 +407,15 @@ impl AgentOutputRouter {
 
 #[async_trait]
 impl OutputStream for AgentOutputRouter {
-    async fn emit_text(&self, text: &str) {
+    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+        if let Some(target) = self.target().await {
+            target
+                .emit_terminal_api_error(api_error_status, terminal_reason)
+                .await;
+        }
+    }
+
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
         if let Some(target) = self.target().await {
             target.emit_text(text).await;
         }
@@ -582,6 +666,27 @@ impl LocalAppsHostBroker {
         payload: &Value,
         streaming: bool,
     ) -> Result<Value, BridgeFailure> {
+        let source = self
+            .run_agent_turn_source(app_id, request_id, payload, streaming)
+            .await?;
+        let json = source.to_json_string().map_err(|error| {
+            BridgeFailure::coded("agent_failed", format!("serialize Agent response: {error}"))
+        })?;
+        serde_json::from_str(&json).map_err(|error| {
+            BridgeFailure::coded(
+                "agent_failed",
+                format!("materialize Agent response: {error}"),
+            )
+        })
+    }
+
+    async fn run_agent_turn_source(
+        &self,
+        app_id: &str,
+        request_id: &str,
+        payload: &Value,
+        streaming: bool,
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
         let session_id = payload
             .get("sessionId")
             .or_else(|| payload.get("session_id"))
@@ -694,7 +799,8 @@ impl LocalAppsHostBroker {
         self.agent_turns.lock().await.remove(&turn_id);
         let cancelled = control.cancel.is_cancelled();
         let usage = output.usage_snapshot();
-        let text = output.text_snapshot().await;
+        let text = output.text_source_snapshot().await;
+        let terminal_error = output.terminal_error_snapshot().await;
         let result = match run_result {
             Ok(_) if cancelled => {
                 output.cancelled("cancelled").await;
@@ -708,13 +814,14 @@ impl LocalAppsHostBroker {
                 )
                 .await
                 .map_err(BridgeFailure::from)?;
-                json!({
-                    "sessionId": session_id,
-                    "turnId": turn_id,
-                    "streamId": stream_id,
-                    "cancelled": true,
-                    "text": text,
-                })
+                agent_turn_response_source(
+                    session_id,
+                    &turn_id,
+                    stream_id.as_deref(),
+                    true,
+                    text,
+                    terminal_error,
+                )
             }
             Ok(_) => {
                 output.completed().await;
@@ -728,13 +835,14 @@ impl LocalAppsHostBroker {
                 )
                 .await
                 .map_err(BridgeFailure::from)?;
-                json!({
-                    "sessionId": session_id,
-                    "turnId": turn_id,
-                    "streamId": stream_id,
-                    "cancelled": false,
-                    "text": text,
-                })
+                agent_turn_response_source(
+                    session_id,
+                    &turn_id,
+                    stream_id.as_deref(),
+                    false,
+                    text,
+                    terminal_error,
+                )
             }
             Err(message) => {
                 let code = if cancelled {
@@ -761,6 +869,26 @@ impl LocalAppsHostBroker {
             }
         };
         Ok(result)
+    }
+
+    pub(super) async fn agent_send_source_value(
+        &self,
+        app_id: &str,
+        request_id: &str,
+        payload: &Value,
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
+        self.run_agent_turn_source(app_id, request_id, payload, false)
+            .await
+    }
+
+    pub(super) async fn agent_stream_source_value(
+        &self,
+        app_id: &str,
+        request_id: &str,
+        payload: &Value,
+    ) -> Result<Utf16JsonProjection, BridgeFailure> {
+        self.run_agent_turn_source(app_id, request_id, payload, true)
+            .await
     }
 
     pub(super) async fn agent_send_value(
@@ -1104,7 +1232,9 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor};
+    use super::{
+        AgentOutputStream, LocalAppsAgentExecutor, source_text, update_agent_session_after_turn,
+    };
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
     use client::adapter::{ClientEventSink, MockSink};
@@ -1114,14 +1244,15 @@ mod tests {
         AppUiRequestDto,
     };
     use lingxi_core::host::OutputStream;
-    use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use local_apps::mailbox::{MAX_MAILBOX_EVENTS, load_mailbox};
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AgentSessionRecord,
-        AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout, AppService,
-        NoopAppEventObserver,
+        AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout,
+        AppService, NoopAppEventObserver, load_manifest, load_permissions, save_manifest,
+        save_permissions,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1138,6 +1269,8 @@ mod tests {
 
     struct EchoAgentExecutor;
 
+    struct LoneSurrogateAgentExecutor;
+
     #[async_trait]
     impl LocalAppsAgentExecutor for EchoAgentExecutor {
         async fn run(
@@ -1150,7 +1283,26 @@ mod tests {
             _cancel: CancellationToken,
             output: Arc<AgentOutputStream>,
         ) -> Result<(), String> {
-            output.emit_text(&prompt).await;
+            output.emit_text(&source_text(&prompt)).await;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl LocalAppsAgentExecutor for LoneSurrogateAgentExecutor {
+        async fn run(
+            &self,
+            _app_id: &str,
+            _session_id: &str,
+            _prompt: String,
+            _session: AgentSessionRecord,
+            _profile: AppAgentProfile,
+            _cancel: CancellationToken,
+            output: Arc<AgentOutputStream>,
+        ) -> Result<(), String> {
+            let source =
+                Utf16JsonProjection::parse(r#""x\ud800y""#).map_err(|error| error.to_string())?;
+            output.emit_text(&source).await;
             Ok(())
         }
     }
@@ -1492,10 +1644,11 @@ mod tests {
     async fn agent_send_and_stream_use_host_owned_session_lifecycle() {
         let h = harness().await;
         declare_and_grant_agent_sessions(&h);
-        assert!(h
-            .broker
-            .attach_agent_executor(Arc::new(EchoAgentExecutor))
-            .is_ok());
+        assert!(
+            h.broker
+                .attach_agent_executor(Arc::new(EchoAgentExecutor))
+                .is_ok()
+        );
         let session = h
             .broker
             .agent_session_create_value(json!({"app_id": h.app_id}))
@@ -1545,13 +1698,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_send_source_result_preserves_lone_surrogate_text() {
+        let h = harness().await;
+        declare_and_grant_agent_sessions(&h);
+        assert!(
+            h.broker
+                .attach_agent_executor(Arc::new(LoneSurrogateAgentExecutor))
+                .is_ok()
+        );
+        let session = h
+            .broker
+            .agent_session_create_value(json!({"app_id": h.app_id}))
+            .await
+            .expect("create Agent session");
+        let session_id = session["sessionId"].as_str().expect("session id");
+
+        h.broker
+            .execute_bridge(AppBridgeRequestDto {
+                request_id: "request-source".into(),
+                app_id: h.app_id.clone(),
+                operation: AppBridgeOperationDto::AgentSend,
+                payload_json: Some(json!({"sessionId": session_id, "prompt": "probe"}).to_string()),
+            })
+            .await;
+        let result_json = h
+            .sink
+            .events()
+            .await
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response },
+                } => response.result_json,
+                _ => None,
+            })
+            .expect("successful bridge response JSON");
+        assert!(result_json.contains(r#""text":"x\ud800y""#));
+        let response = Utf16JsonProjection::parse(&result_json).unwrap();
+        assert_eq!(
+            response.string_units("/text"),
+            Some(vec![b'x' as u16, 0xd800, b'y' as u16])
+        );
+    }
+
+    #[tokio::test]
     async fn agent_session_budget_is_cumulative_and_closed_is_terminal() {
         let h = harness().await;
         declare_and_grant_agent_sessions(&h);
-        assert!(h
-            .broker
-            .attach_agent_executor(Arc::new(EchoAgentExecutor))
-            .is_ok());
+        assert!(
+            h.broker
+                .attach_agent_executor(Arc::new(EchoAgentExecutor))
+                .is_ok()
+        );
         let session = h
             .broker
             .agent_session_create_value(json!({
@@ -1655,7 +1853,7 @@ mod tests {
             Some("stream-1".into()),
         );
         output.started().await;
-        output.emit_text("hello").await;
+        output.emit_text(&source_text("hello")).await;
         output.completed().await;
 
         let events = sink.events().await;
@@ -1682,6 +1880,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_api_error_is_forwarded_as_its_own_app_bridge_frame() {
+        let sink = MockSink::arc();
+        let output = AgentOutputStream::new(
+            sink.clone() as Arc<dyn ClientEventSink>,
+            "abc12345",
+            "request-api-error",
+            Some("stream-api-error".into()),
+        );
+        output.started().await;
+        output
+            .emit_terminal_api_error(Some(413), "image_error")
+            .await;
+        output.completed().await;
+
+        let frames: Vec<_> = sink
+            .events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeStreamFrame { frame, frame_json },
+                } => Some((frame, frame_json)),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(
+            frames[1].0,
+            client::protocol::local_apps::AppBridgeStreamFrameDto::TerminalApiError {
+                seq: 0,
+                api_error_status: Some(413),
+                ref terminal_reason,
+                ..
+            } if terminal_reason == "image_error"
+        ));
+        assert!(frames[1].1.contains("terminalReason"));
+        assert!(frames[1].1.contains("image_error"));
+        assert!(matches!(
+            frames[2].0,
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Completed { seq: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn app_agent_result_keeps_terminal_facts_separate_from_model_text() {
+        let units = vec![b'a' as u16, 0xd800, b'b' as u16];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let response = agent_turn_response_source(
+            "session-1",
+            "turn-1",
+            None,
+            false,
+            text,
+            Some(AppAgentTerminalErrorDto {
+                api_error_status: None,
+                terminal_reason: "api_error".into(),
+            }),
+        );
+        let json = response.to_json_string().unwrap();
+        assert!(json.contains(r#""terminalError":{"terminalReason":"api_error"}"#));
+        let decoded: AppAgentTurnResponseDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.text.code_units, units);
+        assert_eq!(
+            decoded.terminal_error,
+            Some(AppAgentTerminalErrorDto {
+                api_error_status: None,
+                terminal_reason: "api_error".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_stream_data_json_preserves_lone_surrogate_source() {
+        let sink = MockSink::arc();
+        let output = AgentOutputStream::new(
+            sink.clone() as Arc<dyn ClientEventSink>,
+            "abc12345",
+            "request-source",
+            Some("stream-source".into()),
+        );
+        let units = vec![b'p' as u16, 0xd800, b'q' as u16];
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .expect("valid display and source units");
+        output.emit_text(&source).await;
+
+        let data_json = sink
+            .events()
+            .await
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::AppBridgeStreamFrame {
+                            frame:
+                                client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                                    data_json,
+                                    ..
+                                },
+                            ..
+                        },
+                } => Some(data_json),
+                _ => None,
+            })
+            .expect("text data frame");
+        assert_eq!(data_json, r#"{"text":"p\ud800q"}"#);
+        assert_eq!(
+            output.text_source_snapshot().await.string_units(""),
+            Some(units)
+        );
+    }
+
+    #[tokio::test]
     async fn agent_output_budget_cancels_after_the_allowed_output_tokens() {
         let sink = MockSink::arc();
         let cancel = CancellationToken::new();
@@ -1693,10 +2005,10 @@ mod tests {
             Some(cancel.clone()),
             Some(2),
         );
-        output.emit_text("12345678").await;
-        output.emit_text("x").await;
+        output.emit_text(&source_text("12345678")).await;
+        output.emit_text(&source_text("x")).await;
 
-        assert_eq!(output.text_snapshot().await, "12345678");
+        assert_eq!(output.display_text_snapshot().await, "12345678");
         assert!(cancel.is_cancelled());
         assert_eq!(output.usage_snapshot().output_tokens, 2);
     }

@@ -13,6 +13,7 @@
 //! [`ToolRegistry`]: crate::registry::ToolRegistry
 //! [`ToolRegistry::refresh_tool_search_view`]: crate::registry::ToolRegistry::refresh_tool_search_view
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::RwLock;
 
 /// One row in the searchable registry view.
@@ -21,11 +22,11 @@ pub struct ToolSearchEntry {
     /// Tool name (used for ranking + select/exact/prefix matching).
     pub name: String,
     /// Tool description (lower-signal token source, scored at +2).
-    pub description: String,
+    pub description: Utf16JsonProjection,
     /// Curated capability phrase (`tool.searchHint`), scored at +4. claude-code
     /// scores `searchHint` separately from (and higher than) the prompt-derived
     /// description.
-    pub search_hint: Option<String>,
+    pub search_hint: Option<Utf16JsonProjection>,
 }
 
 /// Read-only snapshot of the searchable (deferred) tool set fed to

@@ -18,8 +18,10 @@ use std::sync::{Arc, RwLock};
 
 use client::protocol::commands::WritableScopeDto;
 use lingxi_core::settings::env_parser;
-use lingxi_core::settings::merger::merge_raw_layer;
-use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
+use lingxi_core::settings::merger::{merge_raw_layer, merge_raw_source_layer};
+use lingxi_core::settings::schema::SettingsJson;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use migrations::settings_update::{read_settings_source, settings_path, WritableScope};
 use serde_json::Value;
 
 /// A layer a settings value can come from.
@@ -46,20 +48,19 @@ pub struct SettingsFile {
     pub parse_error: Option<String>,
 }
 
-/// A merged view of the layered settings: the effective values, which layer
-/// each one actually came from, the session's active (already-loaded)
-/// values, and which keys an administrator has locked via the managed layer.
+/// A merged view of the layered settings: an exact source effective object,
+/// its typed settings projection, which layer each setting came from, the
+/// session's active values, and administrator-locked keys.
 pub struct SettingsSnapshot {
     /// The on-disk state of every file layer this module reads.
     pub files: Vec<SettingsFile>,
-    /// The merged values, resolved the way the running engine resolves them:
-    /// every layer folded through [`merge_raw_layer`], which reads the
-    /// engine's own per-field strategy table. For most keys that IS "the
-    /// value from its highest-priority contributing layer", but for a key the
-    /// engine deep-merges (`hooks`, `permissions`, `providers`, …) or
-    /// concat-dedups (`trustedDirectories`, …) it is a UNION across layers —
-    /// see [`SettingsSnapshot::merged_keys`], which names exactly those keys.
+    /// Typed settings values for controls that consume `SettingsJson` fields.
+    /// The complete source object is [`Self::effective_source`].
     pub effective: BTreeMap<String, Value>,
+    /// The complete merged effective JSON source object. This is the client
+    /// and arbitrary-settings view; it stays in the flat UTF-16 carrier so a
+    /// legal lone surrogate never removes other values from a file snapshot.
+    pub effective_source: Utf16JsonProjection,
     /// The values this session actually had loaded at session start: the
     /// three file layers PLUS the managed (policy) overlay — but NOT `cli`
     /// or `env`. Supplied by the caller, not computed here (see
@@ -68,22 +69,23 @@ pub struct SettingsSnapshot {
     /// Managed is included on purpose: the running engine loads managed
     /// settings at startup exactly as much as it loads the three files, so a
     /// value here that left managed out would make a policy-pinned key
-    /// differ from `effective` (which always re-applies the SAME overlay on
-    /// every later listing) forever — reporting it as eternally "pending a
+    /// differ from `effective_source` (which always re-applies the SAME
+    /// overlay on every later listing) forever — reporting it as eternally "pending a
     /// restart" when no restart could ever apply it, since the user never
     /// wrote it and no restart changes it. This field answers "what did this
     /// session load at boot" — the baseline a pending-changes diff is taken
     /// against — and managed settings are part of that answer.
     pub active: BTreeMap<String, Value>,
-    /// For each key in `effective`, the highest-priority layer that defines
-    /// it. For a key in [`SettingsSnapshot::merged_keys`] this is NOT where
-    /// the effective value came from — the value came from several layers at
-    /// once — so a UI must consult `merged_keys` before it renders a
-    /// single-layer badge from this map.
+    /// For each representable key in `effective_source`, the highest-priority
+    /// layer that defines it. For a key in [`SettingsSnapshot::merged_keys`]
+    /// this is NOT where the effective value came from — the value came from
+    /// several layers at once — so a UI must consult `merged_keys` before it
+    /// renders a single-layer badge from this map.
     pub provenance: BTreeMap<String, SettingsLayer>,
-    /// The keys whose effective value is a CROSS-LAYER union rather than one
-    /// layer's value: the engine deep-merges or concat-dedups them (its
-    /// `schema::MERGE_STRATEGIES` table), and more than one layer contributed.
+    /// The keys whose exact source effective value is a CROSS-LAYER union
+    /// rather than one layer's value: the engine deep-merges or concat-dedups
+    /// them (its `schema::MERGE_STRATEGIES` table), and more than one layer
+    /// contributed.
     ///
     /// Naming a single layer for these in `provenance` would be false, which
     /// is why they are called out separately rather than folded into it: a
@@ -95,10 +97,10 @@ pub struct SettingsSnapshot {
     pub merged_keys: Vec<String>,
     /// Keys an administrator pinned through the managed-settings layer —
     /// exactly the keys of the `managed` overlay `build_snapshot` was given,
-    /// so every one of them also appears in `effective` with a `Managed`
+    /// so every non-null key also appears in `effective_source` with a `Managed`
     /// provenance. (The one exception is an overlay entry whose value is JSON
     /// `null`, which the engine reads as unset and which therefore reaches
-    /// neither `effective` nor `provenance` — see [`merge_raw_layer`].)
+    /// neither `effective_source` nor `provenance` — see [`merge_raw_layer`].)
     ///
     /// "Pinned" is about who controls the key, not about the whole value
     /// being the policy's: the engine folds the managed layer in through the
@@ -107,16 +109,19 @@ pub struct SettingsSnapshot {
     /// UNIONED with the file layers' — such a key appears here AND in
     /// [`SettingsSnapshot::merged_keys`].
     pub locked: Vec<String>,
-    /// Each FILE layer's OWN raw map, unmerged: `{"user": {...}, "project":
-    /// {...}, "local": {...}}`, keyed by [`layer_wire_name`]. This
+    /// Each FILE layer's OWN exact source JSON object, unmerged:
+    /// `{"user": {...}, "project": {...}, "local": {...}}`, keyed by
+    /// [`layer_wire_name`]. UTF-16 strings and keys remain source-preserving.
+    /// This
     /// is what a layered editor must pre-merge an object-valued key's write
-    /// against — `effective` is a cross-layer merge and can carry another
+    /// against — `effective_source` is a cross-layer merge and can carry another
     /// layer's entries for a key like `providers`, so basing a write on it
     /// would silently fork that other layer's data into whichever layer gets
     /// saved (see `ClientEvent::SettingsSnapshot::layers_json`'s doc). A
     /// layer whose file does not exist or failed to parse contributes an
-    /// empty map here, the same way it contributes nothing to `effective`.
-    pub layers: BTreeMap<&'static str, serde_json::Map<String, Value>>,
+    /// empty object here, the same way it contributes nothing to
+    /// `effective_source`.
+    pub layers: BTreeMap<&'static str, Utf16JsonProjection>,
 }
 
 /// The two roots needed to resolve every settings layer's file path.
@@ -154,8 +159,9 @@ const FILE_LAYERS: [WritableScope; 3] = [
 /// outranks all three in the engine's precedence
 /// (`env → managed → cli → local → project → user → defaults`). Applying it
 /// first would let a user/project/local file overwrite a policy value, so
-/// `effective` would report a value that cannot actually win and `provenance`
-/// would name the wrong layer — for exactly the keys reported as locked.
+/// `effective_source` would report a value that cannot actually win and
+/// `provenance` would name the wrong layer — for exactly the keys reported
+/// as locked.
 pub fn build_snapshot(
     paths: &SettingsPaths,
     active: BTreeMap<String, Value>,
@@ -171,28 +177,36 @@ fn build_snapshot_with_env(
     env: &BTreeMap<String, String>,
 ) -> SettingsSnapshot {
     let mut effective: BTreeMap<String, Value> = BTreeMap::new();
+    let mut effective_source = empty_settings_source();
     let mut provenance: BTreeMap<String, SettingsLayer> = BTreeMap::new();
     let mut merged_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut files: Vec<SettingsFile> = Vec::new();
-    let mut layers: BTreeMap<&'static str, serde_json::Map<String, Value>> = BTreeMap::new();
+    let mut layers: BTreeMap<&'static str, Utf16JsonProjection> = BTreeMap::new();
 
     for source in FILE_LAYERS {
         let layer = SettingsLayer::from(source);
         let path = settings_path(source, &paths.lingxi_home, &paths.project_dir);
         let exists = path.exists();
-        let (map, parse_error) = match read_settings_map(&path) {
-            Ok(m) => (m, None),
-            Err(e) => (serde_json::Map::new(), Some(e)),
+        let (source_map, parse_error) = match read_settings_source(&path) {
+            Ok(map) => (map, None),
+            Err(error) => (empty_settings_source(), Some(error)),
         };
-        for (key, value) in &map {
-            if value.is_null() {
+        // The public snapshot and merger stay Source-native. `effective` is
+        // separately built through the typed `SettingsJson` boundary for
+        // existing controls; an unrepresentable field is omitted only from
+        // that typed view and remains complete in `effective_source`.
+        for entry in source_map.object_entries().unwrap_or_default() {
+            if entry.value.is_null() {
                 // `"key": null` is UNSET to the engine — every `SettingsJson`
                 // field is an `Option`, so it parses to `None` and never
-                // reaches `effective` (see `merge_raw_layer`'s doc). Claiming
+                // reaches the effective settings (see `merge_raw_layer`'s doc). Claiming
                 // this layer as the provenance of a key it does not set would
                 // put a name in the map with no value behind it.
                 continue;
             }
+            let Ok(key) = String::from_utf16(entry.code_units) else {
+                continue;
+            };
             provenance.insert(key.clone(), layer);
             // Reset before this layer's own report goes in. A key an earlier
             // pair of layers unioned can be fully REDEFINED here — user
@@ -201,9 +215,13 @@ fn build_snapshot_with_env(
             // own value. Accumulating across layers without this would keep
             // calling that merged and suppress a badge that is now honest;
             // the layers that follow always have the last word.
-            merged_keys.remove(key);
+            merged_keys.remove(&key);
         }
-        merged_keys.extend(fold_layer(&mut effective, &map));
+        let source_unions = merge_raw_source_layer(&mut effective_source, &source_map)
+            .expect("a parsed settings object must remain mergeable as source JSON");
+        merged_keys.extend(source_unions);
+        let typed_map = settings_values_from_source(&source_map);
+        let _ = fold_layer(&mut effective, &typed_map);
         files.push(SettingsFile {
             layer,
             path,
@@ -211,9 +229,7 @@ fn build_snapshot_with_env(
             writable: parse_error.is_none(),
             parse_error,
         });
-        // Moved, not cloned: `map` is only read by reference above, so this
-        // is the map's one and only owner from here on.
-        layers.insert(layer_wire_name(layer), map);
+        layers.insert(layer_wire_name(layer), source_map);
     }
 
     // The managed overlay goes on LAST so it wins, and its keys are the locked
@@ -235,12 +251,26 @@ fn build_snapshot_with_env(
         provenance.insert(key.clone(), SettingsLayer::Managed);
         merged_keys.remove(key);
     }
-    merged_keys.extend(merge_raw_layer(&mut effective, managed));
+    let managed_source = Utf16JsonProjection::from_serde_value(&Value::Object(
+        managed.clone().into_iter().collect(),
+    ))
+    .expect("managed settings Value object is valid source JSON");
+    merged_keys.extend(
+        merge_raw_source_layer(&mut effective_source, &managed_source)
+            .expect("managed settings object must remain mergeable as source JSON"),
+    );
+    let typed_managed = settings_values_from_source(&managed_source);
+    let _ = merge_raw_layer(&mut effective, typed_managed.into_iter().collect());
 
     if active.contains_key("providerRegion") {
         effective
             .entry("providerRegion".into())
             .or_insert_with(|| Value::String("international".into()));
+        if effective_source.get_property("providerRegion").is_none() {
+            effective_source
+                .set_field("providerRegion", source_string_value("international"))
+                .expect("effective settings source is an object");
+        }
     }
 
     // Region controls affect routing at startup. Report the same validated
@@ -249,16 +279,22 @@ fn build_snapshot_with_env(
         .ok()
         .and_then(|(settings, _)| settings.provider_region)
     {
-        effective.insert(
-            "providerRegion".into(),
-            serde_json::to_value(region).expect("region serializes"),
-        );
+        let region_value = serde_json::to_value(region).expect("region serializes");
+        effective.insert("providerRegion".into(), region_value.clone());
+        effective_source
+            .set_field(
+                "providerRegion",
+                Utf16JsonProjection::from_serde_value(&region_value)
+                    .expect("provider region Value is valid source JSON"),
+            )
+            .expect("effective settings source is an object");
         provenance.insert("providerRegion".into(), SettingsLayer::Env);
     }
 
     SettingsSnapshot {
         files,
         effective,
+        effective_source,
         active,
         provenance,
         merged_keys: merged_keys.into_iter().collect(),
@@ -284,6 +320,46 @@ fn fold_layer(
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     merge_raw_layer(effective, owned)
+}
+
+/// Project only the fields accepted by the typed engine settings schema into
+/// the legacy control view. The raw settings object itself is never routed
+/// through `serde_json::Value`; any field that cannot enter the typed schema
+/// remains available in the exact source snapshot and merger.
+fn settings_values_from_source(source: &Utf16JsonProjection) -> serde_json::Map<String, Value> {
+    let mut values = serde_json::Map::new();
+    let Some(entries) = source.object_entries() else {
+        return values;
+    };
+    for entry in entries {
+        if entry.value.is_null() {
+            continue;
+        }
+        let Ok(key) = String::from_utf16(entry.code_units) else {
+            continue;
+        };
+        let Ok(value) = source.subprojection_property_units(entry.code_units) else {
+            continue;
+        };
+        let Ok(single_field) =
+            Utf16JsonProjection::object_units(vec![(entry.code_units.to_vec(), value)])
+        else {
+            continue;
+        };
+        let Ok(raw) = single_field.to_json_string() else {
+            continue;
+        };
+        let Ok(typed) = serde_json::from_str::<SettingsJson>(&raw) else {
+            continue;
+        };
+        let Ok(typed) = serde_json::to_value(typed) else {
+            continue;
+        };
+        if let Some(value) = typed.get(&key).filter(|value| !value.is_null()) {
+            values.insert(key, value.clone());
+        }
+    }
+    values
 }
 
 /// The `SettingsContext.active` a connection captures ONCE at boot: the three
@@ -458,11 +534,11 @@ pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
 
 /// Apply a batch of shallow, top-level patches to one writable settings
 /// layer. `None` deletes the key; unknown keys already in the file survive
-/// verbatim (`read_settings_map`'s semantics — this reads the file, edits the
-/// map in memory, and rewrites the whole thing).
+/// verbatim. Typed patch values cross into the exact source writer once; all
+/// pre-existing file data remains in the UTF-16 projection.
 ///
 /// The read-modify-write transaction is shared with
-/// `migrations::settings_update::update_settings`; its callback lets this
+/// `migrations::settings_update::update_settings_source_with_before_publish`; its callback lets this
 /// crate mark the write for the desktop watcher immediately before publication
 /// while `migrations` remains independent of `permission`.
 ///
@@ -471,8 +547,8 @@ pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
 /// [`WritableScopeDto`]'s three variants, but `writable_path` is the
 /// single source of truth so its `Result` is still propagated rather than
 /// unwrapped), the patch touches a [`RESERVED_KEYS`] key, the destination file
-/// exists but is not valid JSON, or the write to disk fails. A broken
-/// destination file is never overwritten: `read_settings_map` returns `Err`
+/// exists but is not a JSON object, or the write to disk fails. A broken
+/// destination file is never overwritten: the source reader returns `Err`
 /// before this function reaches the write.
 pub fn apply_patch(
     paths: &SettingsPaths,
@@ -480,6 +556,54 @@ pub fn apply_patch(
     patch: Vec<(String, Option<Value>)>,
 ) -> Result<(), String> {
     apply_patch_before_publish(paths, destination, patch, || {})
+}
+
+/// Apply a batch of shallow settings updates while retaining arbitrary source
+/// JSON as exact UTF-16 projections. This uses the same writable-layer checks,
+/// per-path lock, internal-write mark, and atomic publication as [`apply_patch`].
+pub fn apply_patch_source(
+    paths: &SettingsPaths,
+    destination: WritableScopeDto,
+    patch: Vec<(String, Option<Utf16JsonProjection>)>,
+) -> Result<(), String> {
+    apply_patch_source_before_publish(paths, destination, patch, || {})
+}
+
+fn apply_patch_source_before_publish<F>(
+    paths: &SettingsPaths,
+    destination: WritableScopeDto,
+    patch: Vec<(String, Option<Utf16JsonProjection>)>,
+    before_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    for (key, value) in &patch {
+        if key == "providerRegion" {
+            let valid = value
+                .as_ref()
+                .and_then(|value| value.string_at(""))
+                .is_some_and(|value| matches!(value, "international" | "china_mainland"));
+            if !valid {
+                return Err("providerRegion must be international or china_mainland".into());
+            }
+        }
+        if let Some((reserved, replacement)) =
+            RESERVED_KEYS.iter().find(|(reserved, _)| reserved == key)
+        {
+            return Err(format!(
+                "the `{reserved}` key has a dedicated writer and is refused here; \
+                 use {replacement} instead"
+            ));
+        }
+    }
+
+    let path = writable_path(paths, destination_layer(destination))?;
+    migrations::settings_update::update_settings_source_with_before_publish(&path, patch, || {
+        permission::mark_internal_write(&path);
+        before_publish();
+    })
+    .map_err(bridge_settings_error)
 }
 
 /// Internal test seam: invoke `before_publish` while the destination lock is
@@ -496,34 +620,25 @@ fn apply_patch_before_publish<F>(
 where
     F: FnOnce(),
 {
-    for (key, value) in &patch {
-        if key == "providerRegion" {
-            if let Some(value) = value {
-                serde_json::from_value::<lingxi_core::settings::ProviderRegion>(value.clone())
-                    .map_err(|_| {
-                        "providerRegion must be international or china_mainland".to_owned()
-                    })?;
-            }
-        }
-        if let Some((reserved, replacement)) =
-            RESERVED_KEYS.iter().find(|(reserved, _)| reserved == key)
-        {
-            return Err(format!(
-                "the `{reserved}` key has a dedicated writer and is refused here; \
-                 use {replacement} instead"
-            ));
-        }
-    }
+    let patch = source_patch_from_values(patch)?;
+    apply_patch_source_before_publish(paths, destination, patch, before_publish)
+}
 
-    let path = writable_path(paths, destination_layer(destination))?;
-    migrations::settings_update::update_settings_with_before_publish(&path, patch, || {
-        // I2: mark BEFORE writing. `settings_watch.rs` consumes this mark
-        // within a 5-second window; skipping it makes the desktop's own
-        // save look like an external edit and fires an unwanted hook round.
-        permission::mark_internal_write(&path);
-        before_publish();
-    })
-    .map_err(bridge_settings_error)
+fn source_patch_from_values(
+    patch: Vec<(String, Option<Value>)>,
+) -> Result<Vec<(String, Option<Utf16JsonProjection>)>, String> {
+    patch
+        .into_iter()
+        .map(|(key, value)| {
+            let value = value
+                .map(|value| {
+                    Utf16JsonProjection::from_serde_value(&value)
+                        .map_err(|error| format!("settings field `{key}` is invalid: {error}"))
+                })
+                .transpose()?;
+            Ok((key, value))
+        })
+        .collect()
 }
 
 /// Keep the bridge's established protocol-facing wording while delegating the
@@ -660,7 +775,8 @@ pub struct LoweredSettings {
     /// unchanged. See [`SettingsSnapshot::merged_keys`] — a client must not
     /// render a single-layer provenance badge for one of these.
     pub merged_keys: Vec<String>,
-    /// `{layer: {key: value}}` — each file layer's own raw map, unmerged.
+    /// `{layer: {key: value}}` — each file layer's own exact source object,
+    /// unmerged.
     /// See [`SettingsSnapshot::layers`] for why a layered editor needs this
     /// instead of `effective_json` before writing back to one layer.
     pub layers_json: String,
@@ -707,7 +823,7 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         .collect();
 
     LoweredSettings {
-        effective_json: to_json_or_empty_object("effective", &snapshot.effective),
+        effective_json: source_json_or_empty_object("effective", &snapshot.effective_source),
         provenance_json: to_json_or_empty_object("provenance", &provenance),
         files_json: serde_json::to_string(&files).unwrap_or_else(|error| {
             tracing::warn!(
@@ -720,8 +836,37 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         active_json: to_json_or_empty_object("active", &snapshot.active),
         locked: snapshot.locked.clone(),
         merged_keys: snapshot.merged_keys.clone(),
-        layers_json: to_json_or_empty_object("layers", &snapshot.layers),
+        layers_json: source_layers_json(&snapshot.layers),
     }
+}
+
+fn source_layers_json(layers: &BTreeMap<&'static str, Utf16JsonProjection>) -> String {
+    let fields = layers
+        .iter()
+        .map(|(name, source)| ((*name).to_owned(), source.clone()))
+        .collect();
+    Utf16JsonProjection::object(fields)
+        .and_then(|source| source.to_pretty_json_string())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "settings source layers failed to serialize; the client is told no settings files exist");
+            "{}".to_string()
+        })
+}
+
+fn source_json_or_empty_object(what: &str, source: &Utf16JsonProjection) -> String {
+    source.to_json_string().unwrap_or_else(|error| {
+        tracing::warn!(%error, what, "settings source payload failed to serialize; the client is told this payload is empty");
+        "{}".to_string()
+    })
+}
+
+fn source_string_value(value: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&Value::String(value.to_owned()))
+        .expect("Rust string is valid source JSON")
+}
+
+fn empty_settings_source() -> Utf16JsonProjection {
+    Utf16JsonProjection::object(Vec::new()).expect("empty settings object is valid")
 }
 
 /// Serialize a map, degrading to `{}` rather than panicking at the routing
@@ -934,14 +1079,19 @@ mod tests {
             snap.merged_keys
         );
 
-        let user_providers = snap.layers.get("user").unwrap().get("providers").unwrap();
+        let user_providers = snap
+            .layers
+            .get("user")
+            .unwrap()
+            .get_property("providers")
+            .unwrap();
         assert!(
-            user_providers.get("userProvider").is_some(),
+            user_providers.get_property("userProvider").is_some(),
             "the user layer's own map must have userProvider, got {user_providers}"
         );
         assert!(
-            user_providers.get("localProvider").is_none()
-                && user_providers.get("projectProvider").is_none(),
+            user_providers.get_property("localProvider").is_none()
+                && user_providers.get_property("projectProvider").is_none(),
             "the user layer's own map must NOT carry another layer's entries, got {user_providers}"
         );
 
@@ -949,20 +1099,25 @@ mod tests {
             .layers
             .get("project")
             .unwrap()
-            .get("providers")
+            .get_property("providers")
             .unwrap();
         assert!(
-            project_providers.get("projectProvider").is_some()
-                && project_providers.get("userProvider").is_none()
-                && project_providers.get("localProvider").is_none(),
+            project_providers.get_property("projectProvider").is_some()
+                && project_providers.get_property("userProvider").is_none()
+                && project_providers.get_property("localProvider").is_none(),
             "the project layer's own map must be exactly its own value, got {project_providers}"
         );
 
-        let local_providers = snap.layers.get("local").unwrap().get("providers").unwrap();
+        let local_providers = snap
+            .layers
+            .get("local")
+            .unwrap()
+            .get_property("providers")
+            .unwrap();
         assert!(
-            local_providers.get("localProvider").is_some()
-                && local_providers.get("userProvider").is_none()
-                && local_providers.get("projectProvider").is_none(),
+            local_providers.get_property("localProvider").is_some()
+                && local_providers.get_property("userProvider").is_none()
+                && local_providers.get_property("projectProvider").is_none(),
             "the local layer's own map must be exactly its own value, got {local_providers}"
         );
 
@@ -971,15 +1126,27 @@ mod tests {
         // bug shaped up), so a layer that never wrote the key must have no
         // entry for it at all, not an empty object standing in for "unset".
         assert!(
-            snap.layers.get("user").unwrap().get("routing").is_none(),
+            snap.layers
+                .get("user")
+                .unwrap()
+                .get_property("routing")
+                .is_none(),
             "a layer that never set `routing` must have no entry for it"
         );
         assert!(
-            snap.layers.get("local").unwrap().get("routing").is_none(),
+            snap.layers
+                .get("local")
+                .unwrap()
+                .get_property("routing")
+                .is_none(),
             "a layer that never set `routing` must have no entry for it"
         );
         assert!(
-            snap.layers.get("project").unwrap().get("routing").is_some(),
+            snap.layers
+                .get("project")
+                .unwrap()
+                .get_property("routing")
+                .is_some(),
             "the layer that DID set `routing` must report it"
         );
 
@@ -999,6 +1166,77 @@ mod tests {
             layers_wire["project"]["routing"]["retry"]["maxAttempts"] == 3,
             "wire layers_json must carry the project layer's own routing value, got {layers_wire}"
         );
+    }
+
+    #[test]
+    fn settings_snapshot_keeps_lone_utf16_in_source_layer_and_reports_parsed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: root.path().join("home"),
+            project_dir: root.path().join("project"),
+        };
+        std::fs::create_dir_all(&paths.lingxi_home).unwrap();
+        std::fs::create_dir_all(paths.project_dir.join(branding::DOT_DIR)).unwrap();
+        let user_path = paths.lingxi_home.join("settings.json");
+        std::fs::write(
+            &user_path,
+            r#"{"model":"opus","hooks":{"PostToolUse":[{"hooks":[{"type":"mcp_tool","input":{"value":"\ud800"}}]}]},"opaque":{"value":"\udfff"}}"#,
+        )
+        .expect("settings source");
+
+        let snapshot = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+        assert!(snapshot.files[0].writable);
+        assert!(snapshot.files[0].parse_error.is_none());
+        assert_eq!(
+            snapshot.layers["user"].string_units("/hooks/PostToolUse/0/hooks/0/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(
+            snapshot
+                .effective_source
+                .string_units("/hooks/PostToolUse/0/hooks/0/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(snapshot.effective_source.string_at("/model"), Some("opus"));
+        assert_eq!(
+            snapshot.effective_source.string_units("/opaque/value"),
+            Some(vec![0xDFFF])
+        );
+        let lowered = lower_snapshot(&snapshot);
+        assert!(lowered.layers_json.contains(r#""value": "\ud800""#));
+        assert!(lowered.effective_json.contains(r#""value":"\ud800""#));
+        assert!(lowered.effective_json.contains(r#""value":"\udfff""#));
+    }
+
+    #[test]
+    fn typed_patch_preserves_existing_exact_source_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: root.path().join("home"),
+            project_dir: root.path().join("project"),
+        };
+        std::fs::create_dir_all(&paths.lingxi_home).unwrap();
+        let path = paths.lingxi_home.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"type":"mcp_tool","input":{"value":"\ud800"}}]}]},"opaque":{"value":"\udfff"}}"#,
+        )
+        .expect("source settings");
+
+        apply_patch(
+            &paths,
+            WritableScopeDto::User,
+            vec![("model".into(), Some(Value::String("opus".into())))],
+        )
+        .expect("typed settings update");
+
+        let source = read_settings_source(&path).expect("cold-read source settings");
+        assert_eq!(source.string_at("/model"), Some("opus"));
+        assert_eq!(
+            source.string_units("/hooks/PostToolUse/0/hooks/0/input/value"),
+            Some(vec![0xD800])
+        );
+        assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
     }
 
     /// The engine does NOT resolve `hooks` (or any other key in
@@ -1211,8 +1449,12 @@ mod tests {
         // nulls included, because that is the thing a layered editor writes
         // back against.
         assert_eq!(
-            snap.layers.get("local").unwrap().get("model"),
-            Some(&Value::Null),
+            snap.layers
+                .get("local")
+                .unwrap()
+                .get_property("model")
+                .map(|value| value.is_null()),
+            Some(true),
             "`layers` must still show the file's own contents verbatim"
         );
     }

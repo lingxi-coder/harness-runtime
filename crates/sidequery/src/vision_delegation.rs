@@ -5,6 +5,7 @@ use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQ
 use base64::Engine as _;
 use hooks::SsrfGuard;
 use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{
     is_nested_media_value, ContentBlock, ConversationMessage, DocumentSource, HttpMethod,
     HttpRequest, ImageSource, MediaAnalysis, MediaObservation, MessageId, MessageRole,
@@ -481,21 +482,31 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
+                turn_companion,
+                usage_limit_note,
+                origin,
+                turn_origin,
             } => Ok(ConversationMessage::User {
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
+                turn_companion,
+                usage_limit_note,
+                origin,
+                turn_origin,
             }),
             ConversationMessage::Assistant {
                 id,
                 content,
                 stop_reason,
+                resumable,
             } => Ok(ConversationMessage::Assistant {
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
                 stop_reason,
+                resumable,
             }),
             ConversationMessage::System { .. } => Ok(message),
         })
@@ -522,7 +533,7 @@ fn filter_blocks_to_fingerprints<S: BuildHasher>(
                 provider_tool_use_id,
                 content_blocks: Some(content_blocks),
             } => {
-                let filtered = content_blocks
+                let filtered = projection_array_items(&content_blocks)
                     .into_iter()
                     .filter_map(|value| match extract_image_source(&value) {
                         Some(source) => match fingerprint_for_source(&source) {
@@ -539,7 +550,7 @@ fn filter_blocks_to_fingerprints<S: BuildHasher>(
                     content,
                     is_error,
                     provider_tool_use_id,
-                    content_blocks: Some(filtered),
+                    content_blocks: Some(projection_array(filtered)),
                 });
             }
             other => out.push(other),
@@ -615,8 +626,10 @@ fn collect_media_from_messages(
                     ..
                 } => {
                     let tool_name = tool_names.get(&tool_use_id.to_string()).cloned();
-                    let summary = Some(tool_result_summary(content, blocks));
-                    for value in blocks {
+                    let display = content.string_at("").unwrap_or_default();
+                    let block_values = projection_array_items(blocks);
+                    let summary = Some(tool_result_summary(&display, &block_values));
+                    for value in &block_values {
                         if let Some(source) = extract_image_source(value) {
                             out.push(DelegationMedia {
                                 fingerprint: fingerprint_for_source(&source)?,
@@ -665,14 +678,19 @@ fn prune_to_latest_media(
                 ..
             } = block
             {
-                blocks.retain(|value| {
-                    if to_remove > 0 && is_nested_media_value(value) {
-                        to_remove -= 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
+                let retained = projection_array_items(blocks)
+                    .into_iter()
+                    .filter(|value| {
+                        if to_remove > 0 && value.at_pointer("").is_some_and(is_nested_media_value)
+                        {
+                            to_remove -= 1;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                *blocks = projection_array(retained);
             }
         }
         content.retain(|block| {
@@ -704,9 +722,9 @@ fn count_media(messages: &[ConversationMessage]) -> usize {
                     ContentBlock::ToolResult {
                         content_blocks: Some(blocks),
                         ..
-                    } => blocks
+                    } => projection_array_items(blocks)
                         .iter()
-                        .filter(|value| is_nested_media_value(value))
+                        .filter(|value| value.at_pointer("").is_some_and(is_nested_media_value))
                         .count(),
                     _ => 0,
                 })
@@ -733,7 +751,8 @@ fn spawn_query(
                 model_attempt: None,
                 model: packet.model.clone(),
                 profile: packet.profile.clone(),
-                system_prompt: Some(system_prompt().to_string()),
+                system_prompt: Some(system_prompt().to_string().into()),
+                system_prompt_input: None,
                 messages: build_messages(&packet, &batch),
                 tools: Vec::new(),
                 tool_choice: None,
@@ -774,21 +793,31 @@ fn rewrite_message_for_nonvision(
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
+            turn_companion,
+            usage_limit_note,
+            origin,
+            turn_origin,
         } => Ok(ConversationMessage::User {
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
+            turn_companion,
+            usage_limit_note,
+            origin,
+            turn_origin,
         }),
         ConversationMessage::Assistant {
             id,
             content,
             stop_reason,
+            resumable,
         } => Ok(ConversationMessage::Assistant {
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
             stop_reason,
+            resumable,
         }),
         ConversationMessage::System { .. } => Ok(message),
     }
@@ -803,7 +832,8 @@ fn rewrite_blocks_for_nonvision(
         match block {
             ContentBlock::Image { source } => {
                 rewritten.push(ContentBlock::Text {
-                    text: placeholder(&fingerprint_for_source(&source)?),
+                    text: placeholder(&fingerprint_for_source(&source)?).into(),
+                    citations: None,
                 });
             }
             ContentBlock::Document { source } if !documents_supported => {
@@ -821,12 +851,12 @@ fn rewrite_blocks_for_nonvision(
                     content,
                     is_error,
                     provider_tool_use_id,
-                    content_blocks: Some(
-                        blocks
+                    content_blocks: Some(projection_array(
+                        projection_array_items(&blocks)
                             .into_iter()
                             .map(|value| rewrite_tool_result_media(value, documents_supported))
                             .collect::<Result<Vec<_>, _>>()?,
-                    ),
+                    )),
                 });
             }
             other => rewritten.push(other),
@@ -836,14 +866,16 @@ fn rewrite_blocks_for_nonvision(
 }
 
 fn rewrite_tool_result_media(
-    value: Value,
+    value: Utf16JsonProjection,
     documents_supported: bool,
-) -> Result<Value, SideQueryError> {
+) -> Result<Utf16JsonProjection, SideQueryError> {
     if let Some(source) = extract_image_source(&value) {
-        return Ok(serde_json::json!({
+        let generated = serde_json::json!({
             "type": "text",
             "text": placeholder(&fingerprint_for_source(&source)?),
-        }));
+        });
+        return Ok(Utf16JsonProjection::from_serde_value(&generated)
+            .expect("generated placeholder is valid JSON"));
     }
     if is_document_value(&value) && !documents_supported {
         return Err(document_value_unsupported());
@@ -903,8 +935,12 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
             MessageRole::User => ConversationMessage::user(MessageId::new(), text),
             MessageRole::Assistant => ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![ContentBlock::Text { text }],
+                content: vec![ContentBlock::Text {
+                    text: text.into(),
+                    citations: None,
+                }],
                 stop_reason: None,
+                resumable: None,
             },
             MessageRole::System => continue,
         });
@@ -914,7 +950,9 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         text: format!(
             "Current user request:\n{}\n\nAnalyze the attached images and answer in JSON only.",
             truncate_head_tail(&packet.current_user_text, CURRENT_TEXT_LIMIT)
-        ),
+        )
+        .into(),
+        citations: None,
     }];
     for item in batch {
         let mut label = format!("{} ({})", item.label, item.fingerprint);
@@ -926,7 +964,10 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
                 label.push_str(&format!("\nTool summary: {summary}"));
             }
         }
-        content.push(ContentBlock::Text { text: label });
+        content.push(ContentBlock::Text {
+            text: label.into(),
+            citations: None,
+        });
         content.push(item.block.clone());
     }
     messages.push(ConversationMessage::User {
@@ -935,6 +976,10 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     });
     messages
 }
@@ -951,10 +996,13 @@ fn parse_response(
     );
     let payload = response
         .structured
-        .and_then(|value| serde_json::from_value::<DelegatePayload>(value).ok())
+        .and_then(|value| {
+            let source = value.to_json_string().ok()?;
+            serde_json::from_str::<DelegatePayload>(&source).ok()
+        })
         .or_else(|| {
             response.text.as_ref().and_then(|text| {
-                let text = text.trim();
+                let text = text.string_at("")?.trim();
                 (!text.is_empty()).then(|| DelegatePayload {
                     task_findings: vec![text.to_string()],
                     media: Vec::new(),
@@ -1016,21 +1064,33 @@ fn parse_response(
     })
 }
 
-fn extract_image_source(value: &Value) -> Option<ImageSource> {
-    let kind = value.get("type")?.as_str()?;
+fn projection_array_items(value: &Utf16JsonProjection) -> Vec<Utf16JsonProjection> {
+    let count = value
+        .array_len("")
+        .expect("structured tool-result content is a JSON array");
+    (0..count)
+        .map(|index| {
+            value
+                .subprojection(&format!("/{index}"))
+                .expect("array item remains a valid source projection")
+        })
+        .collect()
+}
+
+fn projection_array(values: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
+    Utf16JsonProjection::array(values).expect("source array remains a valid projection")
+}
+
+fn extract_image_source(value: &Utf16JsonProjection) -> Option<ImageSource> {
+    let kind = value.string_at("/type")?;
     match kind {
-        "image" => value
-            .get("source")
-            .and_then(|source| serde_json::from_value::<ImageSource>(source.clone()).ok()),
+        "image" => {
+            let source = value.subprojection("/source").ok()?.to_json_string().ok()?;
+            serde_json::from_str::<ImageSource>(&source).ok()
+        }
         "image_url" => value
-            .get("url")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                value
-                    .get("image_url")
-                    .and_then(|payload| payload.get("url"))
-                    .and_then(Value::as_str)
-            })
+            .string_at("/url")
+            .or_else(|| value.string_at("/image_url/url"))
             .map(|url| ImageSource::Url {
                 url: url.to_string(),
             }),
@@ -1038,12 +1098,12 @@ fn extract_image_source(value: &Value) -> Option<ImageSource> {
     }
 }
 
-fn tool_result_summary(content: &str, blocks: &[Value]) -> String {
+fn tool_result_summary(content: &str, blocks: &[Utf16JsonProjection]) -> String {
     let structured = blocks
         .iter()
         .filter_map(|value| {
-            (value.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| value.get("text").and_then(Value::as_str))
+            (value.string_at("/type") == Some("text"))
+                .then(|| value.string_at("/text"))
                 .flatten()
         })
         .collect::<Vec<_>>()
@@ -1058,8 +1118,8 @@ fn tool_result_summary(content: &str, blocks: &[Value]) -> String {
     )
 }
 
-fn is_document_value(value: &Value) -> bool {
-    matches!(value.get("type").and_then(Value::as_str), Some("document"))
+fn is_document_value(value: &Utf16JsonProjection) -> bool {
+    value.string_at("/type") == Some("document")
 }
 
 fn fingerprint_for_source(source: &ImageSource) -> Result<String, SideQueryError> {
@@ -1566,6 +1626,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -1576,6 +1640,10 @@ mod tests {
                 data: data.into(),
             },
         }
+    }
+
+    fn source_array(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("fixture array is valid JSON")
     }
 
     #[test]
@@ -1589,12 +1657,12 @@ mod tests {
             user_message(vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "tool output".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
-                content_blocks: Some(vec![serde_json::json!({
+                content_blocks: Some(source_array(serde_json::json!([{
                     "type": "image_url",
                     "url": "https://example.com/nested.png"
-                })]),
+                }]))),
             }]),
         ];
         let media = collect_media(&messages).unwrap();
@@ -1689,9 +1757,18 @@ mod tests {
         let summary = tool_result_summary(
             "flat fallback",
             &[
-                serde_json::json!({"type": "text", "text": "first"}),
-                serde_json::json!({"type": "image_url", "url": "https://example.com/a"}),
-                serde_json::json!({"type": "text", "text": "second"}),
+                Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type": "text", "text": "first"}),
+                )
+                .unwrap(),
+                Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type": "image_url", "url": "https://example.com/a"}),
+                )
+                .unwrap(),
+                Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type": "text", "text": "second"}),
+                )
+                .unwrap(),
             ],
         );
         assert_eq!(summary, "first\nsecond");
@@ -1756,17 +1833,17 @@ mod tests {
             image_block("YWI="),
             ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
-                content: String::new(),
-                is_error: false,
+                content: String::new().into(),
+                is_error: Some(false),
                 provider_tool_use_id: None,
-                content_blocks: Some(vec![serde_json::json!({
+                content_blocks: Some(source_array(serde_json::json!([{
                     "type": "image",
                     "source": {
                         "type": "base64",
                         "media_type": "image/png",
                         "data": "YWM="
                     }
-                })]),
+                }]))),
             },
         ])];
         let rewritten = rewrite_media_for_nonvision(&messages).unwrap();
@@ -1774,7 +1851,7 @@ mod tests {
             panic!("expected user");
         };
         assert!(
-            matches!(&content[0], ContentBlock::Text { text } if text.contains("see media analysis"))
+            matches!(&content[0], ContentBlock::Text { text, .. } if text.contains("see media analysis"))
         );
         let ContentBlock::ToolResult {
             content_blocks: Some(blocks),
@@ -1783,7 +1860,7 @@ mod tests {
         else {
             panic!("expected tool result");
         };
-        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks.string_at("/0/type"), Some("text"));
     }
 
     #[test]
@@ -2000,17 +2077,20 @@ mod tests {
         .unwrap();
         let client = Arc::new(FakeSideQueryClient::new(vec![Ok(SideQueryResponse {
             text: None,
-            structured: Some(serde_json::json!({
-                "task_findings": ["receipt"],
-                "media": [{
-                    "fingerprint": fp,
-                    "label": "image_1",
-                    "description": "desc",
-                    "relevant_facts": ["fact"]
-                }],
-                "cross_media_findings": [],
-                "truncated": false
-            })),
+            structured: Some(
+                Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                    "task_findings": ["receipt"],
+                    "media": [{
+                        "fingerprint": fp,
+                        "label": "image_1",
+                        "description": "desc",
+                        "relevant_facts": ["fact"]
+                    }],
+                    "cross_media_findings": [],
+                    "truncated": false
+                }))
+                .unwrap(),
+            ),
             tool_calls: Vec::new(),
             usage: cost::Usage::default(),
             stop_reason: Some("max_tokens".into()),
@@ -2172,7 +2252,7 @@ mod tests {
     #[tokio::test]
     async fn analyze_rejects_empty_delegate_response() {
         let client = Arc::new(FakeSideQueryClient::new(vec![Ok(SideQueryResponse {
-            text: Some(String::new()),
+            text: Some(String::new().into()),
             structured: None,
             tool_calls: Vec::new(),
             usage: cost::Usage::default(),

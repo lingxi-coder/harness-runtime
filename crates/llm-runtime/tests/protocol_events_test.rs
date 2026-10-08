@@ -14,7 +14,9 @@ fn sample_response() -> HistoryResponse {
         stop_details: None,
         usage: ExecutionUsage::default(),
         cost: None,
-        provider_metadata: serde_json::json!({}),
+        provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("{}")
+            .expect("empty metadata object is valid JSON"),
+        resumable: None,
     }
 }
 
@@ -28,6 +30,7 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     };
     let delta = HistoryEvent::ContentBlockDelta {
@@ -41,6 +44,7 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
         delta: HistoryMessageDelta {
             stop_reason: Some("end_turn".to_string()),
             stop_details: None,
+            resumable: None,
         },
         usage: None,
     };
@@ -65,12 +69,13 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     };
     let delta = HistoryEvent::ContentBlockDelta {
         index: 0,
         delta: HistoryContentDelta::InputJsonDelta {
-            partial_json: "{\"a\":1".to_string(),
+            partial_json: "{\"a\":1".into(),
         },
     };
     let stop = HistoryEvent::ContentBlockStop { index: 0 };
@@ -78,6 +83,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
         delta: HistoryMessageDelta {
             stop_reason: Some("end_turn".to_string()),
             stop_details: None,
+            resumable: None,
         },
         usage: Some(ExecutionUsage::default()),
     };

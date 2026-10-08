@@ -1,7 +1,14 @@
 //! Regression tests for agent classifier mentions.
 
 use permission::classifier::{classify_tool_call, AutoModeClassifierVerdict};
-use serde_json::json;
+macro_rules! json {
+    ($($tokens:tt)+) => {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!($($tokens)+),
+        )
+        .unwrap()
+    };
+}
 
 #[test]
 fn agent_audit_mentions_require_context_instead_of_keyword_denial() {
@@ -48,7 +55,11 @@ struct RejectPrompt;
 
 #[async_trait::async_trait]
 impl lingxi_core::host::PermissionGate for RejectPrompt {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> lingxi_core::host::PermissionDecision {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
         lingxi_core::host::PermissionDecision::Deny {
             reason: "user declined confirmation".into(),
         }
@@ -84,9 +95,9 @@ impl permission::classifier::LoopPermissionClassifier for ContextualClassifier {
     async fn classify(
         &self,
         _: &str,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &[permission::host_context::HostContextRecord],
-        _: &[String],
+        _: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) -> AutoModeClassifierVerdict {
         self.0.clone()
     }

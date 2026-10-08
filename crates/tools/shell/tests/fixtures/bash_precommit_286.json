@@ -1,0 +1,1350 @@
+{
+  "version": "2.1.286",
+  "binary_sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "source_byte_ranges": [
+    {
+      "signature": "function Lqe(",
+      "start": 184681137,
+      "end": 184681769
+    },
+    {
+      "signature": "function qzn(",
+      "start": 184681828,
+      "end": 184682119
+    },
+    {
+      "signature": "function Dft(",
+      "start": 184686371,
+      "end": 184686576
+    },
+    {
+      "signature": "function Nqe(",
+      "start": 184685627,
+      "end": 184685932
+    },
+    {
+      "signature": "async function Jzn(",
+      "start": 184687676,
+      "end": 184695205
+    },
+    {
+      "signature": "function RX(",
+      "start": 182623295,
+      "end": 182623534
+    }
+  ],
+  "cases": [
+    {
+      "name": "no_skills",
+      "steps": [
+        {
+          "commands": []
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_skills",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "simplify_skills",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "skills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/simplify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/simplify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/simplify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "verify_commands_DEPRECATED",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "commands_DEPRECATED"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "simplify_commands_DEPRECATED",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "commands_DEPRECATED"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/simplify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/simplify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/simplify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "verify_builtin",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "builtin"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "simplify_builtin",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "builtin"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_plugin",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "plugin"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "simplify_plugin",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "plugin"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_bundled",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "bundled"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "simplify_bundled",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "bundled"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_managed",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "managed"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "simplify_managed",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "managed"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_syncedSkills",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "syncedSkills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "simplify_syncedSkills",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "syncedSkills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "verify_and_simplify",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            },
+            {
+              "name": "simplify",
+              "loadedFrom": "skills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` and `/simplify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` and `/simplify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` and `/simplify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "all_three",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            },
+            {
+              "name": "simplify",
+              "loadedFrom": "skills"
+            },
+            {
+              "name": "code-review",
+              "loadedFrom": "builtin"
+            }
+          ],
+          "include_code_review_suggestion": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": true,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify`, `/simplify`, and `/code-review medium` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify`, `/simplify`, and `/code-review medium` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify`, `/simplify`, and `/code-review medium` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "code_review_null",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "code-review",
+              "loadedFrom": "plugin"
+            }
+          ],
+          "include_code_review_suggestion": null
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "code_review_false",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "code-review",
+              "loadedFrom": "plugin"
+            }
+          ],
+          "include_code_review_suggestion": false
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "code_review_true",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "code-review",
+              "loadedFrom": "plugin"
+            }
+          ],
+          "include_code_review_suggestion": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/code-review medium` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/code-review medium` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/code-review medium` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "first_matching_command_wins",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "builtin"
+            },
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "qualified_name_is_not_verify",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "plugin:verify",
+              "loadedFrom": "skills"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "skill_tool_absent",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "skill_tool": false
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "gate_enabled_stays_enabled",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": true
+        },
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": false
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` right before the `commit` command (never for docs or tests)."
+        },
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/simplify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/simplify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/simplify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "gate_disabled_stays_disabled",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": false
+        },
+        {
+          "commands": [
+            {
+              "name": "simplify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": false,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        },
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": true,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": false,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "git_disabled_defers_latch",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "git": false,
+          "flag": false
+        },
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": null,
+          "flag_calls": 0,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        },
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "no_skills_still_latches",
+      "steps": [
+        {
+          "commands": [],
+          "flag": false
+        },
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": false,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        },
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": false,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        }
+      ]
+    },
+    {
+      "name": "code_review_setting_remains_live",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "code-review",
+              "loadedFrom": "skills"
+            }
+          ],
+          "include_code_review_suggestion": false
+        },
+        {
+          "commands": [
+            {
+              "name": "code-review",
+              "loadedFrom": "skills"
+            }
+          ],
+          "include_code_review_suggestion": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        },
+        {
+          "skills": {
+            "codeReview": true,
+            "verify": false,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/code-review medium` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/code-review medium` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/code-review medium` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    },
+    {
+      "name": "session_activation_resets_latch",
+      "steps": [
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": false
+        },
+        {
+          "commands": [
+            {
+              "name": "verify",
+              "loadedFrom": "skills"
+            }
+          ],
+          "flag": true,
+          "new_session": true
+        }
+      ],
+      "outputs": [
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "",
+          "latched": false,
+          "flag_calls": 1,
+          "verbose_boundary": null,
+          "concise_boundary": null
+        },
+        {
+          "skills": {
+            "codeReview": false,
+            "verify": true,
+            "simplify": false,
+            "commit": false,
+            "pr": false
+          },
+          "suggestion": "Always run `/verify` right before the `commit` command (never for docs or tests).",
+          "latched": true,
+          "flag_calls": 1,
+          "verbose_boundary": "\n</example>\n\nAlways run `/verify` right before the `commit` command (never for docs or tests).\n\n# Creating pull requests",
+          "concise_boundary": "\n- Always run `/verify` right before the `commit` command (never for docs or tests)."
+        }
+      ]
+    }
+  ],
+  "allowlist_cases": [
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": null,
+      "selected": [
+        "verify",
+        "plugin:simplify",
+        "synced:check",
+        "ordinary:check",
+        "mcp:verify",
+        "synced:verify"
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": [],
+      "selected": []
+    },
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": [
+        "verify"
+      ],
+      "selected": [
+        "verify",
+        "synced:check"
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": [
+        "simplify"
+      ],
+      "selected": [
+        "plugin:simplify"
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": [
+        "mcp:verify"
+      ],
+      "selected": [
+        "mcp:verify"
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "verify",
+          "loadedFrom": "skills",
+          "type": "prompt",
+          "source": "settings"
+        },
+        {
+          "name": "plugin:simplify",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin"
+        },
+        {
+          "name": "synced:check",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "ordinary:check",
+          "loadedFrom": "plugin",
+          "type": "prompt",
+          "source": "plugin",
+          "aliases": [
+            "verify"
+          ]
+        },
+        {
+          "name": "mcp:verify",
+          "loadedFrom": "mcp",
+          "type": "prompt",
+          "source": "mcp"
+        },
+        {
+          "name": "synced:verify",
+          "loadedFrom": "syncedSkills",
+          "type": "prompt",
+          "source": "settings"
+        }
+      ],
+      "allowlist": [
+        "ordinary:check"
+      ],
+      "selected": [
+        "ordinary:check"
+      ]
+    }
+  ]
+}

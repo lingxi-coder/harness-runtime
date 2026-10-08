@@ -15,6 +15,7 @@
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp::LspRegistry;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -46,15 +47,15 @@ impl LspTransport for DummyTransport {
         &self,
         _: &LspRawConnection,
         _: &str,
-        _: serde_json::Value,
-    ) -> Result<serde_json::Value, LspError> {
+        _: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         Err(LspError::Unavailable)
     }
     async fn notify(
         &self,
         _: &LspRawConnection,
         _: &str,
-        _: serde_json::Value,
+        _: Utf16JsonProjection,
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }

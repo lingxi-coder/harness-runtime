@@ -33,10 +33,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{CONFIG_COMPLETED, CONFIG_FAILED, CONFIG_STARTED};
@@ -45,8 +48,10 @@ use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext, ValidationError,
+    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    source_text_projection_units, DescriptionOptions, InterruptBehavior, PromptOptions, Tool,
+    ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 /// Tool name byte-lock (`ConfigTool/constants.ts:1`).
@@ -427,6 +432,7 @@ pub fn get_path(key: &str) -> Vec<String> {
 }
 
 /// `buildNestedObject(path, value)` (`ConfigTool.ts:455-467`).
+#[cfg(test)]
 fn build_nested_object(path: &[String], value: Value) -> Value {
     if path.is_empty() {
         return Value::Object(Map::new());
@@ -448,6 +454,7 @@ fn build_nested_object(path: &[String], value: Value) -> Value {
 /// only governs the lookup shape: `'global'` reads the flat top-level key
 /// (`path[0]`); `'settings'` walks the dotted path. Returns `Value::Null` when
 /// absent (the JSON image of TS `undefined`).
+#[cfg(test)]
 fn get_value(source: Source, path: &[String], settings: &Map<String, Value>) -> Value {
     match source {
         Source::Global => match path.first() {
@@ -522,6 +529,146 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
+
+fn null_projection() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+}
+
+fn build_nested_projection(path: &[String], value: Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some((key, rest)) = path.split_first() else {
+        return Utf16JsonProjection::object(Vec::new())
+            .expect("empty nested settings object is valid");
+    };
+    let child = if rest.is_empty() {
+        value
+    } else {
+        build_nested_projection(rest, value)
+    };
+    Utf16JsonProjection::object(vec![(key.clone(), child)])
+        .expect("nested setting path is valid JSON")
+}
+
+fn get_projection_value(
+    source: Source,
+    path: &[String],
+    settings: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let keys: Vec<&str> = match source {
+        Source::Global => path.first().map(String::as_str).into_iter().collect(),
+        Source::Settings => path.iter().map(String::as_str).collect(),
+    };
+    let mut current = settings.clone();
+    for key in keys {
+        let units: Vec<u16> = key.encode_utf16().collect();
+        match current.subprojection_property_units(&units) {
+            Ok(value) => current = value,
+            Err(_) => return null_projection(),
+        }
+    }
+    current
+}
+
+fn merge_projection(
+    target: &Utf16JsonProjection,
+    update: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let mut fields = target
+        .object_entries()
+        .expect("settings roots are objects")
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.code_units.to_vec(),
+                target
+                    .subprojection_property_units(entry.code_units)
+                    .expect("settings member projection exists"),
+            )
+        })
+        .collect::<Vec<_>>();
+    for entry in update.object_entries().expect("nested update is object") {
+        let incoming = update
+            .subprojection_property_units(entry.code_units)
+            .expect("nested update projection exists");
+        if let Some((_, previous)) = fields.iter_mut().find(|(key, _)| key == entry.code_units) {
+            let both_objects = previous
+                .at_pointer("")
+                .and_then(|v| v.object_entries())
+                .is_some()
+                && incoming
+                    .at_pointer("")
+                    .and_then(|v| v.object_entries())
+                    .is_some();
+            *previous = if both_objects {
+                merge_projection(previous, &incoming)
+            } else {
+                incoming
+            };
+        } else {
+            fields.push((entry.code_units.to_vec(), incoming));
+        }
+    }
+    Utf16JsonProjection::object_units(fields).expect("merged settings object is valid JSON")
+}
+
+fn coerce_boolean_projection(value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    if let Some(text) = value.string_at("") {
+        match text.trim().to_lowercase().as_str() {
+            "true" => return generated_builtin_result(&json!(true)),
+            "false" => return generated_builtin_result(&json!(false)),
+            _ => {}
+        }
+    }
+    value.clone()
+}
+
+fn js_string_projection(value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let Some(root) = value.at_pointer("") else {
+        return source_text_projection("undefined");
+    };
+    if root.code_units().is_some() {
+        value.clone()
+    } else if let Some(boolean) = root.as_bool() {
+        source_text_projection(&boolean.to_string())
+    } else if let Some(number) = root.as_number() {
+        if number.is_finite() {
+            source_text_projection(&number.to_string())
+        } else {
+            source_text_projection("NaN")
+        }
+    } else if root.is_null() {
+        source_text_projection("null")
+    } else {
+        source_text_projection(
+            &value
+                .to_json_string()
+                .unwrap_or_else(|_| "[object Object]".into()),
+        )
+    }
+}
+
+fn source_text_with_value(
+    prefix: &str,
+    value: &Utf16JsonProjection,
+    suffix: &str,
+) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(value.string_units("").unwrap_or_default());
+    units.extend(suffix.encode_utf16());
+    source_text_projection_units(&units)
+}
+
+fn json_stringify_projection(value: &Utf16JsonProjection) -> String {
+    value.to_json_string().unwrap_or_else(|_| "null".into())
+}
+
+fn projection_u64(value: &Utf16JsonProjection) -> Option<u64> {
+    let number = value.at_pointer("")?.as_number()?;
+    (number.is_finite() && number >= 0.0 && number < u64::MAX as f64 && number.fract() == 0.0)
+        .then(|| number as u64)
+        .filter(|integer| *integer as f64 == number)
+}
+
 fn pii_str(s: &str) -> AnalyticsValue {
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
 }
@@ -540,56 +687,88 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(CONFIG_FAILED, md).await;
 }
 
-async fn read_settings_obj(path: &Path) -> Result<Map<String, Value>, ToolError> {
+async fn read_settings_obj(path: &Path) -> Result<Utf16JsonProjection, ToolError> {
     if !tokio::fs::try_exists(path).await.unwrap_or(false) {
-        return Ok(Map::new());
+        return Ok(Utf16JsonProjection::object(Vec::new()).expect("empty settings object is valid"));
     }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| ToolError::Io(format!("Config: io error at {}: {e}", path.display())))?;
-    if bytes.is_empty() {
-        return Ok(Map::new());
-    }
-    let v: Value = serde_json::from_slice(&bytes).map_err(|e| {
-        ToolError::Io(format!(
-            "Config: settings.json at {} is invalid JSON: {e}",
-            path.display()
-        ))
+    let bytes = tokio::fs::read(path).await.map_err(|e| {
+        ToolError::Io(format!("Config: io error at {}: {e}", path.display()).into())
     })?;
-    match v {
-        Value::Object(m) => Ok(m),
-        other => Err(ToolError::Io(format!(
-            "Config: settings.json at {} is not a JSON object (got {})",
-            path.display(),
-            match &other {
-                Value::Null => "null",
-                Value::Bool(_) => "bool",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::Array(_) => "array",
-                Value::Object(_) => unreachable!(),
-            }
-        ))),
+    if bytes.is_empty() {
+        return Ok(Utf16JsonProjection::object(Vec::new()).expect("empty settings object is valid"));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|error| {
+        ToolError::Io(
+            format!(
+                "Config: settings.json at {} is invalid UTF-8: {error}",
+                path.display()
+            )
+            .into(),
+        )
+    })?;
+    let value = Utf16JsonProjection::parse(text).map_err(|error| {
+        ToolError::Io(
+            format!(
+                "Config: settings.json at {} is invalid JSON: {error}",
+                path.display()
+            )
+            .into(),
+        )
+    })?;
+    if value
+        .at_pointer("")
+        .and_then(|root| root.object_entries())
+        .is_some()
+    {
+        Ok(value)
+    } else {
+        let got = value
+            .at_pointer("")
+            .map(|root| {
+                if root.is_null() {
+                    "null"
+                } else if root.as_bool().is_some() {
+                    "bool"
+                } else if root.as_number().is_some() {
+                    "number"
+                } else if root.as_str().is_some() {
+                    "string"
+                } else if root.array_len().is_some() {
+                    "array"
+                } else {
+                    "object"
+                }
+            })
+            .unwrap_or("unknown");
+        Err(ToolError::Io(
+            format!(
+                "Config: settings.json at {} is not a JSON object (got {got})",
+                path.display()
+            )
+            .into(),
+        ))
     }
 }
 
-async fn write_settings_obj(path: &Path, obj: &Map<String, Value>) -> Result<usize, ToolError> {
+async fn write_settings_obj(path: &Path, obj: &Utf16JsonProjection) -> Result<usize, ToolError> {
     if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| ToolError::Io(format!("Config: io error at {}: {e}", dir.display())))?;
+        tokio::fs::create_dir_all(dir).await.map_err(|e| {
+            ToolError::Io(format!("Config: io error at {}: {e}", dir.display()).into())
+        })?;
     }
-    let body = serde_json::to_vec_pretty(&Value::Object(obj.clone()))
-        .map_err(|e| ToolError::Internal(format!("Config: serde error: {e}")))?;
-    tokio::fs::write(path, &body)
-        .await
-        .map_err(|e| ToolError::Io(format!("Config: io error at {}: {e}", path.display())))?;
+    let body = obj
+        .to_pretty_json_string()
+        .map_err(|e| ToolError::Internal(format!("Config: serialization error: {e}")))?;
+    tokio::fs::write(path, body.as_bytes()).await.map_err(|e| {
+        ToolError::Io(format!("Config: io error at {}: {e}", path.display()).into())
+    })?;
     Ok(body.len())
 }
 
 /// Merge a nested update object into `target` in place (deep merge of objects,
 /// scalar values overwrite). Mirrors the effect of
 /// `updateSettingsForSource('userSettings', buildNestedObject(path, value))`.
+#[cfg(test)]
 fn merge_into(target: &mut Map<String, Value>, update: &Map<String, Value>) {
     for (k, v) in update {
         match (target.get_mut(k), v) {
@@ -606,6 +785,7 @@ fn merge_into(target: &mut Map<String, Value>, update: &Map<String, Value>) {
 /// Coerce a boolean-typed value per `ConfigTool.ts:185-201`: a `"true"`/
 /// `"false"` string (lowercased, trimmed) becomes the bool; everything else
 /// passes through unchanged.
+#[cfg(test)]
 fn coerce_boolean(value: &Value) -> Value {
     if let Some(s) = value.as_str() {
         let lower = s.trim().to_lowercase();
@@ -621,6 +801,7 @@ fn coerce_boolean(value: &Value) -> Value {
 
 /// `String(finalValue)` for options/error messages — JS `String()` of a JSON
 /// value: strings as-is, bool/number lexically, null ⇒ "null".
+#[cfg(test)]
 fn js_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -632,14 +813,21 @@ fn js_string(value: &Value) -> String {
 }
 
 /// `jsonStringify(value)` — `JSON.stringify`, used in the `Set X to Y` prompt.
+#[cfg(test)]
 fn json_stringify(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
 /// Build the success/error output envelope (`outputSchema`,
 /// `ConfigTool.ts:51-61`).
-fn err_data(setting: &str, error: &str) -> Value {
-    json!({ "success": false, "operation": "set", "setting": setting, "error": error })
+fn err_data(setting: &Utf16JsonProjection, error: Utf16JsonProjection) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(vec![
+        ("success".into(), generated_builtin_result(&json!(false))),
+        ("operation".into(), source_text_projection("set")),
+        ("setting".into(), setting.clone()),
+        ("error".into(), error),
+    ])
+    .expect("Config error result is valid JSON")
 }
 
 #[async_trait]
@@ -647,11 +835,18 @@ impl Tool for ConfigTool {
     fn name(&self) -> &str {
         CONFIG_TOOL_NAME
     }
-    fn search_hint(&self) -> Option<&str> {
-        Some("get or set LingXi settings (theme, model)")
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        Some("get or set LingXi settings (theme, model)".into())
     }
-    fn input_schema(&self) -> &Value {
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &SOURCE_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -662,25 +857,29 @@ impl Tool for ConfigTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, input: &Value) -> bool {
-        input.get("value").is_none()
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
+        input.get_property("value").is_none()
     }
-    fn is_destructive(&self, _: &Value) -> bool {
+    fn is_destructive(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_open_world(&self, _: &Value) -> bool {
+    fn is_open_world(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _: &Utf16JsonProjection) -> InterruptBehavior {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         // Auto-allow reading configs (value omitted).
-        if input.get("value").is_none() {
+        if input.get_property("value").is_none() {
             return PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
                     reason: "Config reads ~/.lingxi/settings.json (read-only)".into(),
@@ -691,18 +890,20 @@ impl Tool for ConfigTool {
             };
         }
         let setting = input
-            .get("setting")
-            .and_then(Value::as_str)
+            .string_units("/setting")
+            .map(|units| String::from_utf16_lossy(&units))
             .unwrap_or_default();
-        let value = input.get("value").cloned().unwrap_or(Value::Null);
-        let message = format!("Set {setting} to {}", json_stringify(&value));
+        let value = input
+            .subprojection("/value")
+            .unwrap_or_else(|_| null_projection());
+        let message = format!("Set {setting} to {}", json_stringify_projection(&value));
         PermissionResult::Ask {
             reason: PermissionDecisionReason::Other {
                 reason: "Config writes ~/.lingxi/settings.json".into(),
             },
             prompt: PermissionPrompt {
                 title: "Config".into(),
-                message,
+                message: message.into(),
                 options: vec![],
             },
             pending_classifier_check: None,
@@ -710,37 +911,42 @@ impl Tool for ConfigTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         "Get or set LingXi configuration settings.".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Get or set LingXi configuration settings.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let _ = input
-            .get("setting")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("Config: missing or non-string setting".into()))?;
+        let _ = input.string_units("/setting").ok_or_else(|| {
+            ValidationError(source_text_projection(
+                "Config: missing or non-string setting",
+            ))
+        })?;
         Ok(())
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let setting = match input.get("setting").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
+        let setting_projection = match input
+            .subprojection("/setting")
+            .ok()
+            .filter(|value| value.string_units("").is_some())
+        {
+            Some(value) => value,
             None => {
                 emit_failed(
                     &bus,
@@ -748,13 +954,19 @@ impl Tool for ConfigTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "Config: missing or non-string setting".into(),
-                ));
+                return Err(invalid_tool_input("Config: missing or non-string setting"));
             }
         };
+        let setting = setting_projection.string_at("").map(str::to_owned);
+        let setting_display = setting.clone().unwrap_or_else(|| {
+            String::from_utf16_lossy(
+                &setting_projection
+                    .string_units("")
+                    .expect("setting projection is a string"),
+            )
+        });
         // value omitted ⇒ GET, present ⇒ SET. JSON null is a present value.
-        let value = input.get("value").cloned();
+        let value = input.subprojection("/value").ok();
         let is_get = value.is_none();
 
         let mut md: LogEventMetadata = HashMap::new();
@@ -762,11 +974,11 @@ impl Tool for ConfigTool {
             "op".into(),
             verified_str(if is_get { "get" } else { "set" }),
         );
-        md.insert("setting".into(), verified_str(&setting));
+        md.insert("setting".into(), verified_str(&setting_display));
         bus.log_event(CONFIG_STARTED, md).await;
 
         // 1. Check if setting is supported.
-        if !is_supported(&setting) {
+        let Some(setting) = setting.filter(|setting| is_supported(setting)) else {
             emit_failed(
                 &bus,
                 "unknown_setting",
@@ -774,9 +986,16 @@ impl Tool for ConfigTool {
             )
             .await;
             return Ok(done(
-                json!({ "success": false, "error": format!("Unknown setting: \"{setting}\"") }),
+                Utf16JsonProjection::object(vec![
+                    ("success".into(), generated_builtin_result(&json!(false))),
+                    (
+                        "error".into(),
+                        source_text_with_value("Unknown setting: \"", &setting_projection, "\""),
+                    ),
+                ])
+                .expect("Config unknown-setting result is valid JSON"),
             ));
-        }
+        };
 
         let config = get_config(&setting).expect("supported ⇒ config present");
         let path = get_path(&setting);
@@ -799,14 +1018,17 @@ impl Tool for ConfigTool {
                     return Err(e);
                 }
             };
-            let current = get_value(config.source, &path, &settings);
+            let current = get_projection_value(config.source, &path, &settings);
             emit_completed(&bus, started, "get", &setting, &file).await;
-            return Ok(done(json!({
-                "success": true,
-                "operation": "get",
-                "setting": setting,
-                "value": current,
-            })));
+            return Ok(done(
+                Utf16JsonProjection::object(vec![
+                    ("success".into(), generated_builtin_result(&json!(true))),
+                    ("operation".into(), source_text_projection("get")),
+                    ("setting".into(), setting_projection.clone()),
+                    ("value".into(), current),
+                ])
+                .expect("Config get result is valid JSON"),
+            ));
         }
 
         // 3. SET operation.
@@ -815,28 +1037,34 @@ impl Tool for ConfigTool {
 
         // Coerce and validate boolean values (ConfigTool.ts:185-201).
         if config.ty == SettingType::Boolean {
-            final_value = coerce_boolean(&raw_value);
-            if !final_value.is_boolean() {
+            final_value = coerce_boolean_projection(&raw_value);
+            if final_value
+                .at_pointer("")
+                .and_then(JsonValueView::as_bool)
+                .is_none()
+            {
                 emit_failed(&bus, "not_boolean", started.elapsed().as_millis() as u64).await;
                 return Ok(done(err_data(
-                    &setting,
-                    &format!("{setting} requires true or false."),
+                    &setting_projection,
+                    source_text_projection(&format!("{setting} requires true or false.")),
                 )));
             }
         }
 
         // Check options (ConfigTool.ts:204-214).
         if let Some(options) = get_options_for_setting(&setting) {
-            let candidate = js_string(&final_value);
-            if !options.iter().any(|o| o == &candidate) {
+            let candidate = js_string_projection(&final_value);
+            let candidate_text = candidate.string_at("");
+            if !options
+                .iter()
+                .any(|option| Some(option.as_str()) == candidate_text)
+            {
                 emit_failed(&bus, "invalid_option", started.elapsed().as_millis() as u64).await;
+                let value_text = js_string_projection(&raw_value);
+                let suffix = format!("\". Options: {}", options.join(", "));
                 return Ok(done(err_data(
-                    &setting,
-                    &format!(
-                        "Invalid value \"{}\". Options: {}",
-                        js_string(&raw_value),
-                        options.join(", ")
-                    ),
+                    &setting_projection,
+                    source_text_with_value("Invalid value \"", &value_text, &suffix),
                 )));
             }
         }
@@ -851,7 +1079,7 @@ impl Tool for ConfigTool {
                 return Err(e);
             }
         };
-        let previous_value = get_value(config.source, &path, &settings);
+        let previous_value = get_projection_value(config.source, &path, &settings);
 
         match config.source {
             Source::Global => {
@@ -861,17 +1089,20 @@ impl Tool for ConfigTool {
                     None => {
                         emit_failed(&bus, "invalid_path", started.elapsed().as_millis() as u64)
                             .await;
-                        return Ok(done(err_data(&setting, "Invalid setting path")));
+                        return Ok(done(err_data(
+                            &setting_projection,
+                            source_text_projection("Invalid setting path"),
+                        )));
                     }
                 };
-                settings.insert(key, final_value.clone());
+                settings
+                    .set_field(&key, final_value.clone())
+                    .expect("Config setting key is valid JSON");
             }
             Source::Settings => {
                 // settings: deep-merge the nested update object.
-                let update = build_nested_object(&path, final_value.clone());
-                if let Value::Object(update_map) = update {
-                    merge_into(&mut settings, &update_map);
-                }
+                let update = build_nested_projection(&path, final_value.clone());
+                settings = merge_projection(&settings, &update);
             }
         }
 
@@ -881,58 +1112,102 @@ impl Tool for ConfigTool {
         }
         if setting == "agentPushNotifEnabled" {
             lingxi_core::host::session_flags::set_agent_push_notif_enabled(
-                final_value.as_bool().unwrap_or(false),
+                final_value
+                    .at_pointer("")
+                    .and_then(JsonValueView::as_bool)
+                    .unwrap_or(false),
             );
         }
         if setting == "includeGitInstructions" {
             // Republish so the git/PR sections follow the setting inside the
             // running session, like the attribution trailers below.
-            lingxi_core::host::session_flags::set_include_git_instructions(final_value.as_bool());
+            lingxi_core::host::session_flags::set_include_git_instructions(
+                final_value.at_pointer("").and_then(JsonValueView::as_bool),
+            );
         }
         if setting == "includeCoAuthoredBy" {
             // Republish so the attribution trailers follow the setting inside
             // the running session, like the output caps below.
-            lingxi_core::host::session_flags::set_include_co_authored_by(final_value.as_bool());
+            lingxi_core::host::session_flags::set_include_co_authored_by(
+                final_value.at_pointer("").and_then(JsonValueView::as_bool),
+            );
         }
         if setting == "attribution" {
-            let commit = final_value
-                .get("commit")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let pr = final_value
-                .get("pr")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let source_string_field = |key: &str| {
+                final_value
+                    .subprojection(&format!("/{key}"))
+                    .ok()
+                    .filter(|value| value.string_units("").is_some())
+            };
+            let commit = source_string_field("commit");
+            let pr = source_string_field("pr");
             lingxi_core::host::session_flags::set_attribution(commit, pr);
         }
         if setting == "bashOutputMaxChars" {
             // Republish so the Bash cap moves with the setting inside the
             // running session, exactly as `taskOutputMaxChars` does below.
             lingxi_core::host::session_flags::set_bash_output_max_chars(
-                final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
+                projection_u64(&final_value).and_then(|n| u32::try_from(n).ok()),
             );
         }
         if setting == "taskOutputMaxChars" {
             // Republish so `TaskOutput`'s cap moves with the setting inside the
             // running session, exactly as the push flag above does.
             lingxi_core::host::session_flags::set_task_output_max_chars(
-                final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
+                projection_u64(&final_value).and_then(|n| u32::try_from(n).ok()),
             );
         }
 
         emit_completed(&bus, started, "set", &setting, &file).await;
-        Ok(done(json!({
-            "success": true,
-            "operation": "set",
-            "setting": setting,
-            "previousValue": previous_value,
-            "newValue": final_value,
-        })))
+        Ok(done(
+            Utf16JsonProjection::object(vec![
+                ("success".into(), generated_builtin_result(&json!(true))),
+                ("operation".into(), source_text_projection("set")),
+                ("setting".into(), setting_projection),
+                ("previousValue".into(), previous_value),
+                ("newValue".into(), final_value),
+            ])
+            .expect("Config set result is valid JSON"),
+        ))
+    }
+}
+
+#[cfg(test)]
+struct TestConfigCallResult {
+    data: Value,
+    model_content: Option<String>,
+}
+
+#[cfg(test)]
+impl ConfigTool {
+    async fn call(
+        &self,
+        input: Value,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+    ) -> Result<TestConfigCallResult, ToolError> {
+        let result = Tool::call(self, generated_builtin_result(&input), ctx, progress).await?;
+        let data = serde_json::from_str(
+            &result
+                .data
+                .to_json_string()
+                .expect("test result projection serializes"),
+        )
+        .expect("test result JSON parses");
+        let model_content = result
+            .model_content
+            .as_ref()
+            .and_then(|value| value.string_at(""))
+            .map(str::to_owned);
+        Ok(TestConfigCallResult {
+            data,
+            model_content,
+        })
     }
 }
 
 /// Wrap result `data` in a `ToolCallResult` envelope.
-fn done(data: Value) -> ToolCallResult {
+fn done(data: Utf16JsonProjection) -> ToolCallResult {
     ToolCallResult {
         data,
         model_content: None,
@@ -940,6 +1215,7 @@ fn done(data: Value) -> ToolCallResult {
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
+        subagent_hooks_fired: false,
     }
 }
 
@@ -960,6 +1236,11 @@ async fn emit_completed(
     md.insert("setting".into(), verified_str(setting));
     md.insert("_PROTO_path".into(), pii_str(&file.display().to_string()));
     bus.log_event(CONFIG_COMPLETED, md).await;
+}
+
+fn invalid_tool_input(message: impl Into<String>) -> ToolError {
+    let message = message.into();
+    ToolError::InvalidInput(tool_api::tool_trait::source_text_projection(&message))
 }
 
 #[cfg(test)]
@@ -1227,6 +1508,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_setting_error_preserves_unpaired_utf16_units() {
+        let input = Utf16JsonProjection::object(vec![(
+            "setting".into(),
+            source_text_projection_units(&[0xD800]),
+        )])
+        .expect("config input is valid JSON");
+        let input_tool = tool();
+
+        Tool::validate_input(&input_tool, &input, &fresh_ctx())
+            .await
+            .expect("a JavaScript string with an unpaired unit is a string");
+        let result = Tool::call(&input_tool, input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("unknown setting is returned as a source error result");
+
+        let mut expected_error = "Unknown setting: \"".encode_utf16().collect::<Vec<_>>();
+        expected_error.push(0xD800);
+        expected_error.push(u16::from(b'\"'));
+        assert_eq!(result.data.string_units("/error"), Some(expected_error));
+    }
+
+    #[tokio::test]
     async fn get_missing_returns_null_value() {
         let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
@@ -1343,7 +1646,9 @@ mod tests {
         assert_eq!(out.data["success"], json!(false));
         assert_eq!(
             out.data["error"],
-            json!("Invalid value \"neon\". Options: dark, light, light-daltonized, dark-daltonized, light-ansi, dark-ansi")
+            json!(
+                "Invalid value \"neon\". Options: dark, light, light-daltonized, dark-daltonized, light-ansi, dark-ansi"
+            )
         );
     }
 
@@ -1443,29 +1748,36 @@ mod tests {
     #[tokio::test]
     async fn is_read_only_reflects_value_presence() {
         let t = tool();
-        assert!(t.is_read_only(&json!({ "setting": "theme" })));
-        assert!(!t.is_read_only(&json!({ "setting": "theme", "value": "dark" })));
+        assert!(t.is_read_only(&generated_builtin_result(&json!({ "setting": "theme" }))));
+        assert!(!t.is_read_only(&generated_builtin_result(
+            &json!({ "setting": "theme", "value": "dark" })
+        )));
         // explicit null value is still a SET (present)
-        assert!(!t.is_read_only(&json!({ "setting": "theme", "value": null })));
+        assert!(!t.is_read_only(&generated_builtin_result(
+            &json!({ "setting": "theme", "value": null })
+        )));
     }
 
     #[tokio::test]
     async fn check_permissions_allows_read_asks_on_write() {
         let t = tool();
         let read = t
-            .check_permissions(&json!({ "setting": "theme" }), &fresh_ctx())
+            .check_permissions(
+                &generated_builtin_result(&json!({ "setting": "theme" })),
+                &fresh_ctx(),
+            )
             .await;
         assert!(matches!(read, PermissionResult::Allow { .. }));
 
         let write = t
             .check_permissions(
-                &json!({ "setting": "theme", "value": "dark" }),
+                &generated_builtin_result(&json!({ "setting": "theme", "value": "dark" })),
                 &fresh_ctx(),
             )
             .await;
         match write {
             PermissionResult::Ask { prompt, .. } => {
-                assert_eq!(prompt.message, "Set theme to \"dark\"");
+                assert_eq!(prompt.message.string_at(""), Some("Set theme to \"dark\""));
             }
             other => panic!("expected Ask, got {other:?}"),
         }
@@ -1476,11 +1788,11 @@ mod tests {
         let t = tool();
         assert_eq!(t.name(), "Config");
         assert_eq!(
-            t.search_hint(),
+            t.search_hint().as_ref().and_then(|hint| hint.string_at("")),
             Some("get or set LingXi settings (theme, model)")
         );
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 100_000);
-        assert!(t.is_concurrency_safe(&json!({})));
+        assert!(t.is_concurrency_safe(&generated_builtin_result(&json!({}))));
     }
 }

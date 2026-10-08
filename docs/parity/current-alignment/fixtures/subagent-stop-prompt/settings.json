@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "FIXED_SUBAGENT_STOP_HOOK_INSTRUCTION: Evaluate the completed child task. Return only {\"ok\":true} so the child may stop.",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

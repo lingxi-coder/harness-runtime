@@ -3,7 +3,8 @@
 
 use crate::ExecutionUsage;
 use lingxi_llm_client::protocol::{
-    InferenceReport, ServerToolUsage, ServiceTier, Usage, UsageReport, UsageState,
+    InferenceReport, JsonPayload, LlmError, ServerToolUsage, ServiceTier, Usage, UsageReport,
+    UsageState,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -29,7 +30,7 @@ struct StoredUsage {
     provider_reported_total_tokens: Option<u64>,
     server_tool_use: Option<HostedTools>,
     #[serde(default)]
-    provider_metadata: Value,
+    provider_metadata: JsonPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speed: Option<String>,
 }
@@ -43,38 +44,78 @@ struct CanonicalHistoryUsage {
     inference: InferenceReport,
 }
 
+fn empty_source_object() -> JsonPayload {
+    JsonPayload::parse("{}").expect("empty object is valid JSON")
+}
+
+fn source_object_or_native(
+    value: &JsonPayload,
+    null_is_empty: bool,
+) -> Result<JsonPayload, LlmError> {
+    if value.is_root_object() {
+        return Ok(value.clone());
+    }
+    if null_is_empty && value.as_json_source().trim() == "null" {
+        return Ok(empty_source_object());
+    }
+    empty_source_object().with_object_field("native", value)
+}
+
+fn generated_payload(value: Value) -> Result<JsonPayload, serde_json::Error> {
+    JsonPayload::from_generated_value(&value)
+}
+
+fn ser_source_error<E: serde::ser::Error>(error: impl std::fmt::Display) -> E {
+    E::custom(error.to_string())
+}
+
 impl Serialize for ExecutionUsage {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let counts = self.counts();
-        let mut provider_metadata = self.provider_metadata.clone();
-        if !provider_metadata.is_object() {
-            provider_metadata = if provider_metadata.is_null() {
-                serde_json::json!({})
-            } else {
-                serde_json::json!({ "native": provider_metadata })
-            };
+        let mut provider_metadata = source_object_or_native(&self.provider_metadata, true)
+            .map_err(ser_source_error::<S::Error>)?;
+        let upstream_state = generated_payload(serde_json::json!(self.report.state))
+            .map_err(ser_source_error::<S::Error>)?;
+        provider_metadata = provider_metadata
+            .with_object_field("upstreamUsageState", &upstream_state)
+            .map_err(ser_source_error::<S::Error>)?;
+
+        if counts.cache_write_1h_tokens > 0
+            || provider_metadata.raw_source_at("/cache_creation").is_some()
+        {
+            let mut cache_creation = provider_metadata
+                .payload_at("/cache_creation")
+                .filter(JsonPayload::is_root_object)
+                .unwrap_or_else(empty_source_object);
+            let one_hour_tokens =
+                generated_payload(serde_json::json!(counts.cache_write_1h_tokens))
+                    .map_err(ser_source_error::<S::Error>)?;
+            cache_creation = cache_creation
+                .with_object_field("ephemeral_1h_input_tokens", &one_hour_tokens)
+                .map_err(ser_source_error::<S::Error>)?;
+            provider_metadata = provider_metadata
+                .with_object_field("cache_creation", &cache_creation)
+                .map_err(ser_source_error::<S::Error>)?;
         }
-        provider_metadata["upstreamUsageState"] = serde_json::json!(self.report.state);
-        if counts.cache_write_1h_tokens > 0 || provider_metadata.get("cache_creation").is_some() {
-            if !provider_metadata["cache_creation"].is_object() {
-                provider_metadata["cache_creation"] = serde_json::json!({});
+
+        let mut llm_client = match provider_metadata.payload_at("/llm_client") {
+            Some(value) => {
+                source_object_or_native(&value, true).map_err(ser_source_error::<S::Error>)?
             }
-            provider_metadata["cache_creation"]["ephemeral_1h_input_tokens"] =
-                serde_json::json!(counts.cache_write_1h_tokens);
-        }
-        if !provider_metadata["llm_client"].is_object() {
-            let native = provider_metadata["llm_client"].take();
-            provider_metadata["llm_client"] = if native.is_null() {
-                serde_json::json!({})
-            } else {
-                serde_json::json!({ "native": native })
-            };
-        }
-        provider_metadata["llm_client"]["history_usage"] = serde_json::json!({
+            None => empty_source_object(),
+        };
+        let history_usage = generated_payload(serde_json::json!({
             "schema": 1,
-            "report": self.report,
-            "inference": self.inference,
-        });
+            "report": &self.report,
+            "inference": &self.inference,
+        }))
+        .map_err(ser_source_error::<S::Error>)?;
+        llm_client = llm_client
+            .with_object_field("history_usage", &history_usage)
+            .map_err(ser_source_error::<S::Error>)?;
+        provider_metadata = provider_metadata
+            .with_object_field("llm_client", &llm_client)
+            .map_err(ser_source_error::<S::Error>)?;
         StoredUsage {
             billable_tokens: TokenBuckets {
                 input: counts.input_tokens,
@@ -106,13 +147,15 @@ impl<'de> Deserialize<'de> for ExecutionUsage {
         let stored = StoredUsage::deserialize(deserializer)?;
         let canonical = stored
             .provider_metadata
-            .pointer("/llm_client/history_usage")
-            .and_then(|value| serde_json::from_value::<CanonicalHistoryUsage>(value.clone()).ok())
+            .payload_at("/llm_client/history_usage")
+            .and_then(|value| {
+                serde_json::from_str::<CanonicalHistoryUsage>(value.as_json_source()).ok()
+            })
             .filter(|extension| extension.schema == 1);
         let state = stored
             .provider_metadata
-            .get("upstreamUsageState")
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .raw_source_at("/upstreamUsageState")
+            .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or(UsageState::Partial);
         let usage = Usage {
             input_tokens: stored.billable_tokens.input,
@@ -125,8 +168,8 @@ impl<'de> Deserialize<'de> for ExecutionUsage {
             reasoning_tokens: stored.billable_tokens.reasoning_output,
             cache_write_1h_tokens: stored
                 .provider_metadata
-                .pointer("/cache_creation/ephemeral_1h_input_tokens")
-                .and_then(Value::as_u64)
+                .raw_source_at("/cache_creation/ephemeral_1h_input_tokens")
+                .and_then(|value| serde_json::from_str::<u64>(&value).ok())
                 .unwrap_or_default(),
             server_tool_usage: stored.server_tool_use.map(|tools| ServerToolUsage {
                 web_search_requests: Some(tools.web_search_requests),
@@ -156,5 +199,63 @@ impl<'de> Deserialize<'de> for ExecutionUsage {
             provider_metadata: stored.provider_metadata,
             cost_estimate: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_usage_updates_keep_exact_provider_metadata_source() {
+        let provider_metadata =
+            JsonPayload::parse(r#"{"opaque":"\ud800","llm_client":{"foreign":"\ud801"}}"#).unwrap();
+        let usage = ExecutionUsage {
+            report: UsageReport::measured(
+                Usage {
+                    cache_write_tokens: 9,
+                    cache_write_1h_tokens: 4,
+                    ..Default::default()
+                },
+                UsageState::Complete,
+            ),
+            provider_metadata: provider_metadata.clone(),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_string(&usage).unwrap();
+        let stored = JsonPayload::parse(&encoded).unwrap();
+        assert_eq!(
+            stored.raw_source_at("/provider_metadata/opaque").as_deref(),
+            Some(r#""\ud800""#)
+        );
+        assert_eq!(
+            stored
+                .raw_source_at("/provider_metadata/llm_client/foreign")
+                .as_deref(),
+            Some(r#""\ud801""#)
+        );
+        assert_eq!(
+            stored
+                .raw_source_at("/provider_metadata/cache_creation/ephemeral_1h_input_tokens")
+                .as_deref(),
+            Some("4")
+        );
+
+        let decoded: ExecutionUsage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .provider_metadata
+                .raw_source_at("/opaque")
+                .as_deref(),
+            Some(r#""\ud800""#)
+        );
+        assert_eq!(
+            decoded
+                .provider_metadata
+                .raw_source_at("/llm_client/foreign")
+                .as_deref(),
+            Some(r#""\ud801""#)
+        );
     }
 }

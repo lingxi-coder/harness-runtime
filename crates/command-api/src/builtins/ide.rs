@@ -29,11 +29,12 @@ impl IdeHandler {
 #[async_trait]
 impl BuiltinCommandHandler for IdeHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        let action = args
-            .positional_args
-            .first()
-            .map(String::as_str)
-            .unwrap_or("status");
+        if args.raw_args_utf8().is_none() {
+            return CommandResult::Done {
+                display: Some("IDE arguments must be valid Unicode text.".into()),
+            };
+        }
+        let action = args.positional_arg_utf8(0).unwrap_or("status");
         let result = match action {
             "status" => Ok(render_status(&self.handle.ide_status().await)),
             "open" => {
@@ -65,9 +66,7 @@ impl BuiltinCommandHandler for IdeHandler {
             "connect" => {
                 let status = self.handle.ide_status().await;
                 let endpoint_id = args
-                    .positional_args
-                    .get(1)
-                    .map(String::as_str)
+                    .positional_arg_utf8(1)
                     .map(|selector| endpoint_id_for_selector(&status, selector).unwrap_or(selector))
                     .or_else(|| single_endpoint_id(&status));
                 match endpoint_id {
@@ -85,10 +84,13 @@ impl BuiltinCommandHandler for IdeHandler {
             _ => Ok("Usage: /ide [status|open|connect [endpoint]|disconnect]".to_string()),
         };
         CommandResult::Done {
-            display: Some(match result {
-                Ok(display) => display,
-                Err(error) => format!("Could not manage IDE integration: {error}"),
-            }),
+            display: Some(
+                (match result {
+                    Ok(display) => display,
+                    Err(error) => format!("Could not manage IDE integration: {error}"),
+                })
+                .into(),
+            ),
         }
     }
 

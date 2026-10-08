@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use plugin::discover_recorded_plugins;
 use plugin::plugin_source_sha256;
 use serde::Serialize;
-use serde_json::{json, Map, Value};
 
-use crate::settings_bridge::{apply_patch, build_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch_source, build_snapshot, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 
 #[derive(Debug, Serialize)]
 struct InstalledPluginRow {
@@ -110,61 +110,60 @@ pub async fn catalog_json(
     }
     installed.sort_by(|left, right| left.id.cmp(&right.id));
     let (available, marketplace_rows) = available_plugins(&plugins_dir, &installed_versions)?;
-    let enabled = snapshot
-        .effective
-        .get("enabledPlugins")
-        .cloned()
-        .unwrap_or(Value::Object(Map::new()));
-    let configs = snapshot
-        .effective
-        .get("pluginConfigs")
-        .cloned()
-        .unwrap_or(Value::Object(Map::new()));
-    let marketplaces = snapshot
-        .effective
-        .get("extraKnownMarketplaces")
-        .cloned()
-        .or_else(|| snapshot.effective.get("additionalMarketplaces").cloned())
-        .unwrap_or(Value::Object(Map::new()));
-    let policies = json!({
-        "strictKnownMarketplaces": snapshot.effective.get("strictKnownMarketplaces"),
-        "allowedMarketplaces": snapshot.effective.get("allowedMarketplaces"),
-        "blockedMarketplaces": snapshot.effective.get("blockedMarketplaces"),
-    });
+    let empty_object = source_object()?;
+    let null = source_null()?;
+    let enabled = source_member(&snapshot.effective_source, "enabledPlugins")
+        .unwrap_or_else(|| empty_object.clone());
+    let configs = source_member(&snapshot.effective_source, "pluginConfigs")
+        .unwrap_or_else(|| empty_object.clone());
+    let marketplaces = source_member(&snapshot.effective_source, "extraKnownMarketplaces")
+        .or_else(|| source_member(&snapshot.effective_source, "additionalMarketplaces"))
+        .unwrap_or(empty_object);
+    let policies = Utf16JsonProjection::object(vec![
+        (
+            "strictKnownMarketplaces".to_string(),
+            source_member(&snapshot.effective_source, "strictKnownMarketplaces")
+                .unwrap_or_else(|| null.clone()),
+        ),
+        (
+            "allowedMarketplaces".to_string(),
+            source_member(&snapshot.effective_source, "allowedMarketplaces")
+                .unwrap_or_else(|| null.clone()),
+        ),
+        (
+            "blockedMarketplaces".to_string(),
+            source_member(&snapshot.effective_source, "blockedMarketplaces").unwrap_or(null),
+        ),
+    ])
+    .map_err(|error| error.to_string())?;
     let catalog = PluginCatalog {
         installed,
         available,
         marketplaces: marketplace_rows,
-        enabled_json: serde_json::to_string_pretty(&enabled).map_err(|error| error.to_string())?,
-        configs_json: serde_json::to_string_pretty(&configs).map_err(|error| error.to_string())?,
-        marketplaces_json: serde_json::to_string_pretty(&marketplaces)
+        enabled_json: enabled
+            .to_json_string()
             .map_err(|error| error.to_string())?,
-        policies_json: serde_json::to_string_pretty(&policies)
+        configs_json: configs
+            .to_json_string()
+            .map_err(|error| error.to_string())?,
+        marketplaces_json: marketplaces
+            .to_json_string()
+            .map_err(|error| error.to_string())?,
+        policies_json: policies
+            .to_json_string()
             .map_err(|error| error.to_string())?,
         revisions: BTreeMap::from([
             (
                 "user".to_string(),
-                plugin_source_sha256(
-                    serde_json::to_string(snapshot.layers.get("user").unwrap_or(&Map::new()))
-                        .map_err(|error| error.to_string())?
-                        .as_bytes(),
-                ),
+                layer_revision(&snapshot.layers, "user")?,
             ),
             (
                 "project".to_string(),
-                plugin_source_sha256(
-                    serde_json::to_string(snapshot.layers.get("project").unwrap_or(&Map::new()))
-                        .map_err(|error| error.to_string())?
-                        .as_bytes(),
-                ),
+                layer_revision(&snapshot.layers, "project")?,
             ),
             (
                 "local".to_string(),
-                plugin_source_sha256(
-                    serde_json::to_string(snapshot.layers.get("local").unwrap_or(&Map::new()))
-                        .map_err(|error| error.to_string())?
-                        .as_bytes(),
-                ),
+                layer_revision(&snapshot.layers, "local")?,
             ),
         ]),
     };
@@ -178,12 +177,12 @@ pub async fn preview_operation(
 ) -> Result<String, String> {
     let payload = parse_payload(payload_json)?;
     let action = required_string(&payload, "action")?;
-    let target = payload
-        .get("plugin")
-        .or_else(|| payload.get("name"))
-        .or_else(|| payload.get("source"))
-        .and_then(Value::as_str)
-        .unwrap_or("configuration");
+    let target_projection = ["plugin", "name", "source"]
+        .into_iter()
+        .filter_map(|key| source_member(&payload, key))
+        .find(|value| value.string_at("").is_some())
+        .unwrap_or(source_string("configuration")?);
+    let target = target_projection.string_at("").unwrap_or("configuration");
     let requires_confirmation = matches!(
         action,
         "install"
@@ -217,13 +216,20 @@ pub async fn preview_operation(
         }
         validate_config_payload(context, &payload).await?;
     }
-    serde_json::to_string(&json!({
-        "action": action,
-        "target": target,
-        "requiresConfirmation": requires_confirmation,
-        "summary": format!("{action} {target}"),
-    }))
-    .map_err(|error| error.to_string())
+    let response = Utf16JsonProjection::object(vec![
+        ("action".to_string(), source_string(action)?),
+        ("target".to_string(), target_projection),
+        (
+            "requiresConfirmation".to_string(),
+            source_bool(requires_confirmation)?,
+        ),
+        (
+            "summary".to_string(),
+            source_string(&format!("{action} {target}"))?,
+        ),
+    ])
+    .map_err(|error| error.to_string())?;
+    response.to_json_string().map_err(|error| error.to_string())
 }
 
 pub async fn apply_operation(
@@ -234,8 +240,8 @@ pub async fn apply_operation(
     let payload = parse_payload(payload_json)?;
     let action = required_string(&payload, "action")?;
     let scope = payload
-        .get("scope")
-        .and_then(Value::as_str)
+        .get_property("scope")
+        .and_then(JsonValueView::as_str)
         .unwrap_or("user")
         .to_string();
     ensure_scope_revision(context, &scope, revision_sha256)?;
@@ -248,7 +254,12 @@ pub async fn apply_operation(
             | "marketplace_remove"
             | "marketplace_update"
     );
-    if guarded && payload.get("confirmed").and_then(Value::as_bool) != Some(true) {
+    if guarded
+        && payload
+            .get_property("confirmed")
+            .and_then(JsonValueView::as_bool)
+            != Some(true)
+    {
         return Err("plugin operation requires confirmed:true after preflight".to_string());
     }
 
@@ -267,9 +278,9 @@ pub async fn apply_operation(
         "install" => {
             let plugin = required_string(&payload, "plugin")?.to_string();
             if payload
-                .get("config")
-                .and_then(Value::as_array)
-                .is_some_and(|values| !values.is_empty())
+                .get_property("config")
+                .and_then(JsonValueView::array_len)
+                .is_some_and(|length| length != 0)
             {
                 return Err(
                     "install config must be saved through pluginConfigs and the credential broker"
@@ -292,12 +303,12 @@ pub async fn apply_operation(
         "uninstall" => {
             let plugin = required_string(&payload, "plugin")?.to_string();
             let keep_data = payload
-                .get("keepData")
-                .and_then(Value::as_bool)
+                .get_property("keepData")
+                .and_then(JsonValueView::as_bool)
                 .unwrap_or(false);
             let prune = payload
-                .get("prune")
-                .and_then(Value::as_bool)
+                .get_property("prune")
+                .and_then(JsonValueView::as_bool)
                 .unwrap_or(false);
             tokio::task::spawn_blocking(move || {
                 crate::plugin_install::run_uninstall(
@@ -329,12 +340,17 @@ pub async fn apply_operation(
                 "marketplace_add" => {
                     let source = required_string(&payload, "source")?;
                     let sparse = payload
-                        .get("sparse")
-                        .and_then(Value::as_array)
+                        .get_property("sparse")
+                        .and_then(JsonValueView::array_len)
                         .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
+                        .flat_map(|length| (0..length))
+                        .filter_map(|index| {
+                            payload
+                                .get_property("sparse")?
+                                .get_index(index)?
+                                .as_str()
+                                .map(ToOwned::to_owned)
+                        })
                         .collect::<Vec<_>>();
                     crate::plugin_marketplace::run_add(
                         source,
@@ -353,7 +369,7 @@ pub async fn apply_operation(
                     &cwd,
                 ),
                 "marketplace_update" => crate::plugin_marketplace::run_update(
-                    payload.get("name").and_then(Value::as_str),
+                    payload.get_property("name").and_then(JsonValueView::as_str),
                     &plugins_dir,
                     &home,
                     &cwd,
@@ -380,97 +396,110 @@ pub async fn save_config(
         context.active_snapshot(),
         context.managed.clone(),
     );
-    let current = Value::Object(snapshot.layers.get(scope).cloned().unwrap_or_default());
-    let current_json = serde_json::to_string(&current).map_err(|error| error.to_string())?;
-    let actual = plugin_source_sha256(current_json.as_bytes());
-    if actual != revision_sha256 {
-        return Err(format!(
-            "revision conflict: expected {revision_sha256}, found {actual}"
-        ));
-    }
-    let enabled_plugins = payload.get("enabledPlugins").cloned();
-    let plugin_configs = payload.get("pluginConfigs").cloned();
-    let extra_known_marketplaces = payload
-        .get("extraKnownMarketplaces")
-        .cloned()
-        .or_else(|| payload.get("additionalMarketplaces").cloned());
+    check_scope_revision(&snapshot.layers, scope, revision_sha256)?;
     validate_config_payload(context, &payload).await?;
     let mut patch = Vec::new();
-    if let Some(value) = enabled_plugins {
+    if let Some(value) = source_member(&payload, "enabledPlugins") {
         patch.push(("enabledPlugins".to_string(), Some(value)));
     }
-    if let Some(value) = plugin_configs {
+    if let Some(value) = source_member(&payload, "pluginConfigs") {
         patch.push(("pluginConfigs".to_string(), Some(value)));
     }
-    if let Some(value) = extra_known_marketplaces {
+    if let Some(value) = source_member(&payload, "extraKnownMarketplaces")
+        .or_else(|| source_member(&payload, "additionalMarketplaces"))
+    {
         patch.push(("extraKnownMarketplaces".to_string(), Some(value)));
     }
-    apply_patch(&context.paths, destination, patch)
+    apply_patch_source(&context.paths, destination, patch)
 }
 
 async fn validate_config_payload(
     context: &SettingsContext,
-    payload: &Map<String, Value>,
+    payload: &Utf16JsonProjection,
 ) -> Result<(), String> {
     for key in ["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"] {
-        if payload.get(key).is_some_and(|value| !value.is_object()) {
-            return Err(format!("`{key}` must be a JSON object"));
+        if let Some(value) = payload.get_property(key) {
+            if value.object_entries().is_none() {
+                return Err(format!("`{key}` must be a JSON object"));
+            }
         }
     }
-    let Some(configs) = payload.get("pluginConfigs").and_then(Value::as_object) else {
+    let Some(configs) = source_member(payload, "pluginConfigs") else {
         return Ok(());
     };
-    for (plugin_id, value) in configs {
-        let entry = value
-            .as_object()
+    for plugin_entry in configs
+        .at_pointer("")
+        .and_then(JsonValueView::object_entries)
+        .ok_or_else(|| "`pluginConfigs` must be a JSON object".to_string())?
+    {
+        let plugin_id = String::from_utf16(plugin_entry.code_units)
+            .unwrap_or_else(|_| plugin_entry.display_key.to_string());
+        let entry = configs
+            .subprojection_property_units(plugin_entry.code_units)
+            .map_err(|error| error.to_string())?;
+        let entry_members = entry
+            .at_pointer("")
+            .and_then(JsonValueView::object_entries)
             .ok_or_else(|| format!("pluginConfigs.{plugin_id} must be an object"))?;
-        if entry
-            .keys()
-            .any(|key| key != "options" && key != "mcpServers")
-        {
+        if entry_members.iter().any(|member| {
+            !matches!(
+                String::from_utf16(member.code_units).ok().as_deref(),
+                Some("options" | "mcpServers")
+            )
+        }) {
             return Err(format!(
                 "pluginConfigs.{plugin_id} only accepts `options` and `mcpServers`"
             ));
         }
-        if entry.get("options").is_some_and(|value| !value.is_object()) {
-            return Err(format!(
-                "pluginConfigs.{plugin_id}.options must be an object"
-            ));
+        if let Some(options) = entry.get_property("options") {
+            if options.object_entries().is_none() {
+                return Err(format!(
+                    "pluginConfigs.{plugin_id}.options must be an object"
+                ));
+            }
         }
-        if let Some(servers) = entry.get("mcpServers").and_then(Value::as_object) {
-            if servers.values().any(|value| !value.is_object()) {
+        if let Some(servers) = entry.get_property("mcpServers") {
+            let entries = servers
+                .object_entries()
+                .ok_or_else(|| format!("pluginConfigs.{plugin_id}.mcpServers must be an object"))?;
+            if entries
+                .iter()
+                .any(|entry| entry.value.object_entries().is_none())
+            {
                 return Err(format!(
                     "pluginConfigs.{plugin_id}.mcpServers values must be objects"
                 ));
             }
-        } else if entry.get("mcpServers").is_some() {
-            return Err(format!(
-                "pluginConfigs.{plugin_id}.mcpServers must be an object"
-            ));
         }
     }
 
     let plugins_dir = context.paths.lingxi_home.join("plugins");
     for (_runtime_id, manifest, path) in discover_recorded_plugins(&plugins_dir).await {
         let plugin_id = installed_plugin_identity(&manifest, &path);
-        let Some(entry) = configs.get(&plugin_id).and_then(Value::as_object) else {
+        let Some(entry) = source_member(&configs, &plugin_id) else {
             continue;
         };
-        let options = entry
-            .get("options")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let options = source_member(&entry, "options").unwrap_or(source_object()?);
         let Some(schema) = manifest.user_config.as_ref() else {
-            if !options.is_empty() {
+            if options
+                .at_pointer("")
+                .and_then(JsonValueView::object_entries)
+                .is_some_and(|entries| !entries.is_empty())
+            {
                 return Err(format!(
                     "pluginConfigs.{plugin_id}.options contains values, but the plugin declares no userConfig schema"
                 ));
             }
             continue;
         };
-        for (key, value) in &options {
-            let field = schema.fields.get(key).ok_or_else(|| {
+        for option in options
+            .at_pointer("")
+            .and_then(JsonValueView::object_entries)
+            .ok_or_else(|| format!("pluginConfigs.{plugin_id}.options must be an object"))?
+        {
+            let key = String::from_utf16(option.code_units)
+                .unwrap_or_else(|_| option.display_key.to_string());
+            let field = schema.fields.get(&key).ok_or_else(|| {
                 format!("pluginConfigs.{plugin_id}.options.{key} is not declared by the plugin")
             })?;
             if field.sensitive {
@@ -478,13 +507,13 @@ async fn validate_config_payload(
                     "pluginConfigs.{plugin_id}.options.{key} is sensitive and must be saved through the Credential Broker"
                 ));
             }
-            validate_user_config_value(&plugin_id, key, field, value)?;
+            validate_user_config_value(&plugin_id, &key, field, option.value)?;
         }
         for (key, field) in &schema.fields {
             if !field.sensitive
                 && field.required
                 && field.default.is_none()
-                && !options.contains_key(key)
+                && !options.contains_property(key)
             {
                 return Err(format!(
                     "pluginConfigs.{plugin_id}.options.{key} is required"
@@ -520,42 +549,32 @@ fn validate_user_config_value(
     plugin_id: &str,
     key: &str,
     field: &plugin::UserConfigField,
-    value: &Value,
+    value: JsonValueView<'_>,
 ) -> Result<(), String> {
-    let valid_scalar = |value: &Value| match field.value_type.as_deref().unwrap_or("string") {
-        "string" | "directory" | "file" => value.is_string(),
-        "boolean" => value.is_boolean(),
-        "number" => value.is_number(),
-        _ => false,
-    };
-    let valid = if field.multiple == Some(true) {
-        value
-            .as_array()
-            .is_some_and(|values| values.iter().all(valid_scalar))
-    } else {
-        valid_scalar(value)
-    };
-    if !valid {
-        let expected = field.value_type.as_deref().unwrap_or("string");
-        let expected = if field.multiple == Some(true) {
-            format!("an array of {expected} values")
-        } else {
-            format!("a {expected} value")
+    let valid_scalar =
+        |value: JsonValueView<'_>| match field.value_type.as_deref().unwrap_or("string") {
+            "string" | "directory" | "file" => value.as_str().is_some(),
+            "boolean" => value.as_bool().is_some(),
+            "number" => value.as_number().is_some(),
+            _ => false,
         };
-        return Err(format!(
-            "pluginConfigs.{plugin_id}.options.{key} must be {expected}"
-        ));
-    }
-    let numbers: Vec<f64> = if field.multiple == Some(true) {
-        value
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_f64)
-            .collect()
+    let values = if field.multiple == Some(true) {
+        let Some(length) = value.array_len() else {
+            return invalid_config_type(plugin_id, key, field);
+        };
+        (0..length)
+            .filter_map(|index| value.get_index(index))
+            .collect::<Vec<_>>()
     } else {
-        value.as_f64().into_iter().collect()
+        vec![value]
     };
+    if values.iter().copied().any(|value| !valid_scalar(value)) {
+        return invalid_config_type(plugin_id, key, field);
+    }
+    let numbers: Vec<f64> = values
+        .iter()
+        .filter_map(|value| value.as_number())
+        .collect();
     if let Some(minimum) = field.min {
         if numbers.iter().any(|number| *number < minimum) {
             return Err(format!(
@@ -573,18 +592,39 @@ fn validate_user_config_value(
     Ok(())
 }
 
-fn parse_payload(payload_json: &str) -> Result<Map<String, Value>, String> {
-    match serde_json::from_str::<Value>(payload_json) {
-        Ok(Value::Object(payload)) => Ok(payload),
-        Ok(_) => Err("payload must be a JSON object".to_string()),
-        Err(error) => Err(format!("payload is not valid JSON: {error}")),
-    }
+fn invalid_config_type<T>(
+    plugin_id: &str,
+    key: &str,
+    field: &plugin::UserConfigField,
+) -> Result<T, String> {
+    let expected = field.value_type.as_deref().unwrap_or("string");
+    let expected = if field.multiple == Some(true) {
+        format!("an array of {expected} values")
+    } else {
+        format!("a {expected} value")
+    };
+    Err(format!(
+        "pluginConfigs.{plugin_id}.options.{key} must be {expected}"
+    ))
 }
 
-fn required_string<'a>(payload: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+fn parse_payload(payload_json: &str) -> Result<Utf16JsonProjection, String> {
+    let payload = Utf16JsonProjection::parse(payload_json)
+        .map_err(|error| format!("payload is not valid JSON: {error}"))?;
+    if payload
+        .at_pointer("")
+        .and_then(JsonValueView::object_entries)
+        .is_none()
+    {
+        return Err("payload must be a JSON object".to_string());
+    }
+    Ok(payload)
+}
+
+fn required_string<'a>(payload: &'a Utf16JsonProjection, key: &str) -> Result<&'a str, String> {
     payload
-        .get(key)
-        .and_then(Value::as_str)
+        .get_property(key)
+        .and_then(JsonValueView::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("payload is missing `{key}`"))
 }
@@ -598,6 +638,21 @@ fn destination(scope: &str) -> Result<WritableScopeDto, String> {
     }
 }
 
+fn check_scope_revision(
+    layers: &BTreeMap<&'static str, Utf16JsonProjection>,
+    scope: &str,
+    expected: &str,
+) -> Result<(), String> {
+    let actual = layer_revision(layers, scope)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "revision conflict: expected {expected}, found {actual}"
+        ))
+    }
+}
+
 fn ensure_scope_revision(
     context: &SettingsContext,
     scope: &str,
@@ -608,19 +663,41 @@ fn ensure_scope_revision(
         context.active_snapshot(),
         context.managed.clone(),
     );
-    let current = Value::Object(snapshot.layers.get(scope).cloned().unwrap_or_default());
-    let actual = plugin_source_sha256(
-        serde_json::to_string(&current)
-            .map_err(|error| error.to_string())?
-            .as_bytes(),
-    );
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "revision conflict: expected {expected}, found {actual}"
-        ))
-    }
+    check_scope_revision(&snapshot.layers, scope, expected)
+}
+
+fn layer_revision(
+    layers: &BTreeMap<&'static str, Utf16JsonProjection>,
+    scope: &str,
+) -> Result<String, String> {
+    let source = match layers.get(scope) {
+        Some(layer) => layer.to_json_string().map_err(|error| error.to_string())?,
+        None => "{}".to_string(),
+    };
+    Ok(plugin_source_sha256(source.as_bytes()))
+}
+
+fn source_member(source: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    let key_units: Vec<u16> = key.encode_utf16().collect();
+    source.subprojection_property_units(&key_units).ok()
+}
+
+fn source_object() -> Result<Utf16JsonProjection, String> {
+    Utf16JsonProjection::parse("{}").map_err(|error| error.to_string())
+}
+
+fn source_null() -> Result<Utf16JsonProjection, String> {
+    Utf16JsonProjection::parse("null").map_err(|error| error.to_string())
+}
+
+fn source_string(value: &str) -> Result<Utf16JsonProjection, String> {
+    let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    Utf16JsonProjection::parse(&json).map_err(|error| error.to_string())
+}
+
+fn source_bool(value: bool) -> Result<Utf16JsonProjection, String> {
+    Utf16JsonProjection::parse(if value { "true" } else { "false" })
+        .map_err(|error| error.to_string())
 }
 
 fn available_plugins(
@@ -629,9 +706,9 @@ fn available_plugins(
 ) -> Result<(Vec<AvailablePluginRow>, Vec<MarketplaceRow>), String> {
     let registry_path = plugins_dir.join("known_marketplaces.json");
     let registry = match std::fs::read_to_string(&registry_path) {
-        Ok(raw) => serde_json::from_str::<Map<String, Value>>(&raw)
+        Ok(raw) => Utf16JsonProjection::parse(&raw)
             .map_err(|error| format!("{} is invalid: {error}", registry_path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => source_object()?,
         Err(error) => {
             return Err(format!(
                 "failed to read {}: {error}",
@@ -639,23 +716,41 @@ fn available_plugins(
             ))
         }
     };
+    let registry_entries = registry
+        .at_pointer("")
+        .and_then(JsonValueView::object_entries)
+        .ok_or_else(|| {
+            format!(
+                "{} is invalid: expected a JSON object",
+                registry_path.display()
+            )
+        })?;
     let mut available = Vec::new();
     let mut marketplaces = Vec::new();
     let mut seen = BTreeSet::new();
-    for (marketplace, entry) in registry {
+    for registry_entry in registry_entries {
+        let Ok(marketplace) = String::from_utf16(registry_entry.code_units) else {
+            continue;
+        };
+        let entry = registry
+            .subprojection_property_units(registry_entry.code_units)
+            .map_err(|error| error.to_string())?;
         let install_location = entry
-            .get("installLocation")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+            .get_property("installLocation")
+            .and_then(exact_source_string);
+        let source_json = source_member(&entry, "source")
+            .map(|source| source.to_json_string())
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "null".to_string());
+        let last_updated = entry
+            .get_property("lastUpdated")
+            .and_then(display_source_string);
         marketplaces.push(MarketplaceRow {
             name: marketplace.clone(),
-            source_json: serde_json::to_string(entry.get("source").unwrap_or(&Value::Null))
-                .unwrap_or_else(|_| "null".to_string()),
+            source_json,
             install_location: install_location.clone(),
-            last_updated: entry
-                .get("lastUpdated")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+            last_updated,
         });
         let Some(root) = install_location.map(PathBuf::from) else {
             continue;
@@ -666,16 +761,20 @@ fn available_plugins(
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
-        let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+        let Ok(manifest) = Utf16JsonProjection::parse(&raw) else {
             continue;
         };
-        for plugin in manifest
-            .get("plugins")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(name) = plugin.get("name").and_then(Value::as_str) else {
+        let Some(plugins) = manifest.get_property("plugins") else {
+            continue;
+        };
+        let Some(plugin_count) = plugins.array_len() else {
+            continue;
+        };
+        for index in 0..plugin_count {
+            let Some(plugin) = plugins.get_index(index) else {
+                continue;
+            };
+            let Some(name) = plugin.get_property("name").and_then(exact_source_string) else {
                 continue;
             };
             let id = format!("{name}@{marketplace}");
@@ -683,22 +782,20 @@ fn available_plugins(
                 continue;
             }
             let version = plugin
-                .get("version")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+                .get_property("version")
+                .and_then(exact_source_string)
+                .unwrap_or_default();
             let installed_version = installed_versions
                 .get(&id)
-                .or_else(|| installed_versions.get(name));
+                .or_else(|| installed_versions.get(&name));
             available.push(AvailablePluginRow {
                 id,
-                name: name.to_string(),
+                name: name.clone(),
                 marketplace: marketplace.clone(),
                 description: plugin
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                    .get_property("description")
+                    .and_then(display_source_string)
+                    .unwrap_or_default(),
                 upgrade_available: installed_version
                     .is_some_and(|installed| !version.is_empty() && installed != &version),
                 installed: installed_version.is_some(),
@@ -711,10 +808,19 @@ fn available_plugins(
     Ok((available, marketplaces))
 }
 
+fn exact_source_string(value: JsonValueView<'_>) -> Option<String> {
+    String::from_utf16(value.code_units()?).ok()
+}
+
+fn display_source_string(value: JsonValueView<'_>) -> Option<String> {
+    value.as_str().map(ToOwned::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings_bridge::SettingsPaths;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::fs;
     use std::sync::{Arc, RwLock};
@@ -760,7 +866,8 @@ mod tests {
                 "description":"fixture",
                 "userConfig":{
                     "TOKEN":{"type":"string","title":"Token","description":"secret","sensitive":true},
-                    "COUNT":{"type":"number","title":"Count","description":"count","required":true,"min":1,"max":5}
+                    "COUNT":{"type":"number","title":"Count","description":"count","required":true,"min":1,"max":5},
+                    "LABEL":{"type":"string","title":"Label","description":"label"}
                 }
             }"#,
         )
@@ -854,6 +961,29 @@ mod tests {
         .await
         .expect_err("apply needs confirmation");
         assert!(error.contains("confirmed:true"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn save_config_keeps_unpaired_utf16_in_plugin_options() {
+        let (context, root) = context();
+        install_schema_fixture(&context);
+
+        let result = save_config(
+            &context,
+            &plugin_source_sha256(b"{}"),
+            r#"{"scope":"user","pluginConfigs":{"secure@acme":{"options":{"COUNT":3,"LABEL":"\ud800"}}}}"#,
+        )
+        .await;
+        result.expect("source options should save");
+
+        let persisted = fs::read_to_string(context.paths.lingxi_home.join("settings.json"))
+            .expect("persisted settings");
+        let source = Utf16JsonProjection::parse(&persisted).expect("source settings json");
+        assert_eq!(
+            source.string_units("/pluginConfigs/secure@acme/options/LABEL"),
+            Some(vec![0xd800])
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

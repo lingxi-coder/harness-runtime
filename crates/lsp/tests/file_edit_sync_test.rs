@@ -4,6 +4,7 @@ use jsonrpc::Connection;
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lsp::LspRegistry;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -43,11 +44,21 @@ impl LspTransport for CaptureTransport {
         })
     }
 
-    async fn request(&self, _: &LspRawConnection, _: &str, _: Value) -> Result<Value, LspError> {
+    async fn request(
+        &self,
+        _: &LspRawConnection,
+        _: &str,
+        _: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, LspError> {
         Err(LspError::Unavailable)
     }
 
-    async fn notify(&self, _: &LspRawConnection, _: &str, _: Value) -> Result<(), LspError> {
+    async fn notify(
+        &self,
+        _: &LspRawConnection,
+        _: &str,
+        _: Utf16JsonProjection,
+    ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
 

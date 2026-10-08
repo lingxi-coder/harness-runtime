@@ -1,0 +1,27 @@
+{
+  "native_version": "2.1.293",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Report the fixed fixture result.",
+  "session_id": "00000000-0000-4000-8000-000000002931",
+  "plugin_name": "native-tool-register-fixture",
+  "tool": {
+    "name": "probe",
+    "description": "Native fixed deferred-contract fixture",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "Fixed fixture value"
+        }
+      },
+      "required": ["value"],
+      "additionalProperties": false
+    }
+  },
+  "cases": [
+    {"id": "omitted"},
+    {"id": "false", "isDeferred": false},
+    {"id": "true", "isDeferred": true}
+  ]
+}

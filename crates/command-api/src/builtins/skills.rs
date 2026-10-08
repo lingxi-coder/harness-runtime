@@ -106,12 +106,15 @@ impl BuiltinCommandHandler for SkillsHandler {
             additional_skill_dirs: Vec::new(),
         });
         CommandResult::Done {
-            display: Some(render_available_skills_with_roots(
-                &roots.cwd,
-                &roots.lingxi_home,
-                roots.managed_dir.as_deref(),
-                &roots.additional_skill_dirs,
-            )),
+            display: Some(
+                (render_available_skills_with_roots(
+                    &roots.cwd,
+                    &roots.lingxi_home,
+                    roots.managed_dir.as_deref(),
+                    &roots.additional_skill_dirs,
+                ))
+                .into(),
+            ),
         }
     }
 
@@ -334,8 +337,8 @@ mod tests {
         let h = SkillsHandler::with_roots(cwd, home);
         match h
             .handle(&ParsedSlashCommand {
-                name: "skills".to_string(),
-                raw_args: String::new(),
+                name: "skills".into(),
+                raw_args: String::new().into(),
                 positional_args: Vec::new(),
             })
             .await
@@ -369,8 +372,8 @@ mod tests {
         let h = SkillsHandler::with_all_roots(cwd, home, Some(managed), vec![additional]);
         match h
             .handle(&ParsedSlashCommand {
-                name: "skills".to_string(),
-                raw_args: String::new(),
+                name: "skills".into(),
+                raw_args: String::new().into(),
                 positional_args: Vec::new(),
             })
             .await

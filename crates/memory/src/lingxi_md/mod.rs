@@ -7,6 +7,7 @@
 //! `.lingxi/rules/**`, and `LINGXI.local.md`. Each file is read whole (no size
 //! cap — parity with claude-code `readFile`). See [`hierarchy::walk`].
 
+pub mod agents;
 pub mod excludes;
 pub mod hierarchy;
 pub mod loader;
